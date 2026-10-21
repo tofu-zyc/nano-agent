@@ -52,6 +52,9 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 		data := map[string]any{}
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/open-apis/cardkit/v1/cards":
+			if len(p.Data) > 30000 {
+				t.Error("单卡 JSON 超出体积预算")
+			}
 			if m.deny {
 				io.WriteString(w, `{"code":20001,"msg":"需要开通卡片权限"}`)
 				return
@@ -193,5 +196,24 @@ func TestFeishuWithoutCardPermissionSendsFullText(t *testing.T) {
 	defer m.mu.Unlock()
 	if len(m.sent) != 1 || !strings.HasPrefix(m.sent[0], "text:") || !strings.Contains(m.sent[0], "你好，这是完整回复") {
 		t.Fatalf("sent=%v", m.sent)
+	}
+}
+
+func TestFeishuLargeProcessStaysBoundedAndReplyIsComplete(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	r := f.OpenMirror("chat-test", "网页", strings.Repeat("用户消息🙂", 500)).(*streamRun)
+	r.Reasoning(strings.Repeat("思考🙂", 6000))
+	for range 100 {
+		r.Tool("Shell", strings.Repeat("参数🙂", 200))
+		r.ToolResult(true, strings.Repeat("结果🙂", 100))
+	}
+	reply := strings.Repeat("🙂", 7000)
+	r.Content(reply)
+	r.Close()
+	awaitStream(t, r.done)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.Join(m.texts, "") != reply || len(m.parts) != 3 || m.panels != 2 || !strings.Contains(m.parts[0]["status"], "100 次工具调用") {
+		t.Fatalf("过程挤入正文或长回复丢失: cards=%d panels=%d", len(m.parts), m.panels)
 	}
 }

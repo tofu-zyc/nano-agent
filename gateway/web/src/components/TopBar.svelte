@@ -3,7 +3,7 @@
   import { num, pct } from '../lib/format';
   import Icon from './Icon.svelte';
 
-  const titles: Record<string, string> = { topology: '拓扑', sessions: '会话', personas: '人格', settings: '设置' };
+  const titles: Record<string, string> = { topology: '拓扑', sessions: '会话', personas: '人格', settings: '设置', devices:'设备与服务器' };
   const ov = $derived(store.ov!);
   const t = $derived(ov.totals);
   const isMac = navigator.platform.toLowerCase().includes('mac');

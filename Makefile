@@ -5,7 +5,17 @@ all: kernel gateway
 kernel:
 	$(MAKE) -C kernel
 
-gateway:
+KERNEL_BUNDLE = gateway/internal/device/assets/kernel-src.tar.gz
+KERNEL_SOURCE = $(wildcard kernel/src/*.c kernel/src/*.h kernel/third_party/cjson/*.c kernel/third_party/cjson/*.h) kernel/Makefile
+DEVICE_SKILL = gateway/internal/device/assets/skills.tar.gz
+
+$(DEVICE_SKILL): skills/device-connections/SKILL.md skills/device-connections/references/devices.md
+	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 -C skills device-connections
+
+$(KERNEL_BUNDLE): $(KERNEL_SOURCE)
+	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 kernel/Makefile kernel/src kernel/third_party/cjson
+
+gateway: kernel $(KERNEL_BUNDLE) $(DEVICE_SKILL)
 	cd gateway && go build -o nano-gateway ./cmd/nano-gateway
 
 # 重新构建网页界面（改了 gateway/web 下的前端代码之后；构建结果提交在仓库里，平时不需要 Node）

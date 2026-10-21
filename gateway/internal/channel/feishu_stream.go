@@ -105,15 +105,15 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 		if snap.Source != "" {
 			status += "\n\n" + snap.Source
 		}
-		reasoning := streamClip(snap.Reasoning, 4000)
+		reasoning := streamClip(snap.Reasoning, 2000)
 		if reasoning == "" {
 			reasoning = "本轮没有思考内容"
 		}
-		tools := streamClip(snap.Tools, 6000)
+		tools := streamClip(snap.Tools, 3000)
 		if tools == "" {
 			tools = "本轮尚未调用工具"
 		}
-		notes := snap.Notes
+		notes := streamClip(snap.Notes, 500)
 		if notes == "" {
 			notes = "回复会在下方单独显示"
 		}
@@ -139,7 +139,8 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 			replies = append(replies, c)
 		}
 	}
-	for i, part := range streamChunks(snap.Content, 8000) {
+	// 预留卡片结构开销，即使整段都是四字节 emoji 也不把单卡撑得过大。
+	for i, part := range streamChunks(snap.Content, 6000) {
 		if i == len(replies) {
 			c, err := s.create(ctx, "回复", []any{markdown("reply", part)})
 			if err != nil {

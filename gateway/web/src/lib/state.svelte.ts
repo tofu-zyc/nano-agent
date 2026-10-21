@@ -10,7 +10,7 @@ export type Toast = {
   approval?: Approval;
 };
 
-export type View = 'topology' | 'sessions' | 'personas' | 'settings';
+export type View = 'topology' | 'sessions' | 'personas' | 'settings' | 'devices';
 export type Route = { view: View; arg?: string; focus?: string };
 
 function parseRoute(): Route {
@@ -19,7 +19,7 @@ function parseRoute(): Route {
   const [view, ...rest] = path.split('/');
   const params = new URLSearchParams(query || '');
   const arg = rest.length && rest[0] ? decodeURIComponent(rest.join('/')) : undefined;
-  if (view === 'sessions' || view === 'personas' || view === 'settings') {
+  if (view === 'sessions' || view === 'personas' || view === 'settings' || view === 'devices') {
     return { view, arg, focus: params.get('focus') ?? undefined };
   }
   return { view: 'topology' };

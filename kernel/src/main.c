@@ -602,6 +602,7 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     na_core_feed(k->core, now, &ev);
     pump(k, now);   /* 只剩 KILL：终止所有正在执行的工具 */
     k->next_connect = now + k->backoff;
+    if (!strcmp(k->conf.gateway, "stdio")) g_stop = 1; /* SSH 通道关闭后退出，不留下重连进程 */
 }
 
 /* 服务器上 --ls 的结果 → ls_result */
@@ -674,10 +675,15 @@ static void loop(kernel_t *k)
 
         size_t np = 0;
         pfds[np++] = (struct pollfd){ .fd = g_wake[0], .events = POLLIN };
-        int li = -1;
+        int li = -1, wi = -1;
         if (k->link.fd >= 0) {
             li = (int)np;
-            pfds[np++] = (struct pollfd){ .fd = k->link.fd, .events = POLLIN | (k->link.out.len ? POLLOUT : 0) };
+            bool separate = k->link.write_fd != k->link.fd;
+            pfds[np++] = (struct pollfd){ .fd = k->link.fd, .events = POLLIN | (k->link.out.len && !separate ? POLLOUT : 0) };
+            if (separate && k->link.out.len) {
+                wi = (int)np;
+                pfds[np++] = (struct pollfd){ .fd = k->link.write_fd, .events = POLLOUT };
+            }
         }
         size_t base = np;
         np += runner_pollfds(&k->runner, pfds + base, refs + base, MAX_POLL - base);
@@ -719,6 +725,9 @@ static void loop(kernel_t *k)
             if (k->link.fd >= 0 && (re & POLLOUT) && link_flush(&k->link) < 0)
                 disconnect(k, now, "写入失败");
         }
+
+        if (wi >= 0 && k->link.fd >= 0 && (pfds[wi].revents & (POLLOUT | POLLERR | POLLHUP)) && link_flush(&k->link) < 0)
+            disconnect(k, now, "写入失败");
 
         if (np > base) runner_on_poll(&k->runner, pfds + base, refs + base, np - base);
         collect_finished(k, now);

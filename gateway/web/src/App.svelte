@@ -12,6 +12,7 @@
   import Sessions from './views/Sessions.svelte';
   import Personas from './views/Personas.svelte';
   import Settings from './views/Settings.svelte';
+  import Devices from './views/Devices.svelte';
 
   onMount(() => {
     store.boot();
@@ -43,6 +44,8 @@
           <Personas />
         {:else if store.route.view === 'settings'}
           <Settings />
+        {:else if store.route.view === 'devices'}
+          <Devices />
         {:else}
           <Topology />
         {/if}

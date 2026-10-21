@@ -9,6 +9,8 @@
 listen = "unix:/tmp/nano-agent.sock"
 # listen = "tcp:0.0.0.0:7700"
 token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
+# 额外的电脑接入地址，在网页“设备”中可热启用；SSH 管理连接不需要它。
+# device_listen = "0.0.0.0:7700"
 
 [llm]
 provider = "openai"            # openai（任何 OpenAI 兼容接口）| mock（假模型，测试用）

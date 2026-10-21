@@ -70,6 +70,8 @@ var Fields = []Field{
 		Help: "内核来连的地址：unix:/path 或 tcp:host:port。跨机器请走加密隧道"},
 	{Key: "kernel.token", Group: "kernel", Section: "连接", Label: "连接口令", Type: "secret", Restart: true,
 		Help: "和 kernel.conf 里的 token 一致"},
+	{Key: "kernel.device_listen", Group: "kernel", Section: "电脑接入", Label: "电脑接入地址", Type: "string",
+		Help: "额外的 TCP 接入地址，例如 0.0.0.0:7700；空表示关闭。设备页面可下载启动包，跨网络使用私有网络或隧道"},
 
 	// ---- 工作目录 ----
 	{Key: "workspace.node", Group: "workspace", Section: "默认值", Label: "默认机器", Type: "string",

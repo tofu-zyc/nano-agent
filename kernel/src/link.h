@@ -9,11 +9,12 @@
 
 typedef struct {
     int     fd;        /* -1 表示未连接 */
+    int     write_fd;  /* stdio 模式下读 stdin、写 stdout；普通连接和 fd 相同 */
     buf_t   in, out;
     int64_t last_rx;   /* 最近一次收到数据的时刻 */
 } link_t;
 
-/* addr：unix:/path、tcp:host:port 或 host:port。成功后 fd 为非阻塞。 */
+/* addr：stdio、unix:/path、tcp:host:port 或 host:port。成功后为非阻塞。 */
 int    link_connect(link_t *l, const char *addr, int timeout_ms, char *err, size_t errlen);
 void   link_close(link_t *l);
 

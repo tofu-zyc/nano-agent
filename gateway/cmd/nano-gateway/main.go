@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/device"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
@@ -85,6 +86,14 @@ func main() {
 		os.Exit(1)
 	}
 	go hub.Serve(ctx, ln)
+	devices, err := device.New(ctx, cfg.Session.DataDir, cfg.Kernel.Token, device.FindBundle(cfg.Dir), hub, log)
+	if err != nil {
+		log.Error("初始化设备管理失败", "err", err)
+		os.Exit(1)
+	}
+	if err := devices.SetListener(cfg.Kernel.DeviceListen); err != nil {
+		log.Warn("电脑接入地址用不了", "err", err)
+	}
 
 	if config.On(cfg.CLI.Enabled) {
 		if sock, err := channel.CLISocket(cfg.Session.DataDir); err != nil {
@@ -100,6 +109,7 @@ func main() {
 			log.Error("初始化网页管理界面失败", "err", err)
 			os.Exit(1)
 		}
+		ws.SetDevices(devices)
 		go func() {
 			if err := ws.Serve(ctx, cfg.Web.Listen); err != nil {
 				log.Error("网页管理界面启动失败", "listen", cfg.Web.Listen, "err", err)
@@ -114,6 +124,11 @@ func main() {
 	// 网页里改了配置：能立即生效的立即生效，其余的等重启
 	conf.OnChange(func(old, cur *config.Config) {
 		a.SetConfig(cur)
+		if old.Kernel.DeviceListen != cur.Kernel.DeviceListen {
+			if err := devices.SetListener(cur.Kernel.DeviceListen); err != nil {
+				log.Warn("更新电脑接入地址失败", "err", err)
+			}
+		}
 		if !reflect.DeepEqual(old.LLMConfig(), cur.LLMConfig()) {
 			if c, err := newClient(cur.LLMConfig()); err != nil {
 				log.Warn("新的模型配置有误，继续用原来的", "err", err)

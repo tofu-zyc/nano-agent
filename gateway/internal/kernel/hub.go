@@ -122,14 +122,14 @@ func (h *Hub) Serve(ctx context.Context, ln net.Listener) {
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			h.log.Warn("接受内核连接失败", "err", err)
 			time.Sleep(time.Second)
 			continue
 		}
-		go h.handle(nc)
+		go h.handle(nc, isLocal(nc))
 	}
 }
 
@@ -165,7 +165,25 @@ func (h *Hub) send(c *conn, m proto.Msg) bool {
 	}
 }
 
-func (h *Hub) handle(nc net.Conn) {
+// Attach 接入由 SSH 等通道提供的连接，不需要再开服务器端口。
+func (h *Hub) Attach(ctx context.Context, nc net.Conn, local bool) {
+	go func() {
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				nc.Close()
+			case <-done:
+			}
+		}()
+		h.handle(nc, local)
+		close(done)
+	}()
+}
+
+func ValidNode(name string) bool { return validNode(name) }
+
+func (h *Hub) handle(nc net.Conn, local bool) {
 	c := &conn{nc: nc, out: make(chan []byte, 256), done: make(chan struct{})}
 	defer c.close()
 	remote := nc.RemoteAddr().String()
@@ -223,7 +241,7 @@ func (h *Hub) handle(nc net.Conn) {
 
 	h.send(c, proto.Msg{T: proto.TWelcome, V: proto.Version})
 	h.log.Info("内核已连接", "node", node, "tools", len(hello.Tools), "remote", remote)
-	h.h.KernelUp(node, hello, isLocal(nc))
+	h.h.KernelUp(node, hello, local)
 
 	for {
 		nc.SetReadDeadline(time.Now().Add(readTimeout))

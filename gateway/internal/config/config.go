@@ -30,8 +30,9 @@ type Config struct {
 }
 
 type Kernel struct {
-	Listen string `toml:"listen" json:"listen"` // unix:/path 或 tcp:host:port
-	Token  string `toml:"token" json:"token"`   // 与内核配置里的 token 一致
+	Listen       string `toml:"listen" json:"listen"`               // unix:/path 或 tcp:host:port
+	Token        string `toml:"token" json:"token"`                 // 与内核配置里的 token 一致
+	DeviceListen string `toml:"device_listen" json:"device_listen"` // 额外的电脑接入地址，空表示关闭，可热更新
 }
 
 type LLM struct {

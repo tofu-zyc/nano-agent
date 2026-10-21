@@ -315,27 +315,11 @@
               <Icon name="right" size={13} />
             </button>
           {:else}
-            <p class="note">还没有内核连上来。在内核所在的机器上运行 <code>./kernel/nano-kernel -c kernel.conf</code>，两边配置里的 token 要一致。</p>
+            <p class="note">还没有内核连上来。打开“设备”下载电脑启动包，或通过 SSH 添加服务器。</p>
           {/each}
         </div>
-        <details class="guide">
-          <summary>在另一台机器上加一个内核</summary>
-          <ol>
-            <li>在那台机器上编译（<code>make kernel</code>），或者拷贝 <code>nano-kernel</code> 和 <code>nano-exec</code> 过去；</li>
-            <li>写 <code>kernel.conf</code>：<code>gateway = tcp:网关地址:端口</code>，<code>token</code> 和网关一致，<code>node = 起个名字</code>；</li>
-            <li>网关的“内核监听地址”要是那台机器能连到的地址，比如 <code>tcp:0.0.0.0:7700</code>。内核和网关之间的连接没有加密，跨网络请走 Tailscale、WireGuard 或者 SSH 隧道；</li>
-            <li>运行 <code>./nano-kernel -c kernel.conf</code>，连上之后这里会多一个节点。在会话设置里选它，会话就在那台机器上工作。</li>
-          </ol>
-        </details>
-        <details class="guide">
-          <summary>通过 SSH 在服务器上干活（服务器上不用跑内核）</summary>
-          <ol>
-            <li>确保运行内核的那台机器能免密 <code>ssh</code> 到服务器（密钥登录，<code>~/.ssh/config</code> 里的别名也可以）；</li>
-            <li>在那台机器的 <code>kernel.conf</code> 里加一行：<code>remote = prod deploy@prod.example.com</code>（名字、ssh 目标）；</li>
-            <li>重启内核。它会自动把执行器传到服务器的 <code>~/.cache/nano-agent/</code>（架构不同、glibc 太老时，服务器有 <code>cc</code> 就现编），准备好之后这里会多一个服务器节点；</li>
-            <li>在会话设置里选它，工作目录填服务器上的路径。工具同样关在服务器上的沙箱里（服务器支持 Landlock 的话）。</li>
-          </ol>
-        </details>
+        <button class="btn primary" onclick={() => {store.inspector=null;store.go('#/devices');}}><Icon name="plus" size={14}/>连接电脑或服务器</button>
+        <p class="note">电脑启动包支持 Linux 和 Windows（WSL2）。SSH 可填写地址、端口、用户和密码，或使用现有别名与密钥，网关自动部署内核并接入。</p>
       {/if}
       <button class="btn link" onclick={() => store.open({ type: 'workspace' })}><Icon name="folder" size={14} />工作目录与沙箱的默认设置</button>
       <FieldGroup group="kernel" title="连接" focus={store.focus} />
