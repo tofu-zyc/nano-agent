@@ -27,7 +27,7 @@ import (
 
 const helpText = `可用命令：
 /whoami  查看你的身份、这个窗口和它接着的会话
-/session 查看所有会话；/session <编号> 切换，/session new [名字] 新建（切换需管理员）
+/session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
 /stop    停止当前任务
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）

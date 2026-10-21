@@ -43,6 +43,7 @@ func parseEndpoint(key string) endpoint {
 // epRec 是记下来的一个窗口
 type epRec struct {
 	Name    string `json:"name,omitempty"` // 聊天的名字（私聊对方的名字）
+	Who     string `json:"who,omitempty"`  // 最近在这个窗口说话的人的身份，网页里设管理员用
 	Session string `json:"session"`        // 接着的会话
 }
 
@@ -51,6 +52,8 @@ type EndpointInfo struct {
 	Key     string `json:"key"`
 	Channel string `json:"channel"` // 拓扑图里的渠道：cli、telegram、feishu
 	Name    string `json:"name"`
+	Who     string `json:"who,omitempty"` // 在这个窗口说话的人
+	Admin   bool   `json:"admin"`         // 说话的人是管理员
 	Session string `json:"session"`
 }
 
@@ -164,6 +167,9 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	if m.ChatName != "" && r.Name != m.ChatName {
 		r.Name, changed = m.ChatName, true
 	}
+	if r.Who != who {
+		r.Who, changed = who, true
+	}
 	if changed {
 		a.saveEndpoints()
 		a.publishSession(r.Session)
@@ -196,12 +202,13 @@ func (a *App) endpointsOf(sid string) []EndpointInfo {
 	for key, r := range a.eps {
 		if r.Session == sid {
 			ep := parseEndpoint(key)
-			out = append(out, EndpointInfo{Key: key, Channel: chanName(ep.ch), Name: r.Name, Session: sid})
+			out = append(out, EndpointInfo{Key: key, Channel: chanName(ep.ch), Name: r.Name, Who: r.Who,
+				Admin: ep.ch == "cli" || a.isAdmin(r.Who), Session: sid})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	if sid == mainSID || a.store.Settings(sid).Web {
-		out = append(out, EndpointInfo{Key: "web", Channel: "web", Session: sid})
+		out = append(out, EndpointInfo{Key: "web", Channel: "web", Who: "web:admin", Admin: true, Session: sid})
 	}
 	return out
 }
@@ -346,6 +353,40 @@ func (a *App) SetEndpoint(key, sid string) error {
 	return nil
 }
 
+// EndpointWho 是在聊天窗口 key 里说话的人。
+func (a *App) EndpointWho(key string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r := a.eps[key]
+	if r == nil {
+		return "", errors.New("没有这个聊天窗口")
+	}
+	if r.Who == "" {
+		return "", errors.New("还不知道这个窗口里是谁在说话，先让他发一条消息")
+	}
+	return r.Who, nil
+}
+
+// WelcomeAdmin 在窗口里的人刚被设为管理员之后调用：把窗口接到主会话（管理员的窗口默认都在那里），
+// 并告诉他。
+func (a *App) WelcomeAdmin(key string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r := a.eps[key]
+	if r == nil {
+		return errors.New("没有这个聊天窗口")
+	}
+	text := "你现在是管理员了。"
+	if r.Session != mainSID {
+		a.bind(key, mainSID)
+		text += "这个窗口已经接到主会话，和终端、网页是同一段上下文；"
+	}
+	text += "发 /session 可以查看和切换所有会话。"
+	a.publishSession(mainSID) // 窗口的管理员标记变了
+	a.deliver(parseEndpoint(key), text, "")
+	return nil
+}
+
 // ---- /session 命令 ----
 
 const sessionUsage = "用 /session <编号> 切换，/session new [名字] 新建一个会话并切换过去"
@@ -356,7 +397,7 @@ func (a *App) cmdSession(c in, arg string) {
 		return
 	}
 	if !a.isAdmin(c.who) {
-		a.answer(c, "只有管理员能切换会话")
+		a.answer(c, "只有管理员能切换会话。"+a.adminHint(c))
 		return
 	}
 	if c.ep.ch == "web" {
@@ -410,7 +451,7 @@ func (a *App) findSession(arg string) string {
 func (a *App) describeSessions(c in) string {
 	cur := a.sessionInfo(c.s.sid)
 	if !a.isAdmin(c.who) {
-		return fmt.Sprintf("当前会话：%s（%d 条消息）", cur.Title, cur.Messages)
+		return fmt.Sprintf("当前会话：%s（%d 条消息）\n%s", cur.Title, cur.Messages, a.adminHint(c))
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "这个窗口接在会话「%s」上。所有会话：\n", cur.Title)
@@ -430,6 +471,13 @@ func (a *App) describeSessions(c in) string {
 	}
 	b.WriteString(sessionUsage)
 	return b.String()
+}
+
+// adminHint 告诉不是管理员的人为什么看不到、切不了别的会话，以及怎么成为管理员
+func (a *App) adminHint(c in) string {
+	return fmt.Sprintf("你现在不是管理员（你的身份：%s），只能用自己的这个会话，看不到也切不到别的会话。\n"+
+		"如果这是你自己的机器人：打开网页管理界面，点拓扑图上的「%s」，在你的名字旁边点「设为管理员」，这个窗口就会接到主会话。"+
+		"也可以把这个身份加到配置的 [access] admins 里，然后发 /session 1 切到主会话。", c.who, sourceOf(c.ep.ch))
 }
 
 func endpointLabel(e EndpointInfo) string {

@@ -157,6 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/stop", s.auth(s.stopSession))
 	mux.HandleFunc("POST /api/chat", s.auth(s.chat))
 	mux.HandleFunc("PUT /api/endpoints/{key}", s.auth(s.setEndpoint))
+	mux.HandleFunc("POST /api/endpoints/{key}/admin", s.auth(s.makeAdmin))
 	mux.HandleFunc("POST /api/approvals/{n}", s.auth(s.approve))
 	mux.HandleFunc("GET /api/fs", s.auth(s.listDir))
 	mux.HandleFunc("POST /api/feishu/register", s.auth(s.feishuRegister))

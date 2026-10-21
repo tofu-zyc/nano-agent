@@ -247,4 +247,38 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+type fakeCh struct{}
+
+func (fakeCh) Name() string                                     { return "fs" }
+func (fakeCh) Run(ctx context.Context, _ channel.Handler) error { <-ctx.Done(); return nil }
+func (fakeCh) Send(context.Context, string, string, string) error {
+	return nil
+}
+
+func TestMakeAdmin(t *testing.T) {
+	srv, s, conf := setup(t)
+	c := newClient(t, srv)
+	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
+	s.app.AddChannel(fakeCh{})
+	s.app.OnMessage(fakeCh{}, channel.Message{ChatID: "c9", SenderID: "u9", SenderName: "我", ChatName: "我", Text: "/session", Mentioned: true})
+	if code, _ := c.do("POST", "/api/endpoints/fs:nope/admin", nil, true); code != 400 {
+		t.Fatalf("不存在的窗口：%d", code)
+	}
+	if code, out := c.do("POST", "/api/endpoints/fs:c9/admin", nil, true); code != 200 || out["who"] != "fs:u9" {
+		t.Fatalf("admin：%d %v", code, out)
+	}
+	if admins := conf.Current().Access.Admins; len(admins) != 1 || admins[0] != "fs:u9" {
+		t.Fatalf("admins: %v", admins)
+	}
+	_, out := c.do("GET", "/api/sessions/main", nil, false)
+	if !strings.Contains(mustJSON(out["info"]), `{"admin":true,"channel":"fs","key":"fs:c9","name":"我","session":"main","who":"fs:u9"}`) {
+		t.Fatalf("窗口应该接到主会话：%v", out["info"])
+	}
+	// 再点一次不会重复添加
+	c.do("POST", "/api/endpoints/fs:c9/admin", nil, true)
+	if n := len(conf.Current().Access.Admins); n != 1 {
+		t.Fatalf("重复添加：%d", n)
+	}
+}
+
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }

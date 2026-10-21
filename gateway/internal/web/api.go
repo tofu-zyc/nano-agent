@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -215,6 +216,32 @@ func (s *Server) setEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// makeAdmin 把在聊天窗口里说话的人设为管理员（写进 access.admins），并把窗口接到主会话。
+func (s *Server) makeAdmin(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	who, err := s.app.EndpointWho(key)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if admins := s.conf.Current().Access.Admins; !slices.Contains(admins, who) {
+		list := []any{}
+		for _, a := range admins {
+			list = append(list, a)
+		}
+		if err := s.conf.Set(map[string]any{"access.admins": append(list, who)}); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.app.Bus().Publish(events.Event{T: "config"})
+	}
+	if err := s.app.WelcomeAdmin(key); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"who": who})
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {

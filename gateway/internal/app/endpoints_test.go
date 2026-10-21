@@ -96,10 +96,30 @@ func TestGuestHasOwnSession(t *testing.T) {
 		t.Fatalf("main: %+v", info.Endpoints)
 	}
 	sayFrom(e.a, e.ch, "c2", "u2", "/session 1")
-	e.ch.wait(t, "只有管理员能切换会话")
+	if msg := e.ch.wait(t, "只有管理员能切换会话"); !strings.Contains(msg, "你的身份：fake:u2") {
+		t.Fatalf("要告诉他怎么成为管理员：%q", msg)
+	}
 	sayFrom(e.a, e.ch, "c2", "u2", "/session")
-	if msg := e.ch.wait(t, "当前会话"); strings.Contains(msg, "主会话") {
-		t.Fatalf("访客不该看到别的会话：%q", msg)
+	if msg := e.ch.wait(t, "当前会话"); strings.Contains(msg, "所有会话") || !strings.Contains(msg, "设为管理员") {
+		t.Fatalf("访客不该看到别的会话，但要知道为什么：%q", msg)
+	}
+
+	// 网页里把他设为管理员：窗口接到主会话，之后用管理员的权限
+	if who, err := e.a.EndpointWho("fake:c2"); err != nil || who != "fake:u2" {
+		t.Fatalf("who: %q %v", who, err)
+	}
+	e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, "fake:u2")
+	if err := e.a.WelcomeAdmin("fake:c2"); err != nil {
+		t.Fatal(err)
+	}
+	e.ch.wait(t, "你现在是管理员了。这个窗口已经接到主会话")
+	if info, _ := e.a.Session(mainSID); len(info.Endpoints) != 3 || !info.Endpoints[1].Admin || info.Endpoints[1].Key != "fake:c2" {
+		t.Fatalf("main: %+v", info.Endpoints)
+	}
+	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	sayFrom(e.a, e.ch, "c2", "u2", "现在呢")
+	if in := e.k.expect(proto.TInput); in.SID != mainSID || in.Mode != proto.ModeAsk {
+		t.Fatalf("input: %+v", in)
 	}
 }
 

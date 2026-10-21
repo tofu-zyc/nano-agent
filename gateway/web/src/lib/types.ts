@@ -13,7 +13,8 @@ export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatu
 export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number };
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
-export type EndpointInfo = { key: string; channel: string; name: string; session: string };
+// who 是在这个窗口说话的人，admin 表示他是管理员
+export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
 
 export type SessionInfo = {
   sid: string;

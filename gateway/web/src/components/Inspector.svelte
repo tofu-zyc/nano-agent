@@ -71,14 +71,33 @@
       : [],
   );
   async function attach(e: EndpointInfo) {
-    if (target.type !== 'session') return;
+    if (target.type === 'session') await moveEndpoint(e, target.sid);
+  }
+  async function moveEndpoint(e: EndpointInfo, sid: string) {
     try {
-      await api.put(`/api/endpoints/${encodeURIComponent(e.key)}`, { session: target.sid });
-      store.toast({ kind: 'ok', text: `${endpointLabel(e)} 已接到这个会话` }, 2400);
+      await api.put(`/api/endpoints/${encodeURIComponent(e.key)}`, { session: sid });
+      store.toast({ kind: 'ok', text: `${endpointLabel(e)} 已接到${sid === 'main' ? '主会话' : '这个会话'}` }, 2400);
     } catch (err) {
       store.fail(err);
     }
   }
+  // 把在这个窗口说话的人设为管理员：写进管理员名单，窗口接到主会话
+  async function makeAdmin(e: EndpointInfo) {
+    const who = e.name ? `${e.name}（${e.who}）` : e.who;
+    if (!confirm(`把 ${who} 设为管理员？\n管理员能让机器人在工作目录里读写文件、执行命令，能看到和切换所有会话。这个窗口会接到主会话。`)) return;
+    try {
+      await api.post(`/api/endpoints/${encodeURIComponent(e.key)}/admin`);
+      store.toast({ kind: 'ok', text: `${e.name || e.who} 现在是管理员了，窗口已接到主会话` }, 3000);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  // 某个渠道上聊过天的人（每个私聊是一个窗口）
+  const people = $derived(
+    target.type === 'channel'
+      ? (ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === target.name).map((e) => ({ e, s })))
+      : [],
+  );
   async function rename(title: string) {
     if (!sess || title.trim() === sess.title) return;
     try {
@@ -268,6 +287,35 @@
             <p class="note">私聊机器人的每个人是一个窗口。管理员默认接在主会话上，和终端、网页共享上下文；其他人各自一个会话。管理员可以发 <code>/session</code> 切换。</p>
           {/if}
         </div>
+        {#if target.name !== 'web' && target.name !== 'cli'}
+          {#if people.length}
+            <h5>聊过天的人 <span class="muted small">每个私聊是一个窗口</span></h5>
+            <div class="people">
+              {#each people as { e, s } (e.key)}
+                <div class="person" class:guest={!e.admin}>
+                  <div class="row">
+                    <strong class="grow">{e.name || e.key}</strong>
+                    {#if e.admin}<span class="tag accent">管理员</span>{:else}<span class="tag">访客</span>{/if}
+                  </div>
+                  <div class="where">
+                    接在<button class="lnk" onclick={() => store.open({ type: 'session', sid: s.sid })}>「{s.title}」</button>
+                    {#if e.who}<code>{e.who}</code>{/if}
+                  </div>
+                  {#if !e.admin && !e.who}
+                    <p class="note">还不知道这个窗口里是谁在说话（升级前的记录）。在{channelMeta[e.channel]?.label ?? ''}里给机器人再发一条消息，这里就能设为管理员。</p>
+                  {:else if !e.admin}
+                    <p class="note">访客只能聊天，不能用工具，也看不到别的会话。如果这是你自己，设为管理员后这个窗口会接到主会话，和终端、网页共用上下文。</p>
+                    <button class="btn sm primary" onclick={() => makeAdmin(e)}><Icon name="shield" size={13} />设为管理员并接到主会话</button>
+                  {:else if e.session !== 'main'}
+                    <button class="btn sm" onclick={() => moveEndpoint(e, 'main')}><Icon name="hub" size={13} />接到主会话</button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {:else if c.status.state === 'online'}
+            <p class="note pad">还没有人私聊过机器人。私聊它说一句话，这里就会出现，可以把你自己设为管理员。</p>
+          {/if}
+        {/if}
         {#if target.name === 'telegram' && c.status.state === 'disabled'}
           <details class="guide" open>
             <summary>怎么接入 Telegram</summary>
@@ -314,7 +362,14 @@
             <div class="row">
               <span class="dot" style="background: {channelMeta[e.channel]?.color ?? 'var(--muted)'}"></span>
               <span class="grow">{endpointLabel(e)}</span>
-              {#if e.channel === 'web'}<span class="epkey">能接入任何会话</span>{:else}<code class="epkey">{e.key}</code>{/if}
+              {#if e.channel === 'web'}
+                <span class="epkey">能接入任何会话</span>
+              {:else if !e.admin}
+                <span class="tag" title="不是管理员：只能聊天，不能用工具、不能切换会话">访客</span>
+                {#if e.who}<button class="btn sm" onclick={() => makeAdmin(e)}>设为管理员</button>{/if}
+              {:else}
+                <code class="epkey">{e.key}</code>
+              {/if}
             </div>
           {:else}
             <p class="note">还没有聊天窗口接在这里，只能在网页里聊。</p>
@@ -683,6 +738,50 @@
   }
   input.title:focus {
     border-color: var(--accent);
+  }
+  .people {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .person {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 11px 13px;
+    border-radius: 13px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+  }
+  .person .row {
+    width: 100%;
+  }
+  .person.guest {
+    border-color: color-mix(in srgb, var(--warn) 35%, var(--line));
+  }
+  .where {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .where code {
+    font-size: 11.5px;
+    word-break: break-all;
+  }
+  .lnk {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--accent-2);
+    cursor: pointer;
+    font-size: inherit;
+  }
+  .note.pad {
+    margin-top: 12px;
   }
   .epkey {
     flex: none;
