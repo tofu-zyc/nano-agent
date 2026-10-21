@@ -1,0 +1,59 @@
+# nano-agent 网关配置示例。复制成 gateway.toml 再改。
+# 相对路径都以本文件所在目录为基准。
+# 敏感项也可以用环境变量提供：NANO_KERNEL_TOKEN、NANO_LLM_API_KEY、
+# NANO_TELEGRAM_TOKEN、NANO_FEISHU_APP_SECRET（优先于本文件）。
+
+[kernel]
+# 内核来连的地址。同机部署用 unix socket；内核在别的机器上就用 tcp，
+# 并且最好走 WireGuard / Tailscale / SSH 隧道，协议本身不加密。
+listen = "unix:/tmp/nano-agent.sock"
+# listen = "tcp:0.0.0.0:7700"
+token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
+
+[llm]
+provider = "openai"            # openai（任何 OpenAI 兼容接口）| mock（假模型，测试用）
+base_url = "https://api.deepseek.com/v1"
+api_key  = "sk-..."
+model    = "deepseek-chat"
+context_window     = 128000    # 模型的上下文窗口
+max_history_tokens = 64000     # 每次请求最多带多少历史（估算值），超出从最老的一轮开始丢
+timeout  = 600                 # 单次请求超时（秒）
+proxy    = ""                  # "" 跟随环境变量；"none" 直连；或 "http://127.0.0.1:7890"
+# temperature = 0.7
+# max_tokens  = 4096
+send_reasoning = false         # 把当前这一轮的推理内容回传给模型（部分推理模型需要）
+
+# 原样合并进请求体的额外参数，比如关掉 vLLM 上模型的思考模式：
+# [llm.extra]
+# chat_template_kwargs = { thinking = false }
+
+[persona]
+# 人格（系统提示词）目录：default.md 是默认人格；
+# 放一个 <会话ID>.md（比如 tg:-1001234567890.md）就能给某个会话单独设定。
+# 改完保存，下一条消息就生效，不用重启。
+dir = "personas"
+
+[session]
+data_dir = "data"              # 对话历史存在 data/sessions/ 下，每个会话一个文件
+
+[access]
+# 只响应这些会话（会话 ID 用 /whoami 查），空表示不限制。命令行会话总是允许。
+allow_chats = []
+
+[cli]
+enabled = false                # 命令行聊天，本地调试用
+
+[telegram]
+enabled = false
+token   = ""                   # 找 @BotFather 创建机器人拿到的 token
+proxy   = ""                   # 国内一般需要代理
+# api_base = "https://api.telegram.org"
+group_reply_all = false        # true：群里每条消息都回；false：只回 @ 或回复机器人的消息
+
+[feishu]
+enabled    = false
+app_id     = ""
+app_secret = ""
+domain     = "feishu"          # feishu（飞书）| lark（国际版）
+proxy      = ""
+group_reply_all = false

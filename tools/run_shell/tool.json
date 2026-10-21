@@ -1,0 +1,14 @@
+{
+  "name": "run_shell",
+  "description": "在 bot 所在的机器上用 /bin/sh 执行一条命令，返回标准输出和标准错误。",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "cmd": { "type": "string", "description": "要执行的 shell 命令" }
+    },
+    "required": ["cmd"]
+  },
+  "allow": "admin",
+  "approval": true,
+  "timeout": 60
+}

@@ -1,0 +1,9 @@
+# 本机配置（含密钥）
+/gateway.toml
+/kernel.conf
+# 运行数据
+/data/
+# 构建产物
+/kernel/nano-kernel
+/kernel/build/
+/gateway/nano-gateway

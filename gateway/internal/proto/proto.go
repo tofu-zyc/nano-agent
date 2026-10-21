@@ -1,0 +1,89 @@
+// Package proto 定义网关与内核之间的消息（一行一条 JSON），完整说明见 docs/protocol.md。
+package proto
+
+import "encoding/json"
+
+// Version 是当前协议版本，内核在 hello 里带上。
+const Version = 1
+
+// 消息类型。
+const (
+	// 内核 → 网关
+	THello      = "hello"
+	TModel      = "model"
+	TResult     = "result"
+	TApproveReq = "approve_req"
+	TNotice     = "notice"
+	TDone       = "done"
+	TPing       = "ping"
+
+	// 网关 → 内核
+	TWelcome = "welcome"
+	TError   = "error"
+	TInput   = "input"
+	TTurn    = "turn"
+	TApprove = "approve"
+	TCancel  = "cancel"
+	TPong    = "pong"
+)
+
+// turn 的 reason。各家 API 的特殊情况由网关消化掉，内核只看到这四种。
+const (
+	ReasonFinal   = "final"
+	ReasonToolUse = "tool_use"
+	ReasonRefused = "refused"
+	ReasonError   = "error"
+)
+
+// done 的 status。
+const (
+	StatusOK        = "ok"
+	StatusBudget    = "budget"
+	StatusTimeout   = "timeout"
+	StatusCancelled = "cancelled"
+	StatusRefused   = "refused"
+	StatusError     = "error"
+)
+
+// Msg 是所有消息的并集，按 T 区分类型，没用到的字段省略。
+type Msg struct {
+	T string `json:"t"`
+
+	// hello / welcome
+	V     int        `json:"v,omitempty"`
+	Token string     `json:"token,omitempty"`
+	Node  string     `json:"node,omitempty"`
+	Tools []ToolSpec `json:"tools,omitempty"`
+
+	SID    string `json:"sid,omitempty"`
+	From   string `json:"from,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Calls  []Call `json:"calls,omitempty"`
+
+	ID      string          `json:"id,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	Args    json.RawMessage `json:"args,omitempty"`
+	OK      *bool           `json:"ok,omitempty"`
+	Content string          `json:"content,omitempty"`
+	Status  string          `json:"status,omitempty"`
+	Detail  string          `json:"detail,omitempty"`
+	Text    string          `json:"text,omitempty"`
+}
+
+// ToolSpec 是内核报上来的工具描述，原样转成模型的工具定义。
+type ToolSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// Call 是模型请求的一次工具调用。Args 是参数对象；模型给的参数不是合法 JSON 对象时，
+// 是一个包含原始文本的 JSON 字符串，由内核判定为错误。
+type Call struct {
+	ID   string          `json:"id"`
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
+}
+
+// Bool 返回指向 b 的指针，用于 Msg.OK。
+func Bool(b bool) *bool { return &b }

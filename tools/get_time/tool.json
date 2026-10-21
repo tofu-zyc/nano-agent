@@ -1,0 +1,7 @@
+{
+  "name": "get_time",
+  "description": "获取 bot 所在机器的当前日期、时间、星期和时区。",
+  "input_schema": { "type": "object", "properties": {} },
+  "allow": "all",
+  "timeout": 5
+}
