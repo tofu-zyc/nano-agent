@@ -19,6 +19,7 @@ import (
 
 // Telegram 通过 Bot API 长轮询收消息，不需要公网地址。
 type Telegram struct {
+	statusBox
 	token    string
 	base     string
 	hc       *http.Client
@@ -54,8 +55,9 @@ type tgUser struct {
 }
 
 type tgChat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"` // private | group | supergroup | channel
+	ID    int64  `json:"id"`
+	Type  string `json:"type"` // private | group | supergroup | channel
+	Title string `json:"title"`
 }
 
 type tgMessage struct {
@@ -149,6 +151,12 @@ func (t *Telegram) callRetry(ctx context.Context, method string, params any) err
 }
 
 func (t *Telegram) Run(ctx context.Context, h Handler) error {
+	t.setState(StateStarting, "")
+	defer func() {
+		if st := t.Status(); st.State != StateError || ctx.Err() != nil {
+			t.setState(StateStopped, "")
+		}
+	}()
 	for {
 		var me tgUser
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -156,13 +164,17 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 		cancel()
 		if err == nil {
 			t.botID, t.botUser = me.ID, me.Username
+			t.setIdentity("@" + me.Username)
+			t.setState(StateOnline, "")
 			t.log.Info("Telegram 机器人已就绪", "username", "@"+me.Username)
 			break
 		}
 		var te *tgError
 		if errors.As(err, &te) && te.Code == http.StatusUnauthorized {
+			t.setState(StateError, "token 无效")
 			return fmt.Errorf("telegram token 无效：%w", err)
 		}
+		t.setState(StateError, err.Error())
 		t.log.Warn("连接 Telegram 失败，5 秒后重试", "err", err)
 		select {
 		case <-ctx.Done():
@@ -192,6 +204,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 				t.callRetry(ctx, "deleteWebhook", map[string]any{})
 				continue
 			}
+			t.setState(StateError, err.Error())
 			t.log.Warn("拉取 Telegram 消息失败", "err", err, "retry_in", backoff)
 			select {
 			case <-ctx.Done():
@@ -202,6 +215,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 			continue
 		}
 		backoff = time.Second
+		t.setState(StateOnline, "")
 		for _, u := range ups {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
@@ -241,10 +255,15 @@ func (t *Telegram) convert(m *tgMessage) (Message, bool) {
 	if name == "" {
 		name = m.From.Username
 	}
+	chatName := m.Chat.Title
+	if !group {
+		chatName = name
+	}
 	return Message{
 		ChatID:     strconv.FormatInt(m.Chat.ID, 10),
 		SenderID:   strconv.FormatInt(m.From.ID, 10),
 		SenderName: name,
+		ChatName:   chatName,
 		Text:       strings.TrimSpace(text),
 		MsgID:      strconv.FormatInt(m.MessageID, 10),
 		Group:      group,

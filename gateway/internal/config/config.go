@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,108 +14,121 @@ import (
 )
 
 type Config struct {
-	Kernel    Kernel    `toml:"kernel"`
-	LLM       LLM       `toml:"llm"`
-	Persona   Persona   `toml:"persona"`
-	Session   Session   `toml:"session"`
-	Access    Access    `toml:"access"`
-	Workspace Workspace `toml:"workspace"`
-	CLI       CLI       `toml:"cli"`
-	Telegram  Telegram  `toml:"telegram"`
-	Feishu    Feishu    `toml:"feishu"`
+	Kernel    Kernel    `toml:"kernel" json:"kernel"`
+	LLM       LLM       `toml:"llm" json:"llm"`
+	Persona   Persona   `toml:"persona" json:"persona"`
+	Session   Session   `toml:"session" json:"session"`
+	Access    Access    `toml:"access" json:"access"`
+	Workspace Workspace `toml:"workspace" json:"workspace"`
+	CLI       CLI       `toml:"cli" json:"cli"`
+	Telegram  Telegram  `toml:"telegram" json:"telegram"`
+	Feishu    Feishu    `toml:"feishu" json:"feishu"`
+	Web       Web       `toml:"web" json:"web"`
 
-	Dir string `toml:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
+	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
 
 type Kernel struct {
-	Listen string `toml:"listen"` // unix:/path 或 tcp:host:port
-	Token  string `toml:"token"`  // 与内核配置里的 token 一致
+	Listen string `toml:"listen" json:"listen"` // unix:/path 或 tcp:host:port
+	Token  string `toml:"token" json:"token"`   // 与内核配置里的 token 一致
 }
 
 type LLM struct {
-	Provider         string         `toml:"provider"` // openai | mock
-	BaseURL          string         `toml:"base_url"`
-	APIKey           string         `toml:"api_key"`
-	Model            string         `toml:"model"`
-	ContextWindow    int            `toml:"context_window"`
-	MaxHistoryTokens int            `toml:"max_history_tokens"`
-	Timeout          int            `toml:"timeout"` // 秒
-	Proxy            string         `toml:"proxy"`
-	Temperature      *float64       `toml:"temperature"`
-	MaxTokens        int            `toml:"max_tokens"`
-	SendReasoning    bool           `toml:"send_reasoning"`
-	Extra            map[string]any `toml:"extra"`
+	Provider         string         `toml:"provider" json:"provider"` // openai | mock
+	BaseURL          string         `toml:"base_url" json:"base_url"`
+	APIKey           string         `toml:"api_key" json:"api_key"`
+	Model            string         `toml:"model" json:"model"`
+	ContextWindow    int            `toml:"context_window" json:"context_window"`
+	MaxHistoryTokens int            `toml:"max_history_tokens" json:"max_history_tokens"`
+	Timeout          int            `toml:"timeout" json:"timeout"` // 秒
+	Proxy            string         `toml:"proxy" json:"proxy"`
+	Temperature      *float64       `toml:"temperature" json:"temperature"`
+	MaxTokens        int            `toml:"max_tokens" json:"max_tokens"`
+	SendReasoning    bool           `toml:"send_reasoning" json:"send_reasoning"`
+	Extra            map[string]any `toml:"extra" json:"extra"`
 
 	// 历史超过 max_history_tokens 时，一次裁到它的这个比例，之后只追加，直到下次超出。
 	// 不每次都裁一点，是为了让请求的前缀尽量不变，模型那边的前缀缓存才能命中。
-	TrimTo float64 `toml:"trim_to"`
+	TrimTo float64 `toml:"trim_to" json:"trim_to"`
 
 	// 思考强度。thinking 是默认值（空表示用模型自己的默认），每个会话可以用 /think 改；
 	// thinking_style 是传给模型的方式：vllm（chat_template_kwargs）| openai（reasoning_effort）| none；
 	// thinking_levels 是 /think 可选的值。
-	Thinking       string   `toml:"thinking"`
-	ThinkingStyle  string   `toml:"thinking_style"`
-	ThinkingLevels []string `toml:"thinking_levels"`
+	Thinking       string   `toml:"thinking" json:"thinking"`
+	ThinkingStyle  string   `toml:"thinking_style" json:"thinking_style"`
+	ThinkingLevels []string `toml:"thinking_levels" json:"thinking_levels"`
 }
 
 type Persona struct {
-	Dir string `toml:"dir"`
+	Dir string `toml:"dir" json:"dir"`
 }
 
 type Session struct {
-	DataDir    string `toml:"data_dir"`
-	Timestamps *bool  `toml:"timestamps"` // 在用户消息前加上发送时间，默认开
-	Timezone   string `toml:"timezone"`   // 时间戳用的时区，比如 Asia/Shanghai；空表示系统时区
+	DataDir    string `toml:"data_dir" json:"data_dir"`
+	Timestamps *bool  `toml:"timestamps" json:"timestamps"` // 在用户消息前加上发送时间，默认开
+	Timezone   string `toml:"timezone" json:"timezone"`     // 时间戳用的时区，比如 Asia/Shanghai；空表示系统时区
 }
 
 type Access struct {
-	AllowChats []string `toml:"allow_chats"` // 会话 ID 白名单，空表示不限制
-	Admins     []string `toml:"admins"`      // 管理员身份；命令行用户始终是管理员
-	Guest      string   `toml:"guest"`       // 非管理员能用的工具：none（默认，只聊天）| readonly
+	AllowChats []string `toml:"allow_chats" json:"allow_chats"` // 会话 ID 白名单，空表示不限制
+	Admins     []string `toml:"admins" json:"admins"`           // 管理员身份；命令行用户始终是管理员
+	Guest      string   `toml:"guest" json:"guest"`             // 非管理员能用的工具：none（默认，只聊天）| readonly
 }
 
 // Workspace 是工具能碰到的范围：工作目录之外的文件一律读写不了（由内核的沙箱保证）。
 // 这里是默认值，每个会话可以用 /dir、/mode 单独改。
 type Workspace struct {
-	Dirs    []string `toml:"dirs"`     // 工作目录，第一个是默认目录
-	Mode    string   `toml:"mode"`     // auto | ask（默认）| readonly
-	ExtraRO []string `toml:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
-	ExtraRW []string `toml:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
+	Dirs    []string `toml:"dirs" json:"dirs"`         // 工作目录，第一个是默认目录
+	Mode    string   `toml:"mode" json:"mode"`         // auto | ask（默认）| readonly
+	ExtraRO []string `toml:"extra_ro" json:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
+	ExtraRW []string `toml:"extra_rw" json:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
 }
 
 type CLI struct {
-	Enabled       bool  `toml:"enabled"`
-	ShowReasoning *bool `toml:"show_reasoning"` // 显示模型的思考过程，默认开
-	ShowUsage     *bool `toml:"show_usage"`     // 每轮结束后显示用量和缓存命中率，默认开
+	Enabled       bool  `toml:"enabled" json:"enabled"`
+	ShowReasoning *bool `toml:"show_reasoning" json:"show_reasoning"` // 显示模型的思考过程，默认开
+	ShowUsage     *bool `toml:"show_usage" json:"show_usage"`         // 每轮结束后显示用量和缓存命中率，默认开
 }
 
 // On 读取一个默认为 true 的开关。
 func On(b *bool) bool { return b == nil || *b }
 
 type Telegram struct {
-	Enabled       bool   `toml:"enabled"`
-	Token         string `toml:"token"`
-	Proxy         string `toml:"proxy"`
-	APIBase       string `toml:"api_base"`
-	GroupReplyAll bool   `toml:"group_reply_all"`
+	Enabled       bool   `toml:"enabled" json:"enabled"`
+	Token         string `toml:"token" json:"token"`
+	Proxy         string `toml:"proxy" json:"proxy"`
+	APIBase       string `toml:"api_base" json:"api_base"`
+	GroupReplyAll bool   `toml:"group_reply_all" json:"group_reply_all"`
+}
+
+type Web struct {
+	Listen   string `toml:"listen" json:"listen"`     // 网页管理界面的地址，默认 127.0.0.1:7788；"off" 表示不开
+	Password string `toml:"password" json:"password"` // 登录密码；空表示自动生成一个，存在数据目录的 web.secret 里
 }
 
 type Feishu struct {
-	Enabled       bool   `toml:"enabled"`
-	AppID         string `toml:"app_id"`
-	AppSecret     string `toml:"app_secret"`
-	Domain        string `toml:"domain"` // feishu | lark
-	Proxy         string `toml:"proxy"`
-	GroupReplyAll bool   `toml:"group_reply_all"`
+	Enabled       bool   `toml:"enabled" json:"enabled"`
+	AppID         string `toml:"app_id" json:"app_id"`
+	AppSecret     string `toml:"app_secret" json:"app_secret"`
+	Domain        string `toml:"domain" json:"domain"` // feishu | lark
+	Proxy         string `toml:"proxy" json:"proxy"`
+	GroupReplyAll bool   `toml:"group_reply_all" json:"group_reply_all"`
 }
 
 // Load 读取配置文件，填默认值，并把相对路径换算成相对配置文件所在目录。
 // 返回的 warnings 是不认识的配置项（多半是拼错了）。
 func Load(path string) (*Config, []string, error) {
+	c, _, warnings, err := parse(path, nil)
+	return c, warnings, err
+}
+
+// parse 读取配置文件，再把 overlay（网页里改过的配置，JSON）叠加上去。
+// 优先级：配置文件 < 环境变量 < 网页。
+func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error) {
 	var c Config
 	md, err := toml.DecodeFile(path, &c)
 	if err != nil {
-		return nil, nil, fmt.Errorf("读取 %s：%w", path, err)
+		return nil, md, nil, fmt.Errorf("读取 %s：%w", path, err)
 	}
 	var warnings []string
 	for _, k := range md.Undecoded() {
@@ -125,8 +139,13 @@ func Load(path string) (*Config, []string, error) {
 	}
 
 	c.applyEnv()
+	if len(overlay) > 0 {
+		if err := json.Unmarshal(overlay, &c); err != nil {
+			return nil, md, warnings, fmt.Errorf("网页里保存的配置有误：%w", err)
+		}
+	}
 	c.applyDefaults()
-	if !md.IsDefined("workspace", "extra_ro") {
+	if !md.IsDefined("workspace", "extra_ro") && !strings.Contains(string(overlay), `"extra_ro"`) {
 		c.Workspace.ExtraRO = []string{"~/.gitconfig", "~/.config/git"} // git 要读用户名和邮箱
 	}
 	base := filepath.Dir(path)
@@ -139,7 +158,7 @@ func Load(path string) (*Config, []string, error) {
 	if strings.HasPrefix(c.Kernel.Listen, "unix:") {
 		c.Kernel.Listen = "unix:" + resolve(base, strings.TrimPrefix(c.Kernel.Listen, "unix:"))
 	}
-	return &c, warnings, c.validate()
+	return &c, md, warnings, c.validate()
 }
 
 // 敏感信息也可以放在环境变量里，优先于配置文件。
@@ -179,6 +198,7 @@ func (c *Config) applyDefaults() {
 	def(&c.Session.DataDir, "data")
 	def(&c.Telegram.APIBase, "https://api.telegram.org")
 	def(&c.Feishu.Domain, "feishu")
+	def(&c.Web.Listen, "127.0.0.1:7788")
 	def(&c.Workspace.Mode, "ask")
 	def(&c.Access.Guest, "none")
 	def(&c.LLM.ThinkingStyle, "none")

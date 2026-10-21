@@ -35,9 +35,15 @@ func New(dir string, log *slog.Logger) *Loader {
 	return &Loader{dir: dir, log: log, cache: map[string]entry{}}
 }
 
+// Dir 是人格文件所在的目录。
+func (l *Loader) Dir() string { return l.dir }
+
+// FileFor 是会话专属人格文件的文件名（不一定存在）。
+func FileFor(sid string) string { return url.PathEscape(sid) + ".md" }
+
 // For 返回会话使用的系统提示词，以及它来自哪个文件（都没有时返回空）。
 func (l *Loader) For(sid string) (text, path string) {
-	for _, name := range []string{url.PathEscape(sid) + ".md", "default.md"} {
+	for _, name := range []string{FileFor(sid), "default.md"} {
 		p := filepath.Join(l.dir, name)
 		if t, ok := l.read(p); ok {
 			return t, p

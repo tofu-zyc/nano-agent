@@ -3,7 +3,7 @@
 一个轻量的 bot 型 AI agent，拆成两个小程序：
 
 - **内核**（C，除内嵌的 cJSON 外没有依赖）：只跑 agent 循环，负责预算、权限模式和审批。工具交给执行器 `nano-exec`，在沙箱里执行。
-- **网关**（Go）：保存对话上下文，对接模型（任何 OpenAI 兼容接口）和聊天平台（Telegram、飞书、命令行）。
+- **网关**（Go）：保存对话上下文，对接模型（任何 OpenAI 兼容接口）和聊天平台（Telegram、飞书、命令行、网页），自带一个网页管理界面。
 
 两者通过一条一行一条 JSON 的连接通信（[协议说明](docs/protocol.md)），可以跑在同一台机器上，也可以分开：比如网关在 VPS 上，内核在家里的机器上执行工具。
 
@@ -49,6 +49,8 @@ bot> 结果是 1、4、9、16、25。
 /mode auto
 ```
 
+启动后终端里会打印一行 `网页管理界面：http://127.0.0.1:7788/#k=…`，用浏览器打开就自动登录了（见下面的[网页管理界面](#网页管理界面)）。
+
 也可以分开启动：
 
 ```sh
@@ -56,6 +58,21 @@ make
 ./gateway/nano-gateway -c gateway.toml
 ./kernel/nano-kernel -c kernel.conf      # 另一个终端；-t 只检查配置和执行器，-v 打印协议消息
 ```
+
+## 网页管理界面
+
+网关自带一个网页界面，默认在 `http://127.0.0.1:7788`。密码在 `gateway.toml` 的 `[web] password` 里，没设置就自动生成一个，存在 `data/web.secret`；启动时打印的链接里带着密码，点开就登录了。
+
+- **拓扑**（首页）：一张实时的关系图，从左到右依次是渠道（终端、网页、Telegram、飞书，以及它们的在线状态和机器人名字）、会话、网关、模型和内核、工作目录。消息进出、模型生成、工具执行时，连线上有光点沿着数据流动的方向跑；正在处理的会话外面有一圈光环，颜色表示它在思考、回复还是执行工具，有待审批时会出现黄色的提醒。
+- **点哪儿改哪儿**：点图上的任何一个节点，右边展开它自己的状态和设置——点模型就是接口、思考强度、上下文长度，还能“测试连接”；点 Telegram 就是 token、代理、接入步骤；点会话就是它的权限模式、工作目录、思考强度、人格。改完立即生效，不用点保存。
+- **⌘K / Ctrl+K**：搜索所有配置项、会话和操作，比如输入“代理”“token”“思考”，回车直接跳到那一项。
+- **会话**：所有平台的对话，带思考过程（可折叠）、工具调用卡片（参数和结果）、每次调用的用量和缓存命中率；正在处理的会话实时显示；待审批的工具调用可以直接点“批准 / 拒绝”。网页本身也是一个聊天渠道（会话 ID 是 `web:名字`），网页用户都是管理员。
+- **人格**：编辑默认人格和各个会话的专属人格，保存后下一条消息生效。
+- **设置**：按对象分组的全部配置项，可以搜索、只看改过的。
+
+网页里改的配置存在 `data/config.json`，叠加在 `gateway.toml` 上（优先级：配置文件 < 环境变量 < 网页）。每一项旁边的小圆点表示当前值来自哪里，改过的可以一键恢复成配置文件里的值。大部分修改立即生效（换模型、开关 Telegram / 飞书都不用重启）；少数几项（内核监听地址、网页地址等）会标着“重启生效”。
+
+界面默认只监听本机。要从别的机器访问，建议用 SSH 隧道（`ssh -L 7788:127.0.0.1:7788 机器`）或者 Tailscale，而不是直接监听公网地址。
 
 ## 改人格（系统提示词）
 
@@ -173,7 +190,7 @@ make
 
 - `proxy`：Go 不认 `NO_PROXY` 里 `10.*` 这种通配写法，**内网的模型地址要显式写 `proxy = "none"`**，否则请求会被发到代理上。
 - `[llm.extra]` 里的参数会原样合并进请求体。
-- **思考强度**：`thinking_style` 决定怎么传给模型——`vllm` 写进 `chat_template_kwargs`（`thinking` 开关和 `reasoning_effort`），`openai` 用顶层的 `reasoning_effort`。默认值是 `thinking`，每个会话可以用 `/think` 单独改。多数模型的对话模板把思考强度写在提示词最前面，**切换后这个会话的前缀缓存会失效一次**（之后又能命中），所以它是一个手动切换的会话设置，不会自动变。
+- **思考强度**：`thinking_style` 决定怎么传给模型——`vllm` 写进 `chat_template_kwargs`（`thinking` 开关和 `reasoning_effort`），`openai` 用顶层的 `reasoning_effort`。默认值是 `thinking`，每个会话可以用 `/think` 单独改。
 
 ## 上下文和前缀缓存
 
@@ -197,7 +214,10 @@ make test
 - `kernel/tests/test_exec.py`：直接驱动执行器，测五个工具，以及各种绕过沙箱的尝试（`..`、符号链接、`~`、unix socket、发信号、环境变量里的密钥）。
 - `kernel/tests/test_host.py`：用假网关驱动真实的内核和执行器，测权限模式、审批、超时、取消、断线重连、进程清理（ASan 版本）。
 - `gateway/...`：Go 单元测试，`internal/app` 里用假内核走真实 socket 测调度逻辑（`-race`）。
+- `gateway/internal/web`：网页接口的测试（登录、防跨站请求、Host 检查、改配置、事件流）。
 - `scripts/e2e.sh`：真实的内核、执行器和网关一起跑，模型用 mock，不花钱。
+
+前端代码在 `gateway/web/`（Svelte + Vite），构建结果放在 `gateway/internal/web/dist/` 并提交在仓库里，编译网关只需要 Go。改了前端之后运行 `make web` 重新构建（需要 Node 20 以上）。
 
 把 `llm.provider` 设成 `mock` 就能不接模型调试整条链路：消息里写 `!call 工具名 {参数}` 会让假模型去调这个工具，比如 `!call Shell {"command":"ls"}`。
 
@@ -219,7 +239,11 @@ gateway/           Go 网关
   internal/llm       模型接入（OpenAI 兼容 / mock）
   internal/session   对话历史、会话设置、裁剪
   internal/persona   人格文件热加载
-  internal/channel   Telegram / 飞书 / 命令行
+  internal/channel   Telegram / 飞书 / 命令行 / 网页
+  internal/web       网页管理界面的接口（前端构建结果嵌在 dist/ 里）
+  internal/config    配置：gateway.toml + 网页里的修改
+  internal/events    事件总线（网页实时显示用）
+  web/               网页界面的前端源码（Svelte）
 personas/          人格文件
 docs/protocol.md   内核 ⇄ 网关协议
 ```

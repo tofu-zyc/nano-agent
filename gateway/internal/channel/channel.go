@@ -12,6 +12,7 @@ type Message struct {
 	ChatID     string // 平台的会话 ID（私聊、群聊）
 	SenderID   string // 平台的用户 ID
 	SenderName string
+	ChatName   string // 会话的名字：群名，或者私聊对方的名字；拿不到时为空
 	Text       string // 已去掉 @机器人 的部分
 	MsgID      string // 用于引用回复
 	Group      bool

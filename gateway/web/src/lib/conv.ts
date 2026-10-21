@@ -1,0 +1,68 @@
+// 把会话历史整理成对话视图要显示的块
+import type { Msg, Usage } from './types';
+import { parseUser } from './format';
+
+export type ToolView = { id: string; name: string; detail: string; args: string; ok?: boolean; result?: string };
+
+export type Block =
+  | { type: 'env'; text: string }
+  | { type: 'user'; text: string; time?: string; sender?: string }
+  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number };
+
+export function toolDetail(name: string, args: string): string {
+  let a: Record<string, any>;
+  try {
+    a = JSON.parse(args);
+  } catch {
+    return args.slice(0, 120);
+  }
+  switch (name) {
+    case 'Shell':
+      return String(a.command ?? '');
+    case 'Read':
+      return String(a.path ?? '') + (a.offset ? `（从第 ${a.offset} 行）` : '');
+    case 'Write':
+      return `${a.path ?? ''}（${new TextEncoder().encode(String(a.content ?? '')).length} 字节）`;
+    case 'Edit':
+      return String(a.path ?? '');
+    case 'Grep':
+      return [a.pattern, a.glob, a.path].filter(Boolean).join('  ');
+  }
+  return args.slice(0, 120);
+}
+
+export function prettyArgs(args: string): string {
+  try {
+    return JSON.stringify(JSON.parse(args), null, 2);
+  } catch {
+    return args;
+  }
+}
+
+export function buildBlocks(history: Msg[]): Block[] {
+  const out: Block[] = [];
+  const byId = new Map<string, ToolView>();
+  for (const m of history) {
+    if (m.role === 'user') {
+      const p = parseUser(m.content ?? '');
+      for (const e of p.env) out.push({ type: 'env', text: e });
+      out.push({ type: 'user', text: p.text, time: p.time, sender: p.sender });
+    } else if (m.role === 'assistant') {
+      const tools: ToolView[] = (m.tool_calls ?? []).map((c) => {
+        const t: ToolView = { id: c.id, name: c.function.name, args: c.function.arguments, detail: toolDetail(c.function.name, c.function.arguments) };
+        byId.set(c.id, t);
+        return t;
+      });
+      out.push({ type: 'assistant', text: m.content ?? '', reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts });
+    } else if (m.role === 'tool') {
+      const t = byId.get(m.tool_call_id ?? '');
+      if (t) {
+        let c = m.content ?? '';
+        t.ok = !c.startsWith('[执行失败] ');
+        if (!t.ok) c = c.slice('[执行失败] '.length);
+        t.result = c;
+      }
+    }
+  }
+  return out;
+}

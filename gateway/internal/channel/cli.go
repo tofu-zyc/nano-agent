@@ -52,9 +52,19 @@ func (c *CLI) Run(ctx context.Context, h Handler) error {
 		if line == "" {
 			continue
 		}
-		h(c, Message{ChatID: "local", SenderID: "local", SenderName: "你", Text: line, Mentioned: true})
+		h(c, Message{ChatID: "local", SenderID: "local", SenderName: "你", ChatName: "命令行", Text: line, Mentioned: true})
 	}
 	return sc.Err()
+}
+
+func (c *CLI) Status() Status        { return Status{State: StateOnline, Identity: "本机终端"} }
+func (c *CLI) OnStatus(func(Status)) {}
+
+// SetDisplay 修改显示选项（网页里改了配置时调用）。
+func (c *CLI) SetDisplay(showReasoning, showUsage bool) {
+	c.mu.Lock()
+	c.showReasoning, c.showUsage = showReasoning, showUsage
+	c.mu.Unlock()
 }
 
 func (c *CLI) Send(_ context.Context, _, text, _ string) error {

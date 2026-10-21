@@ -32,6 +32,8 @@ dirs = ["$TMP/work"]
 mode = "ask"
 [cli]
 enabled = true
+[web]
+listen = "off"
 CONF
 cat > "$TMP/kernel.conf" <<CONF
 gateway = unix:$TMP/k.sock

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Settings 是单个会话覆盖默认值的设置，存在 data/sessions/<会话ID>.settings.json。
@@ -15,6 +16,7 @@ type Settings struct {
 	Mode    string   `json:"mode,omitempty"`     // 空表示用配置里的默认模式
 
 	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用配置里的默认值
+	Title    string `json:"title,omitempty"`    // 会话的名字（群名或私聊对方的名字），网页里显示
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。
@@ -54,4 +56,30 @@ func (s *Store) SaveSettings(sid string, st Settings) error {
 		return err
 	}
 	return os.Rename(tmp, s.settingsFile(sid))
+}
+
+// List 返回磁盘上所有会话的 ID（有历史或者有设置的）。
+func (s *Store) List() []string {
+	entries, _ := os.ReadDir(filepath.Join(s.dir, "sessions"))
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		var esc string
+		switch {
+		case strings.HasSuffix(name, ".settings.json"):
+			esc = strings.TrimSuffix(name, ".settings.json")
+		case strings.HasSuffix(name, ".jsonl"):
+			esc = strings.TrimSuffix(name, ".jsonl")
+		default:
+			continue
+		}
+		sid, err := url.PathUnescape(esc)
+		if err != nil || seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		out = append(out, sid)
+	}
+	return out
 }

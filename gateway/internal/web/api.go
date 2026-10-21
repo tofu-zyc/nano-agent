@@ -1,0 +1,357 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"nano-agent/gateway/internal/app"
+	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/session"
+)
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(v); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求格式不对："+err.Error())
+		return false
+	}
+	return true
+}
+
+// ---- 总览和事件 ----
+
+type modelInfo struct {
+	Provider      string   `json:"provider"`
+	Model         string   `json:"model"`
+	BaseURL       string   `json:"base_url"`
+	Thinking      string   `json:"thinking"`
+	ThinkingStyle string   `json:"thinking_style"`
+	Levels        []string `json:"levels"`
+	ContextWindow int      `json:"context_window"`
+	MaxHistory    int      `json:"max_history"`
+}
+
+func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
+	cfg := s.conf.Current()
+	snap := s.app.Snapshot()
+	writeJSON(w, map[string]any{
+		"gateway": map[string]any{"started": snap.Started, "kernel_listen": cfg.Kernel.Listen, "web_listen": cfg.Web.Listen,
+			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
+		"kernel": snap.Kernel,
+		"model": modelInfo{Provider: cfg.LLM.Provider, Model: cfg.LLM.Model, BaseURL: cfg.LLM.BaseURL, Thinking: cfg.LLM.Thinking,
+			ThinkingStyle: cfg.LLM.ThinkingStyle, Levels: cfg.LLM.ThinkingLevels, ContextWindow: cfg.LLM.ContextWindow,
+			MaxHistory: cfg.LLM.MaxHistoryTokens},
+		"channels":  s.app.Channels(),
+		"sessions":  snap.Sessions,
+		"approvals": snap.Approvals,
+		"totals":    snap.Totals,
+		"workspace": map[string]any{"dirs": cfg.Workspace.Dirs, "mode": cfg.Workspace.Mode},
+		"access":    map[string]any{"admins": cfg.Access.Admins, "guest": cfg.Access.Guest},
+	})
+}
+
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "不支持流式响应")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	ch, cancel := s.app.Bus().Subscribe()
+	defer cancel()
+	fmt.Fprint(w, ": hello\n\n")
+	fl.Flush()
+	tick := time.NewTicker(20 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case e := <-ch:
+			b, _ := json.Marshal(e)
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			// 一次把积压的事件都写出去再 flush（流式回复的增量很密）
+			for n := len(ch); n > 0; n-- {
+				b, _ = json.Marshal(<-ch)
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+			fl.Flush()
+		case <-tick.C:
+			fmt.Fprint(w, ": ping\n\n")
+			fl.Flush()
+		}
+	}
+}
+
+// ---- 会话 ----
+
+func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("sid")
+	hist, summary := s.app.History(sid)
+	if len(hist) > 300 {
+		hist = hist[len(hist)-300:]
+	}
+	if hist == nil {
+		hist = []session.Msg{}
+	}
+	writeJSON(w, map[string]any{"info": s.app.Session(sid), "history": hist, "summary": summary})
+}
+
+func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
+	var p app.SessionPatch
+	if !readJSON(w, r, &p) {
+		return
+	}
+	sid := r.PathValue("sid")
+	if err := s.app.UpdateSession(sid, p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, s.app.Session(sid))
+}
+
+func (s *Server) resetSession(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.ResetSession(r.PathValue("sid")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.StopSession(r.PathValue("sid")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+var chatName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
+func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Chat string `json:"chat"`
+		Text string `json:"text"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !chatName.MatchString(req.Chat) {
+		writeErr(w, http.StatusBadRequest, "会话名只能用字母、数字、_ 和 -，最长 32 个字符")
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		writeErr(w, http.StatusBadRequest, "消息是空的")
+		return
+	}
+	if err := s.app.Web().Post(req.Chat, req.Text); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"sid": "web:" + req.Chat})
+}
+
+func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.PathValue("n"))
+	var req struct {
+		OK bool `json:"ok"`
+	}
+	if err != nil || !readJSON(w, r, &req) {
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "编号不对")
+		}
+		return
+	}
+	if err := s.app.Approve(n, req.OK); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ---- 配置 ----
+
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"fields": s.conf.Describe()})
+}
+
+func (s *Server) patchConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Values map[string]any `json:"values"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.conf.Set(req.Values); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.app.Bus().Publish(events.Event{T: "config"})
+	writeJSON(w, map[string]any{"fields": s.conf.Describe()})
+}
+
+func (s *Server) reloadConfig(w http.ResponseWriter, r *http.Request) {
+	if err := s.conf.Reload(); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.app.Bus().Publish(events.Event{T: "config"})
+	writeJSON(w, map[string]any{"fields": s.conf.Describe()})
+}
+
+// testModel 用当前配置发一个很小的请求，看接口通不通、多快
+func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
+	cfg := s.conf.Current()
+	client, err := s.newLLM(cfg.LLM)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	start := time.Now()
+	var first time.Duration
+	res, err := client.Chat(ctx, llm.Request{
+		Messages: []llm.Message{{Role: "user", Content: "用一句话介绍你自己。"}},
+		Thinking: cfg.LLM.Thinking,
+	}, func(llm.Delta) {
+		if first == 0 {
+			first = time.Since(start)
+		}
+	})
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "ms": time.Since(start).Milliseconds()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "reply": res.Content, "usage": res.Usage,
+		"ms": time.Since(start).Milliseconds(), "first_ms": first.Milliseconds()})
+}
+
+// ---- 人格 ----
+
+var personaName = regexp.MustCompile(`^[A-Za-z0-9._:%@-]+\.md$`)
+
+func (s *Server) personaPath(name string) (string, error) {
+	if !personaName.MatchString(name) || strings.Contains(name, "..") {
+		return "", errors.New("文件名不合法")
+	}
+	return filepath.Join(s.persona.Dir(), name), nil
+}
+
+func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		Name     string   `json:"name"`
+		SID      string   `json:"sid,omitempty"` // 会话专属人格对应的会话
+		Size     int64    `json:"size"`
+		Mod      int64    `json:"mod"`
+		Sessions []string `json:"sessions"` // 正在用它的会话
+	}
+	entries, _ := os.ReadDir(s.persona.Dir())
+	items := []item{}
+	idx := map[string]int{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		it := item{Name: e.Name(), Size: info.Size(), Mod: info.ModTime().UnixMilli(), Sessions: []string{}}
+		if e.Name() != "default.md" {
+			if sid, err := url.PathUnescape(strings.TrimSuffix(e.Name(), ".md")); err == nil {
+				it.SID = sid
+			}
+		}
+		idx[it.Name] = len(items)
+		items = append(items, it)
+	}
+	for _, si := range s.app.Snapshot().Sessions {
+		if i, ok := idx[si.Persona]; ok {
+			items[i].Sessions = append(items[i].Sessions, si.SID)
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Name == "default.md" && items[j].Name != "default.md" })
+	writeJSON(w, map[string]any{"dir": s.persona.Dir(), "items": items})
+}
+
+func (s *Server) getPersona(w http.ResponseWriter, r *http.Request) {
+	path, err := s.personaPath(r.PathValue("name"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "没有这个人格文件")
+		return
+	}
+	writeJSON(w, map[string]string{"name": r.PathValue("name"), "text": string(b)})
+}
+
+func (s *Server) putPersona(w http.ResponseWriter, r *http.Request) {
+	path, err := s.personaPath(r.PathValue("name"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req struct {
+		Text string `json:"text"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(req.Text), 0o644); err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.app.Bus().Publish(events.Event{T: "persona", Name: r.PathValue("name")})
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) deletePersona(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path, err := s.personaPath(name)
+	if err != nil || name == "default.md" {
+		writeErr(w, http.StatusBadRequest, "默认人格不能删除")
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		writeErr(w, http.StatusNotFound, "没有这个人格文件")
+		return
+	}
+	s.app.Bus().Publish(events.Event{T: "persona", Name: name})
+	writeJSON(w, map[string]bool{"ok": true})
+}

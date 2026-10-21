@@ -596,7 +596,7 @@ func TestThinkCommand(t *testing.T) {
 	e.say("/think low", from("u2", "李四"))
 	e.ch.wait(t, "只有管理员")
 	e.say("/think low")
-	e.ch.wait(t, "缓存会失效一次")
+	e.ch.wait(t, "已切换为 low")
 	e.say("问题")
 	e.k.expect(proto.TInput)
 	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})

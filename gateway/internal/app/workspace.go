@@ -46,9 +46,9 @@ func (a *App) workspaceOf(sid string) workspace {
 	return w
 }
 
-// isAdmin：命令行用户始终是管理员（能在这台机器上开终端的人本来就有全部权限）。
+// isAdmin：命令行用户（能在这台机器上开终端的人本来就有全部权限）和登录了网页的用户始终是管理员。
 func (a *App) isAdmin(who string) bool {
-	return strings.HasPrefix(who, "cli:") || slices.Contains(a.cfg.Access.Admins, who)
+	return strings.HasPrefix(who, "cli:") || strings.HasPrefix(who, "web:") || slices.Contains(a.cfg.Access.Admins, who)
 }
 
 // runMode 是这一轮实际使用的模式：管理员用会话的设置，其他人用 access.guest。

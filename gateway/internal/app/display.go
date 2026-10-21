@@ -53,8 +53,7 @@ func (a *App) cmdThink(s *sess, who, arg, reply string) {
 		a.say(s, "保存设置失败："+err.Error(), reply)
 		return
 	}
-	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效。\n"+
-		"注意：模型的对话模板会把思考强度写在提示词最前面，切换后这个会话的前缀缓存会失效一次。", arg), reply)
+	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效", arg), reply)
 }
 
 // ---- 时间戳 ----

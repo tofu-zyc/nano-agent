@@ -23,6 +23,7 @@ import (
 
 // Feishu 通过飞书开放平台的长连接（WebSocket）收事件，不需要公网地址。
 type Feishu struct {
+	statusBox
 	cfg      config.Feishu
 	base     string
 	client   *lark.Client
@@ -66,6 +67,7 @@ func NewFeishu(c config.Feishu, log *slog.Logger) (*Feishu, error) {
 func (f *Feishu) Name() string { return "feishu" }
 
 func (f *Feishu) Run(ctx context.Context, h Handler) error {
+	f.setState(StateStarting, "")
 	f.fetchBotInfo(ctx)
 
 	// SDK 的事件回调要尽快返回，真正的处理（查用户名等）放到单独的协程里按顺序做
@@ -104,8 +106,13 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 		larkws.WithWebSocketDialer(&websocket.Dialer{Proxy: pf, HandshakeTimeout: 45 * time.Second}),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 		larkws.WithLogger(sdkLogger{f.log}),
-		larkws.WithOnReady(func() { f.log.Info("飞书长连接已建立") }))
+		larkws.WithOnReady(func() { f.setState(StateOnline, ""); f.log.Info("飞书长连接已建立") }))
 	err = ws.Start(ctx)
+	if err != nil && ctx.Err() == nil {
+		f.setState(StateError, err.Error())
+	} else {
+		f.setState(StateStopped, "")
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -134,6 +141,7 @@ func (f *Feishu) fetchBotInfo(ctx context.Context) {
 		return
 	}
 	f.botOpenID = r.Bot.OpenID
+	f.setIdentity(r.Bot.AppName)
 	f.log.Info("飞书机器人已就绪", "name", r.Bot.AppName)
 }
 
@@ -183,10 +191,16 @@ func (f *Feishu) convert(ctx context.Context, ev *larkim.P2MessageReceiveV1) (Me
 	}
 
 	openID := deref(sender.SenderId.OpenId)
+	senderName := f.userName(ctx, openID)
+	chatName := ""
+	if !group {
+		chatName = senderName
+	}
 	return Message{
 		ChatID:     deref(msg.ChatId),
 		SenderID:   openID,
-		SenderName: f.userName(ctx, openID),
+		SenderName: senderName,
+		ChatName:   chatName,
 		Text:       strings.TrimSpace(text),
 		MsgID:      id,
 		Group:      group,

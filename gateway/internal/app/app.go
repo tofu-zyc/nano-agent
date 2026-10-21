@@ -17,6 +17,7 @@ import (
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
@@ -42,15 +43,27 @@ type App struct {
 	persona *persona.Loader
 	hub     *kernel.Hub
 	log     *slog.Logger
+	bus     *events.Bus
+	started time.Time
 
-	outboxes map[string]chan outItem
+	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
+	chMu   sync.Mutex
+	runs   map[string]*chanRun
+	chErr  map[string]string
+	cli    *channel.CLI
+	cliEOF func()
+	web    *channel.Web
 
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
 
 	mu        sync.Mutex
+	chans     map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
+	outboxes  map[string]chan outItem
+	kernel    *KernelInfo // 当前连着的内核，nil 表示没有
 	tools     []llm.Tool
 	sandbox   bool // 内核能把工具关在工作目录的沙箱里
+	totals    Totals
 	sessions  map[string]*sess
 	approvals map[int]*approval
 	nextAppr  int
@@ -59,7 +72,7 @@ type App struct {
 
 type sess struct {
 	sid        string
-	ch         channel.Channel
+	chName     string
 	chatID     string
 	group      bool
 	queue      []channel.Message
@@ -84,7 +97,8 @@ type run struct {
 }
 
 type approval struct {
-	sid, id string
+	sid, id, name, detail, from string
+	at                          time.Time
 }
 
 type outItem struct {
@@ -103,7 +117,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	}
 	return &App{
 		ctx: ctx, cfg: cfg, llm: client, store: store, persona: p, log: log,
-		now: time.Now, loc: loc,
+		now: time.Now, loc: loc, bus: events.NewBus(), started: time.Now(),
+		chans:     map[string]channel.Channel{},
 		outboxes:  map[string]chan outItem{},
 		sessions:  map[string]*sess{},
 		approvals: map[int]*approval{},
@@ -112,19 +127,51 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 
 func (a *App) SetHub(h *kernel.Hub) { a.hub = h }
 
-// AddChannel 登记一个聊天通道，并为它启动一个按顺序发送消息的协程。
+// Bus 是事件总线，网页界面从这里订阅。
+func (a *App) Bus() *events.Bus { return a.bus }
+
+func (a *App) publish(e events.Event) { a.bus.Publish(e) }
+
+// AddChannel 登记一个聊天通道（同名的旧通道被替换），并保证有一个按顺序发送消息的协程。
 func (a *App) AddChannel(ch channel.Channel) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name := ch.Name()
+	a.chans[name] = ch
+	if _, ok := a.outboxes[name]; ok {
+		return
+	}
 	q := make(chan outItem, 256)
-	a.outboxes[ch.Name()] = q
+	a.outboxes[name] = q
 	go func() {
 		for it := range q {
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
 			if err := it.ch.Send(ctx, it.chatID, it.text, it.replyTo); err != nil {
-				a.log.Warn("发送消息失败", "channel", ch.Name(), "chat", it.chatID, "err", err)
+				a.log.Warn("发送消息失败", "channel", name, "chat", it.chatID, "err", err)
 			}
 			cancel()
 		}
 	}()
+}
+
+// SetConfig 换上新的配置（网页里改了设置时调用）。模型客户端由调用方另外换。
+func (a *App) SetConfig(cfg *config.Config) {
+	loc := time.Local
+	if cfg.Session.Timezone != "" {
+		if l, err := time.LoadLocation(cfg.Session.Timezone); err == nil {
+			loc = l
+		}
+	}
+	a.mu.Lock()
+	a.cfg, a.loc = cfg, loc
+	a.mu.Unlock()
+}
+
+// SetLLM 换上新的模型客户端。已经发出的请求不受影响。
+func (a *App) SetLLM(c llm.Client) {
+	a.mu.Lock()
+	a.llm = c
+	a.mu.Unlock()
 }
 
 // ---- 聊天消息 ----
@@ -155,10 +202,18 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	defer a.mu.Unlock()
 	s := a.sessions[sid]
 	if s == nil {
-		s = &sess{sid: sid, ch: ch, chatID: m.ChatID}
+		s = &sess{sid: sid, chName: ch.Name(), chatID: m.ChatID}
 		a.sessions[sid] = s
 	}
 	s.group = m.Group
+	if m.ChatName != "" {
+		if st := a.store.Settings(sid); st.Title != m.ChatName {
+			st.Title = m.ChatName
+			if err := a.store.SaveSettings(sid, st); err != nil {
+				a.log.Warn("保存会话设置失败", "sid", sid, "err", err)
+			}
+		}
+	}
 	reply := a.replyTo(s, m)
 
 	switch cmd {
@@ -196,6 +251,7 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	if m.Text == "" || (m.Group && !m.Mentioned) {
 		return
 	}
+	a.publish(events.Event{T: "message", SID: sid, Name: m.SenderName, Text: m.Text, Data: map[string]any{"from": who}})
 	s.queue = append(s.queue, m)
 	if s.run == nil {
 		a.startRun(s)
@@ -203,7 +259,7 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 }
 
 func (a *App) allowed(sid string) bool {
-	if len(a.cfg.Access.AllowChats) == 0 || strings.HasPrefix(sid, "cli:") {
+	if len(a.cfg.Access.AllowChats) == 0 || strings.HasPrefix(sid, "cli:") || strings.HasPrefix(sid, "web:") {
 		return true
 	}
 	return slices.Contains(a.cfg.Access.AllowChats, sid)
@@ -216,16 +272,24 @@ func (a *App) replyTo(s *sess, m channel.Message) string {
 	return ""
 }
 
+func (a *App) chanOf(s *sess) channel.Channel { return a.chans[s.chName] }
+
 func (a *App) say(s *sess, text, replyTo string) {
+	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+	ch := a.chanOf(s)
+	if ch == nil {
+		a.log.Warn("渠道已经不在了，消息没发出去", "sid", s.sid)
+		return
+	}
 	select {
-	case a.outboxes[s.ch.Name()] <- outItem{ch: s.ch, chatID: s.chatID, text: text, replyTo: replyTo}:
+	case a.outboxes[s.chName] <- outItem{ch: ch, chatID: s.chatID, text: text, replyTo: replyTo}:
 	default:
 		a.log.Warn("发送队列已满，丢弃一条消息", "sid", s.sid)
 	}
 }
 
 func (a *App) startTyping(s *sess) func() {
-	t, ok := s.ch.(channel.Typer)
+	t, ok := a.chanOf(s).(channel.Typer)
 	if !ok {
 		return func() {}
 	}
@@ -290,14 +354,16 @@ func (a *App) startRun(s *sess) {
 	}
 
 	a.runSeq++
-	r := &run{id: a.runSeq, from: s.ch.Name() + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1]), start: a.now()}
+	r := &run{id: a.runSeq, from: s.chName + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1]), start: a.now()}
 	r.stopTyping = a.startTyping(s)
-	if st, ok := s.ch.(channel.Streamer); ok {
+	if st, ok := a.chanOf(s).(channel.Streamer); ok {
 		r.view = st.OpenRun(s.chatID, r.replyTo)
 	}
 	s.run = r
 	mode := a.runMode(w, r.from)
 	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n, "mode", mode)
+	a.totals.Runs++
+	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content, Data: map[string]any{"from": r.from, "mode": mode}})
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
 	if !a.hub.Send(in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
@@ -321,6 +387,7 @@ func (a *App) endRun(s *sess, note string) {
 	for n, ap := range a.approvals {
 		if ap.sid == s.sid {
 			delete(a.approvals, n)
+			a.publish(events.Event{T: "approval_done", SID: s.sid, N: n})
 		}
 	}
 	if note != "" {
@@ -386,6 +453,12 @@ func (a *App) KernelUp(hello *proto.Msg) {
 		names = append(names, t.Name)
 	}
 	a.sandbox = hello.Sandbox != nil && hello.Sandbox.Landlock > 0
+	ki := &KernelInfo{Node: hello.Node, Tools: names, Since: time.Now().UnixMilli()}
+	if hello.Sandbox != nil {
+		ki.Landlock = hello.Sandbox.Landlock
+	}
+	a.kernel = ki
+	a.publish(events.Event{T: "kernel", Data: ki})
 	a.log.Info("内核报告的工具", "node", hello.Node, "tools", strings.Join(names, ","), "sandbox", a.sandbox)
 	if !a.sandbox {
 		a.log.Warn("内核所在机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批")
@@ -395,6 +468,8 @@ func (a *App) KernelUp(hello *proto.Msg) {
 func (a *App) KernelDown() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.kernel = nil
+	a.publish(events.Event{T: "kernel"})
 	for _, s := range a.sessions {
 		s.queue = nil
 		s.resetAfter = false
@@ -430,14 +505,19 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
 				delete(a.approvals, n)
+				a.publish(events.Event{T: "approval_done", SID: s.sid, N: n})
 			}
 		}
+		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
+			Text: resultDetail(m.Content), Data: clip(m.Content, 4000)})
 	case proto.TApproveReq:
 		a.nextAppr++
 		n := a.nextAppr
-		a.approvals[n] = &approval{sid: s.sid, id: m.ID}
+		desc := describeCall(m.Name, m.Args)
+		a.approvals[n] = &approval{sid: s.sid, id: m.ID, name: m.Name, detail: desc, from: m.From, at: a.now()}
+		a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
 		a.say(s, fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
-			n, describeCall(m.Name, m.Args), m.From, n, n), "")
+			n, desc, m.From, n, n), "")
 	case proto.TNotice:
 		a.say(s, m.Text, "")
 	case proto.TDone:
@@ -489,6 +569,8 @@ func (a *App) finish(s *sess, status, detail string) {
 	if r.view != nil && r.calls > 0 {
 		r.view.Note(usageLine(r, a.now()))
 	}
+	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
+		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
 	a.endRun(s, note)
 	a.startRun(s)
 }
@@ -517,22 +599,30 @@ func (a *App) callModel(s *sess) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
 	r.calls++
+	a.totals.ModelCalls++
+	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start", Data: map[string]any{"thinking": req.Thinking}})
 
-	var onDelta func(llm.Delta)
-	if view := r.view; view != nil {
-		onDelta = func(d llm.Delta) {
-			if d.Reasoning != "" {
+	// 过程总是发布到事件总线（网页实时显示），支持流式的渠道再自己显示一份
+	view, bus, sid := r.view, a.bus, s.sid
+	onDelta := func(d llm.Delta) {
+		if d.Reasoning != "" {
+			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "reasoning", Text: d.Reasoning})
+			if view != nil {
 				view.Reasoning(d.Reasoning)
 			}
-			if d.Content != "" {
+		}
+		if d.Content != "" {
+			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "content", Text: d.Content})
+			if view != nil {
 				view.Content(d.Content)
 			}
 		}
 	}
+	client := a.llm
 
 	go func() {
 		start := time.Now()
-		res, err := a.llm.Chat(ctx, req, onDelta)
+		res, err := client.Chat(ctx, req, onDelta)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		stale := s.run != r || ctx.Err() != nil // run 已经结束（停止、超时、断线），结果作废
@@ -545,6 +635,7 @@ func (a *App) callModel(s *sess) {
 			r.view.EndMessage()
 		}
 		if err != nil {
+			a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: "error: " + err.Error()})
 			a.log.Warn("模型请求失败", "sid", s.sid, "err", err)
 			a.hub.Send(proto.Msg{T: proto.TTurn, SID: s.sid, Reason: proto.ReasonError, Detail: err.Error()})
 			return
@@ -554,6 +645,9 @@ func (a *App) callModel(s *sess) {
 		r.usage.CachedTokens += u.CachedTokens
 		r.usage.CompletionTokens += u.CompletionTokens
 		r.usage.ReasoningTokens += u.ReasoningTokens
+		a.totals.add(u)
+		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
+			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
 		if r.view != nil && res.Content != "" {
 			r.streamed = true
 		}
@@ -571,9 +665,12 @@ func (a *App) callModel(s *sess) {
 			turn.Reason = proto.ReasonToolUse
 			for _, c := range res.Calls {
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
+				detail := toolDetail(c.Function.Name, c.Function.Arguments)
 				if r.view != nil {
-					r.view.Tool(c.Function.Name, toolDetail(c.Function.Name, c.Function.Arguments))
+					r.view.Tool(c.Function.Name, detail)
 				}
+				a.publish(events.Event{T: "tool", SID: s.sid, ID: c.ID, Name: c.Function.Name, Text: detail,
+					Data: clip(c.Function.Arguments, 4000)})
 			}
 		case llm.ReasonRefused:
 			turn.Reason = proto.ReasonRefused

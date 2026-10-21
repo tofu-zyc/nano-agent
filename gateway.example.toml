@@ -29,7 +29,6 @@ send_reasoning = false         # 把当前这一轮的推理内容回传给模�
 #   vllm   chat_template_kwargs 里的 thinking 开关和 reasoning_effort（vLLM 上的 DeepSeek、Qwen 等）
 #   openai 顶层的 reasoning_effort（OpenAI 等），关闭时传 "none"
 #   none   不传（默认），/think 不可用
-# 注意：多数模型把思考强度写在提示词最前面，切换后这个会话的前缀缓存会失效一次。
 thinking       = ""
 thinking_style = "none"
 # thinking_levels = ["off", "low", "high", "max"]   # /think 可选的值
@@ -68,6 +67,11 @@ mode = "ask"
 # 沙箱里额外只读 / 可写的路径。默认放行 git 的用户配置，让 git commit 能拿到用户名和邮箱
 # extra_ro = ["~/.gitconfig", "~/.config/git"]
 # extra_rw = ["~/.cargo/registry"]
+
+[web]
+# 网页管理界面：拓扑图、会话、人格、所有设置。启动时会打印带密码的登录链接。
+listen   = "127.0.0.1:7788"    # "off" 表示不开；要从别的机器访问，建议走 SSH 隧道或 Tailscale
+password = ""                  # 空表示自动生成一个，存在数据目录的 web.secret 里
 
 [cli]
 enabled = false                # 命令行聊天，本地调试用
