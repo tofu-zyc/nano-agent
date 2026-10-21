@@ -63,13 +63,19 @@ func (s *Store) History(sid string) []Msg {
 }
 
 func (s *Store) load(sid string) []Msg {
+	return s.loadFrom(sid, s.Settings(sid).Base)
+}
+
+// Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
+func (s *Store) Archive(sid string) []Msg { return s.loadFrom(sid, 0) }
+
+func (s *Store) loadFrom(sid string, skip int) []Msg {
 	f, err := os.Open(s.file(sid))
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
 	var h []Msg
-	skip := s.Settings(sid).Base
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 64<<20)
 	for sc.Scan() {

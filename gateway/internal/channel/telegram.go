@@ -183,6 +183,16 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 		}
 	}
 
+	commands := []map[string]string{
+		{"command": "history", "description": "查看当前会话的聊天记录"},
+		{"command": "sync", "description": "同步其他窗口的聊天记录"},
+		{"command": "session", "description": "查看和切换会话"},
+		{"command": "stop", "description": "停止当前任务"},
+		{"command": "help", "description": "查看全部命令"},
+	}
+	if err := t.callRetry(ctx, "setMyCommands", map[string]any{"commands": commands}, nil); err != nil {
+		t.log.Warn("设置 Telegram 命令菜单失败", "err", err)
+	}
 	var offset int64
 	backoff := time.Second
 	webhookCleared := false

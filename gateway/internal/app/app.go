@@ -29,6 +29,7 @@ const helpText = `可用命令：
 /whoami  查看你的身份、这个窗口和它接着的会话
 /session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
 /history 查看这个会话最近的对话；/history <轮数> 看更多
+/sync    补上其他窗口的聊天记录（同一会话内也会自动同步）
 /node    查看这个会话在哪台机器上工作；/node <名字> 切换（需管理员）
 /stop    停止当前任务
 /reset   清空本会话的上下文
@@ -227,7 +228,7 @@ func (a *App) SetLLM(c llm.Client) {
 
 // ---- 聊天消息 ----
 
-var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
+var commands = map[string]bool{"help": true, "start": true, "sync": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
 	"dir": true, "mode": true, "think": true, "session": true, "history": true, "node": true}
 
 func parseCommand(text string) (cmd, arg string) {
@@ -279,10 +280,16 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	}
 	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who}
 	switch cmd {
+	case "start":
+		a.answer(c, helpText)
+		return
 	case "session":
 		a.cmdSession(c, arg)
 		return
 	case "history":
+		a.cmdHistory(c, arg)
+		return
+	case "sync":
 		a.cmdHistory(c, arg)
 		return
 	case "node":
@@ -449,6 +456,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
+	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
 	}
@@ -463,12 +471,11 @@ func (a *App) startRun(s *sess) {
 			continue
 		}
 		if wt, ok := a.chans[ep.ch].(channel.Watcher); ok {
-			wt.Echo(ep.chat, via, text)
-			r.outs = append(r.outs, out{ep: ep, view: wt.OpenRun(ep.chat, "")})
+			a.catchUp(ep, s.sid)
+			r.outs = append(r.outs, out{ep: ep, view: wt.OpenMirror(ep.chat, via, text)})
 		}
 	}
 	r.stopTyping = a.startTyping(head.ep)
-	s.run = r
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
 	if len(w.dirs) == 0 || !tools {

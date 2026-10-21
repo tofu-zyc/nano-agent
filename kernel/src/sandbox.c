@@ -72,7 +72,10 @@ static int add_rule(int ruleset, const char *path, uint64_t access, uint64_t han
     struct ll_path_beneath_attr pb = { .allowed_access = access & handled, .parent_fd = fd };
     int rc = (int)syscall(SYS_landlock_add_rule, ruleset, LL_RULE_PATH_BENEATH, &pb, 0);
     int saved = errno;
-    close(fd);
+    /* 保留允许路径的 dentry，直到这次执行器退出。9p/WSL DrvFS 在最后一个
+     * 引用关闭后可能重新创建 inode，Landlock 就认不出刚放行的目录了。
+     * O_CLOEXEC 保证这些 O_PATH 描述符不会传给工具程序。 */
+    if (rc < 0) close(fd);
     errno = saved;
     return rc;
 }

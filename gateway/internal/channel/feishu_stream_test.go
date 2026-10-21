@@ -20,6 +20,8 @@ import (
 type cardServer struct {
 	mu      sync.Mutex
 	texts   []string
+	parts   []map[string]string
+	panels  int
 	seq     map[string]int
 	closed  map[string]bool
 	sent    []string
@@ -60,18 +62,37 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 					Streaming bool `json:"streaming_mode"`
 				} `json:"config"`
 				Body struct {
-					Elements []struct {
-						ID      string `json:"element_id"`
-						Content string `json:"content"`
-					} `json:"elements"`
+					Elements []map[string]any `json:"elements"`
 				} `json:"body"`
 			}
 			json.Unmarshal([]byte(p.Data), &card)
-			if p.Type != "card_json" || card.Schema != "2.0" || !card.Config.Streaming || len(card.Body.Elements) != 1 || card.Body.Elements[0].ID != "reply" {
+			if p.Type != "card_json" || card.Schema != "2.0" || !card.Config.Streaming || len(card.Body.Elements) == 0 {
 				t.Errorf("卡片结构不对：%s", p.Data)
 				return
 			}
-			m.texts = append(m.texts, card.Body.Elements[0].Content)
+			parts := map[string]string{}
+			var walk func(map[string]any)
+			walk = func(e map[string]any) {
+				if e["tag"] == "markdown" {
+					parts[e["element_id"].(string)] = e["content"].(string)
+				}
+				if e["tag"] == "collapsible_panel" {
+					m.panels++
+					if e["expanded"] != false {
+						t.Error("过程面板应当默认折叠")
+					}
+				}
+				if children, ok := e["elements"].([]any); ok {
+					for _, child := range children {
+						walk(child.(map[string]any))
+					}
+				}
+			}
+			for _, e := range card.Body.Elements {
+				walk(e)
+			}
+			m.parts = append(m.parts, parts)
+			m.texts = append(m.texts, parts["reply"])
 			data["card_id"] = fmt.Sprint(len(m.texts))
 		case r.Method == "POST" && r.URL.Path == "/open-apis/im/v1/messages":
 			m.sent = append(m.sent, p.MsgType+":"+p.Content)
@@ -88,10 +109,15 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 				t.Errorf("序号没有递增：%d <= %d", p.Sequence, m.seq[id])
 			}
 			m.seq[id] = p.Sequence
-			if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/elements/reply/content") {
+			if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/content") {
 				var i int
 				fmt.Sscan(id, &i)
-				m.texts[i-1] = p.Content
+				path := strings.Split(r.URL.Path, "/")
+				element := path[len(path)-2]
+				m.parts[i-1][element] = p.Content
+				if element == "reply" {
+					m.texts[i-1] = p.Content
+				}
 			} else if r.Method == "PATCH" && strings.HasSuffix(r.URL.Path, "/settings") {
 				var settings struct {
 					Config struct {
@@ -131,10 +157,10 @@ func TestFeishuStreamsAndClosesCard(t *testing.T) {
 	awaitStream(t, r.done)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.texts) != 1 || !strings.Contains(m.texts[0], "完整回复") || !strings.Contains(m.texts[0], "读取成功") || !m.closed["1"] || m.seq["1"] < 2 {
+	if len(m.texts) != 2 || m.texts[1] != "完整回复" || !strings.Contains(m.parts[0]["tools"], "读取成功") || m.parts[0]["reasoning"] != "先看一下" || m.panels != 2 || !m.closed["1"] || !m.closed["2"] || m.seq["1"] < 2 {
 		t.Fatalf("texts=%v closed=%v seq=%v", m.texts, m.closed, m.seq)
 	}
-	if len(m.sent) != 1 || !strings.HasPrefix(m.sent[0], "interactive:") || !strings.Contains(m.sent[0], `"card_id":"1"`) {
+	if len(m.sent) != 2 || !strings.HasPrefix(m.sent[0], "interactive:") || !strings.Contains(m.sent[0], `"card_id":"1"`) {
 		t.Fatalf("sent=%v", m.sent)
 	}
 }
@@ -143,7 +169,7 @@ func TestFeishuSplitsLongReplyAndClosesEveryCard(t *testing.T) {
 	f, m := mockFeishu(t, false)
 	s := &feishuStream{f: f, chat: "chat-test"}
 	text := strings.Repeat("文档🙂", 7000)
-	if err := s.Write(context.Background(), text); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Content: text}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(context.Background()); err != nil {

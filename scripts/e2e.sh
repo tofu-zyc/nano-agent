@@ -155,7 +155,7 @@ fi
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" </dev/null >"$TMP/out2" 2>&1 &
 expect "旧终端被顶掉" "另一个终端接进来了"
 for _ in $(seq 50); do grep -qF "compaction-e2e-ok" "$TMP/out2" && break; sleep 0.1; done
-if grep -qF "最近 2 轮对话" "$TMP/out2" && grep -qF "compaction-e2e-ok" "$TMP/out2"; then echo "  ok   新终端看到压缩后保留的对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到压缩后保留的对话"; fail=$((fail + 1)); fi
+if grep -qF "最近 3 轮对话" "$TMP/out2" && grep -qF "compaction-e2e-ok" "$TMP/out2"; then echo "  ok   新终端看到完整历史里的最近对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到完整历史里的最近对话"; fail=$((fail + 1)); fi
 
 echo "e2e: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then

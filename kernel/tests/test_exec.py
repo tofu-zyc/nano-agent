@@ -288,6 +288,26 @@ def t_request_errors():
     bad(run("Read", {"path": "a.txt"}, dirs=[os.path.join(T, "missing")]), "工作目录不存在")
 
 
+@case("WSL Windows 盘：列目录、读写与目录外隔离", need_sandbox=True)
+def t_drvfs():
+    drive = next((p for p in ("/mnt/d", "/mnt/c") if os.path.isdir(p) and os.access(p, os.W_OK)), None)
+    if drive is None:
+        print("       没有可用的 Windows 盘，跳过 DrvFS 实测")
+        return
+    with tempfile.TemporaryDirectory(prefix="nano-sandbox-", dir=drive) as root:
+        work = os.path.join(root, "work")
+        os.makedirs(os.path.join(work, "sub"))
+        with open(os.path.join(work, "sub", "input.txt"), "w") as f:
+            f.write("drvfs-test")
+        with open(os.path.join(root, "secret.txt"), "w") as f:
+            f.write("outside")
+        ok(run("Shell", {"command": "ls -la; ls sub; cat sub/input.txt; echo created > sub/output.txt"}, dirs=[work]), "input.txt", "drvfs-test")
+        ok(run("Read", {"path": "sub/output.txt"}, dirs=[work]), "created")
+        ok(run("Write", {"path": "write.txt", "content": "written"}, dirs=[work]), "已创建")
+        bad(run("Shell", {"command": "cat ../secret.txt"}, dirs=[work]), "Permission denied")
+        bad(run("Shell", {"command": "echo denied > write.txt"}, dirs=[work], write=False), "Permission denied")
+
+
 def setup():
     os.makedirs(os.path.join(WORK, "sub"))
     os.makedirs(OTHER)
@@ -321,7 +341,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_read_escape, t_read_ro, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors):
+                  t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

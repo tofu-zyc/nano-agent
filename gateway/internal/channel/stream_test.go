@@ -13,12 +13,12 @@ import (
 type blockedStream struct {
 	started chan struct{}
 	release chan struct{}
-	texts   []string
+	texts   []streamSnapshot
 	closed  bool
 	fail    bool
 }
 
-func (s *blockedStream) Write(_ context.Context, text string) error {
+func (s *blockedStream) Write(_ context.Context, text streamSnapshot) error {
 	if len(s.texts) == 0 {
 		close(s.started)
 		<-s.release
@@ -68,14 +68,9 @@ func TestStreamRunCoalescesAndClosesWithoutBlocking(t *testing.T) {
 	if !w.closed || len(w.texts) != 2 {
 		t.Fatalf("close=%v writes=%d", w.closed, len(w.texts))
 	}
-	text := w.texts[1]
-	for _, want := range []string{"💭 思考\n先看目录", "⚙ Read\na.txt", "✓ 读到了", strings.Repeat("好", 100), "1 次模型调用"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("缺少 %q：%q", want, text)
-		}
-	}
-	if strings.Contains(text, "不能出现") {
-		t.Fatal(text)
+	snap := w.texts[1]
+	if snap.Reasoning != "先看目录" || !strings.Contains(snap.Tools, "Read · a.txt\n✓ 读到了") || snap.Content != strings.Repeat("好", 100) || snap.Notes != "1 次模型调用" || snap.ToolCount != 1 || !snap.Closed {
+		t.Fatalf("过程和正文没有分开：%+v", snap)
 	}
 }
 

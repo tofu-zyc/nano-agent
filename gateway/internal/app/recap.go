@@ -113,7 +113,8 @@ func (a *App) turnsFrom(sid string, from int) ([]turn, int) {
 	st := a.store.Settings(sid)
 	h := a.store.History(sid)
 	if from < st.Base {
-		from = st.Base
+		h = a.store.Archive(sid)
+		st.Base = 0
 	}
 	end := st.Base + len(h)
 	if from >= end {
@@ -223,9 +224,6 @@ func (a *App) cmdHistory(c in, arg string) {
 	}
 	text, shown := renderTurns(ts, 3500)
 	head := fmt.Sprintf("会话「%s」最近 %d 轮对话：", a.sessionInfo(c.s.sid).Title, shown)
-	if st := a.store.Settings(c.s.sid); st.Base > 0 {
-		head += "（更早的已经因为太长裁掉了）"
-	}
 	a.answer(c, head+"\n\n"+text)
 	a.markSeen(c.ep, c.s.sid, end, true)
 }

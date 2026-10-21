@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
+	"unicode/utf16"
 
 	"nano-agent/gateway/internal/config"
 )
@@ -27,7 +27,7 @@ func TestTelegramStreamsEditsAndPreservesLongUnicodeReply(t *testing.T) {
 			ID   int    `json:"message_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&p)
-		if utf8.RuneCountInString(p.Text) > 4000 {
+		if len(utf16.Encode([]rune(p.Text))) > 4096 {
 			t.Error("消息超过长度限制")
 		}
 		mu.Lock()
@@ -84,7 +84,49 @@ func TestTelegramStreamHonorsRateLimit(t *testing.T) {
 	defer srv.Close()
 	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s := &telegramStream{t: tg, chat: "123"}
-	if err := s.Write(context.Background(), "你好"); err != nil || calls != 2 {
+	if err := s.Write(context.Background(), streamSnapshot{Content: "你好"}); err != nil || calls != 2 {
 		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+}
+
+func TestTelegramSeparatesCollapsedProcessFromReply(t *testing.T) {
+	var mu sync.Mutex
+	texts := map[int]string{}
+	modes := map[int]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			Text string `json:"text"`
+			ID   int    `json:"message_id"`
+			Mode string `json:"parse_mode"`
+		}
+		json.NewDecoder(r.Body).Decode(&p)
+		mu.Lock()
+		defer mu.Unlock()
+		if p.ID == 0 {
+			p.ID = len(texts) + 1
+		}
+		texts[p.ID] = p.Text
+		modes[p.ID] = p.Mode
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]int{"message_id": p.ID}})
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := tg.OpenMirror("123", "网页", "看看目录").(*streamRun)
+	r.Reasoning("思考中的 <标签> & 说明")
+	for range 100 {
+		r.Tool("Shell", strings.Repeat("原始工具参数", 200))
+		r.ToolResult(true, "执行成功")
+	}
+	r.Content("这是最终答复")
+	r.Note("完成统计")
+	r.Close()
+	awaitStream(t, r.done)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(texts) != 2 || texts[2] != "这是最终答复" || modes[2] != "" {
+		t.Fatalf("正文混入过程或消息过多: %v", texts)
+	}
+	if !strings.Contains(texts[1], "<blockquote expandable>") || strings.Contains(texts[1], "<标签>") || !strings.Contains(texts[1], "100 次工具调用") || !strings.Contains(texts[1], "来自网页") {
+		t.Fatalf("过程没有折叠、转义或来源: %s", texts[1])
 	}
 }

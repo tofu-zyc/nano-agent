@@ -283,6 +283,11 @@ func (c *CLI) dimLine(text string) {
 
 func (c *CLI) OpenRun(_, _ string) RunView { return &cliRun{c: c} }
 
+func (c *CLI) OpenMirror(chat, via, text string) RunView {
+	c.Echo(chat, via, text)
+	return c.OpenRun(chat, "")
+}
+
 type cliRun struct {
 	c       *CLI
 	state   int // 0 没在输出，1 正在输出思考，2 正在输出正文

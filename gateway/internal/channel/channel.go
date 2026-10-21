@@ -46,11 +46,10 @@ type Noticer interface {
 	Notice(chatID, text string)
 }
 
-// Watcher 是可选能力：同一个会话里，别的窗口发来的消息和回复也在这里同步显示（命令行用）。
-// Echo 显示别的窗口发来的消息，之后的回复过程用 OpenRun 打开的 RunView 显示。
+// Watcher 同步显示同一会话里别的窗口发来的消息和本轮回复。
 type Watcher interface {
 	Streamer
-	Echo(chatID, via, text string)
+	OpenMirror(chatID, via, text string) RunView
 }
 
 // RunView 显示一轮处理的过程。方法可能在不同的协程里调用，实现要自己加锁，并且不能阻塞太久

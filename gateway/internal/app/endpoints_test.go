@@ -166,6 +166,10 @@ type watchCh struct {
 }
 
 func (w *watchCh) Echo(_, via, text string) { w.echoes <- via + "|" + text }
+func (w *watchCh) OpenMirror(chat, via, text string) channel.RunView {
+	w.Echo(chat, via, text)
+	return w.OpenRun(chat, "")
+}
 
 func TestWatcherMirrorsOtherWindows(t *testing.T) {
 	e := setup(t)
@@ -369,4 +373,61 @@ func TestTurnsOf(t *testing.T) {
 	if n != 1 || text != "你：没有时间戳\n机器人：（没有回复）" {
 		t.Fatalf("render: %d %q", n, text)
 	}
+}
+
+// 平台加入主会话后，即使用户只在网页/另一个平台发言，也会自动同步。
+func TestChatPlatformsMirrorWithoutSpeakingAgain(t *testing.T) {
+	e := setup(t)
+	var platforms []*watchCh
+	for _, name := range []string{"tg", "feishu"} {
+		ch := &watchCh{streamCh: streamCh{fakeCh: fakeCh{name: name, sent: make(chan string, 100)}}, echoes: make(chan string, 10)}
+		e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, name+":admin")
+		e.a.AddChannel(ch)
+		sayFrom(e.a, ch, "private", "admin", "/session")
+		ch.wait(t, "主会话")
+		platforms = append(platforms, ch)
+	}
+	e.say("另一端的消息")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	for _, ch := range platforms {
+		select {
+		case echo := <-ch.echoes:
+			if !strings.Contains(echo, "另一端的消息") {
+				t.Fatal(echo)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s 没有自动同步输入", ch.name)
+		}
+		events := ch.snapshot()
+		if len(events) < 2 || events[0].text != "（mock）收到：另一端的消息" {
+			t.Fatalf("%s 没同步回复: %+v", ch.name, events)
+		}
+	}
+	// 同步过的历史不会在下一次开口时重复补发。
+	sayFrom(e.a, platforms[0], "private", "admin", "接着说")
+	e.k.expect(proto.TInput)
+	platforms[0].none(t)
+}
+
+func TestHistoryAndSyncReadArchiveAfterCompaction(t *testing.T) {
+	e := setup(t)
+	e.say("已经完成但会被压缩的任务")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	e.say("近期任务")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	e.a.mu.Lock()
+	n, err := e.a.store.Compact(e.sid, 1, 1, "旧任务已完成。")
+	e.a.mu.Unlock()
+	if err != nil || n != 2 {
+		t.Fatalf("compact: %d %v", n, err)
+	}
+	e.say("/sync 5")
+	msg := e.ch.wait(t, "最近 2 轮对话")
+	if !strings.Contains(msg, "已经完成但会被压缩的任务") || !strings.Contains(msg, "近期任务") {
+		t.Fatal(msg)
+	}
+	e.k.none() // 查看历史不会调用模型。
 }

@@ -22,8 +22,8 @@ import (
 //
 // 会话是一段对话：上下文、工作目录、权限模式、思考强度、人格。聊天窗口（代码里叫端点）是
 // 终端、和 Telegram 机器人的某个私聊、和飞书机器人的某个私聊。每个窗口接在一个会话上，一个会话
-// 可以同时接好几个窗口：从哪个窗口说话都是同一段上下文，回复发回说话的那个窗口（命令行如果也接着
-// 这个会话，会同步显示）。网页能看到所有会话，也能往任何一个会话里发消息。
+// 可以同时接好几个窗口：从哪个窗口说话都是同一段上下文，终端、飞书和 Telegram 自动同步
+// 用户消息与回复。网页能看到所有会话，也能往任何一个会话里发消息。
 //
 // 窗口第一次发消息时决定接到哪里：管理员接到主会话，其他人各自一个会话（会话 ID 就是窗口 ID），
 // 互相看不到。管理员可以用 /session 切换，或者在网页里调整。接线存在 data/endpoints.json。
@@ -168,9 +168,9 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 		a.log.Info("新的聊天窗口", "endpoint", key, "session", r.Session)
 		// 接到的会话里已经有对话了（比如管理员的新窗口接到主会话）：说一声，附上最近的对话
 		if ts, _ := a.turnsFrom(r.Session, 0); len(ts) > 0 {
-			lead := fmt.Sprintf("这个窗口接在会话「%s」上。", a.sessionInfo(r.Session).Title)
+			lead := fmt.Sprintf("这个窗口接在会话「%s」上。/history 查看历史，/sync 补上其他窗口的对话。", a.sessionInfo(r.Session).Title)
 			if r.Session == mainSID {
-				lead = "这个窗口接在主会话上，在这里说话和终端、网页是同一段上下文。"
+				lead = "这个窗口接在主会话上，在这里说话和终端、网页是同一段上下文。/history 查看历史，/sync 补上其他窗口的对话。"
 			}
 			a.introduce(ep, r.Session, lead)
 		} else {
