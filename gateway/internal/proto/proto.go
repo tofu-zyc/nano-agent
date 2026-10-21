@@ -4,7 +4,15 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 1
+const Version = 2
+
+// 权限模式，随 input 传给内核。
+const (
+	ModeNone     = "none"     // 不能用工具
+	ModeReadonly = "readonly" // 只能用只读工具（Read、Grep）
+	ModeAsk      = "ask"      // 只读工具直接执行，其余每次先审批
+	ModeAuto     = "auto"     // 全部直接执行，都在工作目录的沙箱里
+)
 
 // 消息类型。
 const (
@@ -50,15 +58,22 @@ type Msg struct {
 	T string `json:"t"`
 
 	// hello / welcome
-	V     int        `json:"v,omitempty"`
-	Token string     `json:"token,omitempty"`
-	Node  string     `json:"node,omitempty"`
-	Tools []ToolSpec `json:"tools,omitempty"`
+	V       int        `json:"v,omitempty"`
+	Token   string     `json:"token,omitempty"`
+	Node    string     `json:"node,omitempty"`
+	Tools   []ToolSpec `json:"tools,omitempty"`
+	Sandbox *Sandbox   `json:"sandbox,omitempty"`
 
 	SID    string `json:"sid,omitempty"`
 	From   string `json:"from,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Calls  []Call `json:"calls,omitempty"`
+
+	// input：这一轮的权限模式和工作目录
+	Mode string   `json:"mode,omitempty"`
+	Dirs []string `json:"dirs,omitempty"` // 工作目录，第一个是默认目录
+	RO   []string `json:"ro,omitempty"`   // 额外的只读路径
+	RW   []string `json:"rw,omitempty"`   // 额外的读写路径
 
 	ID      string          `json:"id,omitempty"`
 	Name    string          `json:"name,omitempty"`
@@ -75,6 +90,11 @@ type ToolSpec struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// Sandbox 是内核报告的沙箱能力。Landlock 为 0 表示没有沙箱，自动模式下的 Shell 也要审批。
+type Sandbox struct {
+	Landlock int `json:"landlock"`
 }
 
 // Call 是模型请求的一次工具调用。Args 是参数对象；模型给的参数不是合法 JSON 对象时，

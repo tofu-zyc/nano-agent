@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""用一个假网关驱动真实的 nano-kernel 进程，测试宿主层：
-协议收发、子进程执行、超时强杀、输出截断、审批、取消、断线重连。
+"""用一个假网关驱动真实的 nano-kernel 进程（它再启动真实的 nano-exec），测试宿主层：
+协议收发、权限模式、审批、超时、取消、断线重连、进程清理。
 
-用法：python3 tests/test_host.py ./nano-kernel
+用法：python3 tests/test_host.py ./nano-kernel ./nano-exec
 """
 import json
 import os
@@ -14,20 +14,10 @@ import tempfile
 import time
 
 KERNEL = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./nano-kernel")
+EXEC = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "./nano-exec")
 FAILS = []
-
-
-def tool(root, name, script, **policy):
-    d = os.path.join(root, name)
-    os.makedirs(d)
-    spec = {"name": name, "description": f"test tool {name}",
-            "input_schema": {"type": "object", "properties": {}}}
-    spec.update(policy)
-    with open(os.path.join(d, "tool.json"), "w") as f:
-        json.dump(spec, f)
-    with open(os.path.join(d, "run"), "w") as f:
-        f.write("#!/bin/sh\n" + script + "\n")
-    os.chmod(os.path.join(d, "run"), 0o755)
+T = tempfile.mkdtemp(prefix="na-host-")
+WORK = os.path.join(T, "work")
 
 
 class Gateway:
@@ -89,220 +79,217 @@ def case(name):
     return wrap
 
 
-def start_run(gw, sid, frm="tg:user"):
-    gw.send(t="input", sid=sid, **{"from": frm})
+def start_run(gw, sid, mode="auto", dirs=(WORK,), frm="tg:user"):
+    gw.send(t="input", sid=sid, mode=mode, dirs=list(dirs), ro=[], rw=[], **{"from": frm})
     gw.expect("model", sid=sid)
 
 
-@case("工具往返：参数走 stdin，结果回网关")
-def t_echo(gw):
+def call(gw, sid, *calls):
+    gw.send(t="turn", sid=sid, reason="tool_use",
+            calls=[{"id": c[0], "name": c[1], "args": c[2]} for c in calls])
+
+
+def finish(gw, sid):
+    gw.expect("model", sid=sid)
+    gw.send(t="turn", sid=sid, reason="final")
+    gw.expect("done", sid=sid, status="ok")
+
+
+def leftover(tag):
+    return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
+
+
+@case("工具往返：Write 写文件，Read 读回来")
+def t_roundtrip(gw):
     start_run(gw, "s1")
-    gw.send(t="turn", sid="s1", reason="tool_use",
-            calls=[{"id": "c1", "name": "echo", "args": {"x": 1, "s": "中文"}}])
-    r = gw.expect("result", sid="s1", id="c1", ok=True)
-    assert json.loads(r["content"]) == {"x": 1, "s": "中文"}, r
-    assert r["content"].count("\n") == 0
+    call(gw, "s1", ("c1", "Write", {"path": "a.txt", "content": "你好\n"}))
+    gw.expect("result", sid="s1", id="c1", ok=True, content=lambda s: "已创建" in s)
     gw.expect("model", sid="s1")
-    gw.send(t="turn", sid="s1", reason="final")
-    gw.expect("done", sid="s1", status="ok")
+    call(gw, "s1", ("c2", "Read", {"path": "a.txt"}))
+    gw.expect("result", sid="s1", id="c2", ok=True, content="     1\t你好\n")
+    finish(gw, "s1")
 
 
 @case("并行调用：全部有结果后才请求模型")
 def t_parallel(gw):
     start_run(gw, "s2")
-    gw.send(t="turn", sid="s2", reason="tool_use", calls=[
-        {"id": "a", "name": "echo", "args": {}},
-        {"id": "b", "name": "fail", "args": {}},
-        {"id": "c", "name": "nope", "args": {}},
-    ])
+    call(gw, "s2", ("a", "Shell", {"command": "echo A"}), ("b", "Shell", {"command": "echo boom >&2; exit 3"}),
+         ("c", "Nope", {}))
     got = {}
     for _ in range(3):
         r = gw.expect("result", sid="s2")
         got[r["id"]] = r
-    assert got["a"]["ok"] is True
+    assert got["a"]["ok"] is True and got["a"]["content"] == "A\n", got["a"]
     assert got["b"]["ok"] is False and "退出码 3" in got["b"]["content"] and "boom" in got["b"]["content"], got["b"]
     assert got["c"]["ok"] is False and "未知工具" in got["c"]["content"]
-    gw.expect("model", sid="s2")
-    gw.send(t="turn", sid="s2", reason="final")
-    gw.expect("done", sid="s2", status="ok")
+    finish(gw, "s2")
 
 
-@case("超时：强杀整个进程组")
+@case("超时：执行器自己结束命令，连同子进程")
 def t_timeout(gw):
     start_run(gw, "s3")
     t0 = time.time()
-    gw.send(t="turn", sid="s3", reason="tool_use", calls=[{"id": "c1", "name": "slow", "args": {}}])
+    call(gw, "s3", ("c1", "Shell", {"command": "sleep 4242 & wait", "timeout": 1}))
     r = gw.expect("result", sid="s3", id="c1", ok=False, timeout=5)
-    assert "执行超时" in r["content"], r
-    assert 0.8 < time.time() - t0 < 3, time.time() - t0
-    gw.expect("model", sid="s3")
-    time.sleep(0.3)
-    left = subprocess.run(["pgrep", "-f", "sleep 4242"], capture_output=True, text=True).stdout
-    assert not left.strip(), f"孙进程没被杀掉：{left}"
-    gw.send(t="turn", sid="s3", reason="final")
-    gw.expect("done", sid="s3", status="ok")
+    assert "执行超时（1 秒）" in r["content"], r
+    assert time.time() - t0 < 3, time.time() - t0
+    time.sleep(0.2)
+    assert not leftover("sleep 4242"), leftover("sleep 4242")
+    finish(gw, "s3")
 
 
-@case("超长输出：截断并注明")
-def t_big(gw):
+@case("超长和二进制输出：截断、替换非法字节，JSON 仍然合法")
+def t_output(gw):
     start_run(gw, "s4")
-    gw.send(t="turn", sid="s4", reason="tool_use", calls=[{"id": "c1", "name": "big", "args": {}}])
-    r = gw.expect("result", sid="s4", id="c1", ok=True)
-    assert "已截断" in r["content"], r["content"][-200:]
-    assert len(r["content"].encode()) < 4096 + 200, len(r["content"].encode())
-    r["content"].encode("utf-8")  # 截断不能切坏 UTF-8
-    gw.expect("model", sid="s4")
-    gw.send(t="turn", sid="s4", reason="final")
-    gw.expect("done", sid="s4")
+    call(gw, "s4", ("c1", "Shell", {"command": "seq 1 100000"}),
+         ("c2", "Shell", {"command": "printf 'ok\\377\\000end \\344\\270\\255'"}))
+    got = {}
+    for _ in range(2):
+        r = gw.expect("result", sid="s4")
+        got[r["id"]] = r["content"]
+    assert "中间省略" in got["c1"] and got["c1"].endswith("100000\n"), got["c1"][-100:]
+    assert len(got["c1"].encode()) < 4096 + 200, len(got["c1"].encode())
+    assert got["c2"] == "ok��end 中", repr(got["c2"])
+    finish(gw, "s4")
 
 
-@case("二进制输出：非法 UTF-8 和 \\0 被替换，JSON 仍然合法")
-def t_binary(gw):
-    start_run(gw, "s4b")
-    gw.send(t="turn", sid="s4b", reason="tool_use", calls=[{"id": "c1", "name": "binary", "args": {}}])
-    r = gw.expect("result", sid="s4b", id="c1", ok=True)
-    assert r["content"] == "ok\ufffd\ufffdend 中", repr(r["content"])
-    gw.expect("model", sid="s4b")
-    gw.send(t="turn", sid="s4b", reason="final")
-    gw.expect("done", sid="s4b")
+@case("权限模式：none 全拒绝，readonly 只能读")
+def t_modes(gw):
+    start_run(gw, "s5", mode="none")
+    call(gw, "s5", ("c1", "Read", {"path": "a.txt"}))
+    gw.expect("result", sid="s5", id="c1", ok=False, content="当前身份没有使用工具的权限")
+    finish(gw, "s5")
+    start_run(gw, "s5", mode="readonly")
+    call(gw, "s5", ("c1", "Read", {"path": "a.txt"}), ("c2", "Write", {"path": "b.txt", "content": "x"}))
+    got = {}
+    for _ in range(2):
+        r = gw.expect("result", sid="s5")
+        got[r["id"]] = r
+    assert got["c1"]["ok"] is True, got["c1"]
+    assert got["c2"]["ok"] is False and "只读模式" in got["c2"]["content"], got["c2"]
+    assert not os.path.exists(os.path.join(WORK, "b.txt"))
+    finish(gw, "s5")
 
 
-@case("权限：非管理员调用管理员工具直接得到错误结果")
-def t_perm(gw):
-    start_run(gw, "s5", "tg:user")
-    gw.send(t="turn", sid="s5", reason="tool_use", calls=[{"id": "c1", "name": "admin_tool", "args": {}}])
-    r = gw.expect("result", sid="s5", id="c1", ok=False)
-    assert "权限不足" in r["content"], r
-    gw.expect("model", sid="s5")
-    gw.send(t="turn", sid="s5", reason="final")
-    gw.expect("done", sid="s5")
-
-
-@case("审批：非管理员审批无效，管理员批准后执行")
+@case("审批模式：Shell 先审批，批准后执行；拒绝的给模型错误结果")
 def t_approve(gw):
-    start_run(gw, "s6", "tg:admin")
-    gw.send(t="turn", sid="s6", reason="tool_use",
-            calls=[{"id": "c1", "name": "guarded", "args": {"cmd": "x"}}])
-    req = gw.expect("approve_req", sid="s6", id="c1", name="guarded")
-    assert req["args"] == {"cmd": "x"} and req["from"] == "tg:admin", req
-    gw.send(t="approve", sid="s6", id="c1", ok=True, **{"from": "tg:user"})
-    gw.expect("notice", sid="s6", text=lambda s: "不是管理员" in s)
+    start_run(gw, "s6", mode="ask", frm="tg:admin")
+    call(gw, "s6", ("c1", "Shell", {"command": "echo approved-ran"}))
+    req = gw.expect("approve_req", sid="s6", id="c1", name="Shell")
+    assert req["args"] == {"command": "echo approved-ran"} and req["from"] == "tg:admin", req
     gw.send(t="approve", sid="s6", id="c1", ok=True, **{"from": "tg:admin"})
     gw.expect("notice", sid="s6", text=lambda s: "已批准" in s)
-    gw.expect("result", sid="s6", id="c1", ok=True, content=lambda s: "guarded ran" in s)
+    gw.expect("result", sid="s6", id="c1", ok=True, content="approved-ran\n")
     gw.expect("model", sid="s6")
-    gw.send(t="turn", sid="s6", reason="final")
-    gw.expect("done", sid="s6")
+    call(gw, "s6", ("c2", "Write", {"path": "denied.txt", "content": "x"}))
+    gw.expect("approve_req", sid="s6", id="c2", name="Write")
+    gw.send(t="approve", sid="s6", id="c2", ok=False, **{"from": "tg:admin"})
+    gw.expect("result", sid="s6", id="c2", ok=False, content="管理员拒绝执行")
+    assert not os.path.exists(os.path.join(WORK, "denied.txt"))
+    finish(gw, "s6")
 
 
 @case("审批超时：按拒绝处理")
 def t_approve_timeout(gw):
-    start_run(gw, "s7", "tg:admin")
-    gw.send(t="turn", sid="s7", reason="tool_use", calls=[{"id": "c1", "name": "guarded", "args": {}}])
+    start_run(gw, "s7", mode="ask")
+    call(gw, "s7", ("c1", "Shell", {"command": "true"}))
     gw.expect("approve_req", sid="s7")
-    r = gw.expect("result", sid="s7", id="c1", ok=False, timeout=6)
-    assert "审批超时" in r["content"], r
-    gw.expect("model", sid="s7")
-    gw.send(t="turn", sid="s7", reason="final")
-    gw.expect("done", sid="s7")
+    gw.expect("result", sid="s7", id="c1", ok=False, timeout=6, content=lambda s: "审批超时" in s)
+    finish(gw, "s7")
 
 
-@case("取消：终止正在执行的工具并结束 run")
+@case("取消：执行器收到 SIGTERM，清理命令后退出")
 def t_cancel(gw):
     start_run(gw, "s8")
-    gw.send(t="turn", sid="s8", reason="tool_use", calls=[{"id": "c1", "name": "slow", "args": {}}])
-    time.sleep(0.3)
+    call(gw, "s8", ("c1", "Shell", {"command": "sleep 4242"}))
+    time.sleep(0.5)
     gw.send(t="cancel", sid="s8")
-    r = gw.expect("result", sid="s8", id="c1", ok=False)
-    assert "已取消" in r["content"], r
+    gw.expect("result", sid="s8", id="c1", ok=False, content="已取消")
     gw.expect("done", sid="s8", status="cancelled")
-    time.sleep(0.3)
-    left = subprocess.run(["pgrep", "-f", "sleep 4242"], capture_output=True, text=True).stdout
-    assert not left.strip(), f"取消后进程还在：{left}"
+    time.sleep(0.5)
+    assert not leftover("sleep 4242"), f"取消后进程还在：{leftover('sleep 4242')}"
 
 
-@case("后台孙进程占着管道：退出后最多再等 2 秒")
-def t_orphan(gw):
+@case("命令留下的后台进程会被清理")
+def t_background(gw):
     start_run(gw, "s9")
     t0 = time.time()
-    gw.send(t="turn", sid="s9", reason="tool_use", calls=[{"id": "c1", "name": "orphan", "args": {}}])
-    r = gw.expect("result", sid="s9", id="c1", ok=True, timeout=6)
-    assert "parent done" in r["content"], r
+    call(gw, "s9", ("c1", "Shell", {"command": "sleep 4343 & echo parent done"}))
+    gw.expect("result", sid="s9", id="c1", ok=True, timeout=6, content=lambda s: "parent done" in s)
     assert time.time() - t0 < 4, time.time() - t0
-    gw.expect("model", sid="s9")
-    gw.send(t="turn", sid="s9", reason="final")
-    gw.expect("done", sid="s9")
-    subprocess.run(["pkill", "-f", "sleep 4343"])
+    time.sleep(0.2)
+    assert not leftover("sleep 4343"), leftover("sleep 4343")
+    finish(gw, "s9")
+
+
+@case("工作目录不能包含 nano-agent 自己")
+def t_guard(gw):
+    start_run(gw, "s10", dirs=[T])
+    call(gw, "s10", ("c1", "Read", {"path": "kernel.conf"}))
+    gw.expect("result", sid="s10", id="c1", ok=False, content=lambda s: "包含 nano-agent 自己" in s)
+    finish(gw, "s10")
 
 
 @case("非法参数和错误结局")
 def t_bad_args(gw):
-    start_run(gw, "s10")
-    gw.send(t="turn", sid="s10", reason="tool_use",
-            calls=[{"id": "c1", "name": "echo", "args": "{not json"}])
-    r = gw.expect("result", sid="s10", id="c1", ok=False)
-    assert "不是合法的 JSON" in r["content"], r
-    gw.expect("model", sid="s10")
-    gw.send(t="turn", sid="s10", reason="error", detail="upstream 500")
-    gw.expect("done", sid="s10", status="error", detail="upstream 500")
-
-
-@case("断线：杀掉工具，重连后重新 hello")
-def t_reconnect(gw):
     start_run(gw, "s11")
-    gw.send(t="turn", sid="s11", reason="tool_use", calls=[{"id": "c1", "name": "slow", "args": {}}])
-    time.sleep(0.3)
+    gw.send(t="turn", sid="s11", reason="tool_use", calls=[{"id": "c1", "name": "Read", "args": "{not json"}])
+    gw.expect("result", sid="s11", id="c1", ok=False, content=lambda s: "不是合法的 JSON" in s)
+    gw.expect("model", sid="s11")
+    gw.send(t="turn", sid="s11", reason="error", detail="upstream 500")
+    gw.expect("done", sid="s11", status="error", detail="upstream 500")
+
+
+@case("断线：终止执行中的工具，重连后重新 hello")
+def t_reconnect(gw):
+    start_run(gw, "s12")
+    call(gw, "s12", ("c1", "Shell", {"command": "sleep 4242"}))
+    time.sleep(0.5)
     gw.conn.close()
     gw.accept()
     hello = gw.expect("hello", timeout=10)
     assert hello["token"] == "t0k"
-    gw.send(t="welcome", v=1)
-    time.sleep(0.3)
-    left = subprocess.run(["pgrep", "-f", "sleep 4242"], capture_output=True, text=True).stdout
-    assert not left.strip(), f"断线后工具还在跑：{left}"
-    gw.send(t="turn", sid="s11", reason="final")   # 旧 run 已丢弃，内核应忽略
-    start_run(gw, "s12")
-    gw.send(t="turn", sid="s12", reason="final")
-    gw.expect("done", sid="s12", status="ok")
+    gw.send(t="welcome", v=2)
+    time.sleep(0.5)
+    assert not leftover("sleep 4242"), f"断线后工具还在跑：{leftover('sleep 4242')}"
+    gw.send(t="turn", sid="s12", reason="final")   # 旧 run 已丢弃，内核应忽略
+    start_run(gw, "s13")
+    gw.send(t="turn", sid="s13", reason="final")
+    gw.expect("done", sid="s13", status="ok")
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="na-host-")
     try:
-        tools = os.path.join(tmp, "tools")
-        os.makedirs(tools)
-        tool(tools, "echo", "cat", allow="all", timeout=5)
-        tool(tools, "fail", "echo boom >&2; exit 3", allow="all", timeout=5)
-        tool(tools, "slow", "sleep 4242 & wait", allow="all", timeout=1)
-        tool(tools, "big", "i=0; while [ $i -lt 5000 ]; do echo '一二三四五六七八九十'; i=$((i+1)); done",
-             allow="all", timeout=5)
-        tool(tools, "admin_tool", "echo hi", allow="admin", timeout=5)
-        tool(tools, "binary", "printf 'ok\\377\\000end \\344\\270\\255'", allow="all", timeout=5)
-        tool(tools, "guarded", "echo guarded ran", allow="admin", approval=True, timeout=5)
-        tool(tools, "orphan", "sleep 4343 & echo parent done", allow="all", timeout=10)
-        os.makedirs(os.path.join(tools, "broken"))   # 没有 tool.json，应被跳过
-
-        sock = os.path.join(tmp, "gw.sock")
-        conf = os.path.join(tmp, "kernel.conf")
+        os.makedirs(WORK)
+        os.makedirs(os.path.join(T, "home"))
+        sock = os.path.join(T, "gw.sock")
+        conf = os.path.join(T, "kernel.conf")
         with open(conf, "w") as f:
-            f.write(f"gateway = unix:{sock}\ntoken = t0k\nadmin = tg:admin\n"
-                    f"tools_dir = tools\nmax_output = 4096\napproval_timeout = 2\n")
+            f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\n"
+                    f"max_output = 4096\napproval_timeout = 2\n")
 
         gw = Gateway(sock)
-        log = open(os.path.join(tmp, "kernel.log"), "w")
-        proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log)
+        log = open(os.path.join(T, "kernel.log"), "w")
+        env = dict(os.environ, HOME=os.path.join(T, "home"))
+        proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log, env=env)
         try:
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 1
-            assert names == sorted(names) and "broken" not in names and len(names) == 8, names
-            assert all("input_schema" in t for t in hello["tools"])
-            gw.send(t="welcome", v=1)
-            print(f"hello ok：{names}")
-            for t in (t_echo, t_parallel, t_timeout, t_big, t_binary, t_perm, t_approve,
-                      t_approve_timeout, t_cancel, t_orphan, t_bad_args, t_reconnect):
+            assert hello["token"] == "t0k" and hello["v"] == 2, hello
+            assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names
+            assert all("input_schema" in t and t["description"] for t in hello["tools"])
+            assert "landlock" in hello["sandbox"], hello
+            gw.send(t="welcome", v=2)
+            print(f"hello ok：{names}，sandbox={hello['sandbox']}")
+            for t in (t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
+                      t_cancel, t_background, t_guard, t_bad_args, t_reconnect):
                 t(gw)
+
+            # 内核退出时，正在跑的命令也要被清理
+            start_run(gw, "s14")
+            call(gw, "s14", ("c1", "Shell", {"command": "sleep 4646"}))
+            time.sleep(0.5)
         finally:
             proc.terminate()
             try:
@@ -310,7 +297,14 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
             log.close()
-        kernel_log = open(os.path.join(tmp, "kernel.log")).read()
+        time.sleep(0.3)
+        if leftover("sleep 4646"):
+            FAILS.append("exit cleanup")
+            print(f"  FAIL 内核退出后命令还在：{leftover('sleep 4646')}")
+            subprocess.run(["pkill", "-f", "sleep 4646"])
+        else:
+            print("  ok   内核退出时清理正在执行的命令")
+        kernel_log = open(os.path.join(T, "kernel.log")).read()
         if "Sanitizer" in kernel_log:
             FAILS.append("sanitizer")
             print("内核日志里有 Sanitizer 报告：")
@@ -322,7 +316,7 @@ def main():
         print(f"host: {len(FAILS)} failures")
         return 1 if FAILS else 0
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(T, ignore_errors=True)
 
 
 if __name__ == "__main__":

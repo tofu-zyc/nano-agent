@@ -11,7 +11,7 @@ import (
 //
 //	用户消息里含 "!call 工具名 {json参数}" → 请求调用该工具
 //	最后一条是工具结果                       → 把工具结果复述出来作为最终回复
-//	其他                                     → 回显用户消息
+//	其他                                     → 回显用户消息（去掉网关加的 [系统] 环境说明）
 type Mock struct {
 	n atomic.Int64
 }
@@ -39,6 +39,11 @@ func (m *Mock) Chat(ctx context.Context, req Request) (*Result, error) {
 			Type:     "function",
 			Function: FunctionCall{Name: name, Arguments: strings.TrimSpace(args)},
 		}}}, nil
+	}
+	if strings.HasPrefix(text, "[系统] ") {
+		if _, rest, ok := strings.Cut(text, "\n"); ok {
+			text = rest
+		}
 	}
 	return &Result{Reason: ReasonFinal, Content: "（mock）收到：" + text}, nil
 }

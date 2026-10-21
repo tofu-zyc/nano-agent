@@ -18,8 +18,8 @@ typedef struct {
 typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
 
 typedef struct run {
-    char *sid, *from;
-    bool admin;
+    char *sid, *from, *policy;
+    na_mode mode;
     run_state st;
     int steps;            /* 已请求模型的次数 */
     int64_t deadline;     /* 整个 run 的截止时刻 */
@@ -107,7 +107,7 @@ void na_cmd_free(na_cmd *m)
 {
     if (!m) return;
     free(m->sid); free(m->id); free(m->name);
-    free(m->args); free(m->from); free(m->text);
+    free(m->args); free(m->from); free(m->text); free(m->policy);
     free(m);
 }
 
@@ -145,12 +145,26 @@ static const na_tool_policy *find_tool(na_core *c, const char *name)
     return NULL;
 }
 
-static bool is_admin(na_core *c, const char *who)
+typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
+
+/* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
+static decision decide(const na_core *c, na_mode mode, na_tool_kind kind, const char **why)
 {
-    if (!who || !*who) return false;
-    for (size_t i = 0; i < c->cfg.nadmins; i++)
-        if (strcmp(c->cfg.admins[i], who) == 0) return true;
-    return false;
+    switch (mode) {
+    case NA_MODE_NONE:
+        *why = "当前身份没有使用工具的权限";
+        return DECIDE_DENY;
+    case NA_MODE_READONLY:
+        if (kind == NA_TOOL_READ) return DECIDE_RUN;
+        *why = "当前是只读模式，只能用 Read 和 Grep";
+        return DECIDE_DENY;
+    case NA_MODE_ASK:
+        return kind == NA_TOOL_READ ? DECIDE_RUN : DECIDE_ASK;
+    case NA_MODE_AUTO:
+        return kind == NA_TOOL_SHELL && !c->cfg.sandbox ? DECIDE_ASK : DECIDE_RUN;
+    }
+    *why = "未知的权限模式";
+    return DECIDE_DENY;
 }
 
 /* ---- run 生命周期 ---- */
@@ -171,7 +185,7 @@ static void drop_run(na_core *c, run_t *r)
         if (*pp == r) { *pp = r->next; break; }
     }
     free_calls(r);
-    free(r->sid); free(r->from);
+    free(r->sid); free(r->from); free(r->policy);
     free(r);
 }
 
@@ -223,6 +237,7 @@ static void exec_call(na_core *c, int64_t now, run_t *r, call_t *k)
     m->name = dupstr(k->name);
     m->args = dupstr(k->args);
     m->from = dupstr(r->from);
+    m->policy = dupstr(r->policy);
     m->timeout_ms = k->tool->timeout_ms;
     k->st = CALL_RUNNING;
     k->deadline = now + k->tool->timeout_ms;
@@ -261,7 +276,8 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     run_t *r = xcalloc(1, sizeof *r);
     r->sid = dupstr(ev->sid);
     r->from = dupstr(ev->from ? ev->from : "");
-    r->admin = is_admin(c, r->from);
+    r->policy = dupstr(ev->policy ? ev->policy : "{}");
+    r->mode = ev->mode;
     r->deadline = now + c->cfg.run_timeout_ms;
     r->next = c->runs;
     c->runs = r;
@@ -295,6 +311,8 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->name = dupstr(in->name ? in->name : "");
         k->args = dupstr(in->args ? in->args : "{}");
         k->tool = find_tool(c, k->name);
+        const char *why = NULL;
+        decision d = k->tool ? decide(c, r->mode, k->tool->kind, &why) : DECIDE_DENY;
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);
@@ -302,9 +320,9 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             char *p = preview(k->args, ARGS_PREVIEW);
             result_err(c, r, k, "参数不是合法的 JSON 对象：%s", p);
             free(p);
-        } else if (!k->tool->allow_all && !r->admin) {
-            result_err(c, r, k, "权限不足：工具 %s 仅限管理员使用", k->name);
-        } else if (k->tool->approval) {
+        } else if (d == DECIDE_DENY) {
+            result(c, r, k, false, why);
+        } else if (d == DECIDE_ASK) {
             na_cmd *m = push(c, NA_CMD_APPROVE_REQ, r->sid);
             m->id = dupstr(k->id);
             m->name = dupstr(k->name);
@@ -326,11 +344,6 @@ static int on_approve(na_core *c, int64_t now, const na_event *ev)
     call_t *k = r ? find_call(r, ev->id) : NULL;
     if (!k || k->st != CALL_WAIT_APPROVAL) return -1;
 
-    if (!is_admin(c, ev->from)) {
-        notice(c, r->sid, "%s 不是管理员，无权审批 %s",
-               ev->from && *ev->from ? ev->from : "（未知身份）", k->name);
-        return 0;
-    }
     if (ev->ok) {
         notice(c, r->sid, "已批准，开始执行 %s", k->name);
         exec_call(c, now, r, k);

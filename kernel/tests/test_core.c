@@ -13,23 +13,24 @@ static int failures, checks;
 } while (0)
 
 static na_tool_policy tools[] = {
-    { "get_time",   5000,  true,  false },  /* 所有人可用 */
-    { "run_shell",  30000, false, true  },  /* 仅管理员，且需审批 */
-    { "admin_only", 10000, false, false },  /* 仅管理员 */
+    { "Read",  NA_TOOL_READ,  5000 },
+    { "Write", NA_TOOL_WRITE, 10000 },
+    { "Shell", NA_TOOL_SHELL, 30000 },
 };
-static const char *admins[] = { "tg:1" };
 
-static na_core *mk(int max_steps)
+static na_core *mk_sb(int max_steps, bool sandbox)
 {
     na_core_config cfg = {
         .tools = tools, .ntools = 3,
-        .admins = admins, .nadmins = 1,
+        .sandbox = sandbox,
         .max_steps = max_steps,
         .run_timeout_ms = 600000,
         .approval_timeout_ms = 120000,
     };
     return na_core_new(&cfg);
 }
+
+static na_core *mk(int max_steps) { return mk_sb(max_steps, true); }
 
 /* 把取出的命令格式化成一行，便于整体断言 */
 static char out[8192];
@@ -64,10 +65,16 @@ static const char *drain(na_core *c)
     } \
 } while (0)
 
+static int input_mode(na_core *c, int64_t now, const char *sid, const char *from, na_mode mode)
+{
+    na_event ev = { .type = NA_EV_INPUT, .sid = sid, .from = from, .mode = mode, .policy = "{\"dirs\":[\"/w\"]}" };
+    return na_core_feed(c, now, &ev);
+}
+
+/* 默认用审批模式：只读工具直接执行，其余要审批 */
 static int input(na_core *c, int64_t now, const char *sid, const char *from)
 {
-    na_event ev = { .type = NA_EV_INPUT, .sid = sid, .from = from };
-    return na_core_feed(c, now, &ev);
+    return input_mode(c, now, sid, from, NA_MODE_ASK);
 }
 
 static int turn(na_core *c, int64_t now, const char *sid, na_turn_reason reason,
@@ -83,9 +90,9 @@ static int tool_done(na_core *c, int64_t now, const char *sid, const char *id, b
     return na_core_feed(c, now, &ev);
 }
 
-static int approve(na_core *c, int64_t now, const char *sid, const char *id, bool ok, const char *from)
+static int approve(na_core *c, int64_t now, const char *sid, const char *id, bool ok)
 {
-    na_event ev = { .type = NA_EV_APPROVE, .sid = sid, .id = id, .ok = ok, .from = from };
+    na_event ev = { .type = NA_EV_APPROVE, .sid = sid, .id = id, .ok = ok, .from = "tg:1" };
     return na_core_feed(c, now, &ev);
 }
 
@@ -113,9 +120,14 @@ static void test_tool_roundtrip(void)
     na_core *c = mk(16);
     input(c, 0, "s1", "tg:9");
     EXPECT(c, "MODEL(s1)");
-    na_call calls[] = { { "c1", "get_time", "{}", true } };
+    na_call calls[] = { { "c1", "Read", "{}", true } };
     CHECK(turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1) == 0);
-    EXPECT(c, "EXEC(c1,get_time,5000)");
+    na_cmd *m = na_core_next(c);
+    CHECK(m && m->type == NA_CMD_EXEC && !strcmp(m->name, "Read") && m->timeout_ms == 5000);
+    CHECK(m && m->policy && !strcmp(m->policy, "{\"dirs\":[\"/w\"]}"));   /* 执行约束原样带给执行器 */
+    CHECK(m && !strcmp(m->from, "tg:9"));
+    na_cmd_free(m);
+    EXPECT(c, "");
     CHECK(tool_done(c, 20, "s1", "c1", true, "12:00") == 0);
     EXPECT(c, "RESULT(c1,ok,12:00) MODEL(s1)");
     turn(c, 30, "s1", NA_TURN_FINAL, NULL, 0);
@@ -126,11 +138,11 @@ static void test_tool_roundtrip(void)
 static void test_parallel_calls_wait_for_all(void)
 {
     na_core *c = mk(16);
-    input(c, 0, "s1", "tg:1");
+    input_mode(c, 0, "s1", "tg:1", NA_MODE_AUTO);
     drain(c);
-    na_call calls[] = { { "a", "get_time", "{}", true }, { "b", "admin_only", "{}", true } };
+    na_call calls[] = { { "a", "Read", "{}", true }, { "b", "Write", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 2);
-    EXPECT(c, "EXEC(a,get_time,5000) EXEC(b,admin_only,10000)");
+    EXPECT(c, "EXEC(a,Read,5000) EXEC(b,Write,10000)");
     tool_done(c, 20, "s1", "b", true, "B");
     EXPECT(c, "RESULT(b,ok,B)");                 /* a 还没完成，不能请求模型 */
     tool_done(c, 30, "s1", "a", false, "boom");
@@ -141,19 +153,42 @@ static void test_parallel_calls_wait_for_all(void)
 static void test_rejections_are_results(void)
 {
     na_core *c = mk(16);
-    input(c, 0, "s1", "tg:9");                    /* 非管理员 */
+    input_mode(c, 0, "s1", "tg:9", NA_MODE_NONE);   /* 比如群里的非管理员 */
     drain(c);
     na_call calls[] = {
         { "x", "nope", "{}", true },
-        { "y", "get_time", "not json", false },
-        { "z", "admin_only", "{}", true },
+        { "y", "Read", "not json", false },
+        { "z", "Read", "{}", true },
     };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 3);
     EXPECT(c, "RESULT(x,err,未知工具：nope) "
               "RESULT(y,err,参数不是合法的 JSON 对象：not json) "
-              "RESULT(z,err,权限不足：工具 admin_only 仅限管理员使用) "
+              "RESULT(z,err,当前身份没有使用工具的权限) "
               "MODEL(s1)");
     na_core_free(c);
+}
+
+/* 四种模式 × 三类工具 */
+static void test_mode_matrix(void)
+{
+    na_call calls[] = { { "r", "Read", "{}", true }, { "w", "Write", "{}", true }, { "s", "Shell", "{}", true } };
+    struct { na_mode mode; bool sandbox; const char *want; } cases[] = {
+        { NA_MODE_READONLY, true,
+          "EXEC(r,Read,5000) RESULT(w,err,当前是只读模式，只能用 Read 和 Grep) "
+          "RESULT(s,err,当前是只读模式，只能用 Read 和 Grep)" },
+        { NA_MODE_ASK, true, "EXEC(r,Read,5000) APPROVE_REQ(w,Write,tg:1) APPROVE_REQ(s,Shell,tg:1)" },
+        { NA_MODE_AUTO, true, "EXEC(r,Read,5000) EXEC(w,Write,10000) EXEC(s,Shell,30000)" },
+        /* 没有沙箱时，自动模式下的 Shell 退回到审批 */
+        { NA_MODE_AUTO, false, "EXEC(r,Read,5000) EXEC(w,Write,10000) APPROVE_REQ(s,Shell,tg:1)" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        na_core *c = mk_sb(16, cases[i].sandbox);
+        input_mode(c, 0, "s1", "tg:1", cases[i].mode);
+        drain(c);
+        turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 3);
+        EXPECT(c, cases[i].want);
+        na_core_free(c);
+    }
 }
 
 static void test_approval_flow(void)
@@ -161,16 +196,13 @@ static void test_approval_flow(void)
     na_core *c = mk(16);
     input(c, 0, "s1", "tg:1");
     drain(c);
-    na_call calls[] = { { "c1", "run_shell", "{\"cmd\":\"ls\"}", true } };
+    na_call calls[] = { { "c1", "Shell", "{\"command\":\"ls\"}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
-    EXPECT(c, "APPROVE_REQ(c1,run_shell,tg:1)");
+    EXPECT(c, "APPROVE_REQ(c1,Shell,tg:1)");
 
-    CHECK(approve(c, 20, "s1", "c1", true, "tg:9") == 0);   /* 不是管理员 */
-    EXPECT(c, "NOTICE(tg:9 不是管理员，无权审批 run_shell)");
-
-    CHECK(approve(c, 30, "s1", "c1", true, "tg:1") == 0);
-    EXPECT(c, "NOTICE(已批准，开始执行 run_shell) EXEC(c1,run_shell,30000)");
-    CHECK(approve(c, 31, "s1", "c1", true, "tg:1") == -1);  /* 重复审批被忽略 */
+    CHECK(approve(c, 30, "s1", "c1", true) == 0);
+    EXPECT(c, "NOTICE(已批准，开始执行 Shell) EXEC(c1,Shell,30000)");
+    CHECK(approve(c, 31, "s1", "c1", true) == -1);  /* 重复审批被忽略 */
     drain(c);
 
     tool_done(c, 40, "s1", "c1", true, "ok");
@@ -183,13 +215,13 @@ static void test_approval_denied_and_timeout(void)
     na_core *c = mk(16);
     input(c, 0, "s1", "tg:1");
     drain(c);
-    na_call one[] = { { "c1", "run_shell", "{}", true } };
+    na_call one[] = { { "c1", "Shell", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, one, 1);
     drain(c);
-    approve(c, 20, "s1", "c1", false, "tg:1");
+    approve(c, 20, "s1", "c1", false);
     EXPECT(c, "RESULT(c1,err,管理员拒绝执行) MODEL(s1)");
 
-    na_call two[] = { { "c2", "run_shell", "{}", true } };
+    na_call two[] = { { "c2", "Shell", "{}", true } };
     turn(c, 30, "s1", NA_TURN_TOOL_USE, two, 1);
     drain(c);
     CHECK(na_core_next_deadline(c) == 30 + 120000);
@@ -205,7 +237,7 @@ static void test_tool_timeout_and_late_result(void)
     na_core *c = mk(16);
     input(c, 0, "s1", "tg:9");
     drain(c);
-    na_call calls[] = { { "c1", "get_time", "{}", true } };
+    na_call calls[] = { { "c1", "Read", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
     drain(c);
     CHECK(na_core_next_deadline(c) == 10 + 5000);
@@ -221,12 +253,12 @@ static void test_step_budget(void)
     na_core *c = mk(2);
     input(c, 0, "s1", "tg:9");
     EXPECT(c, "MODEL(s1)");
-    na_call a[] = { { "a", "get_time", "{}", true } };
+    na_call a[] = { { "a", "Read", "{}", true } };
     turn(c, 1, "s1", NA_TURN_TOOL_USE, a, 1);
     drain(c);
     tool_done(c, 2, "s1", "a", true, "1");
     EXPECT(c, "RESULT(a,ok,1) MODEL(s1)");
-    na_call b[] = { { "b", "get_time", "{}", true } };
+    na_call b[] = { { "b", "Read", "{}", true } };
     turn(c, 3, "s1", NA_TURN_TOOL_USE, b, 1);
     drain(c);
     tool_done(c, 4, "s1", "b", true, "2");
@@ -240,9 +272,9 @@ static void test_cancel(void)
     na_core *c = mk(16);
     input(c, 0, "s1", "tg:1");
     drain(c);
-    na_call calls[] = { { "a", "get_time", "{}", true }, { "b", "run_shell", "{}", true } };
+    na_call calls[] = { { "a", "Read", "{}", true }, { "b", "Shell", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 2);
-    EXPECT(c, "EXEC(a,get_time,5000) APPROVE_REQ(b,run_shell,tg:1)");
+    EXPECT(c, "EXEC(a,Read,5000) APPROVE_REQ(b,Shell,tg:1)");
     CHECK(simple(c, 20, NA_EV_CANCEL, "s1") == 0);
     EXPECT(c, "KILL(a) RESULT(a,err,已取消) RESULT(b,err,已取消) DONE(cancelled)");
     CHECK(simple(c, 21, NA_EV_CANCEL, "s1") == -1);
@@ -267,7 +299,7 @@ static void test_reset_kills_running_tools(void)
     input(c, 0, "s1", "tg:9");
     input(c, 0, "s2", "tg:9");
     drain(c);
-    na_call calls[] = { { "a", "get_time", "{}", true } };
+    na_call calls[] = { { "a", "Read", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
     drain(c);
     simple(c, 20, NA_EV_RESET, NULL);
@@ -285,7 +317,7 @@ static void test_protocol_mismatches_are_ignored(void)
     input(c, 0, "s1", "tg:9");
     CHECK(input(c, 1, "s1", "tg:9") == -1);       /* 同一会话同时只能有一个 run */
     drain(c);
-    na_call calls[] = { { "a", "get_time", "{}", true } };
+    na_call calls[] = { { "a", "Read", "{}", true } };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
     drain(c);
     CHECK(turn(c, 11, "s1", NA_TURN_FINAL, NULL, 0) == -1);   /* 还在等工具，不该收到 turn */
@@ -321,7 +353,7 @@ static void test_long_args_preview_keeps_utf8(void)
     size_t n = 0;
     while (n + 3 < sizeof args - 1) { memcpy(args + n, "中", 3); n += 3; }
     args[n] = 0;
-    na_call calls[] = { { "a", "get_time", args, false } };
+    na_call calls[] = { { "a", "Read", args, false } };
     turn(c, 1, "s1", NA_TURN_TOOL_USE, calls, 1);
     na_cmd *m = na_core_next(c);
     CHECK(m && m->type == NA_CMD_RESULT);
@@ -342,6 +374,7 @@ int main(void)
     test_tool_roundtrip();
     test_parallel_calls_wait_for_all();
     test_rejections_are_results();
+    test_mode_matrix();
     test_approval_flow();
     test_approval_denied_and_timeout();
     test_tool_timeout_and_late_result();

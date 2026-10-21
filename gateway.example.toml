@@ -39,6 +39,22 @@ data_dir = "data"              # 对话历史存在 data/sessions/ 下，每个�
 [access]
 # 只响应这些会话（会话 ID 用 /whoami 查），空表示不限制。命令行会话总是允许。
 allow_chats = []
+# 管理员身份（用 /whoami 查），比如 "tg:123456789"、"feishu:ou_xxx"。命令行用户始终是管理员。
+# 只有管理员能用写文件、执行命令这类工具，能改工作目录和权限模式，能审批。
+admins = []
+# 其他人能用的工具：none（只聊天，默认）| readonly（可以读工作目录里的文件、搜索）
+guest = "none"
+
+[workspace]
+# 工具能碰到的范围。文件读写和命令都被关在沙箱里：工作目录可读写，系统目录只读，
+# 其他地方（包括 HOME 里的其他东西）一律访问不了。每个会话可以用 /dir、/mode 单独改。
+# 工作目录，第一个是默认目录（命令在这里执行）。要写绝对路径或 ~ 开头。
+dirs = []
+# 权限模式：auto 自动（工作目录内全部直接执行）| ask 审批（写文件、执行命令前要管理员批准）| readonly 只读
+mode = "ask"
+# 沙箱里额外只读 / 可写的路径。默认放行 git 的用户配置，让 git commit 能拿到用户名和邮箱
+# extra_ro = ["~/.gitconfig", "~/.config/git"]
+# extra_rw = ["~/.cargo/registry"]
 
 [cli]
 enabled = false                # 命令行聊天，本地调试用

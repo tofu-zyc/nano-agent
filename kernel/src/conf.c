@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +49,6 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 {
     memset(k, 0, sizeof *k);
     k->gateway = xstrdup("unix:/tmp/nano-agent.sock");
-    k->tools_dir = xstrdup("tools");
     k->max_steps = 16;
     k->run_timeout = 600;
     k->approval_timeout = 300;
@@ -86,10 +86,12 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         if (!strcmp(key, "gateway")) set_str(&k->gateway, val);
         else if (!strcmp(key, "token")) set_str(&k->token, val);
         else if (!strcmp(key, "node")) set_str(&k->node, val);
-        else if (!strcmp(key, "tools_dir")) set_str(&k->tools_dir, val);
-        else if (!strcmp(key, "admin")) {
-            k->admins = xrealloc(k->admins, (k->nadmins + 1) * sizeof *k->admins);
-            k->admins[k->nadmins++] = xstrdup(val);
+        else if (!strcmp(key, "exec")) set_str(&k->exec, val);
+        else if (!strcmp(key, "tools_dir") || !strcmp(key, "admin")) {
+            snprintf(err, errlen, "%s 第 %d 行：%s 已经不用了（工具改成了内置的；管理员改在网关配置的 "
+                     "access.admins 里设置），删掉这一行即可", path, lineno, key);
+            rc = -1;
+            break;
         }
         else if (!strcmp(key, "max_steps") && !parse_int(val, 1, 1000, &n)) k->max_steps = (int)n;
         else if (!strcmp(key, "run_timeout") && !parse_int(val, 1, 86400, &n)) k->run_timeout = (int)n;
@@ -114,12 +116,27 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         gethostname(host, sizeof host - 1);
         k->node = xstrdup(host);
     }
-    if (k->tools_dir[0] != '/') {
-        char *base = dir_of(path);
-        char *full = xasprintf("%s/%s", base, k->tools_dir);
-        free(base);
-        free(k->tools_dir);
-        k->tools_dir = full;
+    char *base = dir_of(path);
+    k->dir = realpath(base, NULL);
+    if (!k->dir) k->dir = xstrdup(base);
+    if (k->exec && k->exec[0] != '/') {
+        char *full = xasprintf("%s/%s", base, k->exec);
+        free(k->exec);
+        k->exec = full;
+    }
+    free(base);
+    if (!k->exec) {
+        /* 默认：和内核程序放在同一个目录 */
+        char self[4096];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+        if (n > 0) {
+            self[n] = 0;
+            char *d = dir_of(self);
+            k->exec = xasprintf("%s/nano-exec", d);
+            free(d);
+        } else {
+            k->exec = xstrdup("nano-exec");
+        }
     }
     return 0;
 }
@@ -129,8 +146,7 @@ void kconf_free(kconf *k)
     free(k->gateway);
     free(k->token);
     free(k->node);
-    free(k->tools_dir);
-    for (size_t i = 0; i < k->nadmins; i++) free(k->admins[i]);
-    free(k->admins);
+    free(k->exec);
+    free(k->dir);
     memset(k, 0, sizeof *k);
 }

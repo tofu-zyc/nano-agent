@@ -1,3 +1,0 @@
-#!/bin/sh
-# 参数从 stdin 传入（这个工具不需要参数），结果写到 stdout
-exec date '+%Y-%m-%d %H:%M:%S %A %Z (UTC%z)'

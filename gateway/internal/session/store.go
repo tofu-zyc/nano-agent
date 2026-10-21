@@ -31,14 +31,18 @@ type Store struct {
 	dir        string
 	keepTokens int // 内存里最多保留多少（估算的）token，超出时从最老的一轮开始丢
 	hist       map[string][]Msg
+	settings   map[string]Settings
 }
 
 func New(dir string, keepTokens int) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir, keepTokens: keepTokens, hist: map[string][]Msg{}}, nil
+	return &Store{dir: dir, keepTokens: keepTokens, hist: map[string][]Msg{}, settings: map[string]Settings{}}, nil
 }
+
+// Dir 是数据目录。
+func (s *Store) Dir() string { return s.dir }
 
 func (s *Store) file(sid string) string {
 	return filepath.Join(s.dir, "sessions", url.PathEscape(sid)+".jsonl")
@@ -96,9 +100,15 @@ func (s *Store) Append(sid string, m Msg) error {
 	return err
 }
 
-// Reset 清空会话历史（磁盘文件一并删除）。
+// Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
 	s.hist[sid] = nil
+	if st := s.Settings(sid); st.EnvNote != "" {
+		st.EnvNote = ""
+		if err := s.SaveSettings(sid, st); err != nil {
+			return err
+		}
+	}
 	err := os.Remove(s.file(sid))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil

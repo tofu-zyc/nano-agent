@@ -2,7 +2,7 @@
 
 一个轻量的 bot 型 AI agent，拆成两个小程序：
 
-- **内核**（C，约 2000 行含注释，除内嵌的 cJSON 外没有依赖）：只跑 agent 循环，负责预算、权限、审批，以及在本机执行工具。
+- **内核**（C，除内嵌的 cJSON 外没有依赖）：只跑 agent 循环，负责预算、权限模式和审批。工具交给执行器 `nano-exec`，在沙箱里执行。
 - **网关**（Go）：保存对话上下文，对接模型（任何 OpenAI 兼容接口）和聊天平台（Telegram、飞书、命令行）。
 
 两者通过一条一行一条 JSON 的连接通信（[协议说明](docs/protocol.md)），可以跑在同一台机器上，也可以分开：比如网关在 VPS 上，内核在家里的机器上执行工具。
@@ -10,16 +10,16 @@
 ```
 聊天平台（Telegram / 飞书 / 命令行）
    |
-网关 Go     平台适配 · 会话上下文 · 人格 · 模型接入
+网关 Go     平台适配 · 会话上下文 · 人格 · 模型接入 · 工作目录设置
    |        NDJSON over Unix socket / TCP，由内核主动连网关
-内核 C      循环状态机 · 步数和时间预算 · 权限与审批 · 本地工具调度
-   |        fork/exec：参数走 stdin，结果走 stdout
-tools/      任意语言写的可执行文件
+内核 C      循环状态机 · 步数和时间预算 · 权限模式与审批
+   |        每次工具调用启动一次执行器：请求走 stdin，结果走 stdout
+nano-exec   Read / Write / Edit / Grep / Shell，关在 Landlock + seccomp 沙箱里
 ```
 
 ## 快速开始（本机，命令行聊天）
 
-需要 gcc 或 clang、make、Go 1.22 以上；示例工具 `run_shell` 需要 python3。
+需要 gcc 或 clang、make、Go 1.22 以上。沙箱需要 Linux 5.13 以上（WSL2 也可以）。
 
 ```sh
 cp gateway.example.toml gateway.toml   # 填模型的 base_url / api_key / model，
@@ -27,14 +27,21 @@ cp kernel.example.conf kernel.conf     # 两边的 token 改成同一串随机�
 make run
 ```
 
-`make run` 会编译两个程序，后台启动内核，前台启动网关，直接在终端里聊天，Ctrl-C 或 Ctrl-D 退出。日志在 `data/kernel.log` 和 `data/gateway.log`，另开一个终端 `tail -f data/*.log` 能看到每次模型调用和工具执行。
+`make run` 会编译三个程序，后台启动内核，前台启动网关，直接在终端里聊天，Ctrl-C 或 Ctrl-D 退出。日志在 `data/kernel.log` 和 `data/gateway.log`，另开一个终端 `tail -f data/*.log` 能看到每次模型调用和工具执行。
+
+想让它读写文件、执行命令，先给它一个工作目录：
+
+```
+/dir add ~/projects/foo
+/mode auto
+```
 
 也可以分开启动：
 
 ```sh
 make
 ./gateway/nano-gateway -c gateway.toml
-./kernel/nano-kernel -c kernel.conf      # 另一个终端；-t 只检查配置和工具，-v 打印协议消息
+./kernel/nano-kernel -c kernel.conf      # 另一个终端；-t 只检查配置和执行器，-v 打印协议消息
 ```
 
 ## 改人格（系统提示词）
@@ -48,51 +55,57 @@ make
 
 群聊里网关会在每条用户消息前加上 `[昵称] `，让模型分得清是谁在说话，默认人格里已经写了这条说明。
 
-## 加工具
+## 工具
 
-每个工具是 `tools/` 下的一个目录，用什么语言写都行：
+工具是固定的五个，内置在执行器里：
 
-```
-tools/get_weather/
-  tool.json   描述和策略
-  run         可执行文件：从 stdin 读参数 JSON，结果写到 stdout，退出码非 0 表示失败
-```
-
-```json
-{
-  "name": "get_weather",
-  "description": "查询城市天气",
-  "input_schema": {
-    "type": "object",
-    "properties": { "city": { "type": "string" } },
-    "required": ["city"]
-  },
-  "allow": "all",
-  "approval": false,
-  "timeout": 10,
-  "command": ["python3", "weather.py"]
-}
-```
-
-| 字段 | 默认值 | 说明 |
+| 工具 | 作用 | 类别 |
 |---|---|---|
-| `name` | 必填 | 字母、数字、`_`、`-`，最长 64 位 |
-| `description` / `input_schema` | 空 / 空对象 | 原样交给模型 |
-| `allow` | `"admin"` | `"admin"` 只有管理员能用；`"all"` 所有人都能用。默认最严，新工具要显式放开 |
-| `approval` | `false` | `true` 时每次执行前要管理员在聊天里批准 |
-| `timeout` | `30` | 秒，超时会连同子进程一起杀掉 |
-| `command` | `["./run"]` | 在工具目录下执行 |
+| `Read` | 读文件（带行号，可分段），读目录时列出内容 | 只读 |
+| `Grep` | 搜索文件内容，或按文件名列文件（有 ripgrep 就用它，没有退回 grep） | 只读 |
+| `Write` | 新建或覆盖文件 | 写 |
+| `Edit` | 把文件里的一段原文精确替换成新文本 | 写 |
+| `Shell` | 用 `/bin/sh` 执行命令，默认超时 120 秒，最长 600 秒 | 命令 |
 
-工具进程还能从环境变量拿到 `NA_SID`（会话）、`NA_FROM`（触发者身份）、`NA_CALL_ID`、`NA_TOOL`。输出超过 `max_output`（默认 64 KB）会被截断。工具改动后重启内核生效。
+工具集固定不变，工具定义对模型的前缀缓存最友好。要扩展能力，后面会通过 skill 来做。
 
-自带两个示例：`get_time`（所有人可用）和 `run_shell`（仅管理员，并且每次都要审批）。
+## 工作目录和权限
 
-## 权限和审批
+**工作目录**是工具能碰到的范围。所有工具都在沙箱里执行：
 
-- 管理员身份写在 `kernel.conf` 里（`admin = tg:123456789`，可以写多行）。自己的身份在聊天里发 `/whoami` 查看。
-- 权限只由内核判断：群里任何人都能和 bot 说话，也就能尝试用提示词诱导模型去调高危工具，所以这道关设在模型之外。被拒绝的调用也会给模型一个结果（"权限不足"），模型会自己跟用户解释。
-- 需要审批的工具，bot 会在聊天里发 `⚠️ 需要审批 #3 …`，管理员回复 `/approve 3` 或 `/deny 3`。非管理员的审批无效，超时（默认 300 秒）按拒绝处理。
-- 建议用一个专门的低权限用户运行内核，万一权限配错了还有一层保护。
+- 工作目录：可读写（只读模式下只读）；
+- 系统目录（`/usr`、`/etc` 等）、`PATH` 里的命令：只读；
+- 每个会话自己的临时目录（`$TMPDIR`）和共用的缓存目录：可读写；
+- 其他地方，包括 HOME 里的其他东西、`/tmp`：一律访问不了；
+- 不能连 unix socket（防止借 D-Bus、systemd、docker 在沙箱外执行命令），不能给沙箱外的进程发信号；
+- 环境变量只保留 `PATH`、`HOME`、`LANG` 等少数几个，shell 配置里 export 的密钥带不进去。
+
+沙箱用的是 Linux 自带的 Landlock 和 seccomp，普通用户就能用，不需要 root 和容器。机器不支持 Landlock 时（比如很老的内核），文件工具仍然只能访问工作目录，但 Shell 没有沙箱，自动模式下也会改为每次审批。
+
+**权限模式**决定工作目录内的操作要不要先问：
+
+| 模式 | 读文件、搜索 | 写文件 | 执行命令 |
+|---|---|---|---|
+| `auto` 自动 | 直接执行 | 直接执行 | 直接执行 |
+| `ask` 审批 | 直接执行 | 管理员批准后执行 | 管理员批准后执行 |
+| `readonly` 只读 | 直接执行 | 不允许 | 不允许 |
+
+工作目录之外的操作在任何模式下都不允许，需要的话把目录加进来。
+
+**设置方法**：`gateway.toml` 的 `[workspace]` 是默认值；每个会话可以用 `/dir`、`/mode` 单独改，改动保存在 `data/sessions/` 下，下一条消息开始生效。工作目录或模式变化时，网关会在下一条用户消息前加一句 `[系统] 工作目录：…` 告诉模型，而不是去改系统提示词，这样前缀缓存不会失效。
+
+几条限制：
+
+- 工作目录不能包含 nano-agent 自己：配置文件里有密钥，执行器要是能被改写，沙箱就形同虚设。内核和网关都会拒绝这样的目录，所以别把 nano-agent 装在要让 bot 工作的目录里。
+- 严格限制之后，有些工具需要额外放行。默认已经只读放行了 `~/.gitconfig`（git 提交需要用户名和邮箱）；npm、cargo 之类写缓存的，在 `[workspace]` 的 `extra_rw` 里加对应目录。
+- 命令结束时，它启动的后台进程会被清理。
+
+## 管理员
+
+- 管理员身份写在 `gateway.toml` 的 `[access] admins` 里（比如 `"tg:123456789"`），自己的身份在聊天里发 `/whoami` 查看。命令行用户始终是管理员。
+- 只有管理员能用写文件、执行命令这类工具，能改工作目录和模式，能审批。
+- 其他人默认只能聊天（`guest = "none"`）；设成 `readonly` 的话可以读工作目录里的文件和搜索。
+- 需要审批时，bot 会在聊天里发 `⚠️ 需要审批 #3`，写清楚要执行的命令或要改的文件，管理员回复 `/approve 3` 或 `/deny 3`。超时（默认 300 秒）按拒绝处理。
 
 ## 聊天命令
 
@@ -100,8 +113,10 @@ tools/get_weather/
 |---|---|
 | `/help` | 列出命令 |
 | `/whoami` | 显示你的身份和当前会话 ID（配置管理员、单独人格时要用） |
-| `/stop` | 停止当前任务（正在执行的工具会被杀掉） |
-| `/reset` | 清空本会话的上下文 |
+| `/dir` | 查看工作目录；`/dir add <路径> [ro]` 添加（`ro` 表示只读），`/dir rm <路径>` 移除，`/dir default <路径>` 设为默认 |
+| `/mode` | 查看权限模式；`/mode auto\|ask\|readonly` 切换 |
+| `/stop` | 停止当前任务（正在执行的命令会被杀掉） |
+| `/reset` | 清空本会话的上下文（工作目录和模式保留） |
 | `/approve <编号>` / `/deny <编号>` | 批准或拒绝一次工具执行 |
 
 群聊里 bot 只回应 @ 它或回复它的消息（`group_reply_all = true` 可以改成每条都回）；命令不用 @ 也会响应。
@@ -135,7 +150,8 @@ tools/get_weather/
 - 网关：`[kernel] listen = "tcp:0.0.0.0:7700"`。
 - 内核：`gateway = tcp:网关地址:7700`。
 - 协议本身不加密，跨公网时请走 WireGuard、Tailscale 或 SSH 隧道（比如 `ssh -L 7700:127.0.0.1:7700 vps`，内核连 `tcp:127.0.0.1:7700`）。两边的 `token` 必须一致。
-- 内核断线后会自动重连。断线时进行中的任务会作废，正在执行的工具会被杀掉，聊天里会收到提示。
+- 内核断线后会自动重连。断线时进行中的任务会作废，正在执行的命令会被杀掉，聊天里会收到提示。
+- 工作目录是内核所在机器上的路径。
 
 ## 模型接入
 
@@ -153,29 +169,32 @@ make test
 ```
 
 - `kernel/tests/test_core.c`：状态机单元测试（ASan + UBSan）。
-- `kernel/tests/test_host.py`：用假网关驱动真实的内核进程，测子进程执行、超时强杀、输出截断、审批、取消、断线重连（ASan 版本）。
+- `kernel/tests/test_exec.py`：直接驱动执行器，测五个工具，以及各种绕过沙箱的尝试（`..`、符号链接、`~`、unix socket、发信号、环境变量里的密钥）。
+- `kernel/tests/test_host.py`：用假网关驱动真实的内核和执行器，测权限模式、审批、超时、取消、断线重连、进程清理（ASan 版本）。
 - `gateway/...`：Go 单元测试，`internal/app` 里用假内核走真实 socket 测调度逻辑（`-race`）。
-- `scripts/e2e.sh`：真实的内核和网关进程一起跑，模型用 mock，不花钱。
+- `scripts/e2e.sh`：真实的内核、执行器和网关一起跑，模型用 mock，不花钱。
 
-把 `llm.provider` 设成 `mock` 就能不接模型调试整条链路：消息里写 `!call 工具名 {参数}` 会让假模型去调这个工具。
+把 `llm.provider` 设成 `mock` 就能不接模型调试整条链路：消息里写 `!call 工具名 {参数}` 会让假模型去调这个工具，比如 `!call Shell {"command":"ls"}`。
 
 ## 目录
 
 ```
-kernel/            C 内核
+kernel/            C 内核和执行器
   src/core.c         状态机（纯逻辑，不做 I/O）
-  src/main.c         poll 主循环
-  src/tools.c        工具加载和子进程执行
+  src/main.c         内核的 poll 主循环
+  src/runner.c       执行器子进程的管理
+  src/tools.c        内置工具的描述和策略
   src/link.c         网关连接
   src/conf.c         配置解析
+  src/nexec_*.c      执行器：五个工具的实现
+  src/sandbox.c      Landlock + seccomp 沙箱
 gateway/           Go 网关
-  internal/app       调度：排队、run、审批、命令
+  internal/app       调度：排队、run、审批、命令、工作目录
   internal/kernel    内核连接
   internal/llm       模型接入（OpenAI 兼容 / mock）
-  internal/session   对话历史、裁剪
+  internal/session   对话历史、会话设置、裁剪
   internal/persona   人格文件热加载
   internal/channel   Telegram / 飞书 / 命令行
-tools/             本地工具
 personas/          人格文件
 docs/protocol.md   内核 ⇄ 网关协议
 ```

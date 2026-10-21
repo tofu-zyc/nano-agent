@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,9 +122,12 @@ func setup(t *testing.T) *env {
 	os.WriteFile(filepath.Join(dir, "personas", "default.md"), []byte("你是测试机器人"), 0o644)
 	sock := filepath.Join(dir, "k.sock")
 	cfg := &config.Config{
-		Kernel:  config.Kernel{Listen: "unix:" + sock, Token: "tok"},
-		LLM:     config.LLM{Provider: "mock", MaxHistoryTokens: 10000},
-		Persona: config.Persona{Dir: filepath.Join(dir, "personas")},
+		Kernel:    config.Kernel{Listen: "unix:" + sock, Token: "tok"},
+		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000},
+		Persona:   config.Persona{Dir: filepath.Join(dir, "personas")},
+		Access:    config.Access{Admins: []string{"fake:u1"}, Guest: "none"},
+		Workspace: config.Workspace{Mode: "ask"},
+		Dir:       filepath.Join(dir, "conf"),
 	}
 	store, err := session.New(filepath.Join(dir, "data"), 20000)
 	if err != nil {
@@ -305,22 +309,22 @@ func TestApproval(t *testing.T) {
 	e := setup(t)
 	e.say("帮我执行命令")
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TApproveReq, SID: "fake:c1", ID: "call_9", Name: "run_shell",
-		Args: json.RawMessage(`{"cmd":"ls"}`), From: "fake:u1"})
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: "fake:c1", ID: "call_9", Name: "Shell",
+		Args: json.RawMessage(`{"command":"ls -la"}`), From: "fake:u1"})
 	msg := e.ch.wait(t, "需要审批 #1")
-	if !strings.Contains(msg, `"cmd": "ls"`) || !strings.Contains(msg, "/approve 1") {
+	if !strings.Contains(msg, "执行命令：\nls -la") || !strings.Contains(msg, "/approve 1") {
 		t.Fatalf("approval prompt: %s", msg)
 	}
 	e.say("/approve 2")
 	e.ch.wait(t, "没有这个编号")
-	e.say("/approve #1", from("u2", "李四"))
+	e.say("/approve #1", from("u2", "李四")) // 不是管理员：网关直接拒绝，审批单仍然有效
+	e.ch.wait(t, "只有管理员能审批")
+	e.k.none()
+	e.say("/approve #1")
 	ap := e.k.expect(proto.TApprove)
-	if ap.ID != "call_9" || ap.From != "fake:u2" || ap.OK == nil || !*ap.OK {
+	if ap.ID != "call_9" || ap.From != "fake:u1" || ap.OK == nil || !*ap.OK {
 		t.Fatalf("approve: %+v", ap)
 	}
-	// 内核判定无权审批，回一条 notice；审批单仍然有效
-	e.k.send(proto.Msg{T: proto.TNotice, SID: "fake:c1", Text: "fake:u2 不是管理员，无权审批 run_shell"})
-	e.ch.wait(t, "无权审批")
 	e.say("/deny 1")
 	if d := e.k.expect(proto.TApprove); d.OK == nil || *d.OK {
 		t.Fatalf("deny: %+v", d)
@@ -353,4 +357,120 @@ func TestWhoamiAndAllowList(t *testing.T) {
 	e.k.none()
 	e.say("/whoami") // 不在白名单也能查身份，方便配置
 	e.ch.wait(t, "你的身份")
+}
+
+func lastUser(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// 跑完一轮：内核要模型，模型回复，内核结束
+func (e *env) roundTrip(t *testing.T) []llm.Message {
+	t.Helper()
+	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.expect(proto.TTurn)
+	msgs := e.llm.lastReq().Messages
+	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.ch.wait(t, "（mock）") // 等回复发出来，确认这一轮已经结束
+	return msgs
+}
+
+func TestWorkspaceAndModes(t *testing.T) {
+	e := setup(t)
+	work := filepath.Join(e.dir, "work")
+	os.MkdirAll(work, 0o755)
+
+	// 没设置工作目录的纯聊天会话：不加环境说明
+	e.say("你好")
+	in := e.k.expect(proto.TInput)
+	if in.Mode != proto.ModeAsk || len(in.Dirs) != 0 {
+		t.Fatalf("input: %+v", in)
+	}
+	if got := lastUser(e.roundTrip(t)); got != "你好" {
+		t.Fatalf("user content: %q", got)
+	}
+
+	e.say("/dir add " + work)
+	e.ch.wait(t, "1. "+work)
+	e.say("/mode auto")
+	e.ch.wait(t, "已切换为自动")
+	e.say("看看目录")
+	in = e.k.expect(proto.TInput)
+	if in.Mode != proto.ModeAuto || len(in.Dirs) != 1 || in.Dirs[0] != work {
+		t.Fatalf("input: %+v", in)
+	}
+	msgs := e.roundTrip(t)
+	want := "[系统] 工作目录：" + work + "（默认，相对路径和命令都从这里开始）。权限模式：自动，"
+	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n看看目录") {
+		t.Fatalf("env note: %q", got)
+	}
+	// 系统提示词里不放会变的东西：前缀缓存不会因为换目录而失效
+	if msgs[0].Role != "system" || msgs[0].Content != "你是测试机器人" {
+		t.Fatalf("system prompt changed: %q", msgs[0].Content)
+	}
+
+	// 环境没变就不重复说明
+	e.say("再看看")
+	e.k.expect(proto.TInput)
+	if got := lastUser(e.roundTrip(t)); got != "再看看" {
+		t.Fatalf("user content: %q", got)
+	}
+
+	// 只读目录、换默认目录
+	other := filepath.Join(e.dir, "docs")
+	e.say("/dir add " + other + " ro")
+	e.ch.wait(t, other+"（只读）")
+	e.say("/dir")
+	e.ch.wait(t, "权限模式：自动")
+	e.say("继续")
+	in = e.k.expect(proto.TInput)
+	if !slices.Contains(in.RO, other) {
+		t.Fatalf("ro: %+v", in.RO)
+	}
+	if got := lastUser(e.roundTrip(t)); !strings.Contains(got, "只读目录："+other) {
+		t.Fatalf("env note: %q", got)
+	}
+
+	// /reset 之后历史是空的，环境说明要重新给一次
+	e.say("/reset")
+	e.ch.wait(t, "上下文已清空")
+	e.say("新的开始")
+	e.k.expect(proto.TInput)
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 工作目录：") {
+		t.Fatalf("after reset: %q", got)
+	}
+}
+
+func TestWorkspaceGuards(t *testing.T) {
+	e := setup(t)
+	e.say("/dir add relative/path")
+	e.ch.wait(t, "绝对路径")
+	e.say("/dir add " + e.dir) // 包含网关的配置和数据目录
+	e.ch.wait(t, "不能把")
+	e.say("/mode yolo")
+	e.ch.wait(t, "模式只能是")
+	e.say("/dir add /tmp", from("u2", "李四"))
+	e.ch.wait(t, "只有管理员能修改工作目录")
+	e.say("/mode auto", from("u2", "李四"))
+	e.ch.wait(t, "只有管理员能切换权限模式")
+	e.say("/dir rm /nope")
+	e.ch.wait(t, "不在工作目录列表里")
+}
+
+func TestGuestMode(t *testing.T) {
+	e := setup(t)
+	e.say("你好", from("u2", "李四"))
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone {
+		t.Fatalf("guest mode: %+v", in)
+	}
+	e.roundTrip(t)
+	e.a.cfg.Access.Guest = "readonly"
+	e.say("你好", from("u2", "李四"))
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeReadonly {
+		t.Fatalf("guest mode: %+v", in)
+	}
 }

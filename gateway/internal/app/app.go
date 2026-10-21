@@ -28,8 +28,10 @@ const helpText = `可用命令：
 /whoami  查看你的身份和当前会话 ID
 /stop    停止当前任务
 /reset   清空本会话的上下文
+/dir     查看和修改工作目录（修改需管理员）
+/mode    查看和切换权限模式：auto 自动、ask 审批、readonly 只读（切换需管理员）
 /approve <编号>  批准一次工具执行（需管理员）
-/deny <编号>     拒绝一次工具执行`
+/deny <编号>     拒绝一次工具执行（需管理员）`
 
 type App struct {
 	ctx     context.Context
@@ -44,6 +46,7 @@ type App struct {
 
 	mu        sync.Mutex
 	tools     []llm.Tool
+	sandbox   bool // 内核能把工具关在工作目录的沙箱里
 	sessions  map[string]*sess
 	approvals map[int]*approval
 	nextAppr  int
@@ -109,7 +112,8 @@ func (a *App) AddChannel(ch channel.Channel) {
 
 // ---- 聊天消息 ----
 
-var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true}
+var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
+	"dir": true, "mode": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -161,6 +165,12 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "approve", "deny":
 		a.decide(s, who, arg, cmd == "approve", reply)
+		return
+	case "dir":
+		a.cmdDir(s, who, arg, reply)
+		return
+	case "mode":
+		a.cmdMode(s, who, strings.ToLower(arg), reply)
 		return
 	}
 	if m.Text == "" || (m.Group && !m.Mentioned) {
@@ -242,6 +252,16 @@ func (a *App) startRun(s *sess) {
 	if s.group {
 		content = fmt.Sprintf("[%s] %s", head.SenderName, content)
 	}
+	// 工作目录或权限变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
+	w := a.workspaceOf(s.sid)
+	st := a.store.Settings(s.sid)
+	if note := envNote(w, st.RO, st.EnvNote); note != st.EnvNote && note != "" {
+		content = note + "\n" + content
+		st.EnvNote = note
+		if err := a.store.SaveSettings(s.sid, st); err != nil {
+			a.log.Warn("保存会话设置失败", "sid", s.sid, "err", err)
+		}
+	}
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
 	}
@@ -250,8 +270,10 @@ func (a *App) startRun(s *sess) {
 	r := &run{id: a.runSeq, from: s.ch.Name() + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1])}
 	r.stopTyping = a.startTyping(s)
 	s.run = r
-	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n)
-	if !a.hub.Send(proto.Msg{T: proto.TInput, SID: s.sid, From: r.from}) {
+	mode := a.runMode(w, r.from)
+	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n, "mode", mode)
+	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
+	if !a.hub.Send(in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
 }
@@ -310,18 +332,21 @@ func (a *App) decide(s *sess, who, arg string, ok bool, reply string) {
 		a.say(s, "没有这个编号的待审批请求", reply)
 		return
 	}
-	// 是否有权审批由内核判断，结果会以 notice 或工具结果的形式回来
+	if !a.isAdmin(who) {
+		a.say(s, "只有管理员能审批", reply)
+		return
+	}
 	a.hub.Send(proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: who})
 }
 
 // ---- 内核事件（kernel.Handler） ----
 
-func (a *App) KernelUp(node string, tools []proto.ToolSpec) {
+func (a *App) KernelUp(hello *proto.Msg) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.tools = a.tools[:0]
-	names := make([]string, 0, len(tools))
-	for _, t := range tools {
+	names := make([]string, 0, len(hello.Tools))
+	for _, t := range hello.Tools {
 		params := t.InputSchema
 		if len(params) == 0 {
 			params = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -331,7 +356,11 @@ func (a *App) KernelUp(node string, tools []proto.ToolSpec) {
 		}})
 		names = append(names, t.Name)
 	}
-	a.log.Info("内核报告的工具", "node", node, "tools", strings.Join(names, ","))
+	a.sandbox = hello.Sandbox != nil && hello.Sandbox.Landlock > 0
+	a.log.Info("内核报告的工具", "node", hello.Node, "tools", strings.Join(names, ","), "sandbox", a.sandbox)
+	if !a.sandbox {
+		a.log.Warn("内核所在机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批")
+	}
 }
 
 func (a *App) KernelDown() {
@@ -375,8 +404,8 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		a.nextAppr++
 		n := a.nextAppr
 		a.approvals[n] = &approval{sid: s.sid, id: m.ID}
-		a.say(s, fmt.Sprintf("⚠️ 需要审批 #%d\n工具：%s\n参数：%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
-			n, m.Name, prettyArgs(m.Args), m.From, n, n), "")
+		a.say(s, fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
+			n, describeCall(m.Name, m.Args), m.From, n, n), "")
 	case proto.TNotice:
 		a.say(s, m.Text, "")
 	case proto.TDone:

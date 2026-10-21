@@ -5,5 +5,6 @@
 /data/
 # 构建产物
 /kernel/nano-kernel
+/kernel/nano-exec
 /kernel/build/
 /gateway/nano-gateway

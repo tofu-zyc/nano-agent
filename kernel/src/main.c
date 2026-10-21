@@ -1,24 +1,27 @@
-/* main.c —— nano-kernel：连接网关，驱动状态机，执行本地工具
+/* main.c —— nano-kernel：连接网关，驱动状态机，调执行器执行工具
  *
- * 单线程 poll 循环：网关连接、工具子进程的管道、信号唤醒管道都在同一个 poll 里。
+ * 单线程 poll 循环：网关连接、执行器的管道、信号唤醒管道都在同一个 poll 里。
  * 外部消息 → 事件 → na_core_feed；na_core_next 取出的命令 → 发给网关或交给执行器。
  */
 #include "cJSON.h"
 #include "conf.h"
 #include "core.h"
 #include "link.h"
+#include "runner.h"
 #include "tools.h"
 #include "util.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      1
+#define PROTO_VERSION      2
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -39,8 +42,11 @@ static void on_signal(int sig)
 
 typedef struct {
     kconf           conf;
-    toolset_t       tools;
-    na_tool_policy *policies;
+    const na_tool_policy *tools;
+    size_t          ntools;
+    int             landlock;    /* 执行器探测到的 Landlock 版本，0 表示没有沙箱 */
+    bool            rg;
+    char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
     na_core        *core;
     runner_t        runner;
     link_t          link;
@@ -71,23 +77,70 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(m, "v", PROTO_VERSION);
     cJSON_AddStringToObject(m, "token", k->conf.token);
     cJSON_AddStringToObject(m, "node", k->conf.node);
-    cJSON *arr = cJSON_AddArrayToObject(m, "tools");
-    for (size_t i = 0; i < k->tools.n; i++)
-        cJSON_AddItemToArray(arr, cJSON_Duplicate(k->tools.v[i].desc, 1));
+    cJSON_AddItemToObject(m, "tools", tools_specs());
+    cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
+    cJSON_AddNumberToObject(sb, "landlock", k->landlock);
     link_send(&k->link, m);
 }
 
 /* ---- 命令 → 外部动作 ---- */
 
+/* 工作目录不能包含内核自己：配置里有 token，执行器要是能被改写，沙箱就形同虚设 */
+static bool guard_paths(const kernel_t *k, const cJSON *list, char *err, size_t errlen)
+{
+    const cJSON *it;
+    cJSON_ArrayForEach(it, list) {
+        if (!cJSON_IsString(it)) continue;
+        const char *p = it->valuestring;
+        const char *home = getenv("HOME");
+        char *full = p[0] == '~' && (p[1] == '/' || !p[1]) && home ? xasprintf("%s%s", home, p + 1) : xstrdup(p);
+        char *real = realpath(full, NULL);
+        free(full);
+        if (!real) continue;   /* 不存在的目录交给执行器报错 */
+        size_t n = strlen(real);
+        bool bad = false;
+        const char *mine[] = { k->conf.dir, k->exec_real };
+        for (size_t i = 0; i < 2; i++) {
+            const char *m = mine[i];
+            if (m && (n == 1 || (!strncmp(m, real, n) && (m[n] == '/' || !m[n])))) bad = true;
+        }
+        free(real);
+        if (bad) {
+            snprintf(err, errlen, "工作目录 %s 包含 nano-agent 自己（内核配置里有密钥，执行器也可能被改写），"
+                     "不能用作工作目录。请让用户换一个目录，或者把 nano-agent 装到工作目录之外", p);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
-    const tool_t *t = toolset_find(&k->tools, c->name);
-    char err[256] = "";
-    if (t && runner_exec(&k->runner, t, c, err, sizeof err) == 0) {
-        log_info("执行 %s（%s）", c->name, c->id);
-        return;
+    char err[512] = "";
+    cJSON *req = cJSON_Parse(c->policy ? c->policy : "{}");
+    if (!cJSON_IsObject(req)) {
+        cJSON_Delete(req);
+        req = cJSON_CreateObject();
     }
-    if (!t) snprintf(err, sizeof err, "工具 %s 不存在", c->name);
+    bool ok = true;
+    for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok; key++)
+        ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, sizeof err);
+    if (ok) {
+        cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
+        cJSON_AddStringToObject(req, "tool", c->name);
+        cJSON_AddItemToObject(req, "args", args ? args : cJSON_CreateObject());
+        cJSON_AddStringToObject(req, "tmp_key", c->sid);
+        cJSON_AddNumberToObject(req, "max_output", (double)k->conf.max_output);
+        cJSON_AddBoolToObject(req, "watch_stdin", true);
+        char *body = cJSON_PrintUnformatted(req);
+        char *line = xasprintf("%s\n", body);
+        cJSON_free(body);
+        char *argv[] = { k->conf.exec, NULL };
+        ok = runner_start(&k->runner, argv, c->sid, c->id, c->name, line, err, sizeof err) == 0;
+        if (ok) log_info("执行 %s（%s）", c->name, c->id);
+    }
+    cJSON_Delete(req);
+    if (ok) return;
     log_warn("无法执行 %s：%s", c->name, err);
     na_event ev = { .type = NA_EV_TOOL_DONE, .sid = c->sid, .id = c->id, .ok = false, .content = err };
     na_core_feed(k->core, now, &ev);
@@ -154,13 +207,37 @@ static na_turn_reason parse_reason(const char *s)
     return NA_TURN_ERROR;
 }
 
+static na_mode parse_mode(const char *s)
+{
+    if (!s) return NA_MODE_NONE;
+    if (!strcmp(s, "auto")) return NA_MODE_AUTO;
+    if (!strcmp(s, "ask")) return NA_MODE_ASK;
+    if (!strcmp(s, "readonly")) return NA_MODE_READONLY;
+    return NA_MODE_NONE;
+}
+
+/* input 里的工作目录设置 → 交给执行器的约束（内核状态机不解析，原样带着） */
+static char *build_policy(const cJSON *m, na_mode mode)
+{
+    cJSON *p = cJSON_CreateObject();
+    const char *keys[] = { "dirs", "ro", "rw" };
+    for (size_t i = 0; i < 3; i++) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(m, keys[i]);
+        cJSON_AddItemToObject(p, keys[i], cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
+    }
+    cJSON_AddBoolToObject(p, "write", mode == NA_MODE_ASK || mode == NA_MODE_AUTO);
+    char *s = cJSON_PrintUnformatted(p);
+    cJSON_Delete(p);
+    return s;
+}
+
 static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
 {
     const char *t = sget(m, "t");
     if (!t) return;
     if (!strcmp(t, "pong")) return;
     if (!strcmp(t, "welcome")) {
-        log_info("网关已接受连接，报告了 %zu 个工具", k->tools.n);
+        log_info("网关已接受连接");
         return;
     }
     if (!strcmp(t, "error")) {
@@ -171,12 +248,17 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     na_event ev = { .sid = sget(m, "sid") };
     na_call *calls = NULL;
     char **owned = NULL;
+    char *policy = NULL;
     size_t ncalls = 0;
 
     if (!strcmp(t, "input")) {
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
-        log_info("run 开始 sid=%s from=%s", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-");
+        ev.mode = parse_mode(sget(m, "mode"));
+        policy = build_policy(m, ev.mode);
+        ev.policy = policy;
+        log_info("run 开始 sid=%s from=%s mode=%s", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
+                 sget(m, "mode") ? sget(m, "mode") : "none");
     } else if (!strcmp(t, "turn")) {
         ev.type = NA_EV_TURN;
         ev.reason = parse_reason(sget(m, "reason"));
@@ -224,6 +306,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     for (size_t i = 0; i < ncalls; i++) cJSON_free(owned[i]);
     free(owned);
     free(calls);
+    cJSON_free(policy);
 }
 
 /* ---- 连接管理 ---- */
@@ -260,7 +343,7 @@ static void collect_finished(kernel_t *k, int64_t now)
     while ((j = runner_take_finished(&k->runner, now))) {
         if (!j->killed) {
             bool ok;
-            char *res = job_result(j, k->conf.max_output, &ok);
+            char *res = job_result(j, &ok);
             log_info("%s（%s）%s", j->name, j->id, ok ? "完成" : "失败");
             na_event ev = { .type = NA_EV_TOOL_DONE, .sid = j->sid, .id = j->id, .ok = ok, .content = res };
             na_core_feed(k->core, now, &ev);
@@ -315,6 +398,7 @@ static void loop(kernel_t *k)
             while (read(g_wake[0], tmp, sizeof tmp) > 0) {}
         }
         runner_reap(&k->runner, now);
+        runner_tick(&k->runner, now);
 
         if (li >= 0 && k->link.fd >= 0) {
             short re = pfds[li].revents;
@@ -366,7 +450,7 @@ static void usage(const char *argv0)
     fprintf(stderr,
             "用法：%s [-c kernel.conf] [-t] [-v]\n"
             "  -c 配置文件（默认 kernel.conf）\n"
-            "  -t 只检查配置和工具，然后退出\n"
+            "  -t 只检查配置和执行器，然后退出\n"
             "  -v 输出调试日志（包括收到的每条协议消息）\n",
             argv0);
 }
@@ -393,6 +477,59 @@ static void setup_signals(void)
     signal(SIGPIPE, SIG_IGN);
 }
 
+/* 运行 nano-exec --probe，看执行器能不能用、本机支持什么沙箱 */
+static int probe_exec(kernel_t *k, char *err, size_t errlen)
+{
+    int p[2];
+    if (pipe(p) < 0) {
+        snprintf(err, errlen, "创建管道失败：%s", strerror(errno));
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        snprintf(err, errlen, "fork 失败：%s", strerror(errno));
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        dup2(p[1], 1);
+        close(p[0]);
+        close(p[1]);
+        execl(k->conf.exec, k->conf.exec, "--probe", (char *)NULL);
+        _exit(127);
+    }
+    close(p[1]);
+    buf_t b = {0};
+    char tmp[1024];
+    int64_t deadline = now_ms() + 5000;
+    for (;;) {
+        struct pollfd pf = { .fd = p[0], .events = POLLIN };
+        int64_t left = deadline - now_ms();
+        if (left <= 0 || poll(&pf, 1, (int)left) <= 0) break;
+        ssize_t n = read(p[0], tmp, sizeof tmp);
+        if (n <= 0) break;
+        buf_append(&b, tmp, (size_t)n);
+    }
+    close(p[0]);
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+
+    cJSON *r = cJSON_ParseWithLength(b.p ? b.p : "", b.len);
+    buf_free(&b);
+    const cJSON *ll = cJSON_GetObjectItemCaseSensitive(r, "landlock");
+    if (!cJSON_IsNumber(ll)) {
+        cJSON_Delete(r);
+        snprintf(err, errlen, "执行器 %s 无法运行（用 exec = 指定它的路径）", k->conf.exec);
+        return -1;
+    }
+    k->landlock = (int)ll->valuedouble;
+    k->rg = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "rg"));
+    cJSON_Delete(r);
+    k->exec_real = realpath(k->conf.exec, NULL);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *conf_path = "kernel.conf";
@@ -413,52 +550,51 @@ int main(int argc, char **argv)
     k.backoff = 1000;
 
     char err[512];
-    if (kconf_load(&k.conf, conf_path, err, sizeof err) < 0) {
+    if (kconf_load(&k.conf, conf_path, err, sizeof err) < 0 || probe_exec(&k, err, sizeof err) < 0) {
         log_error("%s", err);
+        kconf_free(&k.conf);
         return 1;
     }
-    if (toolset_load(&k.tools, k.conf.tools_dir) < 0) {
-        log_error("打不开工具目录 %s：%s", k.conf.tools_dir, strerror(errno));
-        return 1;
-    }
+    k.tools = tools_policies(&k.ntools);
 
-    buf_t names = {0};
-    for (size_t i = 0; i < k.tools.n; i++) {
-        const na_tool_policy *p = &k.tools.v[i].pol;
-        char item[160];
-        snprintf(item, sizeof item, "%s%s[%s%s, %ds]", i ? " " : "", p->name,
-                 p->allow_all ? "所有人" : "管理员", p->approval ? ", 需审批" : "", p->timeout_ms / 1000);
-        buf_puts(&names, item);
-    }
     log_info("节点 %s，网关 %s", k.conf.node, k.conf.gateway);
-    log_info("%zu 个工具：%s", k.tools.n, k.tools.n ? buf_cstr(&names) : "（无）");
-    log_info("%zu 个管理员", k.conf.nadmins);
-    buf_free(&names);
+    if (k.landlock > 0)
+        log_info("执行器 %s，沙箱 Landlock v%d%s", k.conf.exec, k.landlock, k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
+    else
+        log_warn("执行器 %s：本机不支持 Landlock，没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {
-        toolset_free(&k.tools);
+        free(k.exec_real);
         kconf_free(&k.conf);
         return 0;
     }
 
-    k.policies = xcalloc(k.tools.n, sizeof *k.policies);
-    for (size_t i = 0; i < k.tools.n; i++) k.policies[i] = k.tools.v[i].pol;
     na_core_config cc = {
-        .tools = k.policies, .ntools = k.tools.n,
-        .admins = (const char *const *)k.conf.admins, .nadmins = k.conf.nadmins,
+        .tools = k.tools, .ntools = k.ntools,
+        .sandbox = k.landlock > 0,
         .max_steps = k.conf.max_steps,
         .run_timeout_ms = k.conf.run_timeout * 1000,
         .approval_timeout_ms = k.conf.approval_timeout * 1000,
     };
     k.core = na_core_new(&cc);
-    k.runner.max_output = k.conf.max_output;
+    /* 执行器的输出是一行 JSON，内容转义后可能比原文长不少，留足余量 */
+    k.runner.out_cap = k.conf.max_output * 6 + 4096;
 
     setup_signals();
     loop(&k);
 
     log_info("退出");
+    /* 让执行器先清理它们启动的命令，最多等一会儿 */
     runner_kill_all(&k.runner);
-    runner_reap(&k.runner, now_ms());
+    for (int64_t until = now_ms() + 2500; k.runner.jobs && now_ms() < until;) {
+        runner_reap(&k.runner, now_ms());
+        runner_tick(&k.runner, now_ms());
+        bool alive = false;
+        for (job_t *j = k.runner.jobs; j; j = j->next) alive |= !j->exited;
+        if (!alive) break;
+        poll(NULL, 0, 20);
+    }
     for (job_t *j; (j = k.runner.jobs);) {
+        if (!j->exited) kill(-j->pid, SIGKILL);
         k.runner.jobs = j->next;
         job_free(j);
     }
@@ -466,8 +602,7 @@ int main(int argc, char **argv)
     buf_free(&k.link.in);
     buf_free(&k.link.out);
     na_core_free(k.core);
-    free(k.policies);
-    toolset_free(&k.tools);
+    free(k.exec_real);
     kconf_free(&k.conf);
     return 0;
 }

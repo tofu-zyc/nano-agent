@@ -17,26 +17,40 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 工具按会不会改动东西分三类，权限模式据此决定直接执行、先审批还是拒绝 */
+typedef enum {
+    NA_TOOL_READ,    /* 只读：Read、Grep */
+    NA_TOOL_WRITE,   /* 改文件：Write、Edit */
+    NA_TOOL_SHELL,   /* 任意命令 */
+} na_tool_kind;
+
 /* 工具的策略部分。描述和参数 schema 由宿主直接报给网关，内核不关心。 */
 typedef struct {
-    const char *name;
-    int  timeout_ms;   /* 单次执行最长时间 */
-    bool allow_all;    /* false：仅管理员可用 */
-    bool approval;     /* true：每次执行前需要管理员审批 */
+    const char  *name;
+    na_tool_kind kind;
+    int          timeout_ms;   /* 单次执行的兜底时限 */
 } na_tool_policy;
 
+/* 权限模式，由网关按会话设置和触发者身份决定，随 input 传来 */
+typedef enum {
+    NA_MODE_NONE,      /* 不能用工具（比如群里的非管理员） */
+    NA_MODE_READONLY,  /* 只能用只读工具 */
+    NA_MODE_ASK,       /* 只读工具直接执行，其余每次先审批 */
+    NA_MODE_AUTO,      /* 全部直接执行（都在工作目录的沙箱里） */
+} na_mode;
+
 typedef struct {
-    const na_tool_policy *tools;  size_t ntools;   /* 由宿主持有，生命周期须长于 core */
-    const char *const    *admins; size_t nadmins;  /* 管理员身份，如 "tg:123456" */
+    const na_tool_policy *tools; size_t ntools;   /* 由宿主持有，生命周期须长于 core */
+    bool sandbox;             /* 执行器能套上沙箱；不能时，自动模式下的 Shell 也要审批 */
     int max_steps;            /* 每个 run 最多请求几次模型 */
     int run_timeout_ms;       /* 每个 run 最长持续时间 */
     int approval_timeout_ms;  /* 等待审批的最长时间 */
 } na_core_config;
 
 typedef enum {
-    NA_EV_INPUT,      /* 会话收到新输入，开启 run：sid, from */
+    NA_EV_INPUT,      /* 会话收到新输入，开启 run：sid, from, mode, policy */
     NA_EV_TURN,       /* 模型完成一轮：sid, reason, calls, detail */
-    NA_EV_APPROVE,    /* 审批结果：sid, id, ok, from（审批人） */
+    NA_EV_APPROVE,    /* 审批结果：sid, id, ok（审批人是否有权限由网关判断） */
     NA_EV_CANCEL,     /* 用户要求停止：sid */
     NA_EV_TOOL_DONE,  /* 本地工具执行完毕：sid, id, ok, content */
     NA_EV_TICK,       /* 只推进时间，用来检查超时 */
@@ -61,6 +75,8 @@ typedef struct {
     na_ev_type type;
     const char *sid;
     const char *from;
+    na_mode mode;
+    const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */
     na_turn_reason reason;
     const na_call *calls; size_t ncalls;
     const char *detail;
@@ -77,13 +93,13 @@ typedef enum {
     NA_CMD_NOTICE,       /* 给用户看的提示：sid, text */
     NA_CMD_DONE,         /* run 结束：sid, status, text（详情，可为 NULL） */
     /* 发往本地工具执行器 */
-    NA_CMD_EXEC,         /* 执行工具：sid, id, name, args, from, timeout_ms */
+    NA_CMD_EXEC,         /* 执行工具：sid, id, name, args, from, policy, timeout_ms */
     NA_CMD_KILL,         /* 终止执行：sid, id */
 } na_cmd_type;
 
 typedef struct na_cmd {
     na_cmd_type type;
-    char *sid, *id, *name, *args, *from, *text;
+    char *sid, *id, *name, *args, *from, *text, *policy;
     const char *status;  /* DONE："ok" "budget" "timeout" "cancelled" "refused" "error" */
     bool ok;
     int  timeout_ms;

@@ -29,7 +29,7 @@ const (
 
 // Handler 接收内核的事件。KernelMsg 在连接的读协程里串行调用，不要阻塞太久。
 type Handler interface {
-	KernelUp(node string, tools []proto.ToolSpec)
+	KernelUp(hello *proto.Msg)
 	KernelMsg(m *proto.Msg)
 	KernelDown()
 }
@@ -187,7 +187,7 @@ func (h *Hub) handle(nc net.Conn) {
 
 	h.Send(proto.Msg{T: proto.TWelcome, V: proto.Version})
 	h.log.Info("内核已连接", "node", hello.Node, "tools", len(hello.Tools), "remote", remote)
-	h.h.KernelUp(hello.Node, hello.Tools)
+	h.h.KernelUp(hello)
 
 	for {
 		nc.SetReadDeadline(time.Now().Add(readTimeout))

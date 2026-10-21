@@ -12,14 +12,17 @@ import (
 )
 
 type Config struct {
-	Kernel   Kernel   `toml:"kernel"`
-	LLM      LLM      `toml:"llm"`
-	Persona  Persona  `toml:"persona"`
-	Session  Session  `toml:"session"`
-	Access   Access   `toml:"access"`
-	CLI      CLI      `toml:"cli"`
-	Telegram Telegram `toml:"telegram"`
-	Feishu   Feishu   `toml:"feishu"`
+	Kernel    Kernel    `toml:"kernel"`
+	LLM       LLM       `toml:"llm"`
+	Persona   Persona   `toml:"persona"`
+	Session   Session   `toml:"session"`
+	Access    Access    `toml:"access"`
+	Workspace Workspace `toml:"workspace"`
+	CLI       CLI       `toml:"cli"`
+	Telegram  Telegram  `toml:"telegram"`
+	Feishu    Feishu    `toml:"feishu"`
+
+	Dir string `toml:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
 
 type Kernel struct {
@@ -52,6 +55,17 @@ type Session struct {
 
 type Access struct {
 	AllowChats []string `toml:"allow_chats"` // 会话 ID 白名单，空表示不限制
+	Admins     []string `toml:"admins"`      // 管理员身份；命令行用户始终是管理员
+	Guest      string   `toml:"guest"`       // 非管理员能用的工具：none（默认，只聊天）| readonly
+}
+
+// Workspace 是工具能碰到的范围：工作目录之外的文件一律读写不了（由内核的沙箱保证）。
+// 这里是默认值，每个会话可以用 /dir、/mode 单独改。
+type Workspace struct {
+	Dirs    []string `toml:"dirs"`     // 工作目录，第一个是默认目录
+	Mode    string   `toml:"mode"`     // auto | ask（默认）| readonly
+	ExtraRO []string `toml:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
+	ExtraRW []string `toml:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
 }
 
 type CLI struct {
@@ -93,7 +107,14 @@ func Load(path string) (*Config, []string, error) {
 
 	c.applyEnv()
 	c.applyDefaults()
+	if !md.IsDefined("workspace", "extra_ro") {
+		c.Workspace.ExtraRO = []string{"~/.gitconfig", "~/.config/git"} // git 要读用户名和邮箱
+	}
 	base := filepath.Dir(path)
+	if abs, err := filepath.Abs(base); err == nil {
+		base = abs
+	}
+	c.Dir = base
 	c.Persona.Dir = resolve(base, c.Persona.Dir)
 	c.Session.DataDir = resolve(base, c.Session.DataDir)
 	if strings.HasPrefix(c.Kernel.Listen, "unix:") {
@@ -139,6 +160,8 @@ func (c *Config) applyDefaults() {
 	def(&c.Session.DataDir, "data")
 	def(&c.Telegram.APIBase, "https://api.telegram.org")
 	def(&c.Feishu.Domain, "feishu")
+	def(&c.Workspace.Mode, "ask")
+	def(&c.Access.Guest, "none")
 }
 
 func (c *Config) validate() error {
@@ -163,6 +186,19 @@ func (c *Config) validate() error {
 	}
 	if c.Feishu.Domain != "feishu" && c.Feishu.Domain != "lark" {
 		errs = append(errs, fmt.Errorf("feishu.domain 只能是 feishu 或 lark，现在是 %q", c.Feishu.Domain))
+	}
+	switch c.Workspace.Mode {
+	case "auto", "ask", "readonly":
+	default:
+		errs = append(errs, fmt.Errorf("workspace.mode 只能是 auto、ask 或 readonly，现在是 %q", c.Workspace.Mode))
+	}
+	if c.Access.Guest != "none" && c.Access.Guest != "readonly" {
+		errs = append(errs, fmt.Errorf("access.guest 只能是 none 或 readonly，现在是 %q", c.Access.Guest))
+	}
+	for _, d := range c.Workspace.Dirs {
+		if !strings.HasPrefix(d, "/") && !strings.HasPrefix(d, "~") {
+			errs = append(errs, fmt.Errorf("workspace.dirs 里的 %q 要写成绝对路径或 ~ 开头", d))
+		}
 	}
 	if !c.CLI.Enabled && !c.Telegram.Enabled && !c.Feishu.Enabled {
 		errs = append(errs, errors.New("cli、telegram、feishu 至少要启用一个"))
