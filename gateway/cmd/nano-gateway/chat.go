@@ -9,13 +9,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 )
 
 // runChat 是 `nano-gateway chat`：在终端里和正在运行的网关聊天。只负责收发文字，
-// 怎么显示（颜色、思考过程、工具调用）由网关决定。Ctrl-D 或 Ctrl-C 退出，网关照常运行。
+// 怎么显示（颜色、思考过程、工具调用）由网关决定。Ctrl-C 停下正在进行的任务，连按两次退出；
+// Ctrl-D 退出。退出后网关照常运行。
 func runChat(args []string) int {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	cfgPath := fs.String("c", "gateway.toml", "配置文件路径")
@@ -67,16 +69,26 @@ func runChat(args []string) int {
 	}()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	select {
-	case <-closed:
+	var last time.Time
+	for {
 		select {
-		case <-inputDone:
-		default:
-			fmt.Fprintln(os.Stderr, "\n和网关的连接断了（网关停了，或者另一个终端接了进来）。")
-			return 1
+		case <-closed:
+			select {
+			case <-inputDone:
+				return 0
+			default:
+				fmt.Fprintln(os.Stderr, "\n和网关的连接断了（网关停了，或者另一个终端接了进来）。")
+				return 1
+			}
+		case s := <-sig:
+			if s != os.Interrupt || time.Since(last) < 2*time.Second {
+				fmt.Println()
+				return 0
+			}
+			last = time.Now()
+			// 第一次 Ctrl-C：让网关停下这个会话正在进行的任务（没有任务时什么也不做）
+			fmt.Fprintln(conn, channel.ChatStop)
+			fmt.Fprintln(os.Stderr, "\n（再按一次 Ctrl-C 退出）")
 		}
-	case <-sig:
-		fmt.Println()
 	}
-	return 0
 }

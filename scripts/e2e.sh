@@ -71,6 +71,7 @@ for _ in $(seq 50); do grep -q '内核已连接' "$TMP/gateway.log" 2>/dev/null 
 # 终端聊天：nano-gateway chat 连到网关，消息从 fifo 进
 mkfifo "$TMP/in"
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" <"$TMP/in" >"$TMP/out" 2>&1 &
+CHATPID=$!
 exec 3>"$TMP/in"   # 一直开着写端，chat 的 stdin 就不会 EOF
 
 pass=0 fail=0
@@ -83,6 +84,15 @@ expect() {
   done
   echo "  FAIL $desc（没等到：$want）"; fail=$((fail + 1))
 }
+# expect_n：输出里 want 出现了至少 n 次
+expect_n() {
+  local desc=$1 want=$2 n=$3
+  for _ in $(seq 50); do
+    if [ "$(grep -cF -- "$want" "$TMP/out")" -ge "$n" ]; then echo "  ok   $desc"; pass=$((pass + 1)); return; fi
+    sleep 0.1
+  done
+  echo "  FAIL $desc（没等到第 $n 个：$want）"; fail=$((fail + 1))
+}
 
 expect "终端连上网关" "已连上网关。这个终端接在会话「主会话」上"
 send "你好";                                          expect "普通对话" "（mock）收到：你好"
@@ -90,6 +100,11 @@ send "/history";                                      expect "查看最近的对
 send '!call Read {"path":"hello.txt"}';               expect "读工作目录里的文件" "1	hello e2e"
 send '!call Shell {"command":"echo e2e-$((6*7))"}';   expect "审批模式下命令先要审批" "需要审批 #1"
 send "/approve 1";                                    expect "审批通过后执行" "e2e-42"
+send '!call Shell {"command":"echo never"}';          expect "又一个等审批的任务" "需要审批 #2"
+send "停";                                            expect "发「停」停下任务" "（已停止）"
+send '!call Shell {"command":"echo never"}';          expect "再一个等审批的任务" "需要审批 #3"
+kill -INT $CHATPID;                                   expect_n "终端里 Ctrl-C 停下任务" "（已停止）" 2
+expect "Ctrl-C 提示再按一次退出" "再按一次 Ctrl-C 退出"
 send "/mode auto";                                    expect "切换到自动模式" "已切换为自动"
 send '!call Shell {"command":"echo auto-$((6*7))"}';  expect "自动模式直接执行" "auto-42"
 send '!call Skill {"name":"demo"}';                   expect "加载技能说明" "技能 demo"
@@ -104,6 +119,9 @@ send "/reset";                                        expect "清空上下文" "
 send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
 send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
 send "回到主会话";                                    expect "在主会话里说话" "（mock）收到：回到主会话"
+send "撤回";                                          expect "撤回最近一轮" "已撤回：「回到主会话」"
+if ! grep -qF "回到主会话" "$TMP/data/sessions/main.jsonl"; then echo "  ok   撤回的一轮从历史文件里删掉"; pass=$((pass + 1)); else echo "  FAIL 撤回的一轮从历史文件里删掉"; fail=$((fail + 1)); fi
+send "撤回之后";                                      expect "撤回后照常对话" "（mock）收到：撤回之后"
 
 # 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
 REMOTE_ROOT="$TMP/remote" XDG_RUNTIME_DIR="$TMP/run" "$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &

@@ -36,7 +36,15 @@ const (
 	TApprove = "approve"
 	TCancel  = "cancel"
 	TPong    = "pong"
-	TLs      = "ls" // 列目录，网页上选工作目录用
+	TLs      = "ls"      // 列目录，网页上选工作目录用
+	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
+	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
+)
+
+// error 的 reason：内核据此决定怎么办
+const (
+	ErrAuth   = "auth"   // 口令不对（配对得到的口令失效了就重新配对）
+	ErrDenied = "denied" // 管理员拒绝了配对，内核退出
 )
 
 // turn 的 reason。各家 API 的特殊情况由网关消化掉，内核只看到这四种。
@@ -64,6 +72,8 @@ type Msg struct {
 	// hello / welcome
 	V       int         `json:"v,omitempty"`
 	Token   string      `json:"token,omitempty"`
+	Pair    bool        `json:"pair,omitempty"` // hello：没有口令，请求配对
+	Code    string      `json:"code,omitempty"` // pairing：确认码，网页上核对
 	Node    string      `json:"node,omitempty"`
 	Tools   []ToolSpec  `json:"tools,omitempty"`
 	Skills  []SkillSpec `json:"skills,omitempty"`

@@ -70,8 +70,17 @@ type tgMessage struct {
 }
 
 type tgUpdate struct {
-	UpdateID int64      `json:"update_id"`
-	Message  *tgMessage `json:"message"`
+	UpdateID int64            `json:"update_id"`
+	Message  *tgMessage       `json:"message"`
+	Callback *tgCallbackQuery `json:"callback_query"`
+}
+
+// tgCallbackQuery 是点了消息下面的按钮（停止）
+type tgCallbackQuery struct {
+	ID      string     `json:"id"`
+	From    tgUser     `json:"from"`
+	Message *tgMessage `json:"message"`
+	Data    string     `json:"data"`
 }
 
 type tgError struct {
@@ -188,6 +197,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 		{"command": "sync", "description": "同步其他窗口的聊天记录"},
 		{"command": "session", "description": "查看和切换会话"},
 		{"command": "stop", "description": "停止当前任务"},
+		{"command": "undo", "description": "撤回最近一条消息"},
 		{"command": "help", "description": "查看全部命令"},
 	}
 	if err := t.callRetry(ctx, "setMyCommands", map[string]any{"commands": commands}, nil); err != nil {
@@ -200,7 +210,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 		var ups []tgUpdate
 		cctx, cancel := context.WithTimeout(ctx, 70*time.Second)
 		err := t.call(cctx, "getUpdates", map[string]any{
-			"offset": offset, "timeout": 50, "allowed_updates": []string{"message"},
+			"offset": offset, "timeout": 50, "allowed_updates": []string{"message", "callback_query"},
 		}, &ups)
 		cancel()
 		if err != nil {
@@ -234,6 +244,9 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 				if m, ok := t.convert(u.Message); ok {
 					h(t, m)
 				}
+			}
+			if u.Callback != nil {
+				t.onButton(ctx, u.Callback, h)
 			}
 		}
 	}
@@ -279,6 +292,31 @@ func (t *Telegram) convert(m *tgMessage) (Message, bool) {
 		Group:      group,
 		Mentioned:  mentioned,
 	}, true
+}
+
+// onButton：点了回复下面的“停止”。先回应按钮（不然客户端一直转圈），再交给网关。
+func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) {
+	text := ""
+	if q.Data == tgStopData {
+		text = "正在停止…"
+	}
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		t.call(cctx, "answerCallbackQuery", map[string]any{"callback_query_id": q.ID, "text": text}, nil)
+	}()
+	if q.Data != tgStopData || q.Message == nil || q.From.IsBot || q.Message.Chat.Type != "private" {
+		return
+	}
+	name := strings.TrimSpace(q.From.FirstName + " " + q.From.LastName)
+	h(t, Message{
+		ChatID:     strconv.FormatInt(q.Message.Chat.ID, 10),
+		SenderID:   strconv.FormatInt(q.From.ID, 10),
+		SenderName: name,
+		ChatName:   name,
+		Mentioned:  true,
+		Action:     ActionStop,
+	})
 }
 
 // stripMention 去掉文本里所有 @username（不区分大小写，且后面不能紧跟用户名字符）。

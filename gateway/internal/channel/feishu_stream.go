@@ -97,11 +97,11 @@ func (s *feishuStream) update(ctx context.Context, c *streamCard, id, text strin
 }
 func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 	if snap.Reasoning != "" || snap.Tools != "" || snap.Notes != "" || snap.Source != "" {
-		state := "正在处理"
+		state, hint := "正在处理", "\n发「停」可以中断，发「撤回」撤回这一轮"
 		if snap.Closed {
-			state = "处理结束"
+			state, hint = "处理结束", ""
 		}
-		status := fmt.Sprintf("**%s · %d 次工具调用**", state, snap.ToolCount)
+		status := fmt.Sprintf("**%s · %d 次工具调用**%s", state, snap.ToolCount, hint)
 		if snap.Source != "" {
 			status += "\n\n" + snap.Source
 		}

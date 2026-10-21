@@ -1,6 +1,7 @@
 # 本机配置（含密钥）
 /gateway.toml
 /kernel.conf
+/paired.token
 # 运行数据
 /data/
 # 构建产物

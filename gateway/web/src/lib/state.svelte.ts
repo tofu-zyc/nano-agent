@@ -4,11 +4,14 @@ import type { Approval, Ev, FieldState, LiveItem, Machine, Overview, SessionInfo
 
 export type Toast = {
   id: number;
-  kind: 'info' | 'ok' | 'err' | 'approval';
+  kind: 'info' | 'ok' | 'err' | 'approval' | 'pair';
   text: string;
   detail?: string;
   approval?: Approval;
+  pair?: PairRequest;
 };
+
+export type PairRequest = { id: string; node: string; addr: string; code: string; at: string };
 
 export type View = 'topology' | 'sessions' | 'personas' | 'settings' | 'devices';
 export type Route = { view: View; arg?: string; focus?: string };
@@ -120,6 +123,7 @@ class Store {
   private async start() {
     await Promise.all([this.refresh(), this.loadFields()]);
     this.connect();
+    this.checkPairing(); // 打开网页前就有电脑在等确认
   }
 
   async refresh() {
@@ -272,6 +276,21 @@ class Store {
         if (!this.session(sid)) this.refreshSession(sid);
         this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, via: e.data?.via, channel: e.data?.channel, at: e.at });
         break;
+      case 'pairing':
+        this.checkPairing();
+        break;
+      case 'undo': {
+        // 撤回了排队中的消息：去掉实时显示的那条；撤回了一轮：从历史重新读
+        const list = this.live[sid];
+        if (e.data?.queued) {
+          const i = list ? list.map((x) => x.kind === 'user' && x.text === e.text).lastIndexOf(true) : -1;
+          if (list && i >= 0) list.splice(i, 1);
+        } else {
+          if (!this.session(sid)?.running) delete this.live[sid];
+          this.historyTick[sid] = (this.historyTick[sid] ?? 0) + 1;
+        }
+        break;
+      }
       case 'run': {
         const s = this.session(sid);
         if (e.kind === 'start') {
@@ -359,6 +378,35 @@ class Store {
   }
 
   // ---- 操作 ----
+
+  // 有电脑请求配对：不在设备页时弹一个带“允许/拒绝”的提示；处理掉的请求收起提示
+  private pairToasts = new Map<string, number>();
+  async checkPairing() {
+    let reqs: PairRequest[] = [];
+    try {
+      reqs = (await api.get<{ pairing: PairRequest[] }>('/api/devices')).pairing ?? [];
+    } catch {
+      return;
+    }
+    for (const [id, tid] of this.pairToasts) {
+      if (!reqs.some((r) => r.id === id)) {
+        this.dismiss(tid);
+        this.pairToasts.delete(id);
+      }
+    }
+    for (const r of reqs) {
+      if (!this.pairToasts.has(r.id)) this.pairToasts.set(r.id, this.toast({ kind: 'pair', text: `${r.node} 请求接入`, pair: r }, 0));
+    }
+  }
+
+  async decidePair(r: PairRequest, ok: boolean) {
+    try {
+      await api.post(`/api/pairing/${r.id}`, { ok });
+    } catch (err) {
+      this.fail(err);
+    }
+    this.checkPairing();
+  }
 
   toast(t: Omit<Toast, 'id'>, ms = 3200) {
     const id = ++this.toastSeq;

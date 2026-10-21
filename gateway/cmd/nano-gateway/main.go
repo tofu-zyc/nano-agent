@@ -21,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/device"
+	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
@@ -86,7 +87,12 @@ func main() {
 		os.Exit(1)
 	}
 	go hub.Serve(ctx, ln)
-	devices, err := device.New(ctx, cfg.Session.DataDir, cfg.Kernel.Token, device.FindBundle(cfg.Dir), hub, log)
+	if err := hub.EnablePairing(filepath.Join(cfg.Session.DataDir, "paired.json")); err != nil {
+		log.Error("读取配对记录失败", "err", err)
+		os.Exit(1)
+	}
+	hub.OnPairChange(func() { a.Bus().Publish(events.Event{T: "pairing"}) })
+	devices, err := device.New(ctx, cfg.Session.DataDir, device.FindBundle(cfg.Dir), hub, log)
 	if err != nil {
 		log.Error("初始化设备管理失败", "err", err)
 		os.Exit(1)

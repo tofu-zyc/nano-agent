@@ -43,15 +43,20 @@ type Hub struct {
 	h     Handler
 	log   *slog.Logger
 
-	mu    sync.Mutex
-	conns map[string]*conn // 节点名 → 连接
+	mu         sync.Mutex
+	conns      map[string]*conn // 节点名 → 连接
+	pairPath   string           // 配对记录（pair.go），空表示没打开配对
+	paired     map[string]PairedDevice
+	pending    map[string]*PairRequest
+	pairNotify func()
 }
 
 type conn struct {
-	nc   net.Conn
-	out  chan []byte
-	done chan struct{}
-	once sync.Once
+	nc     net.Conn
+	out    chan []byte
+	done   chan struct{}
+	once   sync.Once
+	paired bool // 用配对得到的口令连上来的
 }
 
 func (c *conn) close() {
@@ -129,7 +134,7 @@ func (h *Hub) Serve(ctx context.Context, ln net.Listener) {
 			time.Sleep(time.Second)
 			continue
 		}
-		go h.handle(nc, isLocal(nc))
+		go h.serve(nc, isLocal(nc), false)
 	}
 }
 
@@ -165,7 +170,8 @@ func (h *Hub) send(c *conn, m proto.Msg) bool {
 	}
 }
 
-// Attach 接入由 SSH 等通道提供的连接，不需要再开服务器端口。
+// Attach 接入网关自己建立的通道（比如 SSH 到服务器上启动的内核），不需要再开端口，
+// 也不用口令：通道是网关自己用 SSH 登录建立的，服务器上不留网关的口令。
 func (h *Hub) Attach(ctx context.Context, nc net.Conn, local bool) {
 	go func() {
 		done := make(chan struct{})
@@ -176,14 +182,15 @@ func (h *Hub) Attach(ctx context.Context, nc net.Conn, local bool) {
 			case <-done:
 			}
 		}()
-		h.handle(nc, local)
+		h.serve(nc, local, true)
 		close(done)
 	}()
 }
 
 func ValidNode(name string) bool { return validNode(name) }
 
-func (h *Hub) handle(nc net.Conn, local bool) {
+// serve 处理一个内核连接。trusted 表示通道是网关自己建立的，不查口令。
+func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 	c := &conn{nc: nc, out: make(chan []byte, 256), done: make(chan struct{})}
 	defer c.close()
 	remote := nc.RemoteAddr().String()
@@ -192,11 +199,9 @@ func (h *Hub) handle(nc net.Conn, local bool) {
 	sc.Buffer(make([]byte, 64*1024), maxLine)
 	nc.SetReadDeadline(time.Now().Add(helloTimeout))
 	hello, err := readMsg(sc)
+	reason := ""
 	if err == nil && hello.T != proto.THello {
 		err = fmt.Errorf("第一条消息应为 hello，收到 %q", hello.T)
-	}
-	if err == nil && subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.token)) != 1 {
-		err = errors.New("token 不对")
 	}
 	if err == nil && hello.V != proto.Version {
 		err = fmt.Errorf("协议版本不兼容：内核 %d，网关 %d", hello.V, proto.Version)
@@ -204,9 +209,21 @@ func (h *Hub) handle(nc net.Conn, local bool) {
 	if err == nil && !validNode(hello.Node) {
 		err = fmt.Errorf("内核的名字 %q 不能用：不能为空、不能有空白和冒号，最长 64 个字（在 kernel.conf 里设 node）", hello.Node)
 	}
+	if err == nil && !trusted {
+		switch {
+		case hello.Token == "" && hello.Pair:
+			h.pair(nc, sc, hello)
+			return
+		case hello.Token != "" && subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.token)) == 1:
+		case hello.Token != "" && h.pairedToken(hello.Node, hello.Token):
+			c.paired = true
+		default:
+			err, reason = errors.New("口令不对"), proto.ErrAuth
+		}
+	}
 	if err != nil {
 		h.log.Warn("拒绝内核连接", "remote", remote, "err", err)
-		b, _ := json.Marshal(proto.Msg{T: proto.TError, Detail: err.Error()})
+		b, _ := json.Marshal(proto.Msg{T: proto.TError, Reason: reason, Detail: err.Error()})
 		nc.SetWriteDeadline(time.Now().Add(time.Second))
 		nc.Write(append(b, '\n'))
 		return

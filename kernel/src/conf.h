@@ -2,6 +2,7 @@
 #ifndef NA_CONF_H
 #define NA_CONF_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /* 通过 SSH 执行工具的服务器（服务器上不跑内核，每次调用临时跑一下 nano-exec） */
@@ -13,7 +14,9 @@ typedef struct {
 
 typedef struct {
     char  *gateway;           /* unix:/path 或 tcp:host:port */
-    char  *token;             /* 与网关共享的口令 */
+    char  *token;             /* 与网关共享的口令；没有时向网关请求配对（空字符串） */
+    char  *token_file;        /* 配对得到的口令存在这里：配置目录下的 paired.token */
+    bool   paired;            /* token 是配对得到的（网关不认了就删掉，重新配对） */
     char  *node;              /* 本内核的名字，默认主机名 */
     char  *exec;              /* 执行器 nano-exec 的路径，默认和内核放在同一个目录 */
     char  *dir;               /* 配置文件所在目录（解析过符号链接），不能被用作工作目录 */

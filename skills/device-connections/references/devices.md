@@ -10,7 +10,7 @@
 
 1. 在网关的“设备 → 电脑启动包”中启用电脑接入，默认端口 7700，可展开设置改地址。现有本机 Unix socket 继续使用，无需重启网关。
 2. 填写网关可达的 IP 或域名和端口，下载 Windows 包，解压到电脑上。
-3. 双击 `start.cmd`，填写网关地址、电脑名字，选择一个已安装的 WSL2 环境。包内已带上连接口令，可在界面修改。
+3. 双击 `start.cmd`，填写网关地址、电脑名字，选择一个已安装的 WSL2 环境。包里没有口令：第一次连接时，网关网页会出现这台电脑的接入请求和 6 位确认码，核对和电脑上显示的一致后点“允许”。
 4. 连接后保持窗口运行；Ctrl-C 或关闭窗口可停止。再次打开会沿用上次填写的配置。
 
 这一版 Windows 使用 WSL2，尚未提供原生 Win32 内核。未安装 WSL 时先运行 `wsl --install`。Windows 工作目录在会话中使用 `/mnt/c/项目`、`/mnt/d/项目` 等路径。启动器会把程序放到 WSL 的 `~/.local/share/nano-agent/client/`，不会把安装目录当作工作目录。
@@ -33,7 +33,7 @@
 sh start.sh
 ```
 
-按提示填写网关地址、口令和电脑名字。之后可用 `sh start.sh --saved` 直接使用已保存配置。
+按提示填写网关地址和电脑名字，然后在网关网页的“设备”里核对确认码、点“允许”。配对得到的口令存在安装目录的 `paired.token`，之后可用 `sh start.sh --saved` 直接使用已保存配置。
 
 安装包包含当前构建的二进制和完整 C 源码。二进制不能在目标机器运行时，自动用该机器的编译器构建；需要 `cc`、`make` 和 `tar`。Ubuntu/Debian 可安装 `build-essential`，Fedora 可安装 `gcc make`。工作目录与安装目录分开。
 
@@ -49,7 +49,7 @@ sh start.sh
 
 点击“保存并连接”。网关先通过 SSH 上传程序和配置，目标机不能运行包内程序时自动从源码构建，再通过另一条 SSH 会话启动 `gateway = stdio` 的内核。内核通信全程走 SSH，无需服务器反向连接网关或开放额外端口。SSH 配置中的跳板机、代理和密钥设置由 OpenSSH 正常处理。
 
-管理的程序安装在服务器 `~/.local/share/nano-agent/managed/<连接ID>/`。连接密码只存在网关 `data/connections.json` 和私有认证目录中，文件权限 0600；不会写进 SSH 参数、接口列表或日志。首次连接采用 OpenSSH `accept-new`，主机密钥变化时会拒绝连接。
+管理的程序安装在服务器 `~/.local/share/nano-agent/managed/<连接ID>/`。服务器上的内核走网关建立的 SSH 通道，不保存网关的口令。连接密码只存在网关 `data/connections.json` 和私有认证目录中，文件权限 0600；不会写进 SSH 参数、接口列表或日志。首次连接采用 OpenSSH `accept-new`，主机密钥变化时会拒绝连接。
 
 连接状态包括未连接、连接中、已连接、断开中和失败原因。运行中修改设置需要先断开。点击“断开”会关闭 SSH 通道，服务器内核收到 EOF 后停止工具并退出；已部署的程序保留，方便下次连接。删除记录清除网关保存的密码，不删除服务器文件。
 
@@ -70,6 +70,9 @@ remote = prod deploy@prod.example.com
 - 提示缺少 `cc` / `make`：目标机不能运行包内程序，需要安装构建依赖后再连接。
 - 节点在线但工具被拒：确认会话选对了机器、目录存在，且工作目录不包含 nano-agent 安装目录。
 - Windows 盘目录 `ls`、`Read` 都提示没有权限，但系统目录权限正常：旧版存在 DrvFS/9p 的 Landlock inode 问题，更新执行器后重试，不需要 `chmod 777` 或关闭沙箱。
+- 电脑启动后一直显示“等待网关确认接入”：打开网关网页的“设备”，核对确认码后点“允许”。10 分钟没人处理会自动重新申请。
+- 提示名字已经有电脑配对过：换个名字，或者先在“设备 → 配对的电脑”里移除旧的。
+- 移除过的电脑再启动会重新申请配对；被拒绝时内核退出，重新启动即可再次申请。
 - 手机上执行工具暂未实现；本阶段只支持 Linux 和 Windows WSL2。
 
 ## 管理接口
@@ -78,13 +81,15 @@ remote = prod deploy@prod.example.com
 
 | 方法与路径 | 作用 |
 |---|---|
-| `GET /api/devices` | 连接列表、SSH 别名、实际电脑监听地址、主监听地址和构建架构；不返回密码 |
+| `GET /api/devices` | 连接列表、SSH 别名、实际电脑监听地址、主监听地址、构建架构、等待确认的配对请求（`pairing`）和配对过的电脑（`paired`）；不返回密码和口令 |
 | `POST /api/devices` | 新建或修改 SSH 连接，返回 `id` |
 | `POST /api/devices/{id}/connect` | 开始部署并连接，异步返回；查询列表查看状态 |
 | `POST /api/devices/{id}/disconnect` | 取消连接或断开 SSH |
 | `DELETE /api/devices/{id}` | 删除已断开的记录 |
 | `PUT /api/devices/listener` | `{"address":"0.0.0.0:7700"}` 热启用；空地址关闭，设置持久化 |
-| `GET /api/devices/package?platform=windows&gateway=192.168.1.2:7700` | 下载带网关信息的 Windows ZIP；`platform=linux` 为 tar.gz |
+| `GET /api/devices/package?platform=windows&gateway=192.168.1.2:7700` | 下载带网关地址的 Windows ZIP（不含口令）；`platform=linux` 为 tar.gz |
+| `POST /api/pairing/{id}` | `{"ok":true}` 允许、`{"ok":false}` 拒绝一个配对请求 |
+| `DELETE /api/paired/{node}` | 移除配对过的电脑：口令作废，在线的话断开 |
 
 保存连接的字段：`id`（新建省略）、`name`、`host`、`port`（0 沿用配置）、`user`、`identity_file`、`password`、`auto_connect`。修改时密码留空保持已有密码；`clear_password: true` 清除密码。`state` 可能为 `offline`、`connecting`、`reconnecting`、`online`、`disconnecting`、`error`，`detail` 是可展示的失败原因。
 

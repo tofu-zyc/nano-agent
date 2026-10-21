@@ -144,6 +144,60 @@ func (s *Store) Compact(sid string, high, low int, summary string) (int, error) 
 	return cut, nil
 }
 
+// ErrNothingToUndo：没有可以撤回的一轮（历史是空的，或者都已经被 Compact 整理掉了）
+var ErrNothingToUndo = errors.New("没有可以撤回的对话")
+
+// Undo 撤回最近一轮：删掉最后一条用户消息和它后面的所有消息，磁盘上的文件也截掉。
+// 只动历史的末尾，前面的部分不变，前缀缓存照样命中。被 Compact 整理掉的部分不能撤回。
+// 返回删掉的消息。
+func (s *Store) Undo(sid string) ([]Msg, error) {
+	h := s.History(sid)
+	i := len(h) - 1
+	for i >= 0 && h[i].Role != "user" {
+		i--
+	}
+	if i < 0 {
+		return nil, ErrNothingToUndo
+	}
+	off, err := s.offsetOf(sid, s.Settings(sid).Base+i)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Truncate(s.file(sid), off); err != nil {
+		return nil, fmt.Errorf("撤回：%w", err)
+	}
+	removed := append([]Msg(nil), h[i:]...)
+	s.hist[sid] = append([]Msg(nil), h[:i]...)
+	return removed, nil
+}
+
+// offsetOf 是历史文件里第 n 条消息（从 0 数，和 loadFrom 一样跳过坏行）开头的字节位置。
+func (s *Store) offsetOf(sid string, n int) (int64, error) {
+	f, err := os.Open(s.file(sid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	var off int64
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			var m Msg
+			if json.Unmarshal(line, &m) == nil && m.Role != "" {
+				if n == 0 {
+					return off, nil
+				}
+				n--
+			}
+			off += int64(len(line))
+		}
+		if err != nil {
+			return 0, fmt.Errorf("撤回：历史文件里找不到这条消息")
+		}
+	}
+}
+
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
 	s.hist[sid] = nil

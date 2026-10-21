@@ -22,7 +22,38 @@ func (s *Server) getDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.hasDevices(w) {
 		return
 	}
-	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": device.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH})
+	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": device.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH,
+		"pairing": s.devices.PairRequests(), "paired": s.devices.PairedDevices()})
+}
+
+// decidePair 允许或拒绝一台电脑的配对请求。
+func (s *Server) decidePair(w http.ResponseWriter, r *http.Request) {
+	if !s.hasDevices(w) {
+		return
+	}
+	var req struct {
+		OK bool `json:"ok"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.devices.DecidePair(r.PathValue("id"), req.OK); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// unpair 移除一台配对过的电脑：口令作废，在线的话断开。
+func (s *Server) unpair(w http.ResponseWriter, r *http.Request) {
+	if !s.hasDevices(w) {
+		return
+	}
+	if err := s.devices.Unpair(r.PathValue("node")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 func (s *Server) saveDevice(w http.ResponseWriter, r *http.Request) {
 	if !s.hasDevices(w) {

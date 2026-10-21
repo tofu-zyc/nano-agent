@@ -179,6 +179,16 @@ func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// undoSession 撤回会话里最近的一条输入，返回撤回的那段话（网页放回输入框）。
+func (s *Server) undoSession(w http.ResponseWriter, r *http.Request) {
+	text, err := s.app.UndoSession(r.PathValue("sid"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"text": text})
+}
+
 // chat 以网页管理员的身份往会话里发一条消息。
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {

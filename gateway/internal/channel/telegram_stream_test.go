@@ -130,3 +130,63 @@ func TestTelegramSeparatesCollapsedProcessFromReply(t *testing.T) {
 		t.Fatalf("过程没有折叠、转义或来源: %s", texts[1])
 	}
 }
+
+func TestTelegramStopButton(t *testing.T) {
+	var mu sync.Mutex
+	marked := map[int]bool{} // 消息现在有没有“停止”按钮
+	next := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			ID     int             `json:"message_id"`
+			Markup json.RawMessage `json:"reply_markup"`
+		}
+		json.NewDecoder(r.Body).Decode(&p)
+		mu.Lock()
+		defer mu.Unlock()
+		switch strings.TrimPrefix(r.URL.Path, "/bottest/") {
+		case "sendMessage":
+			next++
+			p.ID = next
+		case "editMessageText", "editMessageReplyMarkup":
+		default:
+			t.Errorf("未知方法 %s", r.URL.Path)
+		}
+		marked[p.ID] = strings.Contains(string(p.Markup), tgStopData)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]int{"message_id": p.ID}})
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := tg.OpenRun("123", "").(*streamRun)
+	r.Tool("Shell", "ls")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		on := marked[1]
+		mu.Unlock()
+		if on {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("处理中的过程消息下面没有停止按钮")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.Content("好了")
+	r.Close()
+	awaitStream(t, r.done)
+	mu.Lock()
+	defer mu.Unlock()
+	for id, on := range marked {
+		if on {
+			t.Fatalf("结束后消息 %d 还留着停止按钮", id)
+		}
+	}
+
+	// 点按钮：交给网关的是一个停止操作
+	got := make(chan Message, 1)
+	tg.onButton(context.Background(), &tgCallbackQuery{ID: "q", From: tgUser{ID: 7, FirstName: "张"},
+		Message: &tgMessage{Chat: tgChat{ID: 123, Type: "private"}}, Data: tgStopData}, func(_ Channel, m Message) { got <- m })
+	if m := <-got; m.Action != ActionStop || m.ChatID != "123" || m.SenderID != "7" {
+		t.Fatalf("按钮消息不对：%+v", m)
+	}
+}

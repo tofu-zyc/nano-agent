@@ -18,7 +18,13 @@ type Message struct {
 	Group      bool
 	Mentioned  bool   // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
 	Session    string // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
+	Action     string // 不是说话，而是界面上的操作：ActionStop、ActionRecall
 }
+
+const (
+	ActionStop   = "stop"   // 停止按钮、终端里的 Ctrl-C：停下正在进行的任务，没有任务时不用回话
+	ActionRecall = "recall" // 用户在平台上撤回了 MsgID 那条消息
+)
 
 // Handler 处理收到的消息，必须很快返回。
 type Handler func(ch Channel, m Message)

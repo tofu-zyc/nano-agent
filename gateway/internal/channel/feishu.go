@@ -31,7 +31,7 @@ type Feishu struct {
 	groupAll bool
 
 	botOpenID string
-	queue     chan *larkim.P2MessageReceiveV1
+	queue     chan any // *larkim.P2MessageReceiveV1 或 *larkim.P2MessageRecalledV1，按收到的顺序处理
 
 	mu    sync.Mutex
 	names map[string]string // open_id → 姓名
@@ -52,7 +52,7 @@ func NewFeishu(c config.Feishu, log *slog.Logger) (*Feishu, error) {
 		base:     base,
 		log:      log.With("channel", "feishu"),
 		groupAll: c.GroupReplyAll,
-		queue:    make(chan *larkim.P2MessageReceiveV1, 256),
+		queue:    make(chan any, 256),
 		names:    map[string]string{},
 		seen:     map[string]time.Time{},
 	}
@@ -77,7 +77,15 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 			case <-ctx.Done():
 				return
 			case ev := <-f.queue:
-				if m, ok := f.convert(ctx, ev); ok {
+				var m Message
+				ok := false
+				switch ev := ev.(type) {
+				case *larkim.P2MessageReceiveV1:
+					m, ok = f.convert(ctx, ev)
+				case *larkim.P2MessageRecalledV1:
+					m, ok = recalled(ev)
+				}
+				if ok {
 					h(f, m)
 				}
 			}
@@ -90,6 +98,13 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 			case f.queue <- ev:
 			default:
 				f.log.Warn("消息队列已满，丢弃一条飞书消息")
+			}
+			return nil
+		}).
+		OnP2MessageRecalledV1(func(_ context.Context, ev *larkim.P2MessageRecalledV1) error {
+			select {
+			case f.queue <- ev:
+			default:
 			}
 			return nil
 		})
@@ -150,6 +165,14 @@ func deref(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// recalled：用户撤回了一条消息（需要订阅 im.message.recalled_v1，扫码创建的机器人自动订阅）
+func recalled(ev *larkim.P2MessageRecalledV1) (Message, bool) {
+	if ev == nil || ev.Event == nil || deref(ev.Event.MessageId) == "" || deref(ev.Event.ChatId) == "" {
+		return Message{}, false
+	}
+	return Message{ChatID: deref(ev.Event.ChatId), MsgID: deref(ev.Event.MessageId), Mentioned: true, Action: ActionRecall}, true
 }
 
 func (f *Feishu) convert(ctx context.Context, ev *larkim.P2MessageReceiveV1) (Message, bool) {

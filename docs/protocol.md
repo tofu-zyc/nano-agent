@@ -2,7 +2,11 @@
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关；网页管理的 SSH 连接使用 `gateway = stdio`，网关主动建立 SSH，再将其 stdin/stdout 接入同一 Hub，协议消息保持不变。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
-- **握手**：内核发 `hello` → 网关校验 token 和版本 → 回 `welcome`；不通过就回 `error` 并断开。
+- **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有三种：
+  - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
+  - 配对得到的口令，只能用配对时的名字；
+  - 网关自己通过 SSH 启动的内核（stdio）不查口令，服务器上不留网关的口令。
+- **配对**：电脑启动包里没有口令。内核第一次连上来时 `hello` 带 `"pair": true`、不带 `token`，网关登记一个配对请求并回 `pairing`（带 6 位确认码，内核打印出来）；管理员在网页“设备”里核对确认码后允许，网关回 `paired`（带这台电脑专用的口令），内核把口令存到配置目录的 `paired.token`（0600），断开后马上用它重新连接。拒绝时回 `error`（`reason: denied`），内核退出；10 分钟没人处理也回 `error`，内核过一会儿重新申请。网关只保存口令的 SHA-256（`data/paired.json`），在网页里移除一台电脑，它的口令就作废；内核再连时收到 `error`（`reason: auth`），删掉 `paired.token` 重新申请。
 - **心跳**：内核每 30 秒发 `ping`，网关回 `pong`。内核 90 秒、网关 120 秒没收到对方任何消息就断开。
 - **多个内核**：网关可以同时连着好几个内核，按 `hello` 里的 `node` 区分（不能为空，不能有空白、冒号和斜杠，最长 64 个字）。同名的新连接会顶替旧连接，旧连接上进行中的任务全部作废。每个会话的一轮只在一个内核上跑，这一轮的 `approve`、`cancel` 都发给那个内核；`ls` 发给要浏览的那台机器上的内核。
 - **加密**：TCP 本身不加密，跨机器请走 WireGuard、Tailscale 或 SSH 隧道；管理的 SSH stdio 连接由 SSH 加密。
@@ -14,7 +18,7 @@
 
 | t | 字段 | 含义 |
 |---|---|---|
-| `hello` | `v` `token` `node` `tools[]` `skills[]` `sandbox` `remotes[]` | 握手，报告工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`skills` 每项是 `{name, description}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`remotes` 是这个内核能通过 SSH 执行工具的服务器，每项是 `{name, target, ok, landlock, detail?}`，`ok` 为 false 时 `detail` 是原因（连不上、还在准备执行器……） |
+| `hello` | `v` `token` `pair?` `node` `tools[]` `skills[]` `sandbox` `remotes[]` | 握手。没有口令时 `token` 为空、`pair` 为 true，请求配对，报告工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`skills` 每项是 `{name, description}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`remotes` 是这个内核能通过 SSH 执行工具的服务器，每项是 `{name, target, ok, landlock, detail?}`，`ok` 为 false 时 `detail` 是原因（连不上、还在准备执行器……） |
 | `tools` | `tools[]` `skills[]` | 技能列表变化后重新报告完整工具定义和技能简介，网关替换该内核的工具列表，后续模型请求立即使用；删除全部技能时 `skills` 是空数组，`tools` 只含五个基础工具 |
 | `remotes` | `remotes[]` | 服务器能不能用变了（准备好了、连不上了），格式同 `hello` |
 | `model` | `sid` | 请模型基于这个会话的上下文生成下一轮 |
@@ -30,7 +34,9 @@
 | t | 字段 | 含义 |
 |---|---|---|
 | `welcome` | `v` | 握手成功 |
-| `error` | `detail` | 握手失败的原因，随后断开 |
+| `error` | `detail` `reason?` | 握手失败的原因，随后断开。`reason` 为 `auth` 表示口令不对（配对得到的口令失效了就重新配对），`denied` 表示管理员拒绝了配对（内核退出） |
+| `pairing` | `code` | 收到配对请求，等管理员在网页上确认；`code` 是确认码 |
+| `paired` | `token` | 管理员同意了配对：`token` 是这台电脑专用的口令，内核保存后断开重连 |
 | `input` | `sid` `from` `mode` `dirs[]` `ro[]` `rw[]` `node?` | 会话收到新消息，开始一轮处理。`mode` 是这一轮的权限模式（见下表），`dirs` 是工作目录（第一个是默认目录），`ro` / `rw` 是额外的只读 / 读写路径；`node` 是这个内核报告的某台服务器的名字时，这一轮的工具通过 SSH 在那台服务器上执行，路径都是服务器上的，有没有沙箱也按服务器算 |
 | `turn` | `sid` `reason` `calls[]?` `detail?` | 模型完成了一轮，`reason` 见下表；`calls` 每项是 `{id, name, args}` |
 | `approve` | `sid` `id` `ok` `from` | 审批结果。`from` 是审批人身份；网关只会转发管理员的审批 |

@@ -158,10 +158,6 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
     fclose(f);
     if (rc) return rc;
 
-    if (!k->token || !*k->token) {
-        snprintf(err, errlen, "%s：必须设置 token（与网关配置里的 kernel.token 一致）", path);
-        return -1;
-    }
     if (!k->node) {
         char host[256] = "kernel";
         gethostname(host, sizeof host - 1);
@@ -177,6 +173,23 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
     char *base = dir_of(path);
     k->dir = realpath(base, NULL);
     if (!k->dir) k->dir = xstrdup(base);
+    /* 没写 token：用配对得到的口令；还没配对过就是空的，连上网关后请求配对。
+     * 走 stdio（网关通过 SSH 启动的内核）时网关自己建立的通道，不用口令。 */
+    k->token_file = xasprintf("%s/paired.token", base);
+    if ((!k->token || !*k->token) && strcmp(k->gateway, "stdio")) {
+        FILE *tf = fopen(k->token_file, "r");
+        char buf[256] = "";
+        if (tf) {
+            if (!fgets(buf, sizeof buf, tf)) buf[0] = 0;
+            fclose(tf);
+        }
+        char *t = trim(buf);
+        if (*t) {
+            set_str(&k->token, t);
+            k->paired = true;
+        }
+    }
+    if (!k->token) k->token = xstrdup("");
     if (k->skills && k->skills[0] != '/') {
         char *full = xasprintf("%s/%s", base, k->skills);
         free(k->skills);
@@ -217,6 +230,7 @@ void kconf_free(kconf *k)
     free(k->skills);
     free(k->gateway);
     free(k->token);
+    free(k->token_file);
     free(k->node);
     free(k->exec);
     free(k->dir);

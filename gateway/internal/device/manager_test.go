@@ -16,6 +16,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,8 +42,11 @@ func setupManager(t *testing.T) (*Manager, *testHandler, string) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := &testHandler{up: make(chan bool, 10), down: make(chan string, 10), messages: make(chan *proto.Msg, 100)}
 	hub := kernel.NewHub("test-token", h, log)
+	if err := hub.EnablePairing(filepath.Join(dir, "paired.json")); err != nil {
+		t.Fatal(err)
+	}
 	root, _ := filepath.Abs("../../..")
-	m, err := New(ctx, dir, "test-token", FindBundle(root), hub, log)
+	m, err := New(ctx, dir, FindBundle(root), hub, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +95,7 @@ func TestConnectionsPersistWithoutReturningPassword(t *testing.T) {
 	if m.List()[0].HasPassword {
 		t.Fatal("清除密码没有生效")
 	}
-	m2, err := New(m.ctx, dir, "test-token", m.bundle, m.hub, m.log)
+	m2, err := New(m.ctx, dir, m.bundle, m.hub, m.log)
 	if err != nil || m2.List()[0].Host != "new-alias" {
 		t.Fatalf("reload: %v", err)
 	}
@@ -215,7 +219,7 @@ func TestAutoConnectAfterRestartCanBeStoppedWhileWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(m.ctx, dir, "test-token", m.bundle, m.hub, m.log)
+	restarted, err := New(m.ctx, dir, m.bundle, m.hub, m.log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,13 +290,33 @@ func TestPackagesIncludeLaunchersConfigAndPortableSources(t *testing.T) {
 				files[f.Name] = b
 			}
 		}
-		if !strings.Contains(string(files["kernel.conf"]), "test-token") || len(files["kernel-src.tar.gz"]) == 0 || len(files["start.ps1"]) == 0 || len(files["start.sh"]) == 0 {
+		if !strings.Contains(string(files["kernel.conf"]), "gateway = tcp:example.test:7700") || len(files["kernel-src.tar.gz"]) == 0 || len(files["start.ps1"]) == 0 || len(files["start.sh"]) == 0 {
 			t.Fatal("启动包缺少配置、源码或启动脚本")
+		}
+		if strings.Contains(string(files["kernel.conf"]), "token") || strings.Contains(string(files["kernel.conf"]), "test-token") {
+			t.Fatal("启动包里不该有网关的口令（电脑第一次连接时配对）")
 		}
 		if platform == "windows" && !bytes.HasPrefix(files["start.ps1"], []byte{0xef, 0xbb, 0xbf}) {
 			t.Fatal("PowerShell 启动器应带 UTF-8 BOM")
 		}
 	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestLinuxPackageBuildsFromSourceAndConnects(t *testing.T) {
@@ -307,7 +331,7 @@ func TestLinuxPackageBuildsFromSourceAndConnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	go m.hub.Serve(m.ctx, ln)
-	data, _, err := (Bundle{}).Package("linux", "tcp:"+ln.Addr().String(), "test-token")
+	data, _, err := (Bundle{}).Package("linux", "tcp:"+ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,17 +360,37 @@ func TestLinuxPackageBuildsFromSourceAndConnects(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", filepath.Join(dir, "start.sh"), "--saved")
 	cmd.Dir = dir
-	var output tailBuffer
+	var output syncBuffer // 内核还在跑的时候就要读它的输出
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// 包里没有口令：内核先请求配对，网页上允许之后拿到专用口令，重新连上来
+	var req kernel.PairRequest
+	for req.ID == "" {
+		if reqs := m.hub.PairRequests(); len(reqs) > 0 {
+			req = reqs[0]
+		} else if ctx.Err() != nil {
+			cmd.Wait()
+			t.Fatalf("源码启动包没有请求配对: %s", output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(req.Code) != 6 || !strings.Contains(output.String(), req.Code) {
+		t.Fatalf("内核没有打印确认码 %s: %s", req.Code, output.String())
+	}
+	if err := m.hub.DecidePair(req.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-h.up:
 	case <-ctx.Done():
 		cmd.Wait()
-		t.Fatalf("源码启动包没有接入网关: %s", output.data)
+		t.Fatalf("源码启动包没有接入网关: %s", output.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "paired.token")); err != nil || len(strings.TrimSpace(string(b))) != 64 {
+		t.Fatalf("配对口令没有保存: %v %q", err, b)
 	}
 	// 启动脚本最后 exec 内核，停止后不会留下编译器或子进程。
 	cancel()
@@ -437,6 +481,14 @@ func TestRealOpenSSHConnection(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		b, _ := os.ReadFile(logPath)
 		t.Fatalf("真实 SSH 没有接入: %+v\n%s", m.List(), b)
+	}
+	// 服务器上的配置里没有网关的口令（stdio 通道由网关自己建立）
+	matches, _ := filepath.Glob(filepath.Join(remote, ".local/share/nano-agent/managed/*/kernel.conf"))
+	if len(matches) != 1 {
+		t.Fatalf("服务器上没有部署内核配置：%v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); strings.Contains(string(b), "token") {
+		t.Fatalf("服务器上留下了口令：%s", b)
 	}
 	m.mu.Lock()
 	done := m.running[id].done

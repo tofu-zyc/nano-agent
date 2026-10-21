@@ -92,9 +92,10 @@ func writeTar(files []bundleFile) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Package 的口令来自登录后下载的网关配置，启动时仍可修改地址、口令和节点名。
-func (b Bundle) Package(platform, gateway, token string) ([]byte, string, error) {
-	conf := fmt.Sprintf("gateway = %s\ntoken = %s\n", gateway, token)
+// Package 生成电脑启动包。包里只有网关地址，没有口令：电脑第一次连上来时请求配对，
+// 管理员在网页上允许后，网关再给它一个专用的口令。启动时还能改地址和名字。
+func (b Bundle) Package(platform, gateway string) ([]byte, string, error) {
+	conf := fmt.Sprintf("gateway = %s\n", gateway)
 	files, err := b.files(conf)
 	if err != nil {
 		return nil, "", err
@@ -123,8 +124,10 @@ func (b Bundle) Package(platform, gateway, token string) ([]byte, string, error)
 	return out.Bytes(), "nano-agent-windows.zip", nil
 }
 
-func (b Bundle) remoteArchive(name, token string) ([]byte, error) {
-	files, err := b.files(fmt.Sprintf("gateway = stdio\nnode = %s\ntoken = %s\nexec = bin/nano-exec\n", name, token))
+// remoteArchive 是网关通过 SSH 部署到服务器上的包。内核走 stdio，通道是网关用 SSH 建立的，
+// 不需要口令，服务器上也就不留网关的口令。
+func (b Bundle) remoteArchive(name string) ([]byte, error) {
+	files, err := b.files(fmt.Sprintf("gateway = stdio\nnode = %s\nexec = bin/nano-exec\n", name))
 	if err != nil {
 		return nil, err
 	}

@@ -43,6 +43,9 @@ type CLI struct {
 // ChatHello 是 `nano-gateway chat` 连上来后发的第一行，后面跟着 color 表示终端支持颜色。
 const ChatHello = "nano-chat 1"
 
+// ChatStop 是终端里按 Ctrl-C 时客户端发的一行：停下正在进行的任务。用户打不出这一行。
+const ChatStop = "\x1b[nano:stop]"
+
 const (
 	gray  = "\x1b[90m"
 	reset = "\x1b[0m"
@@ -181,7 +184,11 @@ func (c *CLI) serve(conn net.Conn, h Handler) {
 		if line == "" {
 			continue
 		}
-		h(c, Message{ChatID: "local", SenderID: "local", SenderName: "你", ChatName: "命令行", Text: line, Mentioned: true})
+		m := Message{ChatID: "local", SenderID: "local", SenderName: "你", ChatName: "命令行", Text: line, Mentioned: true}
+		if line == ChatStop {
+			m.Text, m.Action = "", ActionStop
+		}
+		h(c, m)
 	}
 	c.drop(conn)
 }

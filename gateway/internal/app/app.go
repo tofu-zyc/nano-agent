@@ -31,7 +31,8 @@ const helpText = `可用命令：
 /history 查看这个会话最近的对话；/history <轮数> 看更多
 /sync    补上其他窗口的聊天记录（同一会话内也会自动同步）
 /node    查看这个会话在哪台机器上工作；/node <名字> 切换（需管理员）
-/stop    停止当前任务
+/stop    停止当前任务（任务进行中直接发「停」也行）
+/undo    撤回最近一条消息：还没处理的直接拿掉，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）
 /mode    查看和切换权限模式：auto 自动、ask 审批、readonly 只读（切换需管理员）
@@ -81,7 +82,9 @@ type sess struct {
 	sid        string
 	queue      []queued
 	run        *run
-	resetAfter bool // run 结束后清空上下文（/reset 时正好有任务在跑）
+	resetAfter bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
+	undoAfter  bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
+	recent     []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
 }
 
 // queued 是排队等处理的一条消息
@@ -229,7 +232,7 @@ func (a *App) SetLLM(c llm.Client) {
 // ---- 聊天消息 ----
 
 var commands = map[string]bool{"help": true, "start": true, "sync": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"dir": true, "mode": true, "think": true, "session": true, "history": true, "node": true}
+	"undo": true, "dir": true, "mode": true, "think": true, "session": true, "history": true, "node": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -278,7 +281,23 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.log.Info("忽略不在白名单里的聊天", "chat", ep.key(), "from", who)
 		return
 	}
+	if m.Action == channel.ActionRecall {
+		// 撤回事件里没有说话的人：按窗口现在接着的会话处理，不改窗口的记录
+		if r := a.eps[ep.key()]; r != nil && m.MsgID != "" {
+			a.recall(in{s: a.sessOf(r.Session), ep: ep, who: r.Who}, m.MsgID)
+		}
+		return
+	}
 	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who}
+	if m.Action == channel.ActionStop {
+		if c.s.run != nil || len(c.s.queue) > 0 {
+			a.stop(c)
+		}
+		return
+	}
+	if cmd == "" {
+		cmd = a.plainCommand(c.s, m.Text)
+	}
 	switch cmd {
 	case "start":
 		a.answer(c, helpText)
@@ -297,6 +316,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "stop":
 		a.stop(c)
+		return
+	case "undo":
+		a.undo(c)
 		return
 	case "reset":
 		a.reset(c)
@@ -449,6 +471,7 @@ func (a *App) startRun(s *sess) {
 	}
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
 	a.catchUp(head.ep, s.sid)
+	a.remember(s, batch, a.histEnd(s.sid))
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
 	}
@@ -655,12 +678,8 @@ func (a *App) finish(s *sess, status, detail string) {
 	default:
 		note = "（出错了：" + detail + "）"
 	}
-	if s.resetAfter {
-		s.resetAfter = false
-		if err := a.store.Reset(s.sid); err != nil {
-			a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
-		}
-		body, note = "", "上下文已清空"
+	if text, ok := a.afterRun(s); ok {
+		body, note = "", text
 	}
 	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
 		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)

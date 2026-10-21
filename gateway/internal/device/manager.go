@@ -56,7 +56,7 @@ type active struct {
 type Manager struct {
 	mu         sync.Mutex
 	ctx        context.Context
-	dir, token string
+	dir        string
 	bundle     Bundle
 	hub        *kernel.Hub
 	log        *slog.Logger
@@ -68,8 +68,8 @@ type Manager struct {
 	listenAddr string
 }
 
-func New(ctx context.Context, dir, token string, bundle Bundle, hub *kernel.Hub, log *slog.Logger) (*Manager, error) {
-	m := &Manager{ctx: ctx, dir: dir, token: token, bundle: bundle, hub: hub, log: log, records: map[string]Connection{}, running: map[string]*active{}, states: map[string]status{}, sshProgram: "ssh"}
+func New(ctx context.Context, dir string, bundle Bundle, hub *kernel.Hub, log *slog.Logger) (*Manager, error) {
+	m := &Manager{ctx: ctx, dir: dir, bundle: bundle, hub: hub, log: log, records: map[string]Connection{}, running: map[string]*active{}, states: map[string]status{}, sshProgram: "ssh"}
 	b, err := os.ReadFile(filepath.Join(dir, "connections.json"))
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -328,7 +328,7 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (m *Manager) connect(ctx context.Context, c Connection) error {
-	archive, err := m.bundle.remoteArchive(c.Name, m.token)
+	archive, err := m.bundle.remoteArchive(c.Name)
 	if err != nil {
 		return err
 	}
@@ -424,8 +424,26 @@ func (m *Manager) Listener() string {
 	return m.listener.Addr().String()
 }
 func (m *Manager) Package(platform, gateway string) ([]byte, string, error) {
-	return m.bundle.Package(platform, gateway, m.token)
+	return m.bundle.Package(platform, gateway)
 }
+
+// Paired 是配对过的一台电脑和它在不在线。
+type Paired struct {
+	kernel.PairedDevice
+	Online bool `json:"online"`
+}
+
+// PairRequests、PairedDevices、DecidePair、Unpair：电脑配对（见 kernel/pair.go）
+func (m *Manager) PairRequests() []kernel.PairRequest { return m.hub.PairRequests() }
+func (m *Manager) PairedDevices() []Paired {
+	out := []Paired{}
+	for _, d := range m.hub.PairedDevices() {
+		out = append(out, Paired{d, m.hub.Connected(d.Node)})
+	}
+	return out
+}
+func (m *Manager) DecidePair(id string, ok bool) error { return m.hub.DecidePair(id, ok) }
+func (m *Manager) Unpair(node string) error            { return m.hub.Unpair(node) }
 
 // SSHHosts 只枚举可选择的别名，实际连接仍交给 OpenSSH 解析全部配置和 Include。
 func SSHHosts() []string {

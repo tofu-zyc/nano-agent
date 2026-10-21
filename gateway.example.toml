@@ -10,6 +10,7 @@ listen = "unix:/tmp/nano-agent.sock"
 # listen = "tcp:0.0.0.0:7700"
 token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
 # 额外的电脑接入地址，在网页“设备”中可热启用；SSH 管理连接不需要它。
+# 别的电脑用启动包连进来时不需要这里的 token：第一次连接请求配对，在网页“设备”里允许即可。
 # device_listen = "0.0.0.0:7700"
 
 [llm]

@@ -35,7 +35,7 @@ var regAddons = map[string]any{
 		"im:message", "im:message:send_as_bot", "im:message.p2p_msg:readonly", "contact:user.base:readonly",
 		"cardkit:card:write",
 	}},
-	"events": map[string]any{"items": map[string][]string{"tenant": {"im.message.receive_v1"}}},
+	"events": map[string]any{"items": map[string][]string{"tenant": {"im.message.receive_v1", "im.message.recalled_v1"}}},
 }
 
 // FeishuRegistration 是一次进行中的扫码注册。

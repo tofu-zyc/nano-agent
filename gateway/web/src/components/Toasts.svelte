@@ -2,10 +2,14 @@
   import { store } from '../lib/state.svelte';
   import Icon from './Icon.svelte';
 
-  const icons = { info: 'activity', ok: 'check', err: 'alert', approval: 'shield' } as const;
-  // 正在看的那个会话里已经有审批卡片了，不用再弹
+  const icons = { info: 'activity', ok: 'check', err: 'alert', approval: 'shield', pair: 'link' } as const;
+  // 正在看的那个会话里已经有审批卡片了、设备页上已经有配对请求了，不用再弹
   const shown = $derived(
-    store.toasts.filter((t) => !(t.approval && store.route.view === 'sessions' && store.route.arg === t.approval.sid)),
+    store.toasts.filter(
+      (t) =>
+        !(t.approval && store.route.view === 'sessions' && store.route.arg === t.approval.sid) &&
+        !(t.pair && store.route.view === 'devices'),
+    ),
   );
 </script>
 
@@ -24,11 +28,18 @@
             <button class="btn sm" onclick={() => store.approve(t.approval!.n, false)}>拒绝</button>
             <a class="btn sm ghost" href="#/sessions/{encodeURIComponent(t.approval.sid)}">查看对话</a>
           </div>
+        {:else if t.pair}
+          <div class="who">来自 {t.pair.addr} · 确认码 <b class="code">{t.pair.code}</b></div>
+          <div class="acts">
+            <button class="btn sm primary" onclick={() => store.decidePair(t.pair!, true)}><Icon name="check" size={13} />允许</button>
+            <button class="btn sm" onclick={() => store.decidePair(t.pair!, false)}>拒绝</button>
+            <a class="btn sm ghost" href="#/devices">设备页</a>
+          </div>
         {:else if t.detail}
           <div class="who">{t.detail}</div>
         {/if}
       </div>
-      {#if !t.approval}
+      {#if !t.approval && !t.pair}
         <button class="close" onclick={() => store.dismiss(t.id)} aria-label="关闭"><Icon name="x" size={13} /></button>
       {/if}
     </div>
@@ -77,6 +88,19 @@
   }
   .toast.approval :global(.ic) {
     color: var(--warn);
+  }
+  .toast.pair {
+    width: 370px;
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    box-shadow: var(--shadow), 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .toast.pair :global(.ic) {
+    color: var(--accent-2);
+  }
+  .code {
+    font-family: var(--mono);
+    letter-spacing: 0.08em;
+    color: var(--text);
   }
   .body {
     flex: 1;

@@ -106,8 +106,11 @@ func (a *App) KernelDown(name string) {
 		if s.run == nil || s.run.node != name {
 			continue
 		}
-		s.resetAfter = false
-		a.endRun(s, fmt.Sprintf("（%s 断开了，这一轮已中止）", name))
+		note := fmt.Sprintf("（%s 断开了，这一轮已中止）", name)
+		if text, ok := a.afterRun(s); ok {
+			note += "\n" + text
+		}
+		a.endRun(s, note)
 		a.startRun(s) // 排着队的消息交给别的内核
 	}
 }

@@ -15,6 +15,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -99,6 +100,7 @@ static void send_hello(kernel_t *k)
     cJSON *m = msg_new("hello", NULL);
     cJSON_AddNumberToObject(m, "v", PROTO_VERSION);
     cJSON_AddStringToObject(m, "token", k->conf.token);
+    if (!*k->conf.token && strcmp(k->conf.gateway, "stdio")) cJSON_AddBoolToObject(m, "pair", true);
     cJSON_AddStringToObject(m, "node", k->conf.node);
     cJSON_AddItemToObject(m, "tools", all_tools(k));
     cJSON_AddItemToObject(m, "skills", skills_json(&k->skills));
@@ -488,6 +490,24 @@ static char *build_policy(const cJSON *m, na_mode mode, const char *node)
     return s;
 }
 
+static void disconnect(kernel_t *k, int64_t now, const char *why);
+
+/* 网关同意了配对：口令存进配置目录（只有自己能读），用它重新连上去 */
+static void save_token(kernel_t *k, const char *token, int64_t now)
+{
+    if (!token || !*token || strchr(token, '\n')) return;
+    int fd = open(k->conf.token_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0 || write(fd, token, strlen(token)) < 0 || write(fd, "\n", 1) < 0)
+        log_warn("保存配对口令失败（%s），下次启动要重新配对：%s", k->conf.token_file, strerror(errno));
+    if (fd >= 0) close(fd);
+    free(k->conf.token);
+    k->conf.token = xstrdup(token);
+    k->conf.paired = true;
+    log_info("网关同意了这台电脑接入，口令已保存到 %s", k->conf.token_file);
+    disconnect(k, now, "配对完成，重新连接");
+    k->next_connect = now;
+}
+
 static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
 {
     const char *t = sget(m, "t");
@@ -498,7 +518,26 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         return;
     }
     if (!strcmp(t, "error")) {
+        const char *reason = sget(m, "reason") ? sget(m, "reason") : "";
         log_error("网关报错：%s", sget(m, "detail") ? sget(m, "detail") : "（无详情）");
+        if (!strcmp(reason, "denied")) {
+            log_error("网关没有同意这台电脑接入，内核退出。要重新申请，再启动一次即可");
+            g_stop = 1;
+        } else if (!strcmp(reason, "auth") && k->conf.paired) {
+            log_warn("网关不认这台电脑的配对口令了（可能在网页里移除了它），重新请求配对");
+            unlink(k->conf.token_file);
+            k->conf.token[0] = 0;
+            k->conf.paired = false;
+        }
+        return;
+    }
+    if (!strcmp(t, "pairing")) {
+        log_info("等待网关确认接入：打开网关网页的「设备」页面，核对确认码 %s 后点「允许」",
+                 sget(m, "code") ? sget(m, "code") : "?");
+        return;
+    }
+    if (!strcmp(t, "paired")) {
+        save_token(k, sget(m, "token"), now);
         return;
     }
     if (!strcmp(t, "ls")) {

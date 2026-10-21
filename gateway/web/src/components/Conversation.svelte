@@ -108,6 +108,28 @@
     }
   }
 
+  // 撤回最近一条：排队的直接拿掉，正在处理的先停下，处理完的连同回复从上下文里删掉。撤回的话放回输入框
+  const lastLive = $derived(lastIndex(live, (x) => x.kind === 'user'));
+  const lastBlock = $derived(lastLive >= 0 ? -1 : lastIndex(blocks, (b) => b.type === 'user'));
+  function lastIndex<T>(list: T[], ok: (x: T) => boolean): number {
+    for (let i = list.length - 1; i >= 0; i--) if (ok(list[i])) return i;
+    return -1;
+  }
+  let undoing = $state(false);
+  async function undo() {
+    if (undoing) return;
+    undoing = true;
+    try {
+      const r = await api.post<{ text: string }>(`${sidPath(sid)}/undo`);
+      if (r.text && !text.trim()) text = r.text;
+      store.toast({ kind: 'ok', text: info?.running ? '正在停下，这一轮结束后从上下文里删掉' : '已撤回，内容放回输入框了' });
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      undoing = false;
+    }
+  }
+
   async function act(action: 'stop' | 'reset') {
     if (action === 'reset' && !confirm('清空这个会话的上下文？')) return;
     try {
@@ -152,9 +174,6 @@
         {/if}
       </div>
     </div>
-    {#if info?.running}
-      <button class="btn sm" onclick={() => act('stop')}><Icon name="stop" size={13} />停止</button>
-    {/if}
     <button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>
     <button class="btn sm ghost" onclick={() => store.open({ type: 'session', sid })} title="会话设置"><Icon name="sliders" size={14} /></button>
   </header>
@@ -177,12 +196,13 @@
         </div>
       {/if}
 
-      {#each blocks as b}
+      {#each blocks as b, i}
         {#if b.type === 'env'}
           <div class="sys"><Icon name="folder" size={13} />{b.text}</div>
         {:else if b.type === 'user'}
           <div class="msg user">
             <div class="meta">
+              {#if i === lastBlock}<button class="undo" onclick={undo} disabled={undoing} title="撤回这一轮：连同回复从上下文里删掉，内容放回输入框"><Icon name="undo" size={12} />撤回</button>{/if}
               {#if b.via}<i class="via" style="--c: {channelMeta[viaChannel[b.via]]?.color ?? 'var(--muted)'}"></i>{b.sender ?? b.via}{:else}{b.sender ?? '用户'}{/if}
               {#if b.time}<span>{b.time}</span>{/if}
             </div>
@@ -217,11 +237,12 @@
       {/each}
 
       <!-- 正在进行的这一轮：实时内容 -->
-      {#each live as it}
+      {#each live as it, i}
         {#if it.kind === 'user'}
           {@const raw = it.text}
           <div class="msg user">
             <div class="meta">
+              {#if i === lastLive}<button class="undo" onclick={undo} disabled={undoing} title="撤回：还没处理的直接拿掉，正在处理的先停下再删掉"><Icon name="undo" size={12} />撤回</button>{/if}
               {#if it.via}<i class="via" style="--c: {channelMeta[it.channel ?? '']?.color ?? 'var(--muted)'}"></i>{it.via}{:else}{it.name ?? '用户'}{/if}
               <span>{clock(it.at)}</span>
             </div>
@@ -266,6 +287,9 @@
 
   <div class="composer">
     <textarea bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行。/help 查看命令"></textarea>
+    {#if info?.running}
+      <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
+    {/if}
     <button class="btn primary" onclick={send} disabled={!text.trim() || sending}><Icon name="send" size={14} />发送</button>
   </div>
 </div>
@@ -351,6 +375,29 @@
   }
   .meta span {
     margin-left: 2px;
+  }
+  /* 撤回：只在最后一条用户消息上，鼠标移上去才明显 */
+  .undo {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 7px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--muted);
+    font-size: 11.5px;
+    cursor: pointer;
+    opacity: 0.45;
+    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .msg.user:hover .undo,
+  .undo:focus-visible {
+    opacity: 1;
+  }
+  .undo:hover {
+    color: var(--text);
+    border-color: var(--line-2);
   }
   .via {
     width: 6px;
@@ -578,6 +625,10 @@
   .composer .btn {
     height: 44px;
     border-radius: 13px;
+  }
+  .composer .stop {
+    color: var(--err);
+    border-color: color-mix(in srgb, var(--err) 35%, transparent);
   }
   .gone {
     align-items: center;
