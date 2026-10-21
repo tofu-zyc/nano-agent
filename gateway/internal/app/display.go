@@ -1,0 +1,137 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+)
+
+// ---- 思考强度 ----
+
+func (a *App) thinkingOf(sid string) string {
+	if t := a.store.Settings(sid).Thinking; t != "" {
+		return t
+	}
+	return a.cfg.LLM.Thinking
+}
+
+func thinkingName(level string) string {
+	if level == "" {
+		return "模型默认"
+	}
+	return level
+}
+
+func (a *App) cmdThink(s *sess, who, arg, reply string) {
+	levels := a.cfg.LLM.ThinkingLevels
+	if a.cfg.LLM.ThinkingStyle == "none" || len(levels) == 0 {
+		a.say(s, "没有配置怎么把思考强度传给模型（gateway.toml 的 llm.thinking_style），/think 不起作用", reply)
+		return
+	}
+	cur := a.thinkingOf(s.sid)
+	if arg == "" {
+		a.say(s, fmt.Sprintf("思考强度：%s\n可选：%s，用 /think <强度> 切换", thinkingName(cur), strings.Join(levels, "、")), reply)
+		return
+	}
+	if !a.isAdmin(who) {
+		a.say(s, "只有管理员能切换思考强度", reply)
+		return
+	}
+	if !slices.Contains(levels, arg) {
+		a.say(s, "思考强度只能是 "+strings.Join(levels, "、"), reply)
+		return
+	}
+	if arg == cur {
+		a.say(s, "思考强度已经是 "+arg, reply)
+		return
+	}
+	st := a.store.Settings(s.sid)
+	st.Thinking = arg
+	if err := a.store.SaveSettings(s.sid, st); err != nil {
+		a.say(s, "保存设置失败："+err.Error(), reply)
+		return
+	}
+	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效。\n"+
+		"注意：模型的对话模板会把思考强度写在提示词最前面，切换后这个会话的前缀缓存会失效一次。", arg), reply)
+}
+
+// ---- 时间戳 ----
+
+var weekdays = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+// stamp 是放在用户消息前面的发送时间，比如 [2026-10-21 周二 15:08]。
+// 写进历史后就不再变，不影响前缀缓存；模型也不用调工具就知道现在几点。
+func (a *App) stamp() string {
+	t := a.now().In(a.loc)
+	return fmt.Sprintf("[%s %s %s]", t.Format("2006-01-02"), weekdays[t.Weekday()], t.Format("15:04"))
+}
+
+// ---- 过程显示 ----
+
+// usageLine 总结一轮的用量，重点是缓存命中率：前缀没被破坏的话，多轮对话里应该一直很高。
+func usageLine(r *run, now time.Time) string {
+	u := r.usage
+	in := fmt.Sprintf("输入 %d tokens", u.PromptTokens)
+	if u.PromptTokens > 0 {
+		in += fmt.Sprintf("（缓存命中 %d%%）", u.CachedTokens*100/u.PromptTokens)
+	}
+	out := fmt.Sprintf("输出 %d", u.CompletionTokens)
+	if u.ReasoningTokens > 0 {
+		out += fmt.Sprintf("（思考 %d）", u.ReasoningTokens)
+	}
+	return fmt.Sprintf("%d 次模型调用 · %s · %s · 用时 %.1fs", r.calls, in, out, now.Sub(r.start).Seconds())
+}
+
+// toolDetail 是工具调用的一行摘要，比如 Shell 的命令、Read 的路径
+func toolDetail(name, args string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(args), &m) != nil {
+		return oneLine(args, 100)
+	}
+	str := func(k string) string { v, _ := m[k].(string); return v }
+	switch name {
+	case "Shell":
+		return oneLine(str("command"), 120)
+	case "Read":
+		if off, ok := m["offset"].(float64); ok {
+			return fmt.Sprintf("%s（从第 %d 行）", str("path"), int(off))
+		}
+		return str("path")
+	case "Write":
+		return fmt.Sprintf("%s（%d 字节）", str("path"), len(str("content")))
+	case "Edit":
+		return str("path")
+	case "Grep":
+		parts := []string{}
+		for _, k := range []string{"pattern", "glob", "path"} {
+			if v := str(k); v != "" {
+				parts = append(parts, v)
+			}
+		}
+		return oneLine(strings.Join(parts, "  "), 120)
+	}
+	b, _ := json.Marshal(m)
+	return oneLine(string(b), 100)
+}
+
+// resultDetail 是工具结果的一行摘要：第一行内容，加上总行数
+func resultDetail(content string) string {
+	content = strings.TrimRight(content, "\n")
+	lines := strings.Count(content, "\n") + 1
+	first, _, _ := strings.Cut(strings.TrimSpace(content), "\n")
+	s := oneLine(first, 80)
+	if lines > 1 {
+		s += fmt.Sprintf("（共 %d 行）", lines)
+	}
+	return s
+}
+
+func oneLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}

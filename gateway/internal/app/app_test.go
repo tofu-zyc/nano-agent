@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -54,11 +56,11 @@ type recLLM struct {
 	last llm.Request
 }
 
-func (r *recLLM) Chat(ctx context.Context, req llm.Request) (*llm.Result, error) {
+func (r *recLLM) Chat(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (*llm.Result, error) {
 	r.mu.Lock()
 	r.last = req
 	r.mu.Unlock()
-	return r.Mock.Chat(ctx, req)
+	return r.Mock.Chat(ctx, req, onDelta)
 }
 
 func (r *recLLM) lastReq() llm.Request {
@@ -123,13 +125,13 @@ func setup(t *testing.T) *env {
 	sock := filepath.Join(dir, "k.sock")
 	cfg := &config.Config{
 		Kernel:    config.Kernel{Listen: "unix:" + sock, Token: "tok"},
-		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000},
+		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000, TrimTo: 0.5, ThinkingStyle: "none"},
 		Persona:   config.Persona{Dir: filepath.Join(dir, "personas")},
 		Access:    config.Access{Admins: []string{"fake:u1"}, Guest: "none"},
 		Workspace: config.Workspace{Mode: "ask"},
 		Dir:       filepath.Join(dir, "conf"),
 	}
-	store, err := session.New(filepath.Join(dir, "data"), 20000)
+	store, err := session.New(filepath.Join(dir, "data"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +139,8 @@ func setup(t *testing.T) *env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	rec := &recLLM{}
 	a := New(ctx, cfg, rec, store, persona.New(cfg.Persona.Dir, log), log)
+	a.now = func() time.Time { return time.Date(2026, 10, 21, 15, 8, 0, 0, time.UTC) }
+	a.loc = time.UTC
 	hub := kernel.NewHub("tok", a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)
@@ -179,6 +183,8 @@ func from(id, name string) func(*channel.Message) {
 }
 
 // ---- 用例 ----
+
+const stamp = "[2026-10-21 周三 15:08]"
 
 func TestFinalAnswer(t *testing.T) {
 	e := setup(t)
@@ -241,7 +247,7 @@ func TestGroupNeedsMentionAndPrefixesSender(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
-	if got := msgs[len(msgs)-1].Content; got != "[张三] 几点了" {
+	if got := msgs[len(msgs)-1].Content; got != stamp+" [张三] 几点了" {
 		t.Fatalf("user content: %q", got)
 	}
 }
@@ -264,7 +270,7 @@ func TestQueuedMessagesFromSameSenderAreMerged(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
-	if got := msgs[len(msgs)-1].Content; got != "第二条\n第三条" {
+	if got := msgs[len(msgs)-1].Content; got != stamp+" 第二条\n第三条" {
 		t.Fatalf("merged: %q", got)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
@@ -390,7 +396,7 @@ func TestWorkspaceAndModes(t *testing.T) {
 	if in.Mode != proto.ModeAsk || len(in.Dirs) != 0 {
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); got != "你好" {
+	if got := lastUser(e.roundTrip(t)); got != stamp+" 你好" {
 		t.Fatalf("user content: %q", got)
 	}
 
@@ -405,7 +411,7 @@ func TestWorkspaceAndModes(t *testing.T) {
 	}
 	msgs := e.roundTrip(t)
 	want := "[系统] 工作目录：" + work + "（默认，相对路径和命令都从这里开始）。权限模式：自动，"
-	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n看看目录") {
+	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n"+stamp+" 看看目录") {
 		t.Fatalf("env note: %q", got)
 	}
 	// 系统提示词里不放会变的东西：前缀缓存不会因为换目录而失效
@@ -416,7 +422,7 @@ func TestWorkspaceAndModes(t *testing.T) {
 	// 环境没变就不重复说明
 	e.say("再看看")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); got != "再看看" {
+	if got := lastUser(e.roundTrip(t)); got != stamp+" 再看看" {
 		t.Fatalf("user content: %q", got)
 	}
 
@@ -472,5 +478,169 @@ func TestGuestMode(t *testing.T) {
 	e.say("你好", from("u2", "李四"))
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeReadonly {
 		t.Fatalf("guest mode: %+v", in)
+	}
+}
+
+// ---- 流式显示 ----
+
+type viewEvent struct{ kind, text string }
+
+type streamCh struct {
+	fakeCh
+	mu     sync.Mutex
+	events []viewEvent
+}
+
+func (c *streamCh) OpenRun(_, _ string) channel.RunView { return &recView{c: c} }
+
+func (c *streamCh) log(kind, text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n := len(c.events); n > 0 && c.events[n-1].kind == kind && (kind == "content" || kind == "reasoning") {
+		c.events[n-1].text += text // 相邻的增量合在一起，方便断言
+		return
+	}
+	c.events = append(c.events, viewEvent{kind, text})
+}
+
+func (c *streamCh) snapshot() []viewEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.events)
+}
+
+type recView struct{ c *streamCh }
+
+func (v *recView) Reasoning(t string) { v.c.log("reasoning", t) }
+func (v *recView) Content(t string)   { v.c.log("content", t) }
+func (v *recView) EndMessage()        { v.c.log("end", "") }
+func (v *recView) Tool(n, d string)   { v.c.log("tool", n+" "+d) }
+func (v *recView) ToolResult(ok bool, d string) {
+	v.c.log("result", fmt.Sprint(ok)+" "+d)
+}
+func (v *recView) Note(t string) { v.c.log("note", t) }
+func (v *recView) Close()        { v.c.log("close", "") }
+
+func setupStream(t *testing.T) (*env, *streamCh) {
+	e := setup(t)
+	sc := &streamCh{fakeCh: fakeCh{sent: make(chan string, 100)}}
+	e.a.AddChannel(sc)
+	return e, sc
+}
+
+func (e *env) sayOn(ch channel.Channel, text string) {
+	e.a.OnMessage(ch, channel.Message{ChatID: "c1", SenderID: "u1", SenderName: "张三", Text: text, MsgID: "m1", Mentioned: true})
+}
+
+func TestStreamingView(t *testing.T) {
+	e, sc := setupStream(t)
+	e.a.cfg.LLM.ThinkingStyle, e.a.cfg.LLM.ThinkingLevels = "vllm", []string{"off", "high"}
+	e.sayOn(sc, "/think high")
+	sc.wait(t, "已切换为 high")
+
+	e.sayOn(sc, `!call Shell {"command":"ls -la"}`)
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	turn := e.k.expect(proto.TTurn)
+	if e.llm.lastReq().Thinking != "high" {
+		t.Fatalf("thinking: %q", e.llm.lastReq().Thinking)
+	}
+	e.k.send(proto.Msg{T: proto.TResult, SID: "fake:c1", ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "a.txt\nb.txt\n"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ev := sc.snapshot()
+		if n := len(ev); n > 0 && ev[n-1].kind == "close" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("没等到 close：%+v", sc.snapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ev := sc.snapshot()
+	kinds := ""
+	for _, x := range ev {
+		kinds += x.kind + ","
+	}
+	want := "reasoning,end,tool,result,reasoning,content,end,note,close,"
+	if kinds != want {
+		t.Fatalf("events:\n got %s\nwant %s\n%+v", kinds, want, ev)
+	}
+	if ev[2].text != "Shell ls -la" || ev[3].text != "true a.txt（共 2 行）" || ev[5].text != "（mock）工具结果：a.txt\nb.txt\n" {
+		t.Fatalf("details: %+v", ev)
+	}
+	if !strings.Contains(ev[7].text, "2 次模型调用") || !strings.Contains(ev[7].text, "缓存命中 90%") {
+		t.Fatalf("usage: %q", ev[7].text)
+	}
+	// 正文已经流式显示过，不会再用 Send 发一遍
+	select {
+	case m := <-sc.sent:
+		t.Fatalf("不该再发：%q", m)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestThinkCommand(t *testing.T) {
+	e := setup(t)
+	e.say("/think")
+	e.ch.wait(t, "没有配置")
+	e.a.cfg.LLM.ThinkingStyle, e.a.cfg.LLM.ThinkingLevels = "vllm", []string{"off", "low", "high"}
+	e.say("/think")
+	e.ch.wait(t, "思考强度：模型默认")
+	e.say("/think max")
+	e.ch.wait(t, "只能是 off、low、high")
+	e.say("/think low", from("u2", "李四"))
+	e.ch.wait(t, "只有管理员")
+	e.say("/think low")
+	e.ch.wait(t, "缓存会失效一次")
+	e.say("问题")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.expect(proto.TTurn)
+	if got := e.llm.lastReq().Thinking; got != "low" {
+		t.Fatalf("thinking: %q", got)
+	}
+}
+
+func TestStamp(t *testing.T) {
+	e := setup(t)
+	if got := e.a.stamp(); got != stamp {
+		t.Fatalf("stamp: %q", got)
+	}
+	off := false
+	e.a.cfg.Session.Timestamps = &off
+	e.say("你好")
+	e.k.expect(proto.TInput)
+	if got := lastUser(e.roundTrip(t)); got != "你好" {
+		t.Fatalf("timestamps off: %q", got)
+	}
+}
+
+// 历史超过上限：一次裁掉一大段，之后的请求又是只追加
+func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
+	e := setup(t)
+	e.a.cfg.LLM.MaxHistoryTokens = 600
+	long := strings.Repeat("长", 100) // 约 100 token
+	var prev []llm.Message
+	compactions := 0
+	for i := 0; i < 12; i++ {
+		e.say(long)
+		e.k.expect(proto.TInput)
+		msgs := e.roundTrip(t)
+		if prev != nil && !reflect.DeepEqual(msgs[:min(len(prev), len(msgs))], prev[:min(len(prev), len(msgs))]) {
+			compactions++
+			if !strings.HasPrefix(msgs[1].Content, "[系统] 更早的对话因为太长已经省略。") {
+				t.Fatalf("裁剪后缺少说明：%q", msgs[1].Content[:60])
+			}
+		}
+		prev = msgs
+	}
+	// 每轮约 230 token，上限 600、裁到 300：12 轮里应该只裁几次，而不是每轮都裁
+	if compactions == 0 || compactions > 5 {
+		t.Fatalf("裁剪次数：%d", compactions)
 	}
 }

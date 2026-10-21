@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -43,6 +44,17 @@ type LLM struct {
 	MaxTokens        int            `toml:"max_tokens"`
 	SendReasoning    bool           `toml:"send_reasoning"`
 	Extra            map[string]any `toml:"extra"`
+
+	// 历史超过 max_history_tokens 时，一次裁到它的这个比例，之后只追加，直到下次超出。
+	// 不每次都裁一点，是为了让请求的前缀尽量不变，模型那边的前缀缓存才能命中。
+	TrimTo float64 `toml:"trim_to"`
+
+	// 思考强度。thinking 是默认值（空表示用模型自己的默认），每个会话可以用 /think 改；
+	// thinking_style 是传给模型的方式：vllm（chat_template_kwargs）| openai（reasoning_effort）| none；
+	// thinking_levels 是 /think 可选的值。
+	Thinking       string   `toml:"thinking"`
+	ThinkingStyle  string   `toml:"thinking_style"`
+	ThinkingLevels []string `toml:"thinking_levels"`
 }
 
 type Persona struct {
@@ -50,7 +62,9 @@ type Persona struct {
 }
 
 type Session struct {
-	DataDir string `toml:"data_dir"`
+	DataDir    string `toml:"data_dir"`
+	Timestamps *bool  `toml:"timestamps"` // 在用户消息前加上发送时间，默认开
+	Timezone   string `toml:"timezone"`   // 时间戳用的时区，比如 Asia/Shanghai；空表示系统时区
 }
 
 type Access struct {
@@ -69,8 +83,13 @@ type Workspace struct {
 }
 
 type CLI struct {
-	Enabled bool `toml:"enabled"`
+	Enabled       bool  `toml:"enabled"`
+	ShowReasoning *bool `toml:"show_reasoning"` // 显示模型的思考过程，默认开
+	ShowUsage     *bool `toml:"show_usage"`     // 每轮结束后显示用量和缓存命中率，默认开
 }
+
+// On 读取一个默认为 true 的开关。
+func On(b *bool) bool { return b == nil || *b }
 
 type Telegram struct {
 	Enabled       bool   `toml:"enabled"`
@@ -162,6 +181,18 @@ func (c *Config) applyDefaults() {
 	def(&c.Feishu.Domain, "feishu")
 	def(&c.Workspace.Mode, "ask")
 	def(&c.Access.Guest, "none")
+	def(&c.LLM.ThinkingStyle, "none")
+	if c.LLM.TrimTo <= 0 || c.LLM.TrimTo >= 1 {
+		c.LLM.TrimTo = 0.5
+	}
+	if len(c.LLM.ThinkingLevels) == 0 {
+		switch c.LLM.ThinkingStyle {
+		case "vllm":
+			c.LLM.ThinkingLevels = []string{"off", "low", "high", "max"}
+		case "openai":
+			c.LLM.ThinkingLevels = []string{"off", "low", "medium", "high"}
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -186,6 +217,19 @@ func (c *Config) validate() error {
 	}
 	if c.Feishu.Domain != "feishu" && c.Feishu.Domain != "lark" {
 		errs = append(errs, fmt.Errorf("feishu.domain 只能是 feishu 或 lark，现在是 %q", c.Feishu.Domain))
+	}
+	switch c.LLM.ThinkingStyle {
+	case "vllm", "openai", "none":
+	default:
+		errs = append(errs, fmt.Errorf("llm.thinking_style 只能是 vllm、openai 或 none，现在是 %q", c.LLM.ThinkingStyle))
+	}
+	if c.LLM.Thinking != "" && c.LLM.ThinkingStyle == "none" {
+		errs = append(errs, errors.New("设置了 llm.thinking，但 llm.thinking_style 是 none（不知道怎么传给模型）"))
+	}
+	if c.Session.Timezone != "" {
+		if _, err := time.LoadLocation(c.Session.Timezone); err != nil {
+			errs = append(errs, fmt.Errorf("session.timezone：%w", err))
+		}
 	}
 	switch c.Workspace.Mode {
 	case "auto", "ask", "readonly":

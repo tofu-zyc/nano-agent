@@ -48,7 +48,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	store, err := session.New(cfg.Session.DataDir, cfg.LLM.MaxHistoryTokens*2)
+	store, err := session.New(cfg.Session.DataDir)
 	if err != nil {
 		log.Error("打开数据目录失败", "dir", cfg.Session.DataDir, "err", err)
 		os.Exit(1)
@@ -88,7 +88,7 @@ func main() {
 		chans = append(chans, fs)
 	}
 	if cfg.CLI.Enabled {
-		chans = append(chans, channel.NewCLI(os.Stdin, os.Stdout))
+		chans = append(chans, channel.NewCLI(os.Stdin, os.Stdout, config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage)))
 	}
 
 	names := make([]string, len(chans))

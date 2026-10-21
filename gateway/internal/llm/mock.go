@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 )
@@ -11,14 +12,34 @@ import (
 //
 //	用户消息里含 "!call 工具名 {json参数}" → 请求调用该工具
 //	最后一条是工具结果                       → 把工具结果复述出来作为最终回复
-//	其他                                     → 回显用户消息（去掉网关加的 [系统] 环境说明）
+//	其他                                     → 回显用户消息（去掉网关加的环境说明和时间戳）
+//
+// 流式请求时把回复切成几段依次输出；开了思考（Thinking 不是空或 off）时先输出一段假的思考。
 type Mock struct {
 	n atomic.Int64
 }
 
-func (m *Mock) Chat(ctx context.Context, req Request) (*Result, error) {
+var mockStamp = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2} [^\]]*\] `)
+
+func (m *Mock) Chat(ctx context.Context, req Request, onDelta func(Delta)) (*Result, error) {
+	res := m.reply(req)
+	if onDelta != nil {
+		if req.Thinking != "" && req.Thinking != "off" {
+			res.Reasoning = "（mock）想一想……"
+			onDelta(Delta{Reasoning: res.Reasoning})
+		}
+		r := []rune(res.Content)
+		for i := 0; i < len(r); i += 4 {
+			onDelta(Delta{Content: string(r[i:min(i+4, len(r))])})
+		}
+	}
+	res.Usage = Usage{PromptTokens: 100, CompletionTokens: 10, CachedTokens: 90}
+	return res, nil
+}
+
+func (m *Mock) reply(req Request) *Result {
 	if len(req.Messages) == 0 {
-		return &Result{Reason: ReasonFinal, Content: "（mock）没有消息"}, nil
+		return &Result{Reason: ReasonFinal, Content: "（mock）没有消息"}
 	}
 	last := req.Messages[len(req.Messages)-1]
 	if last.Role == "tool" {
@@ -26,7 +47,7 @@ func (m *Mock) Chat(ctx context.Context, req Request) (*Result, error) {
 		for i := len(req.Messages) - 1; i >= 0 && req.Messages[i].Role == "tool"; i-- {
 			parts = append([]string{req.Messages[i].Content}, parts...)
 		}
-		return &Result{Reason: ReasonFinal, Content: "（mock）工具结果：" + strings.Join(parts, " | ")}, nil
+		return &Result{Reason: ReasonFinal, Content: "（mock）工具结果：" + strings.Join(parts, " | ")}
 	}
 	text := last.Content
 	if i := strings.Index(text, "!call "); i >= 0 {
@@ -38,12 +59,13 @@ func (m *Mock) Chat(ctx context.Context, req Request) (*Result, error) {
 			ID:       fmt.Sprintf("mock-%d", m.n.Add(1)),
 			Type:     "function",
 			Function: FunctionCall{Name: name, Arguments: strings.TrimSpace(args)},
-		}}}, nil
+		}}}
 	}
 	if strings.HasPrefix(text, "[系统] ") {
 		if _, rest, ok := strings.Cut(text, "\n"); ok {
 			text = rest
 		}
 	}
-	return &Result{Reason: ReasonFinal, Content: "（mock）收到：" + text}, nil
+	text = mockStamp.ReplaceAllString(text, "")
+	return &Result{Reason: ReasonFinal, Content: "（mock）收到：" + text}
 }

@@ -20,11 +20,12 @@ func msgTokens(m Msg) int {
 	return b/3 + 8
 }
 
-// Trim 在不超过 budget 的前提下保留尽量多的最近历史。只在用户消息处切，
-// 这样不会把一次工具调用和它的结果拆开；最后一条用户消息之后的内容（当前这一轮）永远保留。
-func Trim(h []Msg, budget int) []Msg {
+// CutPoint 返回从哪条消息开始保留，才能在不超过 budget 的前提下保留尽量多的最近历史。
+// 只在用户消息处切，这样不会把一次工具调用和它的结果拆开；最后一条用户消息之后的内容
+// （当前这一轮）永远保留。不需要切时返回 0。
+func CutPoint(h []Msg, budget int) int {
 	if Estimate(h) <= budget {
-		return h
+		return 0
 	}
 	last := -1
 	for i := len(h) - 1; i >= 0; i-- {
@@ -34,7 +35,7 @@ func Trim(h []Msg, budget int) []Msg {
 		}
 	}
 	if last < 0 {
-		return h
+		return 0
 	}
 	// 从后往前累加，找到能放下的最早的用户消息
 	total := 0
@@ -48,7 +49,7 @@ func Trim(h []Msg, budget int) []Msg {
 			cut = i
 		}
 	}
-	return h[cut:]
+	return cut
 }
 
 // Sanitize 保证每个工具调用后面都紧跟着它的结果（OpenAI 格式的硬性要求）：
@@ -90,10 +91,11 @@ func Sanitize(h []Msg) []Msg {
 	return out
 }
 
-// BuildMessages 生成发给模型的消息：系统提示 + 修补、裁剪后的历史。
+// BuildMessages 生成发给模型的消息：系统提示 + 修补过的历史。summary 是被 Compact 丢掉的
+// 那部分历史的替代说明，放在第一条用户消息前面。
 // sendReasoning 为 true 时，当前这一轮（最后一条用户消息之后）的推理内容会回传给模型。
-func BuildMessages(system string, h []Msg, budget int, sendReasoning bool) []llm.Message {
-	h = Trim(Sanitize(h), budget)
+func BuildMessages(system, summary string, h []Msg, sendReasoning bool) []llm.Message {
+	h = Sanitize(h)
 	last := -1
 	for i := len(h) - 1; i >= 0; i-- {
 		if h[i].Role == "user" {
@@ -105,8 +107,13 @@ func BuildMessages(system string, h []Msg, budget int, sendReasoning bool) []llm
 	if system != "" {
 		msgs = append(msgs, llm.Message{Role: "system", Content: system})
 	}
+	first := true
 	for i, m := range h {
 		lm := llm.Message{Role: m.Role, Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+		if first && summary != "" && m.Role == "user" {
+			lm.Content = summary + "\n" + lm.Content
+			first = false
+		}
 		if sendReasoning && i > last && m.Role == "assistant" {
 			lm.ReasoningContent = m.Reasoning
 		}

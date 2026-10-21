@@ -128,3 +128,42 @@ func TestFeishuExtractPost(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestCLIRunView(t *testing.T) {
+	var out strings.Builder
+	c := NewCLI(strings.NewReader(""), &out, true, true)
+	v := c.OpenRun("local", "")
+	v.Reasoning("先看看")
+	v.Reasoning("目录\n结构")
+	v.EndMessage()
+	v.Tool("Shell", "ls")
+	v.ToolResult(true, "a.txt（共 2 行）")
+	v.Content("有两个文件：\n")
+	v.Content("\na.txt 和 b.txt\n")
+	v.EndMessage()
+	c.Send(context.Background(), "local", "（已停止）", "")
+	v.Note("1 次模型调用")
+	v.Close()
+	v.Content("关闭之后不再显示")
+	want := "思考> 先看看目录\n      结构\n" +
+		"  ⚙ Shell  ls\n" +
+		"    ✓ a.txt（共 2 行）\n" +
+		"bot> 有两个文件：\n\n     a.txt 和 b.txt\n" +
+		"bot> （已停止）\n" +
+		"  1 次模型调用\n"
+	if out.String() != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out.String(), want)
+	}
+
+	// 关掉思考和用量显示
+	out.Reset()
+	c = NewCLI(strings.NewReader(""), &out, false, false)
+	v = c.OpenRun("local", "")
+	v.Reasoning("不显示")
+	v.Content("你好")
+	v.Note("不显示")
+	v.Close()
+	if out.String() != "bot> 你好\n" {
+		t.Fatalf("got %q", out.String())
+	}
+}

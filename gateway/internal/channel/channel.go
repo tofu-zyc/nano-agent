@@ -32,6 +32,24 @@ type Typer interface {
 	Typing(ctx context.Context, chatID string) error
 }
 
+// Streamer 是可选能力：边生成边显示。每一轮处理打开一个 RunView，直到这一轮结束；
+// 回复正文已经通过 RunView 显示过，就不会再用 Send 发一遍。
+type Streamer interface {
+	OpenRun(chatID, replyTo string) RunView
+}
+
+// RunView 显示一轮处理的过程。方法可能在不同的协程里调用，实现要自己加锁，并且不能阻塞太久
+// （命令行直接打印；聊天平台要自己缓冲、限频）。Close 之后的调用应当被忽略。
+type RunView interface {
+	Reasoning(text string)             // 思考内容的增量
+	Content(text string)               // 回复正文的增量
+	EndMessage()                       // 一次模型调用的输出结束
+	Tool(name, detail string)          // 开始执行一个工具
+	ToolResult(ok bool, detail string) // 工具执行完
+	Note(text string)                  // 附加说明，比如这一轮的用量
+	Close()
+}
+
 // Split 把长文本按 rune 数切成多段，尽量在换行处断开。
 func Split(text string, limit int) []string {
 	var parts []string

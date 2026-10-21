@@ -40,6 +40,13 @@ type ToolFunction struct {
 type Request struct {
 	Messages []Message
 	Tools    []Tool
+	Thinking string // 思考强度：空表示用模型默认，"off" 关闭，其他值按 llm.thinking_style 传给模型
+}
+
+// Delta 是流式输出的一个片段。
+type Delta struct {
+	Reasoning string
+	Content   string
 }
 
 // 模型一轮的结局。
@@ -61,8 +68,12 @@ type Result struct {
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`    // 输入里命中前缀缓存的部分
+	ReasoningTokens  int `json:"reasoning_tokens,omitempty"` // 输出里思考的部分
 }
 
 type Client interface {
-	Chat(ctx context.Context, req Request) (*Result, error)
+	// Chat 请求一轮回复。onDelta 不为 nil 时走流式接口，生成过程中的片段依次交给它
+	// （在调用 Chat 的协程里执行），返回的 Result 仍然是完整的。
+	Chat(ctx context.Context, req Request, onDelta func(Delta)) (*Result, error)
 }

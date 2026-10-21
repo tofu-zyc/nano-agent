@@ -14,9 +14,15 @@ type Settings struct {
 	RO      []string `json:"ro,omitempty"`       // 只读的工作目录
 	Mode    string   `json:"mode,omitempty"`     // 空表示用配置里的默认模式
 
+	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用配置里的默认值
+
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。
 	EnvNote string `json:"env_note,omitempty"`
+
+	// Base 是历史文件里已经被 Compact 丢掉的消息数；Summary 代替被丢掉的部分，放在历史最前面。
+	Base    int    `json:"base,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 func (s *Store) settingsFile(sid string) string {

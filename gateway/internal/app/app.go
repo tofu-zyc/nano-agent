@@ -30,6 +30,7 @@ const helpText = `可用命令：
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）
 /mode    查看和切换权限模式：auto 自动、ask 审批、readonly 只读（切换需管理员）
+/think   查看和切换思考强度（切换需管理员）
 /approve <编号>  批准一次工具执行（需管理员）
 /deny <编号>     拒绝一次工具执行（需管理员）`
 
@@ -43,6 +44,9 @@ type App struct {
 	log     *slog.Logger
 
 	outboxes map[string]chan outItem
+
+	now func() time.Time // 测试里可以换成固定时间
+	loc *time.Location   // 时间戳用的时区
 
 	mu        sync.Mutex
 	tools     []llm.Tool
@@ -71,6 +75,12 @@ type run struct {
 	truncated  bool
 	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
 	stopTyping func()
+
+	view     channel.RunView // 支持流式显示的通道才有
+	streamed bool            // 回复正文已经通过 view 显示过了
+	start    time.Time
+	calls    int       // 这一轮请求了几次模型
+	usage    llm.Usage // 这一轮的累计用量
 }
 
 type approval struct {
@@ -85,8 +95,15 @@ type outItem struct {
 }
 
 func New(ctx context.Context, cfg *config.Config, client llm.Client, store *session.Store, p *persona.Loader, log *slog.Logger) *App {
+	loc := time.Local
+	if cfg.Session.Timezone != "" {
+		if l, err := time.LoadLocation(cfg.Session.Timezone); err == nil {
+			loc = l
+		}
+	}
 	return &App{
 		ctx: ctx, cfg: cfg, llm: client, store: store, persona: p, log: log,
+		now: time.Now, loc: loc,
 		outboxes:  map[string]chan outItem{},
 		sessions:  map[string]*sess{},
 		approvals: map[int]*approval{},
@@ -113,7 +130,7 @@ func (a *App) AddChannel(ch channel.Channel) {
 // ---- 聊天消息 ----
 
 var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"dir": true, "mode": true}
+	"dir": true, "mode": true, "think": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -171,6 +188,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "mode":
 		a.cmdMode(s, who, strings.ToLower(arg), reply)
+		return
+	case "think":
+		a.cmdThink(s, who, strings.ToLower(arg), reply)
 		return
 	}
 	if m.Text == "" || (m.Group && !m.Mentioned) {
@@ -252,6 +272,9 @@ func (a *App) startRun(s *sess) {
 	if s.group {
 		content = fmt.Sprintf("[%s] %s", head.SenderName, content)
 	}
+	if config.On(a.cfg.Session.Timestamps) {
+		content = a.stamp() + " " + content
+	}
 	// 工作目录或权限变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	w := a.workspaceOf(s.sid)
 	st := a.store.Settings(s.sid)
@@ -267,8 +290,11 @@ func (a *App) startRun(s *sess) {
 	}
 
 	a.runSeq++
-	r := &run{id: a.runSeq, from: s.ch.Name() + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1])}
+	r := &run{id: a.runSeq, from: s.ch.Name() + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1]), start: a.now()}
 	r.stopTyping = a.startTyping(s)
+	if st, ok := s.ch.(channel.Streamer); ok {
+		r.view = st.OpenRun(s.chatID, r.replyTo)
+	}
 	s.run = r
 	mode := a.runMode(w, r.from)
 	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n, "mode", mode)
@@ -288,6 +314,9 @@ func (a *App) endRun(s *sess, note string) {
 		r.cancelLLM()
 	}
 	r.stopTyping()
+	if r.view != nil {
+		r.view.Close()
+	}
 	s.run = nil
 	for n, ap := range a.approvals {
 		if ap.sid == s.sid {
@@ -395,6 +424,9 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content}); err != nil {
 			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 		}
+		if s.run.view != nil {
+			s.run.view.ToolResult(m.OK == nil || *m.OK, resultDetail(m.Content))
+		}
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
 				delete(a.approvals, n)
@@ -421,11 +453,13 @@ func (a *App) finish(s *sess, status, detail string) {
 	switch status {
 	case proto.StatusOK:
 		note = r.final
-		if strings.TrimSpace(note) == "" {
+		if r.streamed {
+			note = "" // 已经边生成边显示过了
+		} else if strings.TrimSpace(note) == "" {
 			note = "（模型没有返回内容）"
 		}
 		if r.truncated {
-			note += "\n\n（回复太长，被截断了）"
+			note = strings.TrimLeft(note+"\n\n（回复太长，被截断了）", "\n")
 		}
 	case proto.StatusBudget:
 		note = "（这一轮调用工具的次数达到上限，已停止）"
@@ -435,7 +469,9 @@ func (a *App) finish(s *sess, status, detail string) {
 		note = "（已停止）"
 	case proto.StatusRefused:
 		note = r.final
-		if note == "" {
+		if r.streamed {
+			note = ""
+		} else if note == "" {
 			note = "（模型拒绝了这个请求）"
 		}
 	default:
@@ -448,7 +484,11 @@ func (a *App) finish(s *sess, status, detail string) {
 		}
 		note = "上下文已清空"
 	}
-	a.log.Info("处理结束", "sid", s.sid, "status", status)
+	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
+		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)
+	if r.view != nil && r.calls > 0 {
+		r.view.Note(usageLine(r, a.now()))
+	}
 	a.endRun(s, note)
 	a.startRun(s)
 }
@@ -460,17 +500,39 @@ func (a *App) callModel(s *sess) {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
 	}
+	// 历史太长时一次裁掉一大段；平时只追加，请求的前缀不变，缓存才能命中
+	high := a.cfg.LLM.MaxHistoryTokens
+	if n, err := a.store.Compact(s.sid, high, int(float64(high)*a.cfg.LLM.TrimTo)); err != nil {
+		a.log.Warn("裁剪上下文失败", "sid", s.sid, "err", err)
+	} else if n > 0 {
+		a.log.Info("上下文超过上限，裁掉了最早的一段", "sid", s.sid, "messages", n)
+	}
 	system, _ := a.persona.For(s.sid)
+	st := a.store.Settings(s.sid)
 	req := llm.Request{
-		Messages: session.BuildMessages(system, a.store.History(s.sid), a.cfg.LLM.MaxHistoryTokens, a.cfg.LLM.SendReasoning),
+		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning),
 		Tools:    slices.Clone(a.tools),
+		Thinking: a.thinkingOf(s.sid),
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
+	r.calls++
+
+	var onDelta func(llm.Delta)
+	if view := r.view; view != nil {
+		onDelta = func(d llm.Delta) {
+			if d.Reasoning != "" {
+				view.Reasoning(d.Reasoning)
+			}
+			if d.Content != "" {
+				view.Content(d.Content)
+			}
+		}
+	}
 
 	go func() {
 		start := time.Now()
-		res, err := a.llm.Chat(ctx, req)
+		res, err := a.llm.Chat(ctx, req, onDelta)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		stale := s.run != r || ctx.Err() != nil // run 已经结束（停止、超时、断线），结果作废
@@ -479,15 +541,28 @@ func (a *App) callModel(s *sess) {
 			return
 		}
 		r.cancelLLM = nil
+		if r.view != nil {
+			r.view.EndMessage()
+		}
 		if err != nil {
 			a.log.Warn("模型请求失败", "sid", s.sid, "err", err)
 			a.hub.Send(proto.Msg{T: proto.TTurn, SID: s.sid, Reason: proto.ReasonError, Detail: err.Error()})
 			return
 		}
+		u := res.Usage
+		r.usage.PromptTokens += u.PromptTokens
+		r.usage.CachedTokens += u.CachedTokens
+		r.usage.CompletionTokens += u.CompletionTokens
+		r.usage.ReasoningTokens += u.ReasoningTokens
+		if r.view != nil && res.Content != "" {
+			r.streamed = true
+		}
 		a.log.Info("模型回复", "sid", s.sid, "reason", res.Reason, "calls", len(res.Calls),
-			"prompt_tokens", res.Usage.PromptTokens, "completion_tokens", res.Usage.CompletionTokens,
+			"prompt_tokens", u.PromptTokens, "cached_tokens", u.CachedTokens,
+			"completion_tokens", u.CompletionTokens, "reasoning_tokens", u.ReasoningTokens,
 			"took", time.Since(start).Round(time.Millisecond))
-		if err := a.store.Append(s.sid, session.Msg{Role: "assistant", Content: res.Content, ToolCalls: res.Calls, Reasoning: res.Reasoning}); err != nil {
+		if err := a.store.Append(s.sid, session.Msg{Role: "assistant", Content: res.Content, ToolCalls: res.Calls,
+			Reasoning: res.Reasoning, Usage: &u}); err != nil {
 			a.log.Warn("保存模型回复失败", "sid", s.sid, "err", err)
 		}
 		turn := proto.Msg{T: proto.TTurn, SID: s.sid}
@@ -496,6 +571,9 @@ func (a *App) callModel(s *sess) {
 			turn.Reason = proto.ReasonToolUse
 			for _, c := range res.Calls {
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
+				if r.view != nil {
+					r.view.Tool(c.Function.Name, toolDetail(c.Function.Name, c.Function.Arguments))
+				}
 			}
 		case llm.ReasonRefused:
 			turn.Reason = proto.ReasonRefused
