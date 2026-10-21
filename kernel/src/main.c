@@ -7,6 +7,7 @@
 #include "conf.h"
 #include "core.h"
 #include "link.h"
+#include "remote.h"
 #include "runner.h"
 #include "tools.h"
 #include "util.h"
@@ -51,6 +52,7 @@ typedef struct {
     char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
     na_core        *core;
     runner_t        runner;
+    remotes_t       remotes;     /* 通过 SSH 执行工具的服务器 */
     link_t          link;
     int64_t         last_ping;
     int64_t         next_connect;
@@ -82,7 +84,27 @@ static void send_hello(kernel_t *k)
     cJSON_AddItemToObject(m, "tools", tools_specs());
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
+    cJSON_AddItemToObject(m, "remotes", remotes_json(&k->remotes));
     link_send(&k->link, m);
+}
+
+/* 服务器能不能用变了，告诉网关 */
+static void send_remotes(kernel_t *k)
+{
+    if (k->link.fd < 0) return;
+    cJSON *m = msg_new("remotes", NULL);
+    cJSON_AddItemToObject(m, "remotes", remotes_json(&k->remotes));
+    link_send(&k->link, m);
+}
+
+/* input 里的 node：本机（空或者等于自己的名字）返回 NULL；服务器返回它；不认识时 *unknown 为 true */
+static remote_t *target_of(kernel_t *k, const char *node, bool *unknown)
+{
+    *unknown = false;
+    if (!node || !*node || !strcmp(node, k->conf.node)) return NULL;
+    remote_t *rm = remotes_find(&k->remotes, node);
+    if (!rm) *unknown = true;
+    return rm;
 }
 
 /* ---- 命令 → 外部动作 ---- */
@@ -131,9 +153,52 @@ static int cmp_name(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-static void handle_ls(kernel_t *k, const cJSON *m)
+/* 服务器上的目录：在服务器上跑 nano-exec --ls，结束后在 collect_finished 里回复 */
+static void remote_ls(kernel_t *k, remote_t *rm, const char *id, const char *p, int64_t now)
+{
+    char err[256] = "";
+    if (rm->state != RM_READY) {
+        snprintf(err, sizeof err, "服务器 %s 现在用不了：%s", rm->conf->name, rm->detail ? rm->detail : "还在准备");
+    } else {
+        char *qp = shell_quote(p && *p ? p : "~");
+        char *args = xasprintf("--ls %s", qp);
+        char **argv = remote_exec_argv(&k->remotes, rm, args);
+        job_t *j = runner_start_ex(&k->runner, argv, "", id ? id : "", rm->conf->name, xstrdup(""), 0, err, sizeof err);
+        argv_free(argv);
+        free(args);
+        free(qp);
+        if (j) {
+            j->kind = JOB_LS;
+            j->tag = remotes_index(&k->remotes, rm);
+            j->close_in = true;
+            return;
+        }
+    }
+    (void)now;
+    cJSON *r = msg_new("ls_result", NULL);
+    cJSON_AddStringToObject(r, "id", id ? id : "");
+    cJSON_AddBoolToObject(r, "ok", false);
+    cJSON_AddStringToObject(r, "detail", err);
+    link_send(&k->link, r);
+}
+
+static void handle_ls(kernel_t *k, const cJSON *m, int64_t now)
 {
     const char *id = sget(m, "id"), *p = sget(m, "path");
+    bool unknown;
+    remote_t *rm = target_of(k, sget(m, "node"), &unknown);
+    if (rm || unknown) {
+        if (rm) {
+            remote_ls(k, rm, id, p, now);
+            return;
+        }
+        cJSON *r = msg_new("ls_result", NULL);
+        cJSON_AddStringToObject(r, "id", id ? id : "");
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "detail", "这个内核没有配置这台服务器");
+        link_send(&k->link, r);
+        return;
+    }
     const char *home = getenv("HOME");
     if (!home || home[0] != '/') home = "/";
     char *full = !p || !*p || !strcmp(p, "~") ? xstrdup(home)
@@ -198,8 +263,19 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         cJSON_Delete(req);
         req = cJSON_CreateObject();
     }
-    bool ok = true;
-    for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok; key++)
+    bool ok = true, unknown;
+    char *node = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "node"));
+    remote_t *rm = target_of(k, node, &unknown);
+    if (unknown) {
+        snprintf(err, sizeof err, "这个内核没有配置服务器 %s", node);
+        ok = false;
+    } else if (rm && rm->state != RM_READY) {
+        snprintf(err, sizeof err, "服务器 %s 现在用不了：%s", rm->conf->name, rm->detail ? rm->detail : "还在准备执行器");
+        ok = false;
+    }
+    cJSON_DeleteItemFromObjectCaseSensitive(req, "node");
+    /* 工作目录是服务器上的路径时，由服务器上的执行器自己把关 */
+    for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok && !rm; key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, sizeof err);
     if (ok) {
         cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
@@ -211,9 +287,21 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         char *body = cJSON_PrintUnformatted(req);
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
-        char *argv[] = { k->conf.exec, NULL };
-        ok = runner_start(&k->runner, argv, c->sid, c->id, c->name, line, err, sizeof err) == 0;
-        if (ok) log_info("执行 %s（%s）", c->name, c->id);
+        if (rm) {
+            char **argv = remote_exec_argv(&k->remotes, rm, NULL);
+            job_t *j = runner_start_ex(&k->runner, argv, c->sid, c->id, c->name, line, strlen(line), err, sizeof err);
+            argv_free(argv);
+            if (j) {
+                j->kind = JOB_REMOTE_TOOL;
+                j->tag = remotes_index(&k->remotes, rm);
+            }
+            ok = j != NULL;
+            if (ok) log_info("在 %s 上执行 %s（%s）", rm->conf->name, c->name, c->id);
+        } else {
+            char *argv[] = { k->conf.exec, NULL };
+            ok = runner_start(&k->runner, argv, c->sid, c->id, c->name, line, err, sizeof err) == 0;
+            if (ok) log_info("执行 %s（%s）", c->name, c->id);
+        }
     }
     cJSON_Delete(req);
     if (ok) return;
@@ -236,7 +324,7 @@ static void pump(kernel_t *k, int64_t now)
             cJSON_AddStringToObject(m, "id", c->id);
             cJSON_AddBoolToObject(m, "ok", c->ok);
             cJSON_AddStringToObject(m, "content", c->text ? c->text : "");
-            if (!c->ok) log_info("调用 %s 没有成功：%.200s", c->id, c->text ? c->text : "");
+            if (!c->ok) log_info("调用 %s 没有成功：%.*s", c->id, (int)utf8_cut(c->text ? c->text : "", c->text ? strlen(c->text) : 0, 200), c->text ? c->text : "");
             break;
         case NA_CMD_APPROVE_REQ: {
             m = msg_new("approve_req", c->sid);
@@ -292,10 +380,12 @@ static na_mode parse_mode(const char *s)
     return NA_MODE_NONE;
 }
 
-/* input 里的工作目录设置 → 交给执行器的约束（内核状态机不解析，原样带着） */
-static char *build_policy(const cJSON *m, na_mode mode)
+/* input 里的工作目录设置 → 交给执行器的约束（内核状态机不解析，原样带着）。
+ * node 是工具在哪台服务器上执行（本机时没有），执行时取出来。 */
+static char *build_policy(const cJSON *m, na_mode mode, const char *node)
 {
     cJSON *p = cJSON_CreateObject();
+    if (node) cJSON_AddStringToObject(p, "node", node);
     const char *keys[] = { "dirs", "ro", "rw" };
     for (size_t i = 0; i < 3; i++) {
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(m, keys[i]);
@@ -321,7 +411,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         return;
     }
     if (!strcmp(t, "ls")) {
-        handle_ls(k, m);
+        handle_ls(k, m, now);
         return;
     }
 
@@ -335,10 +425,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
-        policy = build_policy(m, ev.mode);
+        bool unknown;
+        const char *node = sget(m, "node");
+        remote_t *rm = target_of(k, node, &unknown);
+        /* 不认识的服务器：照常开始，执行工具时报错；有没有沙箱按最保守的算 */
+        ev.sandbox = rm ? (rm->landlock > 0 ? NA_SB_YES : NA_SB_NO) : unknown ? NA_SB_NO : NA_SB_DEFAULT;
+        policy = build_policy(m, ev.mode, rm || unknown ? node : NULL);
         ev.policy = policy;
-        log_info("run 开始 sid=%s from=%s mode=%s", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
-                 sget(m, "mode") ? sget(m, "mode") : "none");
+        log_info("run 开始 sid=%s from=%s mode=%s%s%s", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
+                 sget(m, "mode") ? sget(m, "mode") : "none", rm || unknown ? " 在 " : "", rm || unknown ? node : "");
     } else if (!strcmp(t, "turn")) {
         ev.type = NA_EV_TURN;
         ev.reason = parse_reason(sget(m, "reason"));
@@ -417,13 +512,43 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     k->next_connect = now + k->backoff;
 }
 
+/* 服务器上 --ls 的结果 → ls_result */
+static void finish_ls(kernel_t *k, const job_t *j)
+{
+    cJSON *r = cJSON_ParseWithLength(j->out.p ? j->out.p : "", j->out.len);
+    if (!cJSON_IsObject(r)) {
+        cJSON_Delete(r);
+        r = cJSON_CreateObject();
+        cJSON_AddBoolToObject(r, "ok", false);
+        bool ok;
+        char *why = job_result(j, &ok);
+        cJSON_AddStringToObject(r, "detail", why);
+        free(why);
+    }
+    cJSON_AddStringToObject(r, "t", "ls_result");
+    cJSON_AddStringToObject(r, "id", j->id);
+    link_send(&k->link, r);
+}
+
 static void collect_finished(kernel_t *k, int64_t now)
 {
     job_t *j;
     while ((j = runner_take_finished(&k->runner, now))) {
-        if (!j->killed) {
+        if (j->kind == JOB_PREP) {
+            remotes_on_job(&k->remotes, &k->runner, j, now);
+        } else if (j->kind == JOB_LS) {
+            if (!j->killed) finish_ls(k, j);
+        } else if (!j->killed) {
             bool ok;
             char *res = job_result(j, &ok);
+            /* ssh 自己失败（退出码 255）又没有执行器的结果：连不上服务器，重新准备 */
+            remote_t *rm = j->kind == JOB_REMOTE_TOOL && j->tag >= 0 && (size_t)j->tag < k->remotes.n ? &k->remotes.list[j->tag] : NULL;
+            if (rm && !ok && WIFEXITED(j->status) && WEXITSTATUS(j->status) == 255 && !strstr(res, "\"ok\"")) {
+                char *why = xasprintf("连不上服务器 %s：%s", rm->conf->name, res);
+                remote_failed(&k->remotes, rm, why, now);
+                free(res);
+                res = why;
+            }
             log_info("%s（%s）%s", j->name, j->id, ok ? "完成" : "失败");
             na_event ev = { .type = NA_EV_TOOL_DONE, .sid = j->sid, .id = j->id, .ok = ok, .content = res };
             na_core_feed(k->core, now, &ev);
@@ -491,7 +616,7 @@ static void loop(kernel_t *k)
                     if (!m) break;
                     if (na_log_level <= NA_LOG_DEBUG) {
                         char *s = cJSON_PrintUnformatted(m);
-                        log_debug("<- %.500s", s);
+                        log_debug("<- %.*s", (int)utf8_cut(s, strlen(s), 500), s);
                         cJSON_free(s);
                     }
                     handle_msg(k, m, now);
@@ -505,6 +630,11 @@ static void loop(kernel_t *k)
 
         if (np > base) runner_on_poll(&k->runner, pfds + base, refs + base, np - base);
         collect_finished(k, now);
+        remotes_tick(&k->remotes, &k->runner, now);
+        if (k->remotes.changed) {
+            k->remotes.changed = false;
+            send_remotes(k);
+        }
 
         na_event tick = { .type = NA_EV_TICK };
         na_core_feed(k->core, now, &tick);
@@ -636,13 +766,23 @@ int main(int argc, char **argv)
         return 1;
     }
     k.tools = tools_policies(&k.ntools);
+    if (remotes_init(&k.remotes, &k.conf, err, sizeof err) < 0) {
+        log_error("%s", err);
+        free(k.exec_real);
+        kconf_free(&k.conf);
+        return 1;
+    }
 
     log_info("节点 %s，网关 %s", k.conf.node, k.conf.gateway);
+    for (size_t i = 0; i < k.conf.nremotes; i++)
+        log_info("服务器 %s：ssh %s，执行器 %s", k.conf.remotes[i].name, k.conf.remotes[i].target,
+                 k.conf.remotes[i].exec ? k.conf.remotes[i].exec : "自动上传");
     if (k.landlock > 0)
         log_info("执行器 %s，沙箱 Landlock v%d%s", k.conf.exec, k.landlock, k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
     else
         log_warn("执行器 %s：本机不支持 Landlock，没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {
+        remotes_free(&k.remotes);
         free(k.exec_real);
         kconf_free(&k.conf);
         return 0;
@@ -682,6 +822,7 @@ int main(int argc, char **argv)
     buf_free(&k.link.in);
     buf_free(&k.link.out);
     na_core_free(k.core);
+    remotes_free(&k.remotes);
     free(k.exec_real);
     kconf_free(&k.conf);
     return 0;

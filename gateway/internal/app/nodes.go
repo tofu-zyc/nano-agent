@@ -27,11 +27,12 @@ import (
 
 // KernelInfo 是一个在线的内核。
 type KernelInfo struct {
-	Node     string   `json:"node"`
-	Landlock int      `json:"landlock"` // 0 表示没有沙箱
-	Tools    []string `json:"tools"`
-	Since    int64    `json:"since"`
-	Local    bool     `json:"local"` // 和网关在同一台机器上
+	Node     string         `json:"node"`
+	Landlock int            `json:"landlock"` // 0 表示没有沙箱
+	Tools    []string       `json:"tools"`
+	Since    int64          `json:"since"`
+	Local    bool           `json:"local"`   // 和网关在同一台机器上
+	Remotes  []proto.Remote `json:"remotes"` // 它通过 SSH 能用的服务器
 }
 
 type node struct {
@@ -56,6 +57,10 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	}
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock
+	}
+	n.info.Remotes = hello.Remotes
+	if n.info.Remotes == nil {
+		n.info.Remotes = []proto.Remote{}
 	}
 	a.nodeSeq++
 	n.seq = a.nodeSeq
@@ -86,6 +91,61 @@ func (a *App) KernelDown(name string) {
 	}
 }
 
+// remotesChanged：内核报告它能用的服务器变了（准备好了、连不上了）
+func (a *App) remotesChanged(name string, list []proto.Remote) {
+	n := a.nodes[name]
+	if n == nil {
+		return
+	}
+	if list == nil {
+		list = []proto.Remote{}
+	}
+	n.info.Remotes = list
+	for _, r := range list {
+		if r.OK {
+			a.log.Info("服务器可用", "server", r.Name, "via", name)
+		} else {
+			a.log.Warn("服务器不可用", "server", r.Name, "via", name, "detail", r.Detail)
+		}
+	}
+	a.publish(events.Event{T: "kernel", Name: name, Data: n.info})
+}
+
+// via 找一个能在机器 name 上执行工具的在线内核：name 本身就是内核，或者某个内核能 SSH 到它。
+// 多个内核都能到时，和网关同一台机器的优先，其次是最近连上来的。
+func (a *App) via(name string) string {
+	if name == "" {
+		return ""
+	}
+	if a.nodes[name] != nil {
+		return name
+	}
+	best := ""
+	for kn, n := range a.nodes {
+		for _, r := range n.info.Remotes {
+			if r.Name != name || !r.OK {
+				continue
+			}
+			if b := a.nodes[best]; best == "" || (n.info.Local && !b.info.Local) || (n.info.Local == b.info.Local && n.seq > b.seq) {
+				best = kn
+			}
+		}
+	}
+	return best
+}
+
+// remoteOf 是某个内核报告的服务器 name（不管能不能用），用来说明为什么用不了
+func (a *App) remoteOf(name string) *proto.Remote {
+	for _, n := range a.nodes {
+		for i := range n.info.Remotes {
+			if n.info.Remotes[i].Name == name {
+				return &n.info.Remotes[i]
+			}
+		}
+	}
+	return nil
+}
+
 // defaultNode 是没有单独设置机器的会话工作的地方
 func (a *App) defaultNode() string {
 	if n := a.cfg.Workspace.Node; n != "" {
@@ -97,8 +157,8 @@ func (a *App) defaultNode() string {
 // pick 挑一个内核来跑会话的这一轮。tools 为 false 表示会话的机器不在线、由替补顶上，这一轮不能用工具；
 // note 是这时要告诉模型的说明。没有任何内核在线时 node 为空。调用方持有锁。
 func (a *App) pick(w workspace) (node string, tools bool, note string) {
-	if w.node != "" && a.nodes[w.node] != nil {
-		return w.node, true, ""
+	if k := a.via(w.node); k != "" {
+		return k, true, ""
 	}
 	sub := a.substitute()
 	if sub == "" {
@@ -106,6 +166,9 @@ func (a *App) pick(w workspace) (node string, tools bool, note string) {
 	}
 	if w.node == "" || len(w.dirs) == 0 {
 		return sub, true, "" // 不挑机器（或者本来就只聊天）：谁在线谁来
+	}
+	if r := a.remoteOf(w.node); r != nil {
+		return sub, false, fmt.Sprintf("[系统] 工作目录所在的服务器 %s 现在用不了（%s），这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。", w.node, r.Detail, sub)
 	}
 	return sub, false, fmt.Sprintf("[系统] 工作目录所在的机器 %s 现在不在线，这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。", w.node, sub)
 }
@@ -180,7 +243,7 @@ func (a *App) setNode(sid, name string) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "这个会话改在 %s 上工作了", where)
-	if cur != "" && a.nodes[cur] == nil {
+	if cur != "" && a.via(cur) == "" {
 		b.WriteString("（它现在不在线，上线之前只能聊天）")
 	}
 	b.WriteString("。")
@@ -221,6 +284,8 @@ func (a *App) describeNodes(sid string) string {
 		b.WriteString("这个会话没有指定机器，哪个内核在线就用哪个。")
 	case a.nodes[w.node] != nil:
 		fmt.Fprintf(&b, "这个会话在 %s 上工作（在线）。", w.node)
+	case a.via(w.node) != "":
+		fmt.Fprintf(&b, "这个会话在服务器 %s 上工作（经由 %s 的内核，通过 SSH）。", w.node, a.via(w.node))
 	default:
 		fmt.Fprintf(&b, "这个会话在 %s 上工作，但它现在不在线，由别的内核顶上时只能聊天。", w.node)
 	}
@@ -243,6 +308,24 @@ func (a *App) describeNodes(sid string) string {
 		b.WriteString("\n现在没有在线的内核。")
 	} else {
 		b.WriteString("\n在线的机器：" + strings.Join(online, "、"))
+	}
+	var servers []string
+	seen := map[string]bool{}
+	for _, k := range a.kernelList() {
+		for _, r := range k.Remotes {
+			if seen[r.Name] {
+				continue
+			}
+			seen[r.Name] = true
+			if v := a.via(r.Name); v != "" {
+				servers = append(servers, fmt.Sprintf("%s（经由 %s）", r.Name, v))
+			} else {
+				servers = append(servers, fmt.Sprintf("%s（用不了：%s）", r.Name, r.Detail))
+			}
+		}
+	}
+	if len(servers) > 0 {
+		b.WriteString("\n能用 SSH 执行的服务器：" + strings.Join(servers, "、"))
 	}
 	b.WriteString("\n" + nodeUsage)
 	return b.String()

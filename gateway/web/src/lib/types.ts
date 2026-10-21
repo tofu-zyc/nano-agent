@@ -10,11 +10,20 @@ export type Usage = {
 export type ChannelStatus = { state: string; identity?: string; error?: string; since: number };
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
-// 一个在线的内核（节点）。local 表示它和网关在同一台机器上
-export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number; local: boolean };
+// 内核通过 SSH 执行工具的服务器（服务器上不跑内核）
+export type RemoteInfo = { name: string; target: string; ok: boolean; landlock: number; detail?: string };
 
-// 一台机器：在线的内核，或者有会话要在上面工作、但现在不在线的
-export type Machine = { name: string; online: boolean; info?: KernelInfo; isDefault: boolean };
+// 一个在线的内核（节点）。local 表示它和网关在同一台机器上
+export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number; local: boolean; remotes: RemoteInfo[] | null };
+
+// 一台机器：在线的内核、内核能 SSH 过去的服务器，或者有会话要在上面工作但现在不在线的
+export type Machine = {
+  name: string;
+  online: boolean;
+  info?: KernelInfo;
+  isDefault: boolean;
+  server?: { via: string; target: string; landlock: number; detail?: string };
+};
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员

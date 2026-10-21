@@ -42,7 +42,17 @@ node = pc
 exec = $ROOT/kernel/nano-exec
 approval_timeout = 5
 CONF
-sed 's/^node = pc$/node = phone/' "$TMP/kernel.conf" > "$TMP/kernel2.conf"
+# phone 的内核还能通过 SSH 在服务器 box 上干活：用假的 ssh，把命令放到 $TMP/remote/box 这个“服务器主目录”里执行
+cat > "$TMP/fakessh" <<'SSH'
+#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -o) shift 2 ;; -T) shift ;; --) shift; break ;; *) break ;; esac; done
+target=$1; shift
+export HOME="$REMOTE_ROOT/$target"
+mkdir -p "$HOME" && cd "$HOME" && exec sh -c "$*"
+SSH
+chmod +x "$TMP/fakessh"
+mkdir -p "$TMP/remote/box/proj"
+{ sed 's/^node = pc$/node = phone/' "$TMP/kernel.conf"; echo "ssh = $TMP/fakessh"; echo "remote = box box"; } > "$TMP/kernel2.conf"
 
 "$ROOT/gateway/nano-gateway" -c "$TMP/gateway.toml" </dev/null >"$TMP/gateway.out" 2>"$TMP/gateway.log" &
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>"$TMP/kernel.log" &
@@ -84,7 +94,7 @@ send "/session 1";                                    expect "切回主会话" "
 send "回到主会话";                                    expect "在主会话里说话" "（mock）收到：回到主会话"
 
 # 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
-"$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
+REMOTE_ROOT="$TMP/remote" XDG_RUNTIME_DIR="$TMP/run" "$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
 for _ in $(seq 50); do grep -q 'node=phone' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
 send "/node";                                         expect "两个内核同时在线" "在线的机器：pc（和网关同一台机器）、phone（和网关同一台机器）"
 kill $KPID; wait $KPID 2>/dev/null || true
@@ -96,6 +106,14 @@ echo "pc is back" > "$TMP/work/back.txt"
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>>"$TMP/kernel.log" &
 for _ in $(seq 50); do [ "$(grep -c '内核已连接 node=pc' "$TMP/gateway.log")" -ge 2 ] && break; sleep 0.1; done
 send '!call Read {"path":"back.txt"}';                expect "pc 回来后照常用工具" "1	pc is back"
+
+# 会话切到服务器 box：工具在服务器上执行（循环在 phone 的内核上）
+for _ in $(seq 100); do grep -q '服务器可用.*server=box' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
+send "/node box";                                     expect "切到服务器" "这个会话改在 box 上工作了"
+send "/dir add ~/proj";                               expect "添加服务器上的目录" "1. ~/proj"
+send '!call Write {"path":"r.txt","content":"remote-e2e"}'; expect "在服务器上写文件" "已创建"
+if [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上"; fail=$((fail + 1)); fi
+send "/node default";                                 expect "切回默认机器" "这个会话改在 pc 上工作了"
 # 再开一个终端：顶掉原来的那个，打招呼时补上最近的对话
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" </dev/null >"$TMP/out2" 2>&1 &
 expect "旧终端被顶掉" "另一个终端接进来了"

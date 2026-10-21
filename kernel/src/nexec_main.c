@@ -2,6 +2,7 @@
 #include "nexec.h"
 #include "sandbox.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <pwd.h>
 #include <signal.h>
@@ -224,6 +225,22 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
         load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "ro"), false, &x->ro, &x->nro, err) < 0 ||
         load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "rw"), false, &x->rw, &x->nrw, err) < 0)
         return -1;
+    /* 可写的目录不能包含执行器自己：改写了它，下一次调用就不在沙箱里了。
+     * 本机由内核把关；远程时执行器放在服务器的 ~/.cache 里，工作目录是 ~ 的话会被包含进来 */
+    char *self = realpath("/proc/self/exe", NULL);
+    for (size_t i = 0; self && i < x->ndirs + x->nrw; i++) {
+        const char *d = i < x->ndirs ? x->dirs[i] : x->rw[i - x->ndirs];
+        if ((i >= x->ndirs || x->write) && path_inside(self, d)) {
+            buf_puts(err, "工作目录 ");
+            buf_puts(err, d);
+            buf_puts(err, " 包含执行器自己（");
+            buf_puts(err, self);
+            buf_puts(err, "），不能用作可写的工作目录。请让用户换一个更具体的目录");
+            free(self);
+            return -1;
+        }
+    }
+    free(self);
 
     const char *xdg = getenv("XDG_CACHE_HOME");
     char *base = xdg && *xdg == '/' ? xasprintf("%s/nano-agent", xdg) : xasprintf("%s/.cache/nano-agent", x->home);
@@ -311,6 +328,76 @@ static int probe(void)
     return 0;
 }
 
+/* --ls 路径：列出一个目录下的子目录（远程选工作目录用），格式和内核的 ls_result 一样。
+ * 包含执行器自己的目录标成 blocked。只返回目录名，不读任何文件内容。 */
+#define LS_MAX 1000
+
+static int cmp_name(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static int list_dir(const char *arg)
+{
+    char *home = home_dir();
+    char *p = expand_home(home, arg && *arg ? arg : "~");
+    char *self = realpath("/proc/self/exe", NULL);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "home", home);
+    char *real = p[0] == '/' ? realpath(p, NULL) : NULL;
+    DIR *d = real ? opendir(real) : NULL;
+    if (!d) {
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "detail", p[0] != '/' ? "要写绝对路径或 ~ 开头" : strerror(errno));
+    } else {
+        cJSON_AddBoolToObject(r, "ok", true);
+        cJSON_AddStringToObject(r, "path", real);
+        cJSON_AddBoolToObject(r, "blocked", self && path_inside(self, real));
+        char **names = NULL;
+        size_t n = 0;
+        bool more = false;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            bool dir = e->d_type == DT_DIR;
+            if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+                struct stat st;
+                dir = fstatat(dirfd(d), e->d_name, &st, 0) == 0 && S_ISDIR(st.st_mode);
+            }
+            if (!dir) continue;
+            if (n >= LS_MAX) { more = true; continue; }
+            names = xrealloc(names, (n + 1) * sizeof *names);
+            names[n++] = xstrdup(e->d_name);
+        }
+        closedir(d);
+        qsort(names, n, sizeof *names, cmp_name);
+        cJSON *arr = cJSON_AddArrayToObject(r, "entries");
+        for (size_t i = 0; i < n; i++) {
+            cJSON *it = cJSON_CreateObject();
+            buf_t b = {0};
+            buf_put_utf8(&b, names[i], strlen(names[i]));
+            cJSON_AddStringToObject(it, "name", buf_cstr(&b));
+            buf_free(&b);
+            char *sub = xasprintf("%s/%s", strcmp(real, "/") ? real : "", names[i]);
+            if (self && path_inside(self, sub)) cJSON_AddBoolToObject(it, "blocked", true);
+            free(sub);
+            cJSON_AddItemToArray(arr, it);
+            free(names[i]);
+        }
+        free(names);
+        if (more) cJSON_AddBoolToObject(r, "truncated", true);
+    }
+    char *s = cJSON_PrintUnformatted(r);
+    puts(s);
+    cJSON_free(s);
+    cJSON_Delete(r);
+    free(real);
+    free(p);
+    free(self);
+    free(home);
+    return 0;
+}
+
 static void close_inherited_fds(void)
 {
 #ifdef SYS_close_range
@@ -322,8 +409,9 @@ static void close_inherited_fds(void)
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--probe")) return probe();
+    if (argc > 1 && !strcmp(argv[1], "--ls")) return list_dir(argc > 2 ? argv[2] : "~");
     if (argc > 1) {
-        fprintf(stderr, "用法：%s [--probe]\n  从 stdin 读一行请求 JSON，向 stdout 写一行结果 JSON\n", argv[0]);
+        fprintf(stderr, "用法：%s [--probe | --ls 目录]\n  从 stdin 读一行请求 JSON，向 stdout 写一行结果 JSON\n", argv[0]);
         return 2;
     }
     close_inherited_fds();

@@ -117,7 +117,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Title = sid
 		}
 	}
-	info.Node, info.NodeSet, info.NodeOnline = w.node, st.Node != "", a.nodes[w.node] != nil
+	info.Node, info.NodeSet, info.NodeOnline = w.node, st.Node != "", a.via(w.node) != ""
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		info.Running, info.RunNode = true, s.run.node
 	}
@@ -292,7 +292,8 @@ func (a *App) ListDir(ctx context.Context, node, path string) (*DirListing, erro
 	if node == "" {
 		node = a.substitute()
 	}
-	if a.nodes[node] == nil {
+	kernel := a.via(node)
+	if kernel == "" {
 		a.mu.Unlock()
 		if node == "" {
 			return nil, errors.New("没有在线的内核，没法浏览目录")
@@ -309,7 +310,11 @@ func (a *App) ListDir(ctx context.Context, node, path string) (*DirListing, erro
 		delete(a.pendingLs, id)
 		a.mu.Unlock()
 	}()
-	if !a.hub.Send(node, proto.Msg{T: proto.TLs, ID: id, Path: path}) {
+	msg := proto.Msg{T: proto.TLs, ID: id, Path: path}
+	if kernel != node {
+		msg.Node = node // 服务器上的目录，由能 SSH 过去的内核去列
+	}
+	if !a.hub.Send(kernel, msg) {
 		return nil, errors.New("内核没有连接，没法浏览目录")
 	}
 	select {

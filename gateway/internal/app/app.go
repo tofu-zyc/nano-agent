@@ -475,6 +475,8 @@ func (a *App) startRun(s *sess) {
 		// 没有工作目录，或者工作目录所在的机器不在线：不给模型工具，只聊天
 		r.noTools = true
 		in.Mode, in.Dirs, in.RO, in.RW = proto.ModeNone, nil, nil, nil
+	} else if w.node != node {
+		in.Node = w.node // 工具在服务器上执行（这个内核通过 SSH 连过去）
 	}
 	a.log.Info("开始处理", "sid", s.sid, "node", node, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
@@ -562,6 +564,10 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if ch := a.pendingLs[m.ID]; ch != nil {
 			ch <- m
 		}
+		return
+	}
+	if m.T == proto.TRemotes {
+		a.remotesChanged(node, m.Remotes)
 		return
 	}
 	s := a.sessions[m.SID]

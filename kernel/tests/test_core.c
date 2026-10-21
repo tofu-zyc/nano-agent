@@ -191,6 +191,27 @@ static void test_mode_matrix(void)
     }
 }
 
+/* 每一轮可以指定执行工具的机器有没有沙箱（远程执行时和本机不同） */
+static void test_per_run_sandbox(void)
+{
+    na_call calls[] = { { "s", "Shell", "{}", true } };
+    struct { bool cfg; na_sandbox run; const char *want; } cases[] = {
+        { true, NA_SB_NO, "APPROVE_REQ(s,Shell,tg:1)" },   /* 本机有沙箱，这一轮的服务器没有 */
+        { false, NA_SB_YES, "EXEC(s,Shell,30000)" },        /* 反过来 */
+        { true, NA_SB_DEFAULT, "EXEC(s,Shell,30000)" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        na_core *c = mk_sb(16, cases[i].cfg);
+        na_event ev = { .type = NA_EV_INPUT, .sid = "s1", .from = "tg:1", .mode = NA_MODE_AUTO,
+                        .sandbox = cases[i].run, .policy = "{}" };
+        CHECK(na_core_feed(c, 0, &ev) == 0);
+        drain(c);
+        turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
+        EXPECT(c, cases[i].want);
+        na_core_free(c);
+    }
+}
+
 static void test_approval_flow(void)
 {
     na_core *c = mk(16);
@@ -375,6 +396,7 @@ int main(void)
     test_parallel_calls_wait_for_all();
     test_rejections_are_results();
     test_mode_matrix();
+    test_per_run_sandbox();
     test_approval_flow();
     test_approval_denied_and_timeout();
     test_tool_timeout_and_late_result();

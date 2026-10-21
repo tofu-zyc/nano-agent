@@ -230,7 +230,24 @@
     {:else if target.type === 'kernel'}
       {#if target.node}
         {@const m = store.machines.find((x) => x.name === target.node)}
-        {#if m?.info}
+        {#if m?.server}
+          <div class="card" class:warnc={!m.online}>
+            <div class="row"><span class="muted">SSH</span><code class="grow">{m.server.target}</code></div>
+            <div class="row"><span class="muted">经由</span><button class="lnk grow" onclick={() => store.open({ type: 'kernel', node: m.server!.via })}>{m.server.via} 的内核</button></div>
+            {#if m.online}
+              <div class="row">
+                <span class="muted">沙箱</span>
+                {#if m.server.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{m.server.landlock}</span>{:else}<span class="tag warn">没有沙箱</span>{/if}
+              </div>
+            {:else}
+              <div class="errbox">{m.server.detail || '用不了'}</div>
+            {/if}
+            <p class="note">
+              服务器上不跑内核：循环在 {m.server.via} 上，每次调用工具时通过复用的 SSH 连接在服务器上临时运行一次执行器，工作目录是服务器上的路径。
+              {#if m.server.landlock === 0 && m.online}服务器不支持 Landlock，自动模式下的 Shell 也会每次要求审批。{/if}
+            </p>
+          </div>
+        {:else if m?.info}
           <div class="card">
             <div class="row">
               <span class="muted">沙箱</span>
@@ -284,6 +301,7 @@
               <span class="grow">{m.name}</span>
               {#if m.isDefault}<span class="tag accent">默认</span>{/if}
               {#if m.info?.local}<span class="tag">本机</span>{/if}
+              {#if m.server}<span class="tag">服务器 · 经由 {m.server.via}</span>{/if}
               {#if !m.online}<span class="tag">离线</span>{:else if !m.info?.landlock}<span class="tag warn">没有沙箱</span>{/if}
               <Icon name="right" size={13} />
             </button>
@@ -298,6 +316,15 @@
             <li>写 <code>kernel.conf</code>：<code>gateway = tcp:网关地址:端口</code>，<code>token</code> 和网关一致，<code>node = 起个名字</code>；</li>
             <li>网关的“内核监听地址”要是那台机器能连到的地址，比如 <code>tcp:0.0.0.0:7700</code>。内核和网关之间的连接没有加密，跨网络请走 Tailscale、WireGuard 或者 SSH 隧道；</li>
             <li>运行 <code>./nano-kernel -c kernel.conf</code>，连上之后这里会多一个节点。在会话设置里选它，会话就在那台机器上工作。</li>
+          </ol>
+        </details>
+        <details class="guide">
+          <summary>通过 SSH 在服务器上干活（服务器上不用跑内核）</summary>
+          <ol>
+            <li>确保运行内核的那台机器能免密 <code>ssh</code> 到服务器（密钥登录，<code>~/.ssh/config</code> 里的别名也可以）；</li>
+            <li>在那台机器的 <code>kernel.conf</code> 里加一行：<code>remote = prod deploy@prod.example.com</code>（名字、ssh 目标）；</li>
+            <li>重启内核。它会自动把执行器传到服务器的 <code>~/.cache/nano-agent/</code>（架构不同、glibc 太老时，服务器有 <code>cc</code> 就现编），准备好之后这里会多一个服务器节点；</li>
+            <li>在会话设置里选它，工作目录填服务器上的路径。工具同样关在服务器上的沙箱里（服务器支持 Landlock 的话）。</li>
           </ol>
         </details>
       {/if}

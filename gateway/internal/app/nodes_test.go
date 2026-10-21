@@ -2,17 +2,24 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/proto"
 )
 
 // dialKernel 再连一个名叫 name 的内核上来
 func (e *env) dialKernel(t *testing.T, name string) *fakeKernel {
+	t.Helper()
+	return e.dialKernelWith(t, name, nil)
+}
+
+func (e *env) dialKernelWith(t *testing.T, name string, remotes []proto.Remote) *fakeKernel {
 	t.Helper()
 	conn, err := net.Dial("unix", filepath.Join(e.dir, "k.sock"))
 	if err != nil {
@@ -21,7 +28,8 @@ func (e *env) dialKernel(t *testing.T, name string) *fakeKernel {
 	t.Cleanup(func() { conn.Close() })
 	k := &fakeKernel{t: t, conn: conn, sc: bufio.NewScanner(conn)}
 	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: name,
-		Tools: []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
+		Tools:   []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		Remotes: remotes})
 	k.expect(proto.TWelcome)
 	waitNode(e.a, name, true)
 	return k
@@ -104,4 +112,61 @@ func TestNodeCommandAndRouting(t *testing.T) {
 	if info, _ := e.a.Session(mainSID); info.Node != "test" || info.NodeSet || !info.NodeOnline {
 		t.Fatalf("info: %+v", info)
 	}
+}
+
+// 服务器（内核通过 SSH 执行工具）也是节点：会话选它，这一轮发给能连到它的内核，带上 node
+func TestRemoteServerNode(t *testing.T) {
+	e := setup(t)
+	pc := e.dialKernelWith(t, "pc", []proto.Remote{{Name: "prod", Target: "deploy@prod", OK: true, Landlock: 7}})
+	e.say("/node prod")
+	e.ch.wait(t, "这个会话改在 prod 上工作了。")
+	e.say("/dir add /srv/app")
+	e.ch.wait(t, "/srv/app")
+	e.say("看看服务器")
+	in := pc.expect(proto.TInput)
+	if in.Node != "prod" || in.Mode != proto.ModeAsk || len(in.Dirs) != 1 || in.Dirs[0] != "/srv/app" {
+		t.Fatalf("input: %+v", in)
+	}
+	pc.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	pc.expect(proto.TTurn)
+	if got := lastUser(e.llm.lastReq().Messages); !strings.HasPrefix(got, "[系统] 在 prod 上工作。工作目录：/srv/app") {
+		t.Fatalf("env note: %q", got)
+	}
+	pc.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	e.ch.wait(t, "收到：看看服务器")
+
+	// 列服务器上的目录：发给 pc，带上 node
+	go func() {
+		m := pc.expect(proto.TLs)
+		ok := m.Node == "prod" && m.Path == "~"
+		pc.send(proto.Msg{T: proto.TLsResult, ID: m.ID, OK: proto.Bool(ok), Path: "/home/deploy", Home: "/home/deploy"})
+	}()
+	if l, err := e.a.ListDir(context.Background(), "prod", "~"); err != nil || l.Path != "/home/deploy" {
+		t.Fatalf("ls: %+v %v", l, err)
+	}
+
+	// 服务器连不上了：替补只聊天，告诉模型原因
+	pc.send(proto.Msg{T: proto.TRemotes, Remotes: []proto.Remote{{Name: "prod", OK: false, Detail: "连不上：Connection refused"}}})
+	waitFor(t, func() bool { info, _ := e.a.Session(mainSID); return !info.NodeOnline })
+	e.say("还能用吗")
+	in = pc.expect(proto.TInput) // 两个内核都在本机，最近连上来的 pc 当替补
+	if in.Node != "" || in.Mode != proto.ModeNone {
+		t.Fatalf("input: %+v", in)
+	}
+	pc.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	pc.expect(proto.TTurn)
+	if got := lastUser(e.llm.lastReq().Messages); !strings.HasPrefix(got, "[系统] 工作目录所在的服务器 prod 现在用不了（连不上：Connection refused）") {
+		t.Fatalf("note: %q", got)
+	}
+}
+
+func waitFor(t *testing.T, f func() bool) {
+	t.Helper()
+	for i := 0; i < 300; i++ {
+		if f() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("等不到")
 }

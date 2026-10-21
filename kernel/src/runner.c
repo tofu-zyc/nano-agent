@@ -24,6 +24,12 @@ static void close_fd(int *fd)
 int runner_start(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                  char *input, char *err, size_t errlen)
 {
+    return runner_start_ex(r, argv, sid, id, name, input, strlen(input), err, errlen) ? 0 : -1;
+}
+
+job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, char *err, size_t errlen)
+{
     int in[2] = { -1, -1 }, out[2] = { -1, -1 }, er[2] = { -1, -1 };
     if (pipe(in) || pipe(out) || pipe(er)) {
         snprintf(err, errlen, "创建管道失败：%s", strerror(errno));
@@ -72,17 +78,17 @@ int runner_start(runner_t *r, char *const argv[], const char *sid, const char *i
     j->fd_out = out[0];
     j->fd_err = er[0];
     j->in = input;
-    j->in_len = strlen(input);
+    j->in_len = in_len;
     j->next = r->jobs;
     r->jobs = j;
-    return 0;
+    return j;
 
 fail:
     free(input);
     close_fd(&in[0]); close_fd(&in[1]);
     close_fd(&out[0]); close_fd(&out[1]);
     close_fd(&er[0]); close_fd(&er[1]);
-    return -1;
+    return NULL;
 }
 
 static void stop_job(job_t *j)
@@ -138,6 +144,7 @@ size_t runner_pollfds(runner_t *r, struct pollfd *pfds, pollref_t *refs, size_t 
 {
     size_t n = 0;
     for (job_t *j = r->jobs; j; j = j->next) {
+        if (j->close_in && j->in_off >= j->in_len) close_fd(&j->fd_in);
         /* stdin 写完后保持打开但不再关心，关闭它表示取消 */
         int fds[3] = { j->in_off < j->in_len ? j->fd_in : -1, j->fd_out, j->fd_err };
         for (int w = 0; w < 3 && n < max; w++) {
@@ -191,6 +198,7 @@ void runner_on_poll(runner_t *r, const struct pollfd *pfds, const pollref_t *ref
                 ssize_t w = write(j->fd_in, j->in + j->in_off, j->in_len - j->in_off);
                 if (w > 0) j->in_off += (size_t)w;
                 else if (w < 0 && errno != EAGAIN && errno != EINTR) close_fd(&j->fd_in);
+                if (j->close_in && j->in_off >= j->in_len) close_fd(&j->fd_in);
             }
             break;
         case 1:

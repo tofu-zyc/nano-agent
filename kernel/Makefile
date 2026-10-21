@@ -6,7 +6,7 @@ STD      := -std=c11
 
 BIN   := nano-kernel
 EXEC  := nano-exec
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/util.c
+SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/remote.c src/util.c
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -14,9 +14,24 @@ XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
 # 测试用 ASan/UBSan 构建，内存问题直接报出来
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test clean
+# 远程执行用：执行器的源码包（服务器跑不了本机编译的执行器时，传过去现编），
+# 能静态链接时顺带编一个静态版本（不依赖服务器的 glibc 版本），不能就算了
+SRCTAR := nano-exec-src.tar.gz
+XHDRS  := src/nexec.h src/sandbox.h src/util.h third_party/cjson/cJSON.h
 
-all: $(BIN) $(EXEC)
+.PHONY: all test clean static
+
+all: $(BIN) $(EXEC) $(SRCTAR) static
+
+$(SRCTAR): $(XSRCS) $(XHDRS) third_party/cjson/cJSON.c
+	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 $^
+
+static: build/.static-tried
+
+build/.static-tried: $(XOBJS)
+	@$(CC) $(CFLAGS) $(LDFLAGS) -static -o nano-exec-static $^ 2>/dev/null \
+	  || { rm -f nano-exec-static; echo "（本机不能静态链接，跳过 nano-exec-static；远程执行时会传动态版本或在服务器上现编）"; }
+	@touch $@
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
@@ -54,6 +69,6 @@ build/nano-kernel-asan: $(SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ $(SRCS) third_party/cjson/cJSON.c
 
 clean:
-	rm -rf build $(BIN) $(EXEC)
+	rm -rf build $(BIN) $(EXEC) $(SRCTAR) nano-exec-static
 
 -include $(OBJS:.o=.d) $(XOBJS:.o=.d)

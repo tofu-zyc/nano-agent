@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """用一个假网关驱动真实的 nano-kernel 进程（它再启动真实的 nano-exec），测试宿主层：
-协议收发、权限模式、审批、超时、取消、断线重连、进程清理。
+协议收发、权限模式、审批、超时、取消、断线重连、进程清理；
+以及远程执行：用一个假的 ssh 把命令放到本机的另一个“服务器主目录”里执行。
 
 用法：python3 tests/test_host.py ./nano-kernel ./nano-exec
 """
@@ -93,6 +94,11 @@ def finish(gw, sid):
     gw.expect("model", sid=sid)
     gw.send(t="turn", sid=sid, reason="final")
     gw.expect("done", sid=sid, status="ok")
+
+
+def start_remote_run(gw, sid, node, dirs, mode="auto"):
+    gw.send(t="input", sid=sid, mode=mode, node=node, dirs=list(dirs), ro=[], rw=[], **{"from": "tg:user"})
+    gw.expect("model", sid=sid)
 
 
 def leftover(tag):
@@ -280,6 +286,138 @@ def t_ls(gw):
     gw.expect("ls_result", id="l5", ok=False, detail=lambda d: "绝对路径" in d)
 
 
+# 假的 ssh：跳过选项，把命令交给 sh 在“服务器”的主目录（$REMOTE_ROOT/目标）里执行。目标 down 连不上
+FAKE_SSH = r"""#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -T) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+target=$1; shift
+if [ "$target" = down ]; then echo "ssh: connect to host down port 22: Connection refused" >&2; exit 255; fi
+export HOME="$REMOTE_ROOT/$target"
+mkdir -p "$HOME" && cd "$HOME" && exec sh -c "$*"
+"""
+
+
+def remote_phase():
+    """配了三台服务器的内核：box 自动上传执行器，down 连不上，fixed 指定的执行器不存在"""
+    root = os.path.join(T, "remote")
+    box = os.path.join(root, "box")
+    os.makedirs(os.path.join(box, "proj"))
+    ssh = os.path.join(T, "fakessh")
+    with open(ssh, "w") as f:
+        f.write(FAKE_SSH)
+    os.chmod(ssh, 0o755)
+    sock = os.path.join(T, "gw2.sock")
+    conf = os.path.join(T, "kernel2.conf")
+    with open(conf, "w") as f:
+        f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nssh = {ssh}\n"
+                f"remote = box box\nremote = down down\nremote = fixed box /nonexistent/nano-exec\n")
+    gw = Gateway(sock)
+    log = open(os.path.join(T, "kernel2.log"), "w")
+    env = dict(os.environ, HOME=os.path.join(T, "home"), REMOTE_ROOT=root, XDG_RUNTIME_DIR=os.path.join(T, "run"))
+    os.makedirs(os.path.join(T, "run"), mode=0o700)
+    proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log, env=env)
+    try:
+        gw.accept()
+        hello = gw.expect("hello")
+        names = [r["name"] for r in hello["remotes"]]
+        assert names == ["box", "down", "fixed"] and not any(r["ok"] for r in hello["remotes"]), hello["remotes"]
+        gw.send(t="welcome", v=3)
+        run_remote_cases(gw, box)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+    klog = open(os.path.join(T, "kernel2.log"), errors="replace").read()
+    if "Sanitizer" in klog or proc.returncode != 0:
+        FAILS.append("remote kernel")
+        print(f"  FAIL 远程测试的内核异常（退出码 {proc.returncode}）")
+    if FAILS:
+        print(klog[-3000:])
+
+
+def run_remote_cases(gw, box):
+    @case("远程：自动上传执行器；连不上、执行器不存在的报告不可用")
+    def t_prepare(gw):
+        state = {}
+        deadline = time.time() + 20
+        while time.time() < deadline and not (state.get("box", {}).get("ok") and "down" in state and "fixed" in state):
+            m = gw.recv(20)
+            if m.get("t") == "remotes":
+                for r in m["remotes"]:
+                    if r["ok"] or "detail" in r and ("连不上" in r["detail"] or "不存在" in r["detail"]):
+                        state[r["name"]] = r
+        assert state["box"]["ok"] and state["box"]["landlock"] >= 0, state
+        assert "连不上" in state["down"]["detail"], state
+        assert "/nonexistent/nano-exec" in state["fixed"]["detail"], state
+        exe = os.listdir(os.path.join(box, ".cache", "nano-agent"))
+        assert any(n.startswith("nano-exec-") for n in exe), exe
+
+    @case("远程：在服务器上读写文件")
+    def t_remote_tools(gw):
+        start_remote_run(gw, "r1", "box", ["~/proj"])
+        call(gw, "r1", ("c1", "Write", {"path": "r.txt", "content": "remote\n"}))
+        gw.expect("result", sid="r1", id="c1", ok=True)
+        assert open(os.path.join(box, "proj", "r.txt")).read() == "remote\n"
+        gw.expect("model", sid="r1")
+        call(gw, "r1", ("c2", "Shell", {"command": "pwd"}))
+        gw.expect("result", sid="r1", id="c2", ok=True, content=lambda s: s.strip().endswith("/box/proj"))
+        finish(gw, "r1")
+
+    @case("远程：工作目录包含服务器上的执行器时，执行器自己拒绝")
+    def t_remote_guard(gw):
+        start_remote_run(gw, "r2", "box", ["~"])
+        call(gw, "r2", ("c1", "Write", {"path": "x.txt", "content": "x"}))
+        gw.expect("result", sid="r2", id="c1", ok=False, content=lambda s: "包含执行器自己" in s)
+        finish(gw, "r2")
+
+    @case("远程：列服务器上的目录，包含执行器的标出来")
+    def t_remote_ls(gw):
+        gw.send(t="ls", id="L1", node="box", path="~")
+        r = gw.expect("ls_result", id="L1", ok=True)
+        ents = {e["name"]: e.get("blocked", False) for e in r["entries"]}
+        assert ents.get("proj") is False and ents.get(".cache") is True, ents
+        gw.send(t="ls", id="L2", node="down", path="~")
+        gw.expect("ls_result", id="L2", ok=False, detail=lambda s: "用不了" in s)
+
+    @case("远程：服务器不可用、不认识时，工具调用失败并说明原因")
+    def t_remote_unavailable(gw):
+        start_remote_run(gw, "r3", "down", ["~"])
+        call(gw, "r3", ("c1", "Read", {"path": "a"}))
+        gw.expect("result", sid="r3", id="c1", ok=False, content=lambda s: "down 现在用不了" in s)
+        finish(gw, "r3")
+        start_remote_run(gw, "r4", "nope", ["~"])
+        call(gw, "r4", ("c1", "Read", {"path": "a"}))
+        gw.expect("result", sid="r4", id="c1", ok=False, content=lambda s: "没有配置服务器 nope" in s)
+        finish(gw, "r4")
+
+    @case("远程：取消时服务器上的命令也被杀掉")
+    def t_remote_cancel(gw):
+        start_remote_run(gw, "r5", "box", ["~/proj"])
+        call(gw, "r5", ("c1", "Shell", {"command": "sleep 4747"}))
+        time.sleep(0.8)
+        assert leftover("sleep 4747"), "命令没有跑起来"
+        gw.send(t="cancel", sid="r5")
+        gw.expect("result", sid="r5", id="c1", ok=False, content="已取消")
+        gw.expect("done", sid="r5", status="cancelled")
+        for _ in range(30):
+            if not leftover("sleep 4747"):
+                break
+            time.sleep(0.1)
+        assert not leftover("sleep 4747"), leftover("sleep 4747")
+
+    for t in (t_prepare, t_remote_tools, t_remote_guard, t_remote_ls, t_remote_unavailable, t_remote_cancel):
+        t(gw)
+
+
 def main():
     try:
         os.makedirs(WORK)
@@ -320,13 +458,14 @@ def main():
                 proc.kill()
             log.close()
         time.sleep(0.3)
+        remote_phase()
         if leftover("sleep 4646"):
             FAILS.append("exit cleanup")
             print(f"  FAIL 内核退出后命令还在：{leftover('sleep 4646')}")
             subprocess.run(["pkill", "-f", "sleep 4646"])
         else:
             print("  ok   内核退出时清理正在执行的命令")
-        kernel_log = open(os.path.join(T, "kernel.log")).read()
+        kernel_log = open(os.path.join(T, "kernel.log"), errors="replace").read()
         if "Sanitizer" in kernel_log:
             FAILS.append("sanitizer")
             print("内核日志里有 Sanitizer 报告：")

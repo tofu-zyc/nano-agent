@@ -25,6 +25,7 @@ const (
 	TDone       = "done"
 	TPing       = "ping"
 	TLsResult   = "ls_result"
+	TRemotes    = "remotes" // 内核能连到的服务器有变化
 
 	// 网关 → 内核
 	TWelcome = "welcome"
@@ -65,6 +66,7 @@ type Msg struct {
 	Node    string     `json:"node,omitempty"`
 	Tools   []ToolSpec `json:"tools,omitempty"`
 	Sandbox *Sandbox   `json:"sandbox,omitempty"`
+	Remotes []Remote   `json:"remotes,omitempty"` // hello / remotes：内核通过 SSH 能用的服务器
 
 	SID    string `json:"sid,omitempty"`
 	From   string `json:"from,omitempty"`
@@ -105,6 +107,16 @@ type ToolSpec struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// Remote 是内核通过 SSH 执行工具的一台服务器（服务器上不跑内核）。input 的 node 写它的名字，
+// 这一轮的工具就在那台服务器上执行。OK 为 false 时 Detail 是原因（连不上、还在准备执行器……）。
+type Remote struct {
+	Name     string `json:"name"`
+	Target   string `json:"target"`
+	OK       bool   `json:"ok"`
+	Landlock int    `json:"landlock"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 // Sandbox 是内核报告的沙箱能力。Landlock 为 0 表示没有沙箱，自动模式下的 Shell 也要审批。

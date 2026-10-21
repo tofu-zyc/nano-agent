@@ -45,6 +45,46 @@ static char *dir_of(const char *path)
     return d;
 }
 
+/* 节点名会出现在网关和网页上：不能有空白、控制字符、冒号和斜杠，最长 64 字节 */
+static bool valid_name(const char *s)
+{
+    size_t n = strlen(s);
+    if (!n || n > 64) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if (*p <= ' ' || *p == 0x7f || *p == ':' || *p == '/') return false;
+    return true;
+}
+
+/* remote = 名字 目标 [服务器上 nano-exec 的路径] */
+static int add_remote(kconf *k, char *val, char *err, size_t errlen)
+{
+    char *save = NULL;
+    char *name = strtok_r(val, " \t", &save);
+    char *target = strtok_r(NULL, " \t", &save);
+    char *exec = strtok_r(NULL, " \t", &save);
+    if (!name || !target || strtok_r(NULL, " \t", &save)) {
+        snprintf(err, errlen, "remote 的写法是：remote = 名字 ssh目标 [服务器上 nano-exec 的路径]");
+        return -1;
+    }
+    if (!valid_name(name)) {
+        snprintf(err, errlen, "服务器的名字 %s 不能用：不能有空白、冒号和斜杠，最长 64 字节", name);
+        return -1;
+    }
+    if (target[0] == '-') {
+        snprintf(err, errlen, "ssh 目标不能以 - 开头：%s", target);
+        return -1;
+    }
+    for (size_t i = 0; i < k->nremotes; i++) {
+        if (!strcmp(k->remotes[i].name, name)) {
+            snprintf(err, errlen, "服务器 %s 写了两次", name);
+            return -1;
+        }
+    }
+    k->remotes = xrealloc(k->remotes, (k->nremotes + 1) * sizeof *k->remotes);
+    k->remotes[k->nremotes++] = (kremote){ xstrdup(name), xstrdup(target), exec ? xstrdup(exec) : NULL };
+    return 0;
+}
+
 int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 {
     memset(k, 0, sizeof *k);
@@ -87,6 +127,16 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         else if (!strcmp(key, "token")) set_str(&k->token, val);
         else if (!strcmp(key, "node")) set_str(&k->node, val);
         else if (!strcmp(key, "exec")) set_str(&k->exec, val);
+        else if (!strcmp(key, "ssh")) set_str(&k->ssh, val);
+        else if (!strcmp(key, "remote")) {
+            if (add_remote(k, val, err, errlen) < 0) {
+                char why[256];
+                snprintf(why, sizeof why, "%s", err);
+                snprintf(err, errlen, "%s 第 %d 行：%s", path, lineno, why);
+                rc = -1;
+                break;
+            }
+        }
         else if (!strcmp(key, "tools_dir") || !strcmp(key, "admin")) {
             snprintf(err, errlen, "%s 第 %d 行：%s 已经不用了（工具改成了内置的；管理员改在网关配置的 "
                      "access.admins 里设置），删掉这一行即可", path, lineno, key);
@@ -116,6 +166,13 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         gethostname(host, sizeof host - 1);
         k->node = xstrdup(host);
     }
+    if (!k->ssh) k->ssh = xstrdup("ssh");
+    for (size_t i = 0; i < k->nremotes; i++) {
+        if (!strcmp(k->remotes[i].name, k->node)) {
+            snprintf(err, errlen, "%s：服务器 %s 和内核自己重名了（node = %s）", path, k->node, k->node);
+            return -1;
+        }
+    }
     char *base = dir_of(path);
     k->dir = realpath(base, NULL);
     if (!k->dir) k->dir = xstrdup(base);
@@ -143,6 +200,13 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 
 void kconf_free(kconf *k)
 {
+    for (size_t i = 0; i < k->nremotes; i++) {
+        free(k->remotes[i].name);
+        free(k->remotes[i].target);
+        free(k->remotes[i].exec);
+    }
+    free(k->remotes);
+    free(k->ssh);
     free(k->gateway);
     free(k->token);
     free(k->node);

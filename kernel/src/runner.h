@@ -1,8 +1,9 @@
 /* runner.h —— 子进程任务：启动执行器，喂请求，收结果
  *
- * 每次工具调用启动一个执行器进程（本机是 nano-exec，以后远程是 ssh … nano-exec）。
+ * 每次工具调用启动一个执行器进程（本机是 nano-exec，远程是 ssh … nano-exec）。
  * 请求写进它的 stdin 后 stdin 保持打开；终止时先关 stdin、发 SIGTERM，让执行器
  * 自己清理它启动的命令，过一会儿还没退出再 SIGKILL。
+ * 也用来跑别的子进程（比如准备服务器时上传执行器），用 kind / tag 区分。
  */
 #ifndef NA_RUNNER_H
 #define NA_RUNNER_H
@@ -15,6 +16,8 @@
 
 typedef struct job {
     char   *sid, *id, *name;
+    int     kind, tag;             /* 调用方自己定义的任务类型和附加信息 */
+    bool    close_in;              /* 输入写完就关掉 stdin（上传文件时，对方要读到 EOF） */
     pid_t   pid;
     int     fd_in, fd_out, fd_err;
     char   *in;                    /* 写给子进程 stdin 的请求 */
@@ -41,6 +44,9 @@ typedef struct {
 /* 启动 argv，把 input（接管所有权）写进它的 stdin。失败返回 -1，原因写进 err。 */
 int    runner_start(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                     char *input, char *err, size_t errlen);
+/* 同上，input 可以含任意字节（长度 in_len）；成功返回任务，调用方可以再设 kind / tag / close_in */
+job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, char *err, size_t errlen);
 void   runner_kill(runner_t *r, const char *sid, const char *id);
 void   runner_kill_all(runner_t *r);
 void   runner_reap(runner_t *r, int64_t now);

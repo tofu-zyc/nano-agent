@@ -168,6 +168,14 @@ class Store {
     if (!ov) return [];
     const def = ov.workspace.node;
     const out: Machine[] = ov.kernels.map((k) => ({ name: k.node, online: true, info: k, isDefault: k.node === def }));
+    for (const k of ov.kernels) {
+      for (const r of k.remotes ?? []) {
+        const ex = out.find((m) => m.name === r.name);
+        const server = { via: k.node, target: r.target, landlock: r.landlock, detail: r.detail };
+        if (!ex) out.push({ name: r.name, online: r.ok, isDefault: r.name === def, server });
+        else if (ex.server && !ex.online && r.ok) Object.assign(ex, { online: true, server }); // 多个内核都能到：用能用的那个
+      }
+    }
     const want = [def, ...(ov.sessions ?? []).map((s) => s.node)];
     for (const n of want) if (n && !out.some((m) => m.name === n)) out.push({ name: n, online: false, isDefault: n === def });
     return out;

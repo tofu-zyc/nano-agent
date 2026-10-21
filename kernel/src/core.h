@@ -71,11 +71,19 @@ typedef struct {
     bool args_ok;       /* 参数是否为合法的 JSON 对象 */
 } na_call;
 
+/* 这一轮执行工具的机器有没有沙箱（远程执行时和本机不同） */
+typedef enum {
+    NA_SB_DEFAULT = 0,   /* 用 na_core_config.sandbox */
+    NA_SB_YES,
+    NA_SB_NO,
+} na_sandbox;
+
 typedef struct {
     na_ev_type type;
     const char *sid;
     const char *from;
     na_mode mode;
+    na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */
     na_turn_reason reason;
     const na_call *calls; size_t ncalls;

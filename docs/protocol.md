@@ -13,7 +13,8 @@
 
 | t | 字段 | 含义 |
 |---|---|---|
-| `hello` | `v` `token` `node` `tools[]` `sandbox` | 握手，报告内置工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱 |
+| `hello` | `v` `token` `node` `tools[]` `sandbox` `remotes[]` | 握手，报告内置工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`remotes` 是这个内核能通过 SSH 执行工具的服务器，每项是 `{name, target, ok, landlock, detail?}`，`ok` 为 false 时 `detail` 是原因（连不上、还在准备执行器……） |
+| `remotes` | `remotes[]` | 服务器能不能用变了（准备好了、连不上了），格式同 `hello` |
 | `model` | `sid` | 请模型基于这个会话的上下文生成下一轮 |
 | `result` | `sid` `id` `ok` `content` | 一次工具调用的结果，包括内核自己生成的失败结果（权限不足、超时、被拒……） |
 | `approve_req` | `sid` `id` `name` `args` `from` | 这次调用需要管理员审批 |
@@ -28,12 +29,12 @@
 |---|---|---|
 | `welcome` | `v` | 握手成功 |
 | `error` | `detail` | 握手失败的原因，随后断开 |
-| `input` | `sid` `from` `mode` `dirs[]` `ro[]` `rw[]` | 会话收到新消息，开始一轮处理。`mode` 是这一轮的权限模式（见下表），`dirs` 是工作目录（第一个是默认目录），`ro` / `rw` 是额外的只读 / 读写路径 |
+| `input` | `sid` `from` `mode` `dirs[]` `ro[]` `rw[]` `node?` | 会话收到新消息，开始一轮处理。`mode` 是这一轮的权限模式（见下表），`dirs` 是工作目录（第一个是默认目录），`ro` / `rw` 是额外的只读 / 读写路径；`node` 是这个内核报告的某台服务器的名字时，这一轮的工具通过 SSH 在那台服务器上执行，路径都是服务器上的，有没有沙箱也按服务器算 |
 | `turn` | `sid` `reason` `calls[]?` `detail?` | 模型完成了一轮，`reason` 见下表；`calls` 每项是 `{id, name, args}` |
 | `approve` | `sid` `id` `ok` `from` | 审批结果。`from` 是审批人身份；网关只会转发管理员的审批 |
 | `cancel` | `sid` | 用户要求停止 |
 | `pong` | | 心跳 |
-| `ls` | `id` `path` | 列出内核所在机器上的一个目录（网页上选工作目录用），`path` 可以是 `~` 开头。只返回子目录名，不读文件内容 |
+| `ls` | `id` `path` `node?` | 列出内核所在机器（或者 `node` 指定的服务器）上的一个目录（网页上选工作目录用），`path` 可以是 `~` 开头。只返回子目录名，不读文件内容 |
 
 `turn.reason`：
 

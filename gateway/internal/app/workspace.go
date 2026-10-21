@@ -115,7 +115,8 @@ func (a *App) cmdDir(c in, arg string) {
 	}
 	st := a.store.Settings(c.s.sid)
 	if !st.DirsSet {
-		st.Dirs, st.DirsSet = slices.Clone(a.cfg.Workspace.Dirs), true
+		// 从现在实际生效的目录开始改（默认工作目录只属于默认机器，换了机器就是空的）
+		st.Dirs, st.DirsSet = slices.Clone(a.workspaceOf(c.s.sid).dirs), true
 	}
 	path, flag, _ := strings.Cut(rest, " ")
 	path = cleanPath(path)

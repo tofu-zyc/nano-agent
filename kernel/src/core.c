@@ -20,6 +20,7 @@ typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
 typedef struct run {
     char *sid, *from, *policy;
     na_mode mode;
+    bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
     int steps;            /* 已请求模型的次数 */
     int64_t deadline;     /* 整个 run 的截止时刻 */
@@ -148,7 +149,7 @@ static const na_tool_policy *find_tool(na_core *c, const char *name)
 typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
 
 /* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
-static decision decide(const na_core *c, na_mode mode, na_tool_kind kind, const char **why)
+static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, const char **why)
 {
     switch (mode) {
     case NA_MODE_NONE:
@@ -161,7 +162,7 @@ static decision decide(const na_core *c, na_mode mode, na_tool_kind kind, const 
     case NA_MODE_ASK:
         return kind == NA_TOOL_READ ? DECIDE_RUN : DECIDE_ASK;
     case NA_MODE_AUTO:
-        return kind == NA_TOOL_SHELL && !c->cfg.sandbox ? DECIDE_ASK : DECIDE_RUN;
+        return kind == NA_TOOL_SHELL && !sandbox ? DECIDE_ASK : DECIDE_RUN;
     }
     *why = "未知的权限模式";
     return DECIDE_DENY;
@@ -278,6 +279,7 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->from = dupstr(ev->from ? ev->from : "");
     r->policy = dupstr(ev->policy ? ev->policy : "{}");
     r->mode = ev->mode;
+    r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
     r->deadline = now + c->cfg.run_timeout_ms;
     r->next = c->runs;
     c->runs = r;
@@ -312,7 +314,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->args = dupstr(in->args ? in->args : "{}");
         k->tool = find_tool(c, k->name);
         const char *why = NULL;
-        decision d = k->tool ? decide(c, r->mode, k->tool->kind, &why) : DECIDE_DENY;
+        decision d = k->tool ? decide(r->sandbox, r->mode, k->tool->kind, &why) : DECIDE_DENY;
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);

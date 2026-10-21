@@ -541,9 +541,12 @@
             {@const m = n.data as Machine}
             <rect class="card" class:active={busyNodes.has(m.name)} class:bad={!m.online && !m.name} class:off={!m.online && !!m.name} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
-            <g class="ico"><Icon name="shield" x={24} y={28} size={24} /></g>
-            <text x="66" y="28" class="t3">内核{m.info?.local ? ' · 本机' : ''}{m.isDefault ? ' · 默认' : ''}</text>
-            {#if m.info}
+            <g class="ico"><Icon name={m.server ? 'terminal' : 'shield'} x={24} y={28} size={24} /></g>
+            <text x="66" y="28" class="t3">{m.server ? `服务器 · 经由 ${truncate(m.server.via, 10)}` : '内核'}{m.info?.local ? ' · 本机' : ''}{m.isDefault ? ' · 默认' : ''}</text>
+            {#if m.server}
+              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
+              <text x="66" y="66" class="t2" class:errt={!m.online}>{m.online ? `SSH · ${m.server.landlock > 0 ? `Landlock v${m.server.landlock} 沙箱` : '没有沙箱'}` : truncate(m.server.detail || '用不了', 18)}</text>
+            {:else if m.info}
               <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
               <text x="66" y="66" class="t2">{m.info.landlock > 0 ? `Landlock v${m.info.landlock} 沙箱` : '没有沙箱'} · {m.info.tools.length} 个工具</text>
             {:else if m.name}
