@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-21，Skill 阶段完成。
+最后更新：2026-10-21，聊天平台流式回复阶段完成。
 
 ## 一句话
 
@@ -26,6 +26,7 @@ gateway/               Go 网关
   cmd/nano-gateway     入口；chat.go 是 `nano-gateway chat` 终端客户端
   internal/app         调度：会话、窗口（endpoints）、节点（nodes）、补聊天记录（recap）、命令
   internal/channel     聊天渠道：cli（unix socket）、web、telegram、feishu（含扫码创建）
+    stream.go          平台流式显示：后台合并、限频、结束补齐、失败时发送完整文本
   internal/kernel      内核连接（hub，多节点）
   internal/session     历史（JSONL 只追加）、会话设置、裁剪
   internal/llm         OpenAI 兼容接口（流式）、mock
@@ -64,7 +65,8 @@ cd gateway && go test -race ./...
 | f08e92d | 切换会话/回来时补上没看到的聊天记录（/history）；网关和终端聊天分开（make chat） |
 | 131e2e2 | 多个内核（节点）：会话绑定机器，掉线时替补只聊天，/node |
 | b3c1929 | SSH 远程执行：服务器作为节点（经由某个内核），自动上传/现编执行器 |
-| Skill 阶段 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
+| fb07909 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
+| 流式回复阶段 | Telegram 发送后编辑、飞书 CardKit 流式卡片，含思考/工具/用量、长回复分段和失败降级 |
 
 ## 关键设计（改之前先理解）
 
@@ -75,6 +77,7 @@ cd gateway && go test -race ./...
 5. **SSH 远程**：服务器上不跑内核。内核后台准备执行器（检查 → 上传 → 现编），工具调用是 `ssh … 目标 sh -c 'exec 执行器'`，ControlMaster 复用，关 stdin 取消。执行器放在服务器 `~/.cache/nano-agent/nano-exec-<指纹>`。
 6. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）；内核连接用 token（**目前所有内核共用一个 token，连接不加密**，跨网络要走 Tailscale/WireGuard/SSH 隧道）。
 7. **技能**：由内核管理，默认目录是 kernel.conf 旁的 skills/（skills 配置可改）。名字和简介放在 Skill 工具定义里，正文调用时读。下一轮开始和空闲每 30 秒扫描；元数据变化用 tools 消息同步网关和网页。正文、附带文件更新不改变工具定义。SSH 调用 Skill 时把所选技能打包上传到服务器缓存，后续 Read/Shell 在沙箱里只读访问。沿用 runner 的异步执行和取消，不另起技能服务。
+8. **聊天平台流式显示**：RunView 只追加到内存，streamRun 的后台协程合并更新，Close 不阻塞调度锁，但会补齐尾部并关闭卡片。Telegram 每秒编辑消息，飞书每半秒用 CardKit Content 更新卡片，每张卡片的 sequence 严格递增。长回复分段，错误只记录一次，结束时发送完整文本。无正文增量的模型最终结果也会交给 RunView。飞书需要 cardkit:card:write，扫码注册已加入；平台接口测试用 httptest 模拟，无真实凭据的渠道仍需使用时验证。
 
 ## 用户的偏好和约定（重要）
 
@@ -82,16 +85,15 @@ cd gateway && go test -race ./...
 - 先把项目主体功能搭好，每完成一个阶段提交；实现保持直接，做合适的错误处理，不堆防御性代码，体验优化留到实际使用中推进。
 - 思考强度只用 OpenAI 风格的 `reasoning_effort`（用户的模型接受 none/low/high/xhigh/max，不接受 medium/minimal/off）。切换思考强度导致缓存失效是 vLLM 的问题，**不要提示**。
 - 目前只支持私聊，群聊以后做。
-- 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，提交信息结尾带 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。用户说过“提交，然后开始下一步即可”。
+- 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，Co-Authored-By 记录实际参与者。用户说过“提交，然后开始下一步即可”。
 - **密钥**：用户的 API key 只在本地 gateway.toml（gitignore，权限 600）。提交前用 `git grep --cached` 查一遍。不要删用户的 data/。工作目录不能包含 nano-agent 自己。
 - 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），地址在 gateway.toml。
 - 杀进程前确认 /proc/PID/cwd 是演示目录，用户自己可能开着网关（cwd 是项目目录）。
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
-1. **飞书 / Telegram 流式回复**：现在要等整段回复生成完才发。飞书用卡片（CardKit 流式更新），Telegram 用 sendMessageDraft 或编辑消息；思考过程和工具调用也显示。审批可以做成按钮。
-2. **上下文压缩**：现在裁掉的部分只换成一句“更早的对话已省略”（Settings.Summary）。改成调模型生成摘要放在那里（只在裁剪时做一次，之后照样只追加）。
-3. 之后：长期记忆、群聊、每台机器单独的 token、Telegram 真机测试（没有凭据，代码写好了没跑过）。
+1. **上下文压缩**：现在裁掉的部分只换成一句“更早的对话已省略”（Settings.Summary）。改成调模型生成摘要放在那里（只在裁剪时做一次，之后照样只追加）。
+2. 之后：长期记忆、群聊、每台机器单独的 token、审批按钮、Telegram 真机测试（没有凭据，代码写好了没跑过）。
 
 ## 坑
 

@@ -717,6 +717,7 @@ func (a *App) callModel(s *sess) {
 
 	// 过程总是发布到事件总线（网页实时显示），支持流式的窗口再自己显示一份
 	views, bus, sid := r.views(), a.bus, s.sid
+	contentEmitted := false
 	onDelta := func(d llm.Delta) {
 		if d.Reasoning != "" {
 			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "reasoning", Text: d.Reasoning})
@@ -725,6 +726,7 @@ func (a *App) callModel(s *sess) {
 			}
 		}
 		if d.Content != "" {
+			contentEmitted = true
 			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "content", Text: d.Content})
 			for _, v := range views {
 				v.Content(d.Content)
@@ -744,6 +746,10 @@ func (a *App) callModel(s *sess) {
 			return
 		}
 		r.cancelLLM = nil
+		// 拒绝回复等结果可能没有正文增量，仍需交给流式窗口显示一次。
+		if err == nil && res.Content != "" && !contentEmitted {
+			onDelta(llm.Delta{Content: res.Content})
+		}
 		for _, v := range views {
 			v.EndMessage()
 		}

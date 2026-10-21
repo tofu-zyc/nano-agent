@@ -133,10 +133,10 @@ func (t *Telegram) redact(err error) error {
 }
 
 // callRetry 遇到限流（429）时按服务端要求等待后重试。
-func (t *Telegram) callRetry(ctx context.Context, method string, params any) error {
+func (t *Telegram) callRetry(ctx context.Context, method string, params, out any) error {
 	for attempt := 0; ; attempt++ {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := t.call(cctx, method, params, nil)
+		err := t.call(cctx, method, params, out)
 		cancel()
 		var te *tgError
 		if err == nil || !errors.As(err, &te) || te.Code != http.StatusTooManyRequests || attempt >= 2 {
@@ -201,7 +201,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 			if errors.As(err, &te) && te.Code == http.StatusConflict && strings.Contains(te.Desc, "webhook") && !webhookCleared {
 				t.log.Warn("这个机器人设置了 webhook，与长轮询冲突，正在删除 webhook")
 				webhookCleared = true
-				t.callRetry(ctx, "deleteWebhook", map[string]any{})
+				t.callRetry(ctx, "deleteWebhook", map[string]any{}, nil)
 				continue
 			}
 			t.setState(StateError, err.Error())
@@ -301,7 +301,7 @@ func (t *Telegram) Send(ctx context.Context, chatID, text, replyTo string) error
 				p["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
 			}
 		}
-		if err := t.callRetry(ctx, "sendMessage", p); err != nil {
+		if err := t.callRetry(ctx, "sendMessage", p, nil); err != nil {
 			return err
 		}
 	}

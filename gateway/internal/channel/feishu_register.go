@@ -33,6 +33,7 @@ var regDomains = map[string]string{"feishu": "https://accounts.feishu.cn", "lark
 var regAddons = map[string]any{
 	"scopes": map[string][]string{"tenant": {
 		"im:message", "im:message:send_as_bot", "im:message.p2p_msg:readonly", "contact:user.base:readonly",
+		"cardkit:card:write",
 	}},
 	"events": map[string]any{"items": map[string][]string{"tenant": {"im.message.receive_v1"}}},
 }

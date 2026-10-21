@@ -623,6 +623,42 @@ func TestStreamingView(t *testing.T) {
 	}
 }
 
+type finalOnlyLLM struct{}
+
+func (finalOnlyLLM) Chat(context.Context, llm.Request, func(llm.Delta)) (*llm.Result, error) {
+	return &llm.Result{Reason: llm.ReasonRefused, Content: "这次无法回答"}, nil
+}
+
+func TestStreamingFinalWithoutContentDelta(t *testing.T) {
+	e, sc := setupStream(t)
+	e.a.SetLLM(finalOnlyLLM{})
+	e.sayOn(sc, "问题")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
+	if turn := e.k.expect(proto.TTurn); turn.Reason != proto.ReasonRefused {
+		t.Fatal(turn)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusRefused})
+	waitFor(t, func() bool {
+		events := sc.snapshot()
+		return len(events) > 0 && events[len(events)-1].kind == "close"
+	})
+	n := 0
+	for _, event := range sc.snapshot() {
+		if event.kind == "content" && event.text == "这次无法回答" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("正文应显示一次，实际 %d 次", n)
+	}
+	select {
+	case text := <-sc.sent:
+		t.Fatalf("不应再发送正文：%s", text)
+	default:
+	}
+}
+
 func TestThinkCommand(t *testing.T) {
 	e := setup(t)
 	e.a.cfg.LLM.ThinkingLevels = []string{"none", "low", "high"}
