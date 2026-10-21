@@ -61,6 +61,9 @@ void      remote_failed(remotes_t *rs, remote_t *rm, const char *why, int64_t no
 
 /* 在服务器上运行执行器的 ssh 参数（args 是给执行器的参数，可以为 NULL）。用 argv_free 释放 */
 char    **remote_exec_argv(const remotes_t *rs, const remote_t *rm, const char *args);
+/* 上传一个技能目录，完成后输出工具结果 JSON；remote_dir 是 ~/ 开头的缓存路径 */
+char    **remote_skill_argv(const remotes_t *rs, const remote_t *rm, const char *dir,
+                           const char *remote_dir, const char *result);
 void      argv_free(char **argv);
 char     *shell_quote(const char *s);
 

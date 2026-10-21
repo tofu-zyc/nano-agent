@@ -13,6 +13,15 @@ trap cleanup EXIT
 make -s -C "$ROOT" all >/dev/null
 
 mkdir -p "$TMP/work" "$TMP/home"
+mkdir -p "$TMP/skills/demo"
+cat > "$TMP/skills/demo/SKILL.md" <<'SKILL'
+---
+name: demo
+description: 端到端测试技能
+---
+读取技能目录下的 data.txt。
+SKILL
+echo "skill-e2e-data" > "$TMP/skills/demo/data.txt"
 echo "hello e2e" > "$TMP/work/hello.txt"
 echo "secret-profile" > "$TMP/home/.profile"
 export HOME="$TMP/home"   # 执行器的临时目录和缓存放在 HOME 下，别弄脏真实的 HOME
@@ -82,6 +91,8 @@ send '!call Shell {"command":"echo e2e-$((6*7))"}';   expect "审批模式下命
 send "/approve 1";                                    expect "审批通过后执行" "e2e-42"
 send "/mode auto";                                    expect "切换到自动模式" "已切换为自动"
 send '!call Shell {"command":"echo auto-$((6*7))"}';  expect "自动模式直接执行" "auto-42"
+send '!call Skill {"name":"demo"}';                   expect "加载技能说明" "技能 demo"
+send "!call Read {\"path\":\"$TMP/skills/demo/data.txt\"}"; expect "读取技能附带文件" "skill-e2e-data"
 send '!call Read {"path":"/etc/hostname"}';           expect "工作目录外的文件读不了" "不在工作目录内"
 send '!call Shell {"command":"cat ~/.profile"}';        expect "沙箱里读不到 HOME" "Permission denied"
 send '!call nope {}';                                 expect "未知工具变成错误结果" "未知工具：nope"
@@ -113,6 +124,12 @@ send "/node box";                                     expect "切到服务器" "
 send "/dir add ~/proj";                               expect "添加服务器上的目录" "1. ~/proj"
 send '!call Write {"path":"r.txt","content":"remote-e2e"}'; expect "在服务器上写文件" "已创建"
 if [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上"; fail=$((fail + 1)); fi
+send '!call Skill {"name":"demo"}';                   expect "服务器上加载技能" "技能目录：~/.cache/nano-agent/skills/"
+if find "$TMP/remote/box/.cache/nano-agent/skills" -name data.txt -exec cat {} \; | grep -qF "skill-e2e-data"; then
+  echo "  ok   技能附带文件传到服务器"; pass=$((pass + 1))
+else
+  echo "  FAIL 技能附带文件传到服务器"; fail=$((fail + 1))
+fi
 send "/node default";                                 expect "切回默认机器" "这个会话改在 pc 上工作了"
 # 再开一个终端：顶掉原来的那个，打招呼时补上最近的对话
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" </dev/null >"$TMP/out2" 2>&1 &

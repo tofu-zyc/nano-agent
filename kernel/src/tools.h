@@ -1,7 +1,8 @@
-/* tools.h —— 内置工具：Read、Write、Edit、Grep、Shell
+/* tools.h —— 内置工具：Read、Write、Edit、Grep、Shell，以及 Skill
  *
  * 工具集是固定的：描述原样报给网关交给模型（不变的工具定义对前缀缓存最友好），
- * 执行在 nano-exec 里完成（见 nexec.h）。
+ * 执行在 nano-exec 里完成（见 nexec.h）。Skill 的描述随技能列表变化（skills.h），
+ * 由内核自己执行（读 SKILL.md），这里只有它的策略。
  */
 #ifndef NA_TOOLS_H
 #define NA_TOOLS_H

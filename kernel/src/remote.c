@@ -220,6 +220,39 @@ char **remote_exec_argv(const remotes_t *rs, const remote_t *rm, const char *arg
     return argv;
 }
 
+char **remote_skill_argv(const remotes_t *rs, const remote_t *rm, const char *dir,
+                         const char *remote_dir, const char *result)
+{
+    char *dest = shell_quote(remote_dir + 2);  /* 调用方传来的路径以 ~/ 开头 */
+    char *reply = shell_quote(result);
+    char *script = xasprintf("d=\"$HOME\"/%s; mkdir -p \"$d\" && tar xf - -C \"$d\" && printf '%%s\\n' %s", dest, reply);
+    char **ssh = ssh_argv(rs, rm, script);
+    free(script);
+    free(dest);
+    free(reply);
+
+    /* 打包和上传都交给 runner，不阻塞内核；临时包在命令退出时删除。 */
+    buf_t cmd = {0};
+    buf_puts(&cmd, "archive=$(mktemp) || exit 1; trap 'rm -f \"$archive\"' EXIT; tar -C ");
+    char *src = shell_quote(dir);
+    buf_puts(&cmd, src);
+    free(src);
+    buf_puts(&cmd, " -cf \"$archive\" . && ");
+    for (char **p = ssh; *p; p++) {
+        char *q = shell_quote(*p);
+        buf_puts(&cmd, q);
+        buf_puts(&cmd, " ");
+        free(q);
+    }
+    argv_free(ssh);
+    buf_puts(&cmd, "< \"$archive\"");
+    char **argv = xcalloc(4, sizeof *argv);
+    argv[0] = xstrdup("/bin/sh");
+    argv[1] = xstrdup("-c");
+    argv[2] = buf_cstr(&cmd);
+    return argv;
+}
+
 /* ---- 准备服务器 ---- */
 
 /* 网关只关心能不能用：就绪 ⇄ 不可用、或者不可用的原因变了才通知；中间的准备阶段不算 */

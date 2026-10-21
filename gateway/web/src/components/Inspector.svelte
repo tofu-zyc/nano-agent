@@ -157,6 +157,7 @@
     Write: '新建或覆盖文件',
     Edit: '精确替换一段文本',
     Shell: '执行命令',
+    Skill: '加载技能说明和附带文件',
   };
 
   const dirSessions = $derived(
@@ -273,6 +274,14 @@
               <div class="tool"><code>{name}</code><span>{toolDesc[name] ?? ''}</span></div>
             {/each}
           </div>
+          {#if m.info.skills?.length}
+            <h5>技能</h5>
+            <div class="tools">
+              {#each m.info.skills as skill}
+                <div class="tool skill"><code>{skill.name}</code><span>{skill.description}</span></div>
+              {/each}
+            </div>
+          {/if}
         {:else}
           <div class="card warnc">
             <p class="note">{target.node} 现在不在线。它上线之前，在它上面工作的会话由别的内核顶上，只能聊天；它连回来之后自动恢复。</p>
@@ -763,6 +772,15 @@
   }
   .tool span {
     color: var(--text-2);
+  }
+  .tool.skill {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .tool.skill code {
+    width: auto;
+    overflow-wrap: anywhere;
   }
   .btn.link {
     margin-top: 14px;

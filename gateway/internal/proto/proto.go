@@ -26,6 +26,7 @@ const (
 	TPing       = "ping"
 	TLsResult   = "ls_result"
 	TRemotes    = "remotes" // 内核能连到的服务器有变化
+	TTools      = "tools"   // 技能目录变化后更新工具定义
 
 	// 网关 → 内核
 	TWelcome = "welcome"
@@ -61,12 +62,13 @@ type Msg struct {
 	T string `json:"t"`
 
 	// hello / welcome
-	V       int        `json:"v,omitempty"`
-	Token   string     `json:"token,omitempty"`
-	Node    string     `json:"node,omitempty"`
-	Tools   []ToolSpec `json:"tools,omitempty"`
-	Sandbox *Sandbox   `json:"sandbox,omitempty"`
-	Remotes []Remote   `json:"remotes,omitempty"` // hello / remotes：内核通过 SSH 能用的服务器
+	V       int         `json:"v,omitempty"`
+	Token   string      `json:"token,omitempty"`
+	Node    string      `json:"node,omitempty"`
+	Tools   []ToolSpec  `json:"tools,omitempty"`
+	Skills  []SkillSpec `json:"skills,omitempty"`
+	Sandbox *Sandbox    `json:"sandbox,omitempty"`
+	Remotes []Remote    `json:"remotes,omitempty"` // hello / remotes：内核通过 SSH 能用的服务器
 
 	SID    string `json:"sid,omitempty"`
 	From   string `json:"from,omitempty"`
@@ -107,6 +109,12 @@ type ToolSpec struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// SkillSpec 是内核安装的技能简介，正文在调用 Skill 时才加载。
+type SkillSpec struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 // Remote 是内核通过 SSH 执行工具的一台服务器（服务器上不跑内核）。input 的 node 写它的名字，

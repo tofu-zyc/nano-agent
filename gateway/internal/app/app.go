@@ -570,6 +570,10 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.remotesChanged(node, m.Remotes)
 		return
 	}
+	if m.T == proto.TTools {
+		a.toolsChanged(node, m)
+		return
+	}
 	s := a.sessions[m.SID]
 	if s == nil || s.run == nil || s.run.node != node {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束

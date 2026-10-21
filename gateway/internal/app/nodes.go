@@ -27,12 +27,13 @@ import (
 
 // KernelInfo 是一个在线的内核。
 type KernelInfo struct {
-	Node     string         `json:"node"`
-	Landlock int            `json:"landlock"` // 0 表示没有沙箱
-	Tools    []string       `json:"tools"`
-	Since    int64          `json:"since"`
-	Local    bool           `json:"local"`   // 和网关在同一台机器上
-	Remotes  []proto.Remote `json:"remotes"` // 它通过 SSH 能用的服务器
+	Node     string            `json:"node"`
+	Landlock int               `json:"landlock"` // 0 表示没有沙箱
+	Tools    []string          `json:"tools"`
+	Skills   []proto.SkillSpec `json:"skills"`
+	Since    int64             `json:"since"`
+	Local    bool              `json:"local"`   // 和网关在同一台机器上
+	Remotes  []proto.Remote    `json:"remotes"` // 它通过 SSH 能用的服务器
 }
 
 type node struct {
@@ -41,11 +42,14 @@ type node struct {
 	seq   int // 第几个连上来的，挑替补时优先最近连上的
 }
 
-func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := &node{info: KernelInfo{Node: name, Since: time.Now().UnixMilli(), Local: local}}
-	for _, t := range hello.Tools {
+func (n *node) setTools(tools []proto.ToolSpec, skills []proto.SkillSpec) {
+	n.tools = nil
+	n.info.Tools = []string{}
+	n.info.Skills = skills
+	if n.info.Skills == nil {
+		n.info.Skills = []proto.SkillSpec{}
+	}
+	for _, t := range tools {
 		params := t.InputSchema
 		if len(params) == 0 {
 			params = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -55,6 +59,13 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 		}})
 		n.info.Tools = append(n.info.Tools, t.Name)
 	}
+}
+
+func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := &node{info: KernelInfo{Node: name, Since: time.Now().UnixMilli(), Local: local}}
+	n.setTools(hello.Tools, hello.Skills)
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock
 	}
@@ -74,6 +85,16 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	if n.info.Landlock == 0 {
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
+}
+
+func (a *App) toolsChanged(name string, m *proto.Msg) {
+	n := a.nodes[name]
+	if n == nil {
+		return
+	}
+	n.setTools(m.Tools, m.Skills)
+	a.publish(events.Event{T: "kernel", Name: name, Data: n.info})
+	a.log.Info("内核工具已更新", "node", name, "skills", len(m.Skills))
 }
 
 func (a *App) KernelDown(name string) {

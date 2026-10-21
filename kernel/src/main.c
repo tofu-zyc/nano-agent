@@ -9,6 +9,7 @@
 #include "link.h"
 #include "remote.h"
 #include "runner.h"
+#include "skills.h"
 #include "tools.h"
 #include "util.h"
 
@@ -53,6 +54,8 @@ typedef struct {
     na_core        *core;
     runner_t        runner;
     remotes_t       remotes;     /* 通过 SSH 执行工具的服务器 */
+    skills_t        skills;      /* 技能 */
+    int64_t         skills_at;   /* 下一次重新扫描技能目录的时刻 */
     link_t          link;
     int64_t         last_ping;
     int64_t         next_connect;
@@ -75,17 +78,53 @@ static cJSON *msg_new(const char *type, const char *sid)
     return m;
 }
 
+/* 给模型看的工具：内置工具，有技能时加上 Skill（按名字排序） */
+static cJSON *all_tools(kernel_t *k)
+{
+    cJSON *arr = tools_specs();
+    cJSON *sk = skills_tool_spec(&k->skills);
+    if (!sk) return arr;
+    int i = 0;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(it, "name")), "Skill") > 0) break;
+        i++;
+    }
+    cJSON_InsertItemInArray(arr, i, sk);
+    return arr;
+}
+
 static void send_hello(kernel_t *k)
 {
     cJSON *m = msg_new("hello", NULL);
     cJSON_AddNumberToObject(m, "v", PROTO_VERSION);
     cJSON_AddStringToObject(m, "token", k->conf.token);
     cJSON_AddStringToObject(m, "node", k->conf.node);
-    cJSON_AddItemToObject(m, "tools", tools_specs());
+    cJSON_AddItemToObject(m, "tools", all_tools(k));
+    cJSON_AddItemToObject(m, "skills", skills_json(&k->skills));
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
     cJSON_AddItemToObject(m, "remotes", remotes_json(&k->remotes));
     link_send(&k->link, m);
+}
+
+/* 技能变了：重新报一遍工具 */
+static void send_tools(kernel_t *k)
+{
+    if (k->link.fd < 0) return;
+    cJSON *m = msg_new("tools", NULL);
+    cJSON_AddItemToObject(m, "tools", all_tools(k));
+    cJSON_AddItemToObject(m, "skills", skills_json(&k->skills));
+    link_send(&k->link, m);
+}
+
+static void refresh_skills(kernel_t *k, int64_t now)
+{
+    k->skills_at = now + 30000;
+    if (skills_scan(&k->skills, k->conf.skills)) {
+        log_info("技能有变化：%zu 个", k->skills.n);
+        send_tools(k);
+    }
 }
 
 /* 服务器能不能用变了，告诉网关 */
@@ -273,10 +312,62 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         snprintf(err, sizeof err, "服务器 %s 现在用不了：%s", rm->conf->name, rm->detail ? rm->detail : "还在准备执行器");
         ok = false;
     }
+    if (ok && !strcmp(c->name, "Skill")) {
+        /* 说明由内核读；远程执行时先把这个技能的附带文件传到服务器。 */
+        cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
+        const char *name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(args, "name"));
+        char *root = rm && k->skills.n ? skills_remote_root(&k->skills, k->conf.node) : NULL;
+        char *dir = root ? xasprintf("%s/%s", root, name ? name : "") : NULL;
+        bool sok;
+        char *res = skill_load(&k->skills, name, dir, &sok);
+        if (rm && sok) {
+            cJSON *reply = cJSON_CreateObject();
+            cJSON_AddBoolToObject(reply, "ok", true);
+            cJSON_AddStringToObject(reply, "content", res);
+            char *body = cJSON_PrintUnformatted(reply);
+            char **argv = remote_skill_argv(&k->remotes, rm, skills_find(&k->skills, name)->dir, dir, body);
+            job_t *j = runner_start_ex(&k->runner, argv, c->sid, c->id, c->name, xstrdup(""), 0, err, sizeof err);
+            argv_free(argv);
+            cJSON_free(body);
+            cJSON_Delete(reply);
+            if (j) {
+                j->kind = JOB_REMOTE_TOOL;
+                j->tag = remotes_index(&k->remotes, rm);
+                j->close_in = true;
+            } else {
+                sok = false;
+                free(res);
+                res = xstrdup(err);
+            }
+            if (j) {
+                free(res);
+                res = NULL;  /* 上传完成后由 collect_finished 返回结果 */
+            }
+        }
+        log_info("技能 %s（%s）%s", name ? name : "?", c->id, sok ? "" : "没有找到");
+        if (res) {
+            na_event ev = { .type = NA_EV_TOOL_DONE, .sid = c->sid, .id = c->id, .ok = sok, .content = res };
+            na_core_feed(k->core, now, &ev);
+        }
+        free(res);
+        free(dir);
+        free(root);
+        cJSON_Delete(args);
+        cJSON_Delete(req);
+        return;
+    }
     cJSON_DeleteItemFromObjectCaseSensitive(req, "node");
     /* 工作目录是服务器上的路径时，由服务器上的执行器自己把关 */
     for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok && !rm; key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, sizeof err);
+    if (ok && k->skills.n) {
+        /* 技能目录在沙箱里只读可见：附带的脚本和资料用 Read 读、用 Shell 运行 */
+        cJSON *ro = cJSON_GetObjectItemCaseSensitive(req, "ro");
+        if (!cJSON_IsArray(ro)) ro = cJSON_AddArrayToObject(req, "ro");
+        char *root = rm ? skills_remote_root(&k->skills, k->conf.node) : xstrdup(k->skills.root);
+        cJSON_AddItemToArray(ro, cJSON_CreateString(root));
+        free(root);
+    }
     if (ok) {
         cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
         cJSON_AddStringToObject(req, "tool", c->name);
@@ -422,6 +513,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     size_t ncalls = 0;
 
     if (!strcmp(t, "input")) {
+        refresh_skills(k, now);
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
@@ -631,6 +723,7 @@ static void loop(kernel_t *k)
         if (np > base) runner_on_poll(&k->runner, pfds + base, refs + base, np - base);
         collect_finished(k, now);
         remotes_tick(&k->remotes, &k->runner, now);
+        if (now >= k->skills_at) refresh_skills(k, now);
         if (k->remotes.changed) {
             k->remotes.changed = false;
             send_remotes(k);
@@ -766,6 +859,8 @@ int main(int argc, char **argv)
         return 1;
     }
     k.tools = tools_policies(&k.ntools);
+    skills_scan(&k.skills, k.conf.skills);
+    k.skills_at = now_ms() + 30000;
     if (remotes_init(&k.remotes, &k.conf, err, sizeof err) < 0) {
         log_error("%s", err);
         free(k.exec_real);
@@ -774,6 +869,16 @@ int main(int argc, char **argv)
     }
 
     log_info("节点 %s，网关 %s", k.conf.node, k.conf.gateway);
+    if (k.skills.n) {
+        buf_t names = {0};
+        for (size_t i = 0; i < k.skills.n; i++) {
+            buf_puts(&names, i ? "、" : "");
+            buf_puts(&names, k.skills.list[i].name);
+        }
+        char *s = buf_cstr(&names);
+        log_info("技能目录 %s：%s", k.skills.root, s);
+        free(s);
+    }
     for (size_t i = 0; i < k.conf.nremotes; i++)
         log_info("服务器 %s：ssh %s，执行器 %s", k.conf.remotes[i].name, k.conf.remotes[i].target,
                  k.conf.remotes[i].exec ? k.conf.remotes[i].exec : "自动上传");
@@ -782,6 +887,7 @@ int main(int argc, char **argv)
     else
         log_warn("执行器 %s：本机不支持 Landlock，没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {
+        skills_free(&k.skills);
         remotes_free(&k.remotes);
         free(k.exec_real);
         kconf_free(&k.conf);
@@ -823,6 +929,7 @@ int main(int argc, char **argv)
     buf_free(&k.link.out);
     na_core_free(k.core);
     remotes_free(&k.remotes);
+    skills_free(&k.skills);
     free(k.exec_real);
     kconf_free(&k.conf);
     return 0;

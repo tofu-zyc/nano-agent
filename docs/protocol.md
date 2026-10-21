@@ -13,7 +13,8 @@
 
 | t | 字段 | 含义 |
 |---|---|---|
-| `hello` | `v` `token` `node` `tools[]` `sandbox` `remotes[]` | 握手，报告内置工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`remotes` 是这个内核能通过 SSH 执行工具的服务器，每项是 `{name, target, ok, landlock, detail?}`，`ok` 为 false 时 `detail` 是原因（连不上、还在准备执行器……） |
+| `hello` | `v` `token` `node` `tools[]` `skills[]` `sandbox` `remotes[]` | 握手，报告工具和沙箱能力。`tools` 每项是 `{name, description, input_schema}`；`skills` 每项是 `{name, description}`；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`remotes` 是这个内核能通过 SSH 执行工具的服务器，每项是 `{name, target, ok, landlock, detail?}`，`ok` 为 false 时 `detail` 是原因（连不上、还在准备执行器……） |
+| `tools` | `tools[]` `skills[]` | 技能列表变化后重新报告完整工具定义和技能简介，网关替换该内核的工具列表，后续模型请求立即使用；删除全部技能时 `skills` 是空数组，`tools` 只含五个基础工具 |
 | `remotes` | `remotes[]` | 服务器能不能用变了（准备好了、连不上了），格式同 `hello` |
 | `model` | `sid` | 请模型基于这个会话的上下文生成下一轮 |
 | `result` | `sid` `id` `ok` `content` | 一次工具调用的结果，包括内核自己生成的失败结果（权限不足、超时、被拒……） |
@@ -63,8 +64,8 @@
 ## 一次完整的处理
 
 ```
-K→G {"t":"hello","v":2,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
-G→K {"t":"welcome","v":2}
+K→G {"t":"hello","v":3,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
+G→K {"t":"welcome","v":3}
 G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","dirs":["~/projects/foo"],"ro":["~/.gitconfig"]}
 K→G {"t":"model","sid":"tg:-1001234"}
 G→K {"t":"turn","sid":"tg:-1001234","reason":"tool_use","calls":[{"id":"call_1","name":"Shell","args":{"command":"date"}}]}
@@ -86,7 +87,7 @@ K→G {"t":"done","sid":"tg:-1001234","status":"ok"}
 
 ## 执行器
 
-内核每次执行工具都启动一次 `nano-exec`（以后远程主机上是 `ssh 主机 nano-exec`），一问一答：
+内核执行基础工具时每次启动一次 `nano-exec`（远程主机上通过 SSH 启动），一问一答：
 
 ```
 stdin  {"tool":"Shell","args":{"command":"ls"},"dirs":["/home/u/foo"],"write":true,"ro":[],"rw":[],
@@ -98,3 +99,5 @@ stdout {"ok":true,"content":"a.txt\nb.txt\n"}
 - 请求写完后 stdin 保持打开。stdin 被关闭或收到 SIGTERM 表示取消：执行器杀掉它启动的命令（整个进程组），不输出结果直接退出。
 - 工作目录不能包含内核的配置目录和执行器本身，内核会在启动执行器之前检查。
 - `nano-exec --probe` 输出本机的沙箱能力：`{"v":1,"landlock":7,"os":"Linux","arch":"x86_64","rg":true}`。
+
+`Skill` 由内核读取技能目录，返回说明正文和附带文件的位置，不经过执行器。本机工具的 `ro` 自动包含技能目录；远程时先通过 SSH 上传所选技能，再返回服务器上的 `~/.cache/nano-agent/skills/…` 路径，并把对应缓存目录加入后续工具请求的 `ro`。

@@ -128,6 +128,7 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         else if (!strcmp(key, "node")) set_str(&k->node, val);
         else if (!strcmp(key, "exec")) set_str(&k->exec, val);
         else if (!strcmp(key, "ssh")) set_str(&k->ssh, val);
+        else if (!strcmp(key, "skills")) set_str(&k->skills, val);
         else if (!strcmp(key, "remote")) {
             if (add_remote(k, val, err, errlen) < 0) {
                 char why[256];
@@ -176,6 +177,12 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
     char *base = dir_of(path);
     k->dir = realpath(base, NULL);
     if (!k->dir) k->dir = xstrdup(base);
+    if (k->skills && k->skills[0] != '/') {
+        char *full = xasprintf("%s/%s", base, k->skills);
+        free(k->skills);
+        k->skills = full;
+    }
+    if (!k->skills) k->skills = xasprintf("%s/skills", base);
     if (k->exec && k->exec[0] != '/') {
         char *full = xasprintf("%s/%s", base, k->exec);
         free(k->exec);
@@ -207,6 +214,7 @@ void kconf_free(kconf *k)
     }
     free(k->remotes);
     free(k->ssh);
+    free(k->skills);
     free(k->gateway);
     free(k->token);
     free(k->node);

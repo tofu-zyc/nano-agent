@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-21，提交 b3c1929 之后。
+最后更新：2026-10-21，Skill 阶段完成。
 
 ## 一句话
 
@@ -17,6 +17,7 @@ kernel/                C 内核和执行器
   src/core.c/h         循环状态机（sans-I/O）：预算、权限模式、审批
   src/runner.c/h       子进程任务（执行器、ssh、上传）
   src/remote.c/h       SSH 远程执行：准备服务器（检查/上传/现编）、拼 ssh 命令
+  src/skills.c/h       技能目录扫描、SKILL.md 解析、工具定义和按需加载
   src/conf.c/h         kernel.conf 解析（含 remote = …）
   src/nexec_*.c        执行器 nano-exec：每次工具调用启动一次，套上 Landlock + seccomp 再执行
   src/sandbox.c        Landlock / seccomp
@@ -45,7 +46,7 @@ make web          # 改了前端后重新构建（npm run check && build），�
 cd gateway && go test -race ./...
 ```
 
-- e2e（scripts/e2e.sh）现在 30 项：终端聊天、工具、审批、模式、沙箱、会话切换、两个内核替补、SSH 服务器（假 ssh）、终端重连。
+- e2e（scripts/e2e.sh）现在 34 项：终端聊天、工具、审批、模式、沙箱、会话切换、两个内核替补、SSH 服务器（假 ssh）、终端重连、本机与远程技能。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在之前会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
 - 本机是 Fedora 43（WSL），glibc 2.42，**不能静态链接**（没装 glibc-static），所以 `nano-exec-static` 不会生成。
 
@@ -63,6 +64,7 @@ cd gateway && go test -race ./...
 | f08e92d | 切换会话/回来时补上没看到的聊天记录（/history）；网关和终端聊天分开（make chat） |
 | 131e2e2 | 多个内核（节点）：会话绑定机器，掉线时替补只聊天，/node |
 | b3c1929 | SSH 远程执行：服务器作为节点（经由某个内核），自动上传/现编执行器 |
+| Skill 阶段 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
 
 ## 关键设计（改之前先理解）
 
@@ -72,10 +74,12 @@ cd gateway && go test -race ./...
 4. **沙箱**：执行器每次调用启动一次，Landlock（工作目录读写、系统目录只读、HOME 其他地方不可见）+ seccomp（禁 AF_UNIX、io_uring 等）+ 清理环境变量。工作目录不能包含 nano-agent 自己（内核、网关、执行器各自把关）。没有沙箱的机器，自动模式下 Shell 也要审批（按每一轮实际执行的机器算）。
 5. **SSH 远程**：服务器上不跑内核。内核后台准备执行器（检查 → 上传 → 现编），工具调用是 `ssh … 目标 sh -c 'exec 执行器'`，ControlMaster 复用，关 stdin 取消。执行器放在服务器 `~/.cache/nano-agent/nano-exec-<指纹>`。
 6. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）；内核连接用 token（**目前所有内核共用一个 token，连接不加密**，跨网络要走 Tailscale/WireGuard/SSH 隧道）。
+7. **技能**：由内核管理，默认目录是 kernel.conf 旁的 skills/（skills 配置可改）。名字和简介放在 Skill 工具定义里，正文调用时读。下一轮开始和空闲每 30 秒扫描；元数据变化用 tools 消息同步网关和网页。正文、附带文件更新不改变工具定义。SSH 调用 Skill 时把所选技能打包上传到服务器缓存，后续 Read/Shell 在沙箱里只读访问。沿用 runner 的异步执行和取消，不另起技能服务。
 
 ## 用户的偏好和约定（重要）
 
 - 中文交流；界面、日志、文档都是中文。用户喜欢“有创意、好看、好用”的网页，不要填表式的设置；拓扑图节点能拖动。
+- 先把项目主体功能搭好，每完成一个阶段提交；实现保持直接，做合适的错误处理，不堆防御性代码，体验优化留到实际使用中推进。
 - 思考强度只用 OpenAI 风格的 `reasoning_effort`（用户的模型接受 none/low/high/xhigh/max，不接受 medium/minimal/off）。切换思考强度导致缓存失效是 vLLM 的问题，**不要提示**。
 - 目前只支持私聊，群聊以后做。
 - 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，提交信息结尾带 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。用户说过“提交，然后开始下一步即可”。
@@ -85,10 +89,9 @@ cd gateway && go test -race ./...
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
-1. **Skill**：按 Anthropic Agent Skills 的格式（目录里一个 SKILL.md，带 name/description frontmatter，可以附带脚本和资料）。加一个 Skill 工具：系统提示词里只列技能的名字和描述（固定不变，不破坏缓存），模型调用 Skill 时把 SKILL.md 的正文作为工具结果给它；附带的文件让模型用 Read/Shell 去读。技能放在哪台机器上要想清楚（网关管理技能目录，内核执行时需要能读到附带文件）。
-2. **飞书 / Telegram 流式回复**：现在要等整段回复生成完才发。飞书用卡片（CardKit 流式更新），Telegram 用 sendMessageDraft 或编辑消息；思考过程和工具调用也显示。审批可以做成按钮。
-3. **上下文压缩**：现在裁掉的部分只换成一句“更早的对话已省略”（Settings.Summary）。改成调模型生成摘要放在那里（只在裁剪时做一次，之后照样只追加）。
-4. 之后：长期记忆、群聊、每台机器单独的 token、Telegram 真机测试（没有凭据，代码写好了没跑过）。
+1. **飞书 / Telegram 流式回复**：现在要等整段回复生成完才发。飞书用卡片（CardKit 流式更新），Telegram 用 sendMessageDraft 或编辑消息；思考过程和工具调用也显示。审批可以做成按钮。
+2. **上下文压缩**：现在裁掉的部分只换成一句“更早的对话已省略”（Settings.Summary）。改成调模型生成摘要放在那里（只在裁剪时做一次，之后照样只追加）。
+3. 之后：长期记忆、群聊、每台机器单独的 token、Telegram 真机测试（没有凭据，代码写好了没跑过）。
 
 ## 坑
 

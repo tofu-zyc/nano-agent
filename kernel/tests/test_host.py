@@ -105,6 +105,49 @@ def leftover(tag):
     return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
 
 
+SKILLS = os.path.join(T, "skills")
+
+
+@case("技能：Skill 返回说明，附带文件在沙箱里只读可见")
+def t_skill(gw):
+    start_run(gw, "sk")
+    call(gw, "sk", ("c1", "Skill", {"name": "demo"}))
+    gw.expect("result", sid="sk", id="c1", ok=True,
+              content=lambda s: s.startswith("技能 demo\n技能目录：") and "附带文件：data.txt、scripts/run.sh" in s
+              and s.rstrip().endswith("照着做就行。"))
+    gw.expect("model", sid="sk")
+    call(gw, "sk", ("c2", "Shell", {"command": f"cat {SKILLS}/demo/data.txt"}),
+         ("c3", "Write", {"path": f"{SKILLS}/demo/data.txt", "content": "x"}),
+         ("c4", "Skill", {"name": "nope"}))
+    got = {}
+    for _ in range(3):
+        r = gw.expect("result", sid="sk")
+        got[r["id"]] = r
+    assert got["c2"]["ok"] and "技能数据" in got["c2"]["content"], got["c2"]
+    assert not got["c3"]["ok"], got["c3"]
+    assert not got["c4"]["ok"] and "没有这个技能" in got["c4"]["content"], got["c4"]
+    finish(gw, "sk")
+
+
+@case("技能热更新：下一轮加载新增技能，删除后撤下 Skill 工具")
+def t_skill_reload(gw):
+    demo = os.path.join(SKILLS, "demo", "SKILL.md")
+    saved = open(demo).read()
+    os.unlink(demo)
+    gw.send(t="input", sid="reload", mode="auto", dirs=[WORK], **{"from": "tg:user"})
+    msg = gw.expect("tools", skills=[])
+    assert "Skill" not in [t["name"] for t in msg["tools"]], msg
+    finish(gw, "reload")
+
+    with open(demo, "w") as f:
+        f.write(saved)
+    gw.send(t="input", sid="reload2", mode="auto", dirs=[WORK], **{"from": "tg:user"})
+    msg = gw.expect("tools")
+    assert msg["skills"][0]["name"] == "demo", msg
+    assert "Skill" in [t["name"] for t in msg["tools"]], msg
+    finish(gw, "reload2")
+
+
 @case("工具往返：Write 写文件，Read 读回来")
 def t_roundtrip(gw):
     start_run(gw, "s1")
@@ -316,7 +359,7 @@ def remote_phase():
     conf = os.path.join(T, "kernel2.conf")
     with open(conf, "w") as f:
         f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nssh = {ssh}\n"
-                f"remote = box box\nremote = down down\nremote = fixed box /nonexistent/nano-exec\n")
+                f"skills = {SKILLS}\nremote = box box\nremote = down down\nremote = fixed box /nonexistent/nano-exec\n")
     gw = Gateway(sock)
     log = open(os.path.join(T, "kernel2.log"), "w")
     env = dict(os.environ, HOME=os.path.join(T, "home"), REMOTE_ROOT=root, XDG_RUNTIME_DIR=os.path.join(T, "run"))
@@ -379,6 +422,23 @@ def run_remote_cases(gw, box):
         gw.expect("result", sid="r2", id="c1", ok=False, content=lambda s: "包含执行器自己" in s)
         finish(gw, "r2")
 
+    @case("远程技能：上传附带文件，在服务器上读取、运行，不能改写")
+    def t_remote_skill(gw):
+        start_remote_run(gw, "rs", "box", ["~/proj"])
+        call(gw, "rs", ("s1", "Skill", {"name": "demo"}))
+        result = gw.expect("result", sid="rs", id="s1", ok=True)
+        path = result["content"].split("技能目录：", 1)[1].split("（", 1)[0]
+        assert path.startswith("~/.cache/nano-agent/skills/"), path
+        gw.expect("model", sid="rs")
+        call(gw, "rs", ("s2", "Read", {"path": path + "/data.txt"}),
+             ("s3", "Shell", {"command": "sh " + path + "/scripts/run.sh"}),
+             ("s4", "Write", {"path": path + "/data.txt", "content": "x"}))
+        got = {r["id"]: r for r in (gw.expect("result", sid="rs") for _ in range(3))}
+        assert got["s2"]["ok"] and "技能数据" in got["s2"]["content"], got
+        assert got["s3"]["ok"] and "hi" in got["s3"]["content"], got
+        assert not got["s4"]["ok"], got
+        finish(gw, "rs")
+
     @case("远程：列服务器上的目录，包含执行器的标出来")
     def t_remote_ls(gw):
         gw.send(t="ls", id="L1", node="box", path="~")
@@ -414,7 +474,7 @@ def run_remote_cases(gw, box):
             time.sleep(0.1)
         assert not leftover("sleep 4747"), leftover("sleep 4747")
 
-    for t in (t_prepare, t_remote_tools, t_remote_guard, t_remote_ls, t_remote_unavailable, t_remote_cancel):
+    for t in (t_prepare, t_remote_tools, t_remote_guard, t_remote_skill, t_remote_ls, t_remote_unavailable, t_remote_cancel):
         t(gw)
 
 
@@ -422,10 +482,18 @@ def main():
     try:
         os.makedirs(WORK)
         os.makedirs(os.path.join(T, "home"))
+        os.makedirs(os.path.join(SKILLS, "demo", "scripts"))
+        with open(os.path.join(SKILLS, "demo", "SKILL.md"), "w") as f:
+            f.write("---\nname: demo\ndescription: >\n  示例技能，\n  测试用\n---\n\n# 示例\n照着做就行。\n")
+        with open(os.path.join(SKILLS, "demo", "data.txt"), "w") as f:
+            f.write("技能数据\n")
+        with open(os.path.join(SKILLS, "demo", "scripts", "run.sh"), "w") as f:
+            f.write("echo hi\n")
+        os.makedirs(os.path.join(SKILLS, "broken"))  # 没有 SKILL.md 的目录不算技能
         sock = os.path.join(T, "gw.sock")
         conf = os.path.join(T, "kernel.conf")
         with open(conf, "w") as f:
-            f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\n"
+            f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nskills = {SKILLS}\n"
                     f"max_output = 4096\napproval_timeout = 2\n")
 
         gw = Gateway(sock)
@@ -437,12 +505,16 @@ def main():
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
             assert hello["token"] == "t0k" and hello["v"] == 3, hello
-            assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names
+            assert names == ["Edit", "Grep", "Read", "Shell", "Skill", "Write"], names
+            skill = next(t for t in hello["tools"] if t["name"] == "Skill")
+            assert "- demo：示例技能， 测试用" in skill["description"], skill["description"]
+            assert skill["input_schema"]["properties"]["name"]["enum"] == ["demo"], skill
+            assert hello["skills"] == [{"name": "demo", "description": "示例技能， 测试用"}], hello["skills"]
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
             assert "landlock" in hello["sandbox"], hello
             gw.send(t="welcome", v=3)
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_ls, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
+            for t in (t_ls, t_skill, t_skill_reload, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
                       t_cancel, t_background, t_guard, t_bad_args, t_reconnect):
                 t(gw)
 

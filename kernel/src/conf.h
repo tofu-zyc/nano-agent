@@ -22,6 +22,7 @@ typedef struct {
     int    approval_timeout;  /* 秒 */
     size_t max_output;        /* 工具输出最多保留的字节数 */
     char  *ssh;               /* ssh 命令，默认 ssh */
+    char  *skills;            /* 技能目录，默认是配置目录下的 skills/ */
     kremote *remotes;         /* remote = 名字 目标 [服务器上 nano-exec 的路径] */
     size_t nremotes;
 } kconf;

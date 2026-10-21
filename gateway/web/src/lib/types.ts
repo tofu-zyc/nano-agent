@@ -14,7 +14,8 @@ export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatu
 export type RemoteInfo = { name: string; target: string; ok: boolean; landlock: number; detail?: string };
 
 // 一个在线的内核（节点）。local 表示它和网关在同一台机器上
-export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number; local: boolean; remotes: RemoteInfo[] | null };
+export type SkillInfo = { name: string; description: string };
+export type KernelInfo = { node: string; landlock: number; tools: string[]; skills: SkillInfo[]; since: number; local: boolean; remotes: RemoteInfo[] | null };
 
 // 一台机器：在线的内核、内核能 SSH 过去的服务器，或者有会话要在上面工作但现在不在线的
 export type Machine = {

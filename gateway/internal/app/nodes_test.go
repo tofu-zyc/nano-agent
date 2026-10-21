@@ -170,3 +170,33 @@ func waitFor(t *testing.T, f func() bool) {
 	}
 	t.Fatal("等不到")
 }
+
+func TestSkillToolsUpdateWithoutReconnect(t *testing.T) {
+	e := setup(t)
+	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	initial := e.a.Snapshot().Kernels[0]
+	skills := []proto.SkillSpec{{Name: "demo", Description: "示例技能"}}
+	tools := []proto.ToolSpec{{Name: "Skill", Description: "先加载 demo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	e.k.send(proto.Msg{T: proto.TTools, Tools: tools, Skills: skills})
+	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Skills) == 1 })
+	updated := e.a.Snapshot().Kernels[0]
+	if updated.Since != initial.Since || !updated.Local || updated.Skills[0].Name != "demo" {
+		t.Fatalf("更新工具不该重建节点：%+v", updated)
+	}
+	e.say("用一下技能")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	if got := e.llm.lastReq().Tools; len(got) != 1 || got[0].Function.Name != "Skill" || got[0].Function.Description != "先加载 demo" {
+		t.Fatalf("模型没收到新的技能工具：%+v", got)
+	}
+
+	// 删掉技能后，后续请求也不再带过期的工具定义。
+	e.k.send(proto.Msg{T: proto.TTools})
+	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Skills) == 0 })
+	e.say("技能删掉了")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	if len(e.llm.lastReq().Tools) != 0 {
+		t.Fatal("模型仍然带着已经删除的工具")
+	}
+}

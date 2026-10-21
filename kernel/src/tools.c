@@ -49,6 +49,7 @@ static const builtin BUILTINS[] = {
       "\"command\":{\"type\":\"string\",\"description\":\"要执行的命令\"},"
       "\"timeout\":{\"type\":\"integer\",\"description\":\"超时秒数，默认 120，最大 600\"}},"
       "\"required\":[\"command\"]}" },
+    { { "Skill", NA_TOOL_READ, 70 * 1000 }, NULL, NULL },   /* 描述见 skills.c；远程时含文件上传 */
     { { "Write", NA_TOOL_WRITE, 30 * 1000 },
       "创建或覆盖工作目录里的文件，写入完整内容；上级目录不存在会自动创建。"
       "只改文件的一部分时用 Edit，不要用 Write 重写整个文件。",
@@ -72,6 +73,7 @@ cJSON *tools_specs(void)
 {
     cJSON *arr = cJSON_CreateArray();
     for (size_t i = 0; i < NBUILTINS; i++) {
+        if (!BUILTINS[i].description) continue;
         cJSON *t = cJSON_CreateObject();
         cJSON_AddStringToObject(t, "name", BUILTINS[i].pol.name);
         cJSON_AddStringToObject(t, "description", BUILTINS[i].description);
