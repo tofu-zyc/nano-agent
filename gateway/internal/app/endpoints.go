@@ -138,7 +138,16 @@ func (a *App) boundSession(ep endpoint, m channel.Message) string {
 // attach 返回窗口接着的会话；第一次见到的窗口按说话的人决定接到哪里。调用方持有锁。
 func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	if ep.ch == "web" {
-		return a.boundSession(ep, m)
+		// 网页能在任何会话里说话，说过话就算网页也接着这个会话（主会话一直接着网页）
+		sid := a.boundSession(ep, m)
+		if st := a.store.Settings(sid); sid != mainSID && !st.Web {
+			st.Web = true
+			if err := a.store.SaveSettings(sid, st); err != nil {
+				a.log.Warn("保存会话设置失败", "sid", sid, "err", err)
+			}
+			a.publishSession(sid)
+		}
+		return sid
 	}
 	key := ep.key()
 	r := a.eps[key]
@@ -180,7 +189,8 @@ func (a *App) publishSession(sid string) {
 	a.publish(events.Event{T: "session", SID: sid, Data: a.sessionInfo(sid)})
 }
 
-// endpointsOf 是接在会话 sid 上的窗口
+// endpointsOf 是接在会话 sid 上的窗口。网页放在最后：主会话一直接着网页（网页用户是管理员，
+// 管理员的窗口默认都接在主会话上），其他会话在网页里新建或者说过话才算。
 func (a *App) endpointsOf(sid string) []EndpointInfo {
 	out := []EndpointInfo{}
 	for key, r := range a.eps {
@@ -190,6 +200,9 @@ func (a *App) endpointsOf(sid string) []EndpointInfo {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if sid == mainSID || a.store.Settings(sid).Web {
+		out = append(out, EndpointInfo{Key: "web", Channel: "web", Session: sid})
+	}
 	return out
 }
 
@@ -242,7 +255,8 @@ func (a *App) orderedSessions() []SessionInfo {
 	return list
 }
 
-func (a *App) newSession(title string) (string, error) {
+// newSession 新建一个会话。web 表示是在网页里新建的（网页接着它）。
+func (a *App) newSession(title string, web bool) (string, error) {
 	var sid string
 	for sid == "" || a.hasSession(sid) {
 		b := make([]byte, 3)
@@ -254,7 +268,7 @@ func (a *App) newSession(title string) (string, error) {
 		t := a.now().In(a.loc)
 		title = fmt.Sprintf("新会话 %s", t.Format("01-02 15:04"))
 	}
-	if err := a.store.SaveSettings(sid, session.Settings{Title: title}); err != nil {
+	if err := a.store.SaveSettings(sid, session.Settings{Title: title, Web: web}); err != nil {
 		return "", err
 	}
 	a.publishSession(sid)
@@ -274,7 +288,7 @@ func (a *App) HasSession(sid string) bool {
 func (a *App) NewSession(title string) (SessionInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	sid, err := a.newSession(title)
+	sid, err := a.newSession(title, true)
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -352,7 +366,7 @@ func (a *App) cmdSession(c in, arg string) {
 	var sid string
 	if sub, rest, _ := strings.Cut(arg, " "); sub == "new" {
 		var err error
-		if sid, err = a.newSession(rest); err != nil {
+		if sid, err = a.newSession(rest, false); err != nil {
 			a.answer(c, "新建会话失败："+err.Error())
 			return
 		}

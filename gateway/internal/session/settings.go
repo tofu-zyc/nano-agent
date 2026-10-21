@@ -16,7 +16,8 @@ type Settings struct {
 	Mode    string   `json:"mode,omitempty"`     // 空表示用配置里的默认模式
 
 	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用配置里的默认值
-	Title    string `json:"title,omitempty"`    // 会话的名字（群名或私聊对方的名字），网页里显示
+	Title    string `json:"title,omitempty"`    // 会话的名字，网页里显示
+	Web      bool   `json:"web,omitempty"`      // 网页接着这个会话：在网页里新建的，或者在网页里说过话
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。

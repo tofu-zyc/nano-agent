@@ -91,6 +91,10 @@ func TestGuestHasOwnSession(t *testing.T) {
 	if info, ok := e.a.Session("fake:c2"); !ok || info.Title != "李四" || len(info.Endpoints) != 1 {
 		t.Fatalf("info: %+v", info)
 	}
+	// 主会话一直接着网页
+	if info, _ := e.a.Session(mainSID); len(info.Endpoints) != 2 || info.Endpoints[0].Key != "fake:c1" || info.Endpoints[1].Key != "web" {
+		t.Fatalf("main: %+v", info.Endpoints)
+	}
 	sayFrom(e.a, e.ch, "c2", "u2", "/session 1")
 	e.ch.wait(t, "只有管理员能切换会话")
 	sayFrom(e.a, e.ch, "c2", "u2", "/session")
@@ -216,7 +220,8 @@ func TestWebSessionsAndRewiring(t *testing.T) {
 	}
 	e.sid = info.SID
 	e.roundTrip(t)
-	if got, _ := e.a.Session(info.SID); len(got.Endpoints) != 1 || got.Channel != "fake" {
+	// 网页里新建的会话也接着网页
+	if got, _ := e.a.Session(info.SID); len(got.Endpoints) != 2 || got.Channel != "fake" || got.Endpoints[1].Key != "web" {
 		t.Fatalf("info: %+v", got)
 	}
 
@@ -233,6 +238,25 @@ func TestWebSessionsAndRewiring(t *testing.T) {
 	e.say("回来了")
 	if in := e.k.expect(proto.TInput); in.SID != mainSID {
 		t.Fatalf("input: %+v", in)
+	}
+}
+
+func TestWebJoinsSessionItTalksIn(t *testing.T) {
+	e := setup(t)
+	web := channel.NewWeb()
+	e.a.AddChannel(web)
+	e.say("/session new 终端开的")
+	e.ch.wait(t, "已切换到会话「终端开的」")
+	sid := e.a.eps["fake:c1"].Session
+	if info, _ := e.a.Session(sid); len(info.Endpoints) != 1 {
+		t.Fatalf("网页还没在这里说过话：%+v", info.Endpoints)
+	}
+	e.a.OnMessage(web, channel.Message{ChatID: "browser", SenderID: "admin", Session: sid, Text: "网页也来说一句", Mentioned: true})
+	if in := e.k.expect(proto.TInput); in.SID != sid || in.From != "web:admin" {
+		t.Fatalf("input: %+v", in)
+	}
+	if info, _ := e.a.Session(sid); len(info.Endpoints) != 2 || info.Endpoints[1].Key != "web" {
+		t.Fatalf("网页说过话之后应该接着：%+v", info.Endpoints)
 	}
 }
 

@@ -168,8 +168,8 @@
         <div class="empty">
           <Icon name="chat" size={26} />
           <p>说点什么开始对话吧。</p>
-          {#if eps.length}
-            <p class="muted">{eps.map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
+          {#if eps.some((e) => e.channel !== 'web')}
+            <p class="muted">{eps.filter((e) => e.channel !== 'web').map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
           {/if}
           {#if !info?.dirs?.length}
             <p class="muted">想让它读写文件、执行命令？先在 <button class="lnk" onclick={() => store.open({ type: 'session', sid })}>会话设置</button> 里给它一个工作目录。</p>

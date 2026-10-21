@@ -65,7 +65,9 @@
   // 其他会话上的窗口，可以改接到这个会话
   const otherEndpoints = $derived(
     target.type === 'session'
-      ? (ov.sessions ?? []).flatMap((s) => (s.sid === target.sid ? [] : (s.endpoints ?? []).map((e) => ({ e, from: s.title }))))
+      ? (ov.sessions ?? []).flatMap((s) =>
+          s.sid === target.sid ? [] : (s.endpoints ?? []).filter((e) => e.channel !== 'web').map((e) => ({ e, from: s.title })),
+        )
       : [],
   );
   async function attach(e: EndpointInfo) {
@@ -312,7 +314,7 @@
             <div class="row">
               <span class="dot" style="background: {channelMeta[e.channel]?.color ?? 'var(--muted)'}"></span>
               <span class="grow">{endpointLabel(e)}</span>
-              <code class="epkey">{e.key}</code>
+              {#if e.channel === 'web'}<span class="epkey">能接入任何会话</span>{:else}<code class="epkey">{e.key}</code>{/if}
             </div>
           {:else}
             <p class="note">还没有聊天窗口接在这里，只能在网页里聊。</p>
