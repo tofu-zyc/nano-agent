@@ -1,8 +1,14 @@
 package channel
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -131,7 +137,9 @@ func TestFeishuExtractPost(t *testing.T) {
 
 func TestCLIRunView(t *testing.T) {
 	var out strings.Builder
-	c := NewCLI(strings.NewReader(""), &out, true, true)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := NewCLI("", true, true, log)
+	c.out = &out
 	v := c.OpenRun("local", "")
 	v.Reasoning("先看看")
 	v.Reasoning("目录\n结构")
@@ -157,7 +165,8 @@ func TestCLIRunView(t *testing.T) {
 
 	// 关掉思考和用量显示
 	out.Reset()
-	c = NewCLI(strings.NewReader(""), &out, false, false)
+	c = NewCLI("", false, false, log)
+	c.out = &out
 	v = c.OpenRun("local", "")
 	v.Reasoning("不显示")
 	v.Content("你好")
@@ -165,5 +174,97 @@ func TestCLIRunView(t *testing.T) {
 	v.Close()
 	if out.String() != "bot> 你好\n" {
 		t.Fatalf("got %q", out.String())
+	}
+}
+
+// 终端通过 unix socket 连上来：打招呼、收发消息、新终端顶掉旧终端
+func TestCLISocket(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "nc")
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "cli.sock")
+	c := NewCLI(sock, false, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	connected := make(chan struct{}, 4)
+	c.OnConnect(func() { connected <- struct{}{} })
+	got := make(chan string, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx, func(_ Channel, m Message) { got <- m.Text })
+
+	var conn net.Conn
+	var err error
+	for i := 0; i < 50; i++ {
+		if conn, err = net.Dial("unix", sock); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(sock); st.Mode().Perm() != 0o600 {
+		t.Fatalf("socket 权限：%v", st.Mode())
+	}
+	fmt.Fprintln(conn, ChatHello)
+	<-connected
+	if st := c.Status(); st.State != StateOnline {
+		t.Fatalf("status: %+v", st)
+	}
+	fmt.Fprintln(conn, "你好")
+	if m := <-got; m != "你好" {
+		t.Fatalf("got %q", m)
+	}
+	c.Send(context.Background(), "local", "回复", "")
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	br := bufio.NewReader(conn)
+	if line, _ := br.ReadString('\n'); line != "bot> 回复\n" {
+		t.Fatalf("read %q", line)
+	}
+
+	// 第二个终端连上来，第一个被断开
+	conn2, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	fmt.Fprintln(conn2, ChatHello+" color")
+	<-connected
+	rest, _ := io.ReadAll(br)
+	if !strings.Contains(string(rest), "另一个终端接进来了") {
+		t.Fatalf("旧终端：%q", rest)
+	}
+	// 不按规矩打招呼的连接直接断开
+	bad, _ := net.Dial("unix", sock)
+	fmt.Fprintln(bad, "hello")
+	bad.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if msg, _ := io.ReadAll(bad); !strings.Contains(string(msg), "nano-gateway chat") {
+		t.Fatalf("bad: %q", msg)
+	}
+	conn2.Close()
+	for i := 0; i < 50 && c.Status().State != StateIdle; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := c.Status(); st.State != StateIdle {
+		t.Fatalf("断开后：%+v", st)
+	}
+}
+
+func TestCLISocketPath(t *testing.T) {
+	if p, err := CLISocket("/srv/nano/data"); err != nil || p != "/srv/nano/data/cli.sock" {
+		t.Fatalf("%q %v", p, err)
+	}
+	run := t.TempDir()
+	os.Chmod(run, 0o700)
+	t.Setenv("XDG_RUNTIME_DIR", run)
+	long := "/" + strings.Repeat("很长的目录/", 12) + "data"
+	p, err := CLISocket(long)
+	if err != nil || filepath.Dir(p) != run || len(p) > 100 {
+		t.Fatalf("%q %v", p, err)
+	}
+	if p2, _ := CLISocket(long); p2 != p {
+		t.Fatalf("同一个数据目录要算出同一个路径：%q %q", p, p2)
+	}
+	os.Chmod(run, 0o755)
+	if _, err := CLISocket(long); err == nil {
+		t.Fatal("别人也能进的目录不能用")
 	}
 }

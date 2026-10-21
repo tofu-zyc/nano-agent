@@ -11,6 +11,7 @@ import (
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -297,5 +298,75 @@ func TestMigrateOldCLISession(t *testing.T) {
 	}
 	if store.Exists("cli:local") {
 		t.Fatal("旧会话还在")
+	}
+}
+
+// 两个窗口轮流在主会话里说话：每个窗口说话前，先补上它没看到的对话
+func TestCatchUpAcrossWindows(t *testing.T) {
+	e := setup(t)
+	other := e.otherCh()
+	e.say("在 fake 说的")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	e.ch.wait(t, "（mock）收到：在 fake 说的")
+
+	// other 第一次说话：告诉它接在主会话上，附上最近的对话
+	sayFrom(e.a, other, "x", "u9", "我在 other")
+	if msg := other.wait(t, "这个窗口接在主会话上"); !strings.Contains(msg, "〔10-21 15:08 · fake〕\n你：在 fake 说的\n机器人：（mock）收到：在 fake 说的") {
+		t.Fatalf("intro: %q", msg)
+	}
+	e.k.expect(proto.TInput)
+	// 这一轮还没结束时 fake 又说话：要等这一轮结束、开始 fake 那一轮时再补，不补半截
+	e.say("回到 fake")
+	e.ch.none(t)
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	other.wait(t, "（mock）收到：我在 other")
+	msg := e.ch.wait(t, "你不在这里的时候")
+	if !strings.Contains(msg, "你：我在 other\n机器人：（mock）收到：我在 other") || strings.Contains(msg, "在 fake 说的") {
+		t.Fatalf("catch up: %q", msg)
+	}
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	e.ch.wait(t, "（mock）收到：回到 fake")
+
+	// 自己说的不用补；other 再说话时补上 fake 刚才那一轮
+	e.say("再说一句")
+	e.k.expect(proto.TInput)
+	e.ch.none(t)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusCancelled})
+	e.ch.wait(t, "（已停止）")
+	sayFrom(e.a, other, "x", "u9", "/history 2")
+	if msg := other.wait(t, "会话「主会话」最近 2 轮对话"); !strings.Contains(msg, "你：回到 fake") || !strings.Contains(msg, "你：再说一句\n机器人：（没有回复）") {
+		t.Fatalf("history: %q", msg)
+	}
+	// /history 之后算看过了，不再补
+	sayFrom(e.a, other, "x", "u9", "好的")
+	e.k.expect(proto.TInput)
+	other.none(t)
+}
+
+func TestTurnsOf(t *testing.T) {
+	h := []session.Msg{
+		{Role: "assistant", Content: "上一轮的尾巴"},
+		{Role: "user", Content: "[系统] 工作目录：/w\n[2026-10-21 周三 15:08 · 飞书] 看看目录"},
+		{Role: "assistant", Content: "我看看", ToolCalls: []llm.ToolCall{{ID: "1"}}},
+		{Role: "tool", ToolCallID: "1", Content: "a.txt"},
+		{Role: "assistant", Content: "只有 a.txt"},
+		{Role: "user", Content: "没有时间戳"},
+	}
+	ts := turnsOf(h, 10)
+	if len(ts) != 2 || ts[0] != (turn{at: "10-21 15:08", via: "飞书", user: "看看目录", reply: "只有 a.txt", tools: 1, start: 11}) ||
+		ts[1] != (turn{user: "没有时间戳", start: 15}) {
+		t.Fatalf("turns: %+v", ts)
+	}
+	text, n := renderTurns(ts, 10) // 太长时只留最近的
+	if n != 1 || text != "你：没有时间戳\n机器人：（没有回复）" {
+		t.Fatalf("render: %d %q", n, text)
 	}
 }

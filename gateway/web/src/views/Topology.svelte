@@ -750,6 +750,11 @@
     fill: var(--err);
     filter: drop-shadow(0 0 4px var(--err));
   }
+  .sdot.idle {
+    fill: none;
+    stroke: var(--ok);
+    stroke-width: 1.5;
+  }
   .ring {
     fill: none;
     stroke: var(--accent);

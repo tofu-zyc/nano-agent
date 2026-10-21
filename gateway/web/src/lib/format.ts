@@ -67,6 +67,7 @@ export const stateLabel: Record<string, string> = {
   starting: '连接中',
   error: '出错',
   stopped: '已停止',
+  idle: '等待接入',
   disabled: '未启用',
 };
 

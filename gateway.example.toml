@@ -76,7 +76,7 @@ listen   = "127.0.0.1:7788"    # "off" 表示不开；要从别的机器访问�
 password = ""                  # 空表示自动生成一个，存在数据目录的 web.secret 里
 
 [cli]
-enabled = false                # 命令行聊天，本地调试用
+enabled = true                 # 终端聊天：另开一个终端 make chat 连进来（只有自己能连）
 show_reasoning = true          # 灰色显示模型的思考过程
 show_usage     = true          # 每轮结束后显示用量和前缀缓存命中率
 

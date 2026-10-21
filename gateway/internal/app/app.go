@@ -28,6 +28,7 @@ import (
 const helpText = `可用命令：
 /whoami  查看你的身份、这个窗口和它接着的会话
 /session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
+/history 查看这个会话最近的对话；/history <轮数> 看更多
 /stop    停止当前任务
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）
@@ -48,12 +49,11 @@ type App struct {
 	started time.Time
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
-	chMu   sync.Mutex
-	runs   map[string]*chanRun
-	chErr  map[string]string
-	cli    *channel.CLI
-	cliEOF func()
-	web    *channel.Web
+	chMu  sync.Mutex
+	runs  map[string]*chanRun
+	chErr map[string]string
+	cli   *channel.CLI
+	web   *channel.Web
 
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
@@ -225,7 +225,7 @@ func (a *App) SetLLM(c llm.Client) {
 // ---- 聊天消息 ----
 
 var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"dir": true, "mode": true, "think": true, "session": true}
+	"dir": true, "mode": true, "think": true, "session": true, "history": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -278,6 +278,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	switch cmd {
 	case "session":
 		a.cmdSession(c, arg)
+		return
+	case "history":
+		a.cmdHistory(c, arg)
 		return
 	case "stop":
 		a.stop(c)
@@ -425,9 +428,12 @@ func (a *App) startRun(s *sess) {
 			a.log.Warn("保存会话设置失败", "sid", s.sid, "err", err)
 		}
 	}
+	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
+	a.catchUp(head.ep, s.sid)
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
 	}
+	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
 	r := &run{id: a.runSeq, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
@@ -676,6 +682,12 @@ func (a *App) finish(s *sess, status, detail string) {
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
 		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
 	a.endRun(s, "")
+	// 这一轮显示到的窗口都看到了这里
+	end := a.histEnd(s.sid)
+	for _, o := range r.outs {
+		a.markSeen(o.ep, s.sid, end, false)
+	}
+	a.saveEndpoints()
 	if note != "" {
 		a.publish(events.Event{T: "say", SID: s.sid, Text: note})
 	}

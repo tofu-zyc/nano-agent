@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test run clean
+.PHONY: all kernel gateway web test run chat clean
 
 all: kernel gateway
 
@@ -21,6 +21,11 @@ test: all
 # 本机一键运行，在终端里直接聊天
 run: all
 	./scripts/run-local.sh
+
+# 在终端里和正在运行的网关聊天（网关先 make run 跑起来）
+chat:
+	@test -x gateway/nano-gateway || $(MAKE) -s gateway
+	@./gateway/nano-gateway chat -c gateway.toml
 
 clean:
 	$(MAKE) -C kernel clean

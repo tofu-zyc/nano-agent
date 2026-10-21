@@ -118,7 +118,7 @@ type Workspace struct {
 }
 
 type CLI struct {
-	Enabled       bool  `toml:"enabled" json:"enabled"`
+	Enabled       *bool `toml:"enabled" json:"enabled"`                 // 终端聊天（make chat 连进来），默认开
 	ShowReasoning *bool `toml:"show_reasoning" json:"show_reasoning"` // 显示模型的思考过程，默认开
 	ShowUsage     *bool `toml:"show_usage" json:"show_usage"`         // 每轮结束后显示用量和缓存命中率，默认开
 }
@@ -283,8 +283,8 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("workspace.dirs 里的 %q 要写成绝对路径或 ~ 开头", d))
 		}
 	}
-	if !c.CLI.Enabled && !c.Telegram.Enabled && !c.Feishu.Enabled {
-		errs = append(errs, errors.New("cli、telegram、feishu 至少要启用一个"))
+	if !On(c.CLI.Enabled) && !c.Telegram.Enabled && !c.Feishu.Enabled && c.Web.Listen == "off" {
+		errs = append(errs, errors.New("终端、网页、Telegram、飞书都关掉了，没有地方能聊天"))
 	}
 	return errors.Join(errs...)
 }

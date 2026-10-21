@@ -11,6 +11,7 @@ const (
 	StateOnline   = "online"
 	StateError    = "error"
 	StateStopped  = "stopped"
+	StateIdle     = "idle" // 在等人接入（终端渠道没有终端连着）
 )
 
 // Status 是渠道的连接状态，网页界面用它画拓扑图。

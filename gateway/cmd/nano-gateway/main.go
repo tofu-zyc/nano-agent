@@ -1,5 +1,8 @@
 // nano-gateway：nano-agent 的网关。持有对话上下文，对接模型和聊天平台，
 // 等内核连上来驱动循环；另外提供一个网页管理界面。
+//
+//	nano-gateway -c gateway.toml        运行网关
+//	nano-gateway chat -c gateway.toml   在终端里和正在运行的网关聊天
 package main
 
 import (
@@ -32,6 +35,9 @@ func newClient(c config.LLM) (llm.Client, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "chat" {
+		os.Exit(runChat(os.Args[2:]))
+	}
 	cfgPath := flag.String("c", "gateway.toml", "配置文件路径")
 	verbose := flag.Bool("v", false, "输出调试日志")
 	flag.Parse()
@@ -80,14 +86,12 @@ func main() {
 	}
 	go hub.Serve(ctx, ln)
 
-	if cfg.CLI.Enabled {
-		// 只有命令行一个聊天渠道时（网页不算），Ctrl-D 就是退出
-		onlyCLI := !cfg.Telegram.Enabled && !cfg.Feishu.Enabled
-		a.SetCLI(channel.NewCLI(os.Stdin, os.Stdout, config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage)), func() {
-			if onlyCLI {
-				stop()
-			}
-		})
+	if config.On(cfg.CLI.Enabled) {
+		if sock, err := channel.CLISocket(cfg.Session.DataDir); err != nil {
+			log.Error("终端聊天用不了", "err", err)
+		} else {
+			a.SetCLI(channel.NewCLI(sock, config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage), log))
+		}
 	}
 
 	var ws *web.Server
@@ -103,9 +107,7 @@ func main() {
 		}()
 		url := ws.LoginURL(cfg.Web.Listen)
 		log.Info("网页管理界面", "url", strings.Split(url, "#")[0])
-		if cfg.CLI.Enabled {
-			fmt.Printf("网页管理界面：%s\n", url)
-		}
+		fmt.Printf("网页管理界面：%s\n", url)
 		os.WriteFile(filepath.Join(cfg.Session.DataDir, "web.url"), []byte(url+"\n"), 0o600)
 	}
 
@@ -135,6 +137,9 @@ func main() {
 	}
 	log.Info("网关已启动", "listen", cfg.Kernel.Listen, "model", cfg.LLM.Model, "provider", cfg.LLM.Provider,
 		"channels", strings.Join(names, ","), "persona", cfg.Persona.Dir, "data", cfg.Session.DataDir)
+	if config.On(cfg.CLI.Enabled) {
+		fmt.Printf("终端聊天：另开一个终端运行 make chat（或 %s chat -c %s）\n", os.Args[0], *cfgPath)
+	}
 
 	<-ctx.Done()
 	log.Info("退出")

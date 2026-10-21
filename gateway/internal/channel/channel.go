@@ -40,6 +40,12 @@ type Streamer interface {
 	OpenRun(chatID, replyTo string) RunView
 }
 
+// Noticer 是可选能力：用不同于机器人回复的样式显示系统说明（比如补上的聊天记录）。
+// 没有这个能力的渠道直接用 Send 发。
+type Noticer interface {
+	Notice(chatID, text string)
+}
+
 // Watcher 是可选能力：同一个会话里，别的窗口发来的消息和回复也在这里同步显示（命令行用）。
 // Echo 显示别的窗口发来的消息，之后的回复过程用 OpenRun 打开的 RunView 显示。
 type Watcher interface {

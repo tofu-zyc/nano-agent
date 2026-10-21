@@ -45,6 +45,9 @@ type epRec struct {
 	Name    string `json:"name,omitempty"` // 聊天的名字（私聊对方的名字）
 	Who     string `json:"who,omitempty"`  // 最近在这个窗口说话的人的身份，网页里设管理员用
 	Session string `json:"session"`        // 接着的会话
+
+	// Seen 是这个窗口在各个会话里看到了哪里（历史里的位置），用来补上没看到的对话（recap.go）
+	Seen map[string]int `json:"seen,omitempty"`
 }
 
 // EndpointInfo 是一个聊天窗口，网页用。
@@ -163,6 +166,16 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 		a.eps[key] = r
 		changed = true
 		a.log.Info("新的聊天窗口", "endpoint", key, "session", r.Session)
+		// 接到的会话里已经有对话了（比如管理员的新窗口接到主会话）：说一声，附上最近的对话
+		if ts, _ := a.turnsFrom(r.Session, 0); len(ts) > 0 {
+			lead := fmt.Sprintf("这个窗口接在会话「%s」上。", a.sessionInfo(r.Session).Title)
+			if r.Session == mainSID {
+				lead = "这个窗口接在主会话上，在这里说话和终端、网页是同一段上下文。"
+			}
+			a.introduce(ep, r.Session, lead)
+		} else {
+			a.markSeen(ep, r.Session, a.histEnd(r.Session), false)
+		}
 	}
 	if m.ChatName != "" && r.Name != m.ChatName {
 		r.Name, changed = m.ChatName, true
@@ -349,7 +362,7 @@ func (a *App) SetEndpoint(key, sid string) error {
 		return nil
 	}
 	a.bind(key, sid)
-	a.deliver(parseEndpoint(key), fmt.Sprintf("这个窗口已经改接到会话「%s」，之后在这里说的话都进这个会话", a.sessionInfo(sid).Title), "")
+	a.introduce(parseEndpoint(key), sid, fmt.Sprintf("这个窗口已经改接到会话「%s」，之后在这里说的话都进这个会话。", a.sessionInfo(sid).Title))
 	return nil
 }
 
@@ -376,14 +389,13 @@ func (a *App) WelcomeAdmin(key string) error {
 	if r == nil {
 		return errors.New("没有这个聊天窗口")
 	}
-	text := "你现在是管理员了。"
-	if r.Session != mainSID {
-		a.bind(key, mainSID)
-		text += "这个窗口已经接到主会话，和终端、网页是同一段上下文；"
-	}
-	text += "发 /session 可以查看和切换所有会话。"
 	a.publishSession(mainSID) // 窗口的管理员标记变了
-	a.deliver(parseEndpoint(key), text, "")
+	if r.Session == mainSID {
+		a.deliver(parseEndpoint(key), "你现在是管理员了。发 /session 可以查看和切换所有会话。", "")
+		return nil
+	}
+	a.bind(key, mainSID)
+	a.introduce(parseEndpoint(key), mainSID, "你现在是管理员了。这个窗口已经接到主会话，和终端、网页是同一段上下文；发 /session 可以查看和切换所有会话。")
 	return nil
 }
 
@@ -421,7 +433,7 @@ func (a *App) cmdSession(c in, arg string) {
 	}
 	a.bind(c.ep.key(), sid)
 	info := a.sessionInfo(sid)
-	a.tell(sid, c.ep, fmt.Sprintf("已切换到会话「%s」（%d 条消息），之后在这里说的话都进这个会话", info.Title, info.Messages))
+	a.introduce(c.ep, sid, fmt.Sprintf("已切换到会话「%s」（%d 条消息），之后在这里说的话都进这个会话。", info.Title, info.Messages))
 }
 
 // findSession 按 /session 列表里的编号、会话 ID 或者名字找会话

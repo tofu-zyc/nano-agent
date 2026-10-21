@@ -30,10 +30,11 @@ type chanRun struct {
 // 拓扑图里渠道的顺序
 var channelOrder = []string{"cli", "web", "telegram", "feishu"}
 
-// SetCLI 登记命令行渠道（由 main 创建，它接着终端）。onEOF 在标准输入关闭时调用。
-// 命令行窗口一开始就接在主会话上（拓扑图里能看到），不用等第一条消息。
-func (a *App) SetCLI(c *channel.CLI, onEOF func()) {
-	a.cli, a.cliEOF = c, onEOF
+// SetCLI 登记终端渠道（由 main 创建）。终端窗口一开始就接在主会话上（拓扑图里能看到），
+// 不用等第一条消息；终端连上来时打个招呼，附上最近的对话。
+func (a *App) SetCLI(c *channel.CLI) {
+	a.cli = c
+	c.OnConnect(a.cliConnected)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if key := c.Name() + ":local"; a.eps[key] == nil {
@@ -103,15 +104,8 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 	}
 	go func() {
 		defer close(r.done)
-		err := ch.Run(ctx, a.OnMessage)
-		switch {
-		case err != nil:
+		if err := ch.Run(ctx, a.OnMessage); err != nil {
 			a.log.Error("聊天渠道退出", "channel", name, "err", err)
-		case name == "cli" && ctx.Err() == nil:
-			a.log.Info("标准输入已关闭，命令行渠道停止")
-			if a.cliEOF != nil {
-				a.cliEOF()
-			}
 		}
 		a.publishChannel(name)
 	}()

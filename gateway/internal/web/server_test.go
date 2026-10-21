@@ -203,7 +203,7 @@ func TestPersonas(t *testing.T) {
 
 func TestSessions(t *testing.T) {
 	srv, s, _ := setup(t)
-	s.app.SetCLI(channel.NewCLI(strings.NewReader(""), io.Discard, false, false), nil)
+	s.app.SetCLI(channel.NewCLI(filepath.Join(t.TempDir(), "cli.sock"), false, false, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	c := newClient(t, srv)
 	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
 	// 主会话一直在，哪怕还没有消息（以前新会话没发过消息时打开设置会显示“会话不存在了”）

@@ -82,7 +82,8 @@ var Fields = []Field{
 		Help: "沙箱里额外能写的路径，比如 npm、cargo 的缓存目录", Keywords: "沙箱 sandbox 缓存"},
 
 	// ---- 渠道 ----
-	{Key: "cli.enabled", Group: "cli", Label: "启用命令行聊天", Type: "bool", Restart: true},
+	{Key: "cli.enabled", Group: "cli", Label: "启用终端聊天", Type: "bool", Restart: true,
+		Help: "另开一个终端运行 make chat 连进来聊天；网关在数据目录里开一个只有自己能连的 socket"},
 	{Key: "cli.show_reasoning", Group: "cli", Label: "显示思考过程", Type: "bool"},
 	{Key: "cli.show_usage", Group: "cli", Label: "显示用量", Type: "bool", Help: "每轮结束后显示用量和缓存命中率"},
 

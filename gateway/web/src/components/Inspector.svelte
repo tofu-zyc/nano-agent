@@ -282,7 +282,10 @@
             <p class="note">网页能看到所有会话，也能往任何一个会话里发消息，网页用户都是管理员。</p>
             <a class="btn primary" href="#/sessions/main" onclick={() => (store.inspector = null)}><Icon name="chat" size={14} />打开主会话</a>
           {:else if target.name === 'cli'}
-            <p class="note">启动网关的终端就是一个聊天窗口，身份是 <code>cli:local</code>，始终是管理员，默认接在主会话上（用 <code>/session</code> 切换）。同一个会话里别的窗口说的话和回复，终端里也会同步显示。</p>
+            <p class="note">
+              在另一个终端运行 <code>make chat</code>（或 <code>nano-gateway chat</code>）就能和网关聊天，随时进出，网关照常运行；连上时会先显示最近的对话。
+              终端的身份是 <code>cli:local</code>，始终是管理员，默认接在主会话上（用 <code>/session</code> 切换）。同一个会话里别的窗口说的话和回复，终端里也会同步显示。
+            </p>
           {:else}
             <p class="note">私聊机器人的每个人是一个窗口。管理员默认接在主会话上，和终端、网页共享上下文；其他人各自一个会话。管理员可以发 <code>/session</code> 切换。</p>
           {/if}

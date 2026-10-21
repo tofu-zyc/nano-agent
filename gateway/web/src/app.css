@@ -147,6 +147,7 @@ textarea.input { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .dot.starting { background: var(--warn); animation: blink 1s infinite; }
 .dot.error { background: var(--err); box-shadow: 0 0 8px var(--err); }
 .dot.stopped, .dot.disabled { background: var(--muted); }
+.dot.idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ok); }
 
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 12.5px; }
