@@ -57,17 +57,20 @@ type App struct {
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
 
-	mu        sync.Mutex
-	chans     map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
-	outboxes  map[string]chan outItem
-	kernel    *KernelInfo // 当前连着的内核，nil 表示没有
-	tools     []llm.Tool
-	sandbox   bool // 内核能把工具关在工作目录的沙箱里
-	totals    Totals
-	sessions  map[string]*sess
-	approvals map[int]*approval
-	nextAppr  int
-	runSeq    uint64
+	mu           sync.Mutex
+	groupNoticed map[string]bool            // 已经提醒过“只支持私聊”的群
+	pendingLs    map[string]chan *proto.Msg // 等内核回复的列目录请求
+	lsSeq        int
+	chans        map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
+	outboxes     map[string]chan outItem
+	kernel       *KernelInfo // 当前连着的内核，nil 表示没有
+	tools        []llm.Tool
+	sandbox      bool // 内核能把工具关在工作目录的沙箱里
+	totals       Totals
+	sessions     map[string]*sess
+	approvals    map[int]*approval
+	nextAppr     int
+	runSeq       uint64
 }
 
 type sess struct {
@@ -94,6 +97,7 @@ type run struct {
 	start    time.Time
 	calls    int       // 这一轮请求了几次模型
 	usage    llm.Usage // 这一轮的累计用量
+	noTools  bool      // 没有工作目录：不给模型工具，只聊天
 }
 
 type approval struct {
@@ -118,10 +122,12 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	return &App{
 		ctx: ctx, cfg: cfg, llm: client, store: store, persona: p, log: log,
 		now: time.Now, loc: loc, bus: events.NewBus(), started: time.Now(),
-		chans:     map[string]channel.Channel{},
-		outboxes:  map[string]chan outItem{},
-		sessions:  map[string]*sess{},
-		approvals: map[int]*approval{},
+		chans:        map[string]channel.Channel{},
+		groupNoticed: map[string]bool{},
+		pendingLs:    map[string]chan *proto.Msg{},
+		outboxes:     map[string]chan outItem{},
+		sessions:     map[string]*sess{},
+		approvals:    map[int]*approval{},
 	}
 }
 
@@ -200,6 +206,15 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if m.Group {
+		// 群聊暂不支持：被 @ 时提醒一次，其余忽略
+		if m.Mentioned && !a.groupNoticed[sid] {
+			a.groupNoticed[sid] = true
+			a.say(&sess{sid: sid, chName: ch.Name(), chatID: m.ChatID}, "暂时只支持私聊，有事请私聊我", m.MsgID)
+		}
+		a.log.Debug("暂不支持群聊，忽略", "sid", sid)
+		return
+	}
 	s := a.sessions[sid]
 	if s == nil {
 		s = &sess{sid: sid, chName: ch.Name(), chatID: m.ChatID}
@@ -361,6 +376,10 @@ func (a *App) startRun(s *sess) {
 	}
 	s.run = r
 	mode := a.runMode(w, r.from)
+	if len(w.dirs) == 0 {
+		// 没有工作目录：不给模型工具，只当聊天机器人
+		mode, r.noTools = proto.ModeNone, true
+	}
 	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n, "mode", mode)
 	a.totals.Runs++
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content, Data: map[string]any{"from": r.from, "mode": mode}})
@@ -480,6 +499,12 @@ func (a *App) KernelDown() {
 func (a *App) KernelMsg(m *proto.Msg) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if m.T == proto.TLsResult {
+		if ch := a.pendingLs[m.ID]; ch != nil {
+			ch <- m
+		}
+		return
+	}
 	s := a.sessions[m.SID]
 	if s == nil || s.run == nil {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束
@@ -593,8 +618,10 @@ func (a *App) callModel(s *sess) {
 	st := a.store.Settings(s.sid)
 	req := llm.Request{
 		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning),
-		Tools:    slices.Clone(a.tools),
 		Thinking: a.thinkingOf(s.sid),
+	}
+	if !r.noTools {
+		req.Tools = slices.Clone(a.tools)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel

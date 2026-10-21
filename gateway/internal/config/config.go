@@ -24,6 +24,7 @@ type Config struct {
 	Telegram  Telegram  `toml:"telegram" json:"telegram"`
 	Feishu    Feishu    `toml:"feishu" json:"feishu"`
 	Web       Web       `toml:"web" json:"web"`
+	Network   Network   `toml:"network" json:"network"`
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
@@ -51,12 +52,44 @@ type LLM struct {
 	// 不每次都裁一点，是为了让请求的前缀尽量不变，模型那边的前缀缓存才能命中。
 	TrimTo float64 `toml:"trim_to" json:"trim_to"`
 
-	// 思考强度。thinking 是默认值（空表示用模型自己的默认），每个会话可以用 /think 改；
-	// thinking_style 是传给模型的方式：vllm（chat_template_kwargs）| openai（reasoning_effort）| none；
-	// thinking_levels 是 /think 可选的值。
+	// 思考强度，作为 reasoning_effort 原样传给模型（none 表示关闭）。thinking 是默认值
+	// （空表示不传，用模型自己的默认），每个会话可以用 /think 改；thinking_levels 是可选的值。
 	Thinking       string   `toml:"thinking" json:"thinking"`
-	ThinkingStyle  string   `toml:"thinking_style" json:"thinking_style"`
 	ThinkingLevels []string `toml:"thinking_levels" json:"thinking_levels"`
+}
+
+// Network 是网关的网络设置。
+type Network struct {
+	// 网关的默认代理，模型和各个聊天渠道的代理留空时用它。
+	// 空：跟随环境变量（HTTPS_PROXY 等）；none：直连；或者写代理地址。
+	Proxy string `toml:"proxy" json:"proxy"`
+}
+
+// ProxyFor 是某个组件实际用的代理：组件自己没设置就用网关的默认代理。
+func (c *Config) ProxyFor(p string) string {
+	if p == "" {
+		return c.Network.Proxy
+	}
+	return p
+}
+
+// LLMConfig、TelegramConfig、FeishuConfig 返回代理已经换成实际值的配置，给各组件用。
+func (c *Config) LLMConfig() LLM {
+	l := c.LLM
+	l.Proxy = c.ProxyFor(l.Proxy)
+	return l
+}
+
+func (c *Config) TelegramConfig() Telegram {
+	t := c.Telegram
+	t.Proxy = c.ProxyFor(t.Proxy)
+	return t
+}
+
+func (c *Config) FeishuConfig() Feishu {
+	f := c.Feishu
+	f.Proxy = c.ProxyFor(f.Proxy)
+	return f
 }
 
 type Persona struct {
@@ -201,17 +234,11 @@ func (c *Config) applyDefaults() {
 	def(&c.Web.Listen, "127.0.0.1:7788")
 	def(&c.Workspace.Mode, "ask")
 	def(&c.Access.Guest, "none")
-	def(&c.LLM.ThinkingStyle, "none")
 	if c.LLM.TrimTo <= 0 || c.LLM.TrimTo >= 1 {
 		c.LLM.TrimTo = 0.5
 	}
 	if len(c.LLM.ThinkingLevels) == 0 {
-		switch c.LLM.ThinkingStyle {
-		case "vllm":
-			c.LLM.ThinkingLevels = []string{"off", "low", "high", "max"}
-		case "openai":
-			c.LLM.ThinkingLevels = []string{"off", "low", "medium", "high"}
-		}
+		c.LLM.ThinkingLevels = []string{"none", "low", "medium", "high"}
 	}
 }
 
@@ -237,14 +264,6 @@ func (c *Config) validate() error {
 	}
 	if c.Feishu.Domain != "feishu" && c.Feishu.Domain != "lark" {
 		errs = append(errs, fmt.Errorf("feishu.domain 只能是 feishu 或 lark，现在是 %q", c.Feishu.Domain))
-	}
-	switch c.LLM.ThinkingStyle {
-	case "vllm", "openai", "none":
-	default:
-		errs = append(errs, fmt.Errorf("llm.thinking_style 只能是 vllm、openai 或 none，现在是 %q", c.LLM.ThinkingStyle))
-	}
-	if c.LLM.Thinking != "" && c.LLM.ThinkingStyle == "none" {
-		errs = append(errs, errors.New("设置了 llm.thinking，但 llm.thinking_style 是 none（不知道怎么传给模型）"))
 	}
 	if c.Session.Timezone != "" {
 		if _, err := time.LoadLocation(c.Session.Timezone); err != nil {

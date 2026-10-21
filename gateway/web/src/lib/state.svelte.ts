@@ -54,6 +54,7 @@ class Store {
   connected = $state(false);
   historyTick = $state<Record<string, number>>({});
   personaTick = $state(0);
+  feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
 
   private es: EventSource | null = null;
   private listeners = new Set<(e: Ev) => void>();
@@ -291,6 +292,9 @@ class Store {
         break;
       case 'persona':
         this.personaTick++;
+        break;
+      case 'feishu_reg':
+        this.feishuReg = { kind: e.kind ?? '', text: e.text ?? '' };
         break;
     }
     if (e.t !== 'delta') {

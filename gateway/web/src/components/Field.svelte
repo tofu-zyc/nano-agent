@@ -2,6 +2,7 @@
   import { store } from '../lib/state.svelte';
   import type { FieldState } from '../lib/types';
   import ChipList from './ChipList.svelte';
+  import DirInput from './DirInput.svelte';
   import Icon from './Icon.svelte';
 
   let { f, highlight = false }: { f: FieldState; highlight?: boolean } = $props();
@@ -10,7 +11,6 @@
   const optionLabels: Record<string, Record<string, string>> = {
     'workspace.mode': { auto: '自动', ask: '审批', readonly: '只读' },
     'access.guest': { none: '只能聊天', readonly: '可以读文件' },
-    'llm.thinking_style': { none: '不传', vllm: 'vLLM', openai: 'OpenAI' },
     'llm.provider': { openai: 'OpenAI 兼容', mock: '假模型' },
     'feishu.domain': { feishu: '飞书', lark: 'Lark' },
   };
@@ -23,7 +23,7 @@
   let error = $state('');
 
   $effect(() => {
-    draft = f.type === 'secret' ? '' : toText(f.value);
+    draft = f.type === 'secret' ? '' : f.type === 'proxy' && f.value === 'none' ? '' : toText(f.value);
   });
 
   async function save(v: unknown) {
@@ -39,6 +39,12 @@
     if (f.type === 'secret') {
       if (draft.trim()) save(draft.trim()).then(() => (draft = ''));
       return;
+    }
+    if (f.type === 'proxy') {
+      const v = draft.trim();
+      if (!v || v === f.value) return;
+      customProxy = false;
+      return save(v);
     }
     if (draft === toText(f.value)) return;
     if (f.type === 'int' || f.type === 'float') {
@@ -74,6 +80,17 @@
   }
 
   const labelOf = (o: string) => optionLabels[f.key]?.[o] ?? o;
+
+  // 代理：默认（网关的默认代理，或者网关自己跟随环境变量）/ 直连 / 自定义地址
+  const isGatewayProxy = $derived(f.key === 'network.proxy');
+  const proxyKind = $derived(!f.value ? 'default' : f.value === 'none' ? 'direct' : 'custom');
+  let customProxy = $state(false);
+  const gatewayProxy = $derived(store.field('network.proxy')?.value as string | undefined);
+  function proxyHint() {
+    if (isGatewayProxy) return '跟随网关进程的环境变量（HTTPS_PROXY 等）';
+    if (!gatewayProxy) return '用网关的默认代理（现在是：跟随环境变量）';
+    return `用网关的默认代理（现在是：${gatewayProxy === 'none' ? '直连' : gatewayProxy}）`;
+  }
 </script>
 
 <div class="field" class:hl={highlight} id={'f-' + f.key}>
@@ -99,9 +116,22 @@
     <div class="seg">
       <button class:active={!f.value} onclick={() => f.value && save('')}>模型默认</button>
       {#each levels as o}
-        <button class:active={f.value === o} onclick={() => f.value !== o && save(o)}>{o}</button>
+        <button class:active={f.value === o} onclick={() => f.value !== o && save(o)}>{o === 'none' ? '关闭' : o}</button>
       {/each}
     </div>
+  {:else if f.type === 'proxy'}
+    <div class="seg">
+      <button class:active={proxyKind === 'default' && !customProxy} onclick={() => { customProxy = false; if (f.value) save(''); }}>
+        {isGatewayProxy ? '跟随环境变量' : '默认'}
+      </button>
+      <button class:active={proxyKind === 'direct' && !customProxy} onclick={() => { customProxy = false; if (f.value !== 'none') save('none'); }}>直连</button>
+      <button class:active={proxyKind === 'custom' || customProxy} onclick={() => (customProxy = true)}>自定义</button>
+    </div>
+    {#if proxyKind === 'custom' || customProxy}
+      <input class="input mono proxy" bind:value={draft} onblur={commit} onkeydown={onkey} placeholder="http://127.0.0.1:7890 或 socks5://…" spellcheck="false" />
+    {:else}
+      <p class="help">{proxyKind === 'direct' ? '不走代理，直接连接' : proxyHint()}</p>
+    {/if}
   {:else if f.type === 'bool'}
     <button
       class="switch"
@@ -123,8 +153,11 @@
         {#each f.options ?? [] as o}<option value={o}>{labelOf(o)}</option>{/each}
       </select>
     {/if}
+  {:else if f.type === 'list' && f.key.startsWith('workspace.')}
+    <DirInput values={f.value ?? []} onchange={(v) => save(v)} first={f.key === 'workspace.dirs'}
+      placeholder={f.key === 'workspace.dirs' ? '输入路径，比如 ~/projects，会自动提示' : '比如 ~/.gitconfig、~/.npm'} />
   {:else if f.type === 'list'}
-    <ChipList values={f.value ?? []} onchange={(v) => save(v)} mono={f.key.includes('dir') || f.key.includes('_r')} />
+    <ChipList values={f.value ?? []} onchange={(v) => save(v)} />
   {:else if f.type === 'json'}
     <textarea class="input mono" rows="4" bind:value={draft} onblur={commit} onkeydown={onkey} spellcheck="false"></textarea>
   {:else if f.type === 'secret'}
@@ -313,5 +346,8 @@
   }
   textarea {
     font-size: 12px;
+  }
+  .proxy {
+    margin-top: 8px;
   }
 </style>

@@ -8,4 +8,7 @@ require (
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.2
 )
 
-require github.com/gogo/protobuf v1.3.2 // indirect
+require (
+	github.com/gogo/protobuf v1.3.2 // indirect
+	rsc.io/qr v0.2.0
+)

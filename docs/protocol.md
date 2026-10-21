@@ -1,4 +1,4 @@
-# 内核 ⇄ 网关协议（v2）
+# 内核 ⇄ 网关协议（v3）
 
 - **传输**：TCP 或 Unix socket，**内核主动连网关**（内核所在的机器往往在 NAT 后面）。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
@@ -20,6 +20,7 @@
 | `notice` | `sid` `text` | 发给用户看的提示 |
 | `done` | `sid` `status` `detail?` | 这一轮处理结束，`status` 见下表 |
 | `ping` | | 心跳 |
+| `ls_result` | `id` `ok` `path` `home` `blocked` `entries[]` `truncated?` `detail?` | `ls` 的结果：`path` 是解析过符号链接的绝对路径，`entries` 每项是 `{name, blocked?}`（只有子目录）；`blocked` 表示这个目录包含内核自己，不能当工作目录 |
 
 ### 网关 → 内核
 
@@ -32,6 +33,7 @@
 | `approve` | `sid` `id` `ok` `from` | 审批结果。`from` 是审批人身份；网关只会转发管理员的审批 |
 | `cancel` | `sid` | 用户要求停止 |
 | `pong` | | 心跳 |
+| `ls` | `id` `path` | 列出内核所在机器上的一个目录（网页上选工作目录用），`path` 可以是 `~` 开头。只返回子目录名，不读文件内容 |
 
 `turn.reason`：
 

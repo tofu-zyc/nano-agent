@@ -4,7 +4,8 @@
   import { ago, channelMeta, homeShort, modeMeta, num, pct, since, stateLabel } from '../lib/format';
   import type { SessionInfo, Usage } from '../lib/types';
   import FieldGroup from './FieldGroup.svelte';
-  import ChipList from './ChipList.svelte';
+  import DirInput from './DirInput.svelte';
+  import FeishuQR from './FeishuQR.svelte';
   import Icon from './Icon.svelte';
 
   const target = $derived(store.inspector!);
@@ -123,7 +124,7 @@
         </div>
         <div class="row">
           <span class="muted">思考</span>
-          <span class="grow">{ov.model.thinking || '模型默认'}{ov.model.thinking_style !== 'none' ? ` · 用 ${ov.model.thinking_style} 方式传` : ''}</span>
+          <span class="grow">{ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '模型默认'} · 作为 reasoning_effort 传给模型</span>
         </div>
         <div class="row">
           <span class="muted">上下文</span>
@@ -228,12 +229,14 @@
               <li>找 <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> 发 <code>/newbot</code>，拿到 token，填到下面；</li>
               <li>国内一般要设代理，比如 <code>http://127.0.0.1:7890</code>；</li>
               <li>打开“启用”，几秒后这里会显示机器人的名字；</li>
-              <li>想在群里用：把机器人设为群管理员，或者在 BotFather 里 <code>/setprivacy</code> 关掉隐私模式后重新拉进群。</li>
+              <li>私聊机器人就能用了。目前只支持私聊，群聊以后再做。</li>
             </ol>
           </details>
-        {:else if target.name === 'feishu' && c.status.state === 'disabled'}
-          <details class="guide" open>
-            <summary>怎么接入飞书</summary>
+        {/if}
+        {#if target.name === 'feishu'}
+          <FeishuQR configured={!!store.field('feishu.app_id')?.value} />
+          <details class="guide">
+            <summary>或者手动接入</summary>
             <ol>
               <li>在 <a href="https://open.feishu.cn/app" target="_blank" rel="noopener">飞书开放平台</a> 创建企业自建应用，添加“机器人”能力；</li>
               <li>把 App ID 和 App Secret 填到下面，打开“启用”；</li>
@@ -257,8 +260,17 @@
           <div class="stat"><b>{num(sess.usage.prompt_tokens)}</b><span>累计输入</span></div>
         </div>
 
-        <h5>权限模式</h5>
-        <div class="modes">
+        {#if !sess.dirs?.length}
+          <div class="chatonly">
+            <Icon name="chat" size={16} />
+            <div>
+              <strong>只聊天</strong>
+              <p>还没有工作目录，这个会话不能读写文件、执行命令。在下面加一个工作目录就能用工具了。</p>
+            </div>
+          </div>
+        {/if}
+        <h5>权限模式 {#if !sess.dirs?.length}<span class="muted small">有工作目录之后生效</span>{/if}</h5>
+        <div class="modes" class:inactive={!sess.dirs?.length}>
           {#each Object.entries(modeMeta) as [m, meta]}
             <button class:active={sess.mode === m} onclick={() => sess.mode !== m && patchSession({ mode: m })}>
               <strong>{meta.label}</strong>
@@ -268,16 +280,16 @@
         </div>
 
         <h5>工作目录 <span class="muted small">第一个是默认目录，命令从这里开始执行</span></h5>
-        <ChipList values={sess.dirs ?? []} mono placeholder="比如 ~/projects/foo，回车添加" onchange={(v) => patchSession({ dirs: v })} />
+        <DirInput values={sess.dirs ?? []} onchange={(v) => patchSession({ dirs: v })} />
         <h5>只读目录</h5>
-        <ChipList values={sess.ro ?? []} mono placeholder="只能读不能写的目录" onchange={(v) => patchSession({ ro: v })} />
+        <DirInput values={sess.ro ?? []} first={false} placeholder="只能读不能写的目录" onchange={(v) => patchSession({ ro: v })} />
 
-        {#if ov.model.thinking_style !== 'none' && ov.model.levels?.length}
+        {#if ov.model.levels?.length}
           <h5>思考强度</h5>
           <div class="seg">
             <button class:active={!sess.thinking || sess.thinking === ov.model.thinking} onclick={() => patchSession({ thinking: '' })}>默认</button>
             {#each ov.model.levels as l}
-              <button class:active={sess.thinking === l && l !== ov.model.thinking} onclick={() => patchSession({ thinking: l })}>{l}</button>
+              <button class:active={sess.thinking === l && l !== ov.model.thinking} onclick={() => patchSession({ thinking: l })}>{l === 'none' ? '关闭' : l}</button>
             {/each}
           </div>
         {/if}
@@ -582,6 +594,27 @@
     gap: 8px;
     margin-bottom: 14px;
     flex-wrap: wrap;
+  }
+  .chatonly {
+    display: flex;
+    gap: 10px;
+    padding: 11px 13px;
+    border-radius: 12px;
+    color: var(--c-session);
+    background: color-mix(in srgb, var(--c-session) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--c-session) 30%, transparent);
+  }
+  .chatonly strong {
+    color: var(--text);
+    font-size: 13px;
+  }
+  .chatonly p {
+    margin: 2px 0 0;
+    font-size: 12.5px;
+    color: var(--text-2);
+  }
+  .modes.inactive {
+    opacity: 0.6;
   }
   .modes {
     display: grid;

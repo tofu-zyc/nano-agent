@@ -257,46 +257,18 @@ func TestStreamingErrors(t *testing.T) {
 	}
 }
 
-func TestThinkingStyles(t *testing.T) {
-	cases := []struct {
-		style, level string
-		check        func(map[string]any) bool
-	}{
-		{"vllm", "high", func(b map[string]any) bool {
-			kw, _ := b["chat_template_kwargs"].(map[string]any)
-			return kw["thinking"] == true && kw["reasoning_effort"] == "high"
-		}},
-		{"vllm", "50", func(b map[string]any) bool {
-			kw, _ := b["chat_template_kwargs"].(map[string]any)
-			return kw["reasoning_effort"] == float64(50)
-		}},
-		{"vllm", "off", func(b map[string]any) bool {
-			kw, _ := b["chat_template_kwargs"].(map[string]any)
-			_, has := kw["reasoning_effort"]
-			return kw["thinking"] == false && !has
-		}},
-		{"openai", "low", func(b map[string]any) bool { return b["reasoning_effort"] == "low" }},
-		{"openai", "off", func(b map[string]any) bool { return b["reasoning_effort"] == "none" }},
-		{"vllm", "", func(b map[string]any) bool { // 不设置时只有 extra 里原来的参数
-			kw, _ := b["chat_template_kwargs"].(map[string]any)
-			_, has := kw["reasoning_effort"]
-			return kw["thinking"] == false && !has
-		}},
+func TestThinking(t *testing.T) {
+	var got map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &got)
+		reply(w, "stop", map[string]any{"content": "ok"})
+	})
+	if _, err := c.Chat(context.Background(), Request{Thinking: "none"}, nil); err != nil || got["reasoning_effort"] != "none" {
+		t.Fatalf("body=%v err=%v", got, err)
 	}
-	for _, tc := range cases {
-		var got map[string]any
-		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			json.Unmarshal(body, &got)
-			reply(w, "stop", map[string]any{"content": "ok"})
-		})
-		c.thinkingStyle = tc.style
-		if _, err := c.Chat(context.Background(), Request{Thinking: tc.level}, nil); err != nil || !tc.check(got) {
-			t.Errorf("%s/%s: body=%v err=%v", tc.style, tc.level, got, err)
-		}
-		// extra 是共享的配置，不能被改掉
-		if kw := c.extra["chat_template_kwargs"].(map[string]any); kw["thinking"] != false || len(kw) != 1 {
-			t.Fatalf("extra was modified: %v", c.extra)
-		}
+	got = nil
+	if _, err := c.Chat(context.Background(), Request{}, nil); err != nil || got["reasoning_effort"] != nil {
+		t.Fatalf("不设置时不该传：%v", got)
 	}
 }

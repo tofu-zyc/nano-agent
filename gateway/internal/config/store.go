@@ -207,7 +207,7 @@ func (s *Store) Describe() []FieldState {
 // normalize 检查网页传来的值是否符合配置项的类型，并整理成写进 JSON 的样子
 func normalize(f Field, v any) (any, error) {
 	switch f.Type {
-	case "string", "secret":
+	case "string", "secret", "proxy":
 		s, ok := v.(string)
 		if !ok {
 			return nil, errors.New("应该是文本")

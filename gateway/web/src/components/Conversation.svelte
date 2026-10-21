@@ -128,13 +128,13 @@
       <div class="chips">
         <span class="tag">{meta?.label ?? sid.split(':')[0]}</span>
         {#if info}
-          <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
           {#if info.dirs?.length}
+            <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
             <button class="tag mono" title={info.dirs[0]} onclick={() => store.open({ type: 'session', sid })}><Icon name="folder" size={11} />{shortPath(homeShort(info.dirs[0]), 36)}{info.dirs.length > 1 ? ` +${info.dirs.length - 1}` : ''}</button>
           {:else}
-            <button class="tag" onclick={() => store.open({ type: 'session', sid })}>没有工作目录</button>
+            <button class="tag" onclick={() => store.open({ type: 'session', sid })} title="没有工作目录，不能用工具。点这里添加">只聊天</button>
           {/if}
-          {#if info.thinking}<span class="tag">思考 {info.thinking}</span>{/if}
+          {#if info.thinking}<span class="tag">思考 {info.thinking === 'none' ? '关闭' : info.thinking}</span>{/if}
           {#if info.usage.prompt_tokens}<span class="tag accent">缓存命中 {pct(info.usage.cached_tokens, info.usage.prompt_tokens)}</span>{/if}
         {/if}
       </div>

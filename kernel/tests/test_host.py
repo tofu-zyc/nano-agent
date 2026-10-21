@@ -249,13 +249,35 @@ def t_reconnect(gw):
     gw.accept()
     hello = gw.expect("hello", timeout=10)
     assert hello["token"] == "t0k"
-    gw.send(t="welcome", v=2)
+    gw.send(t="welcome", v=3)
     time.sleep(0.5)
     assert not leftover("sleep 4242"), f"断线后工具还在跑：{leftover('sleep 4242')}"
     gw.send(t="turn", sid="s12", reason="final")   # 旧 run 已丢弃，内核应忽略
     start_run(gw, "s13")
     gw.send(t="turn", sid="s13", reason="final")
     gw.expect("done", sid="s13", status="ok")
+
+
+@case("列目录：只列子目录，包含内核自己的目录标出来")
+def t_ls(gw):
+    os.makedirs(os.path.join(WORK, "sub", "deep"), exist_ok=True)
+    os.makedirs(os.path.join(WORK, ".hidden"), exist_ok=True)
+    gw.send(t="ls", id="l1", path=WORK)
+    r = gw.expect("ls_result", id="l1", ok=True)
+    names = [e["name"] for e in r["entries"]]
+    assert names == [".hidden", "sub"], names   # a.txt 之类的文件不列
+    assert r["path"] == os.path.realpath(WORK) and not r["blocked"], r
+    gw.send(t="ls", id="l2", path=T)   # T 里有 kernel.conf：T 本身不能当工作目录，work 可以
+    r = gw.expect("ls_result", id="l2", ok=True)
+    assert r["blocked"] is True, r
+    assert {"name": "work"} in r["entries"], r["entries"]
+    gw.send(t="ls", id="l3", path="~")
+    r = gw.expect("ls_result", id="l3", ok=True)
+    assert r["path"] == os.path.realpath(os.path.join(T, "home")) and r["home"] == os.path.join(T, "home"), r
+    gw.send(t="ls", id="l4", path="/no/such/dir")
+    gw.expect("ls_result", id="l4", ok=False, detail=lambda d: "No such file" in d)
+    gw.send(t="ls", id="l5", path="relative")
+    gw.expect("ls_result", id="l5", ok=False, detail=lambda d: "绝对路径" in d)
 
 
 def main():
@@ -276,13 +298,13 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 2, hello
+            assert hello["token"] == "t0k" and hello["v"] == 3, hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
             assert "landlock" in hello["sandbox"], hello
-            gw.send(t="welcome", v=2)
+            gw.send(t="welcome", v=3)
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
+            for t in (t_ls, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
                       t_cancel, t_background, t_guard, t_bad_args, t_reconnect):
                 t(gw)
 

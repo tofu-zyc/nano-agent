@@ -11,7 +11,6 @@ import (
 	"maps"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,15 +20,14 @@ import (
 
 // OpenAI 对接 OpenAI 兼容的 /chat/completions 接口（vLLM、DeepSeek、通义、Kimi 等）。
 type OpenAI struct {
-	url           string
-	apiKey        string
-	model         string
-	temperature   *float64
-	maxTokens     int
-	extra         map[string]any
-	thinkingStyle string
-	hc            *http.Client
-	retryDelays   []time.Duration
+	url         string
+	apiKey      string
+	model       string
+	temperature *float64
+	maxTokens   int
+	extra       map[string]any
+	hc          *http.Client
+	retryDelays []time.Duration
 }
 
 func NewOpenAI(c config.LLM) (*OpenAI, error) {
@@ -38,15 +36,14 @@ func NewOpenAI(c config.LLM) (*OpenAI, error) {
 		return nil, fmt.Errorf("llm.proxy：%w", err)
 	}
 	return &OpenAI{
-		url:           strings.TrimRight(c.BaseURL, "/") + "/chat/completions",
-		apiKey:        c.APIKey,
-		model:         c.Model,
-		temperature:   c.Temperature,
-		maxTokens:     c.MaxTokens,
-		extra:         c.Extra,
-		thinkingStyle: c.ThinkingStyle,
-		hc:            hc,
-		retryDelays:   []time.Duration{time.Second, 3 * time.Second},
+		url:         strings.TrimRight(c.BaseURL, "/") + "/chat/completions",
+		apiKey:      c.APIKey,
+		model:       c.Model,
+		temperature: c.Temperature,
+		maxTokens:   c.MaxTokens,
+		extra:       c.Extra,
+		hc:          hc,
+		retryDelays: []time.Duration{time.Second, 3 * time.Second},
 	}, nil
 }
 
@@ -146,42 +143,11 @@ func (o *OpenAI) body(req Request, stream bool) map[string]any {
 		body["stream"] = true
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}
-	applyThinking(body, o.thinkingStyle, req.Thinking)
+	// 思考强度用 OpenAI 的 reasoning_effort，值原样传（none 表示关闭）。vLLM 等兼容接口也认它。
+	if req.Thinking != "" {
+		body["reasoning_effort"] = req.Thinking
+	}
 	return body
-}
-
-// applyThinking 按模型的习惯写入思考强度：
-//
-//	vllm：chat_template_kwargs 里的 thinking 开关和 reasoning_effort（DeepSeek、Qwen 等在 vLLM 上的做法）
-//	openai：顶层的 reasoning_effort，关闭时传 "none"
-func applyThinking(body map[string]any, style, level string) {
-	if level == "" {
-		return
-	}
-	switch style {
-	case "vllm":
-		kw := map[string]any{}
-		if old, ok := body["chat_template_kwargs"].(map[string]any); ok {
-			maps.Copy(kw, old)
-		}
-		if level == "off" {
-			kw["thinking"] = false
-			delete(kw, "reasoning_effort")
-		} else {
-			kw["thinking"] = true
-			if n, err := strconv.Atoi(level); err == nil {
-				kw["reasoning_effort"] = n
-			} else {
-				kw["reasoning_effort"] = level
-			}
-		}
-		body["chat_template_kwargs"] = kw
-	case "openai":
-		if level == "off" {
-			level = "none"
-		}
-		body["reasoning_effort"] = level
-	}
 }
 
 func (o *OpenAI) request(ctx context.Context, payload []byte, stream bool) (*http.Response, error) {

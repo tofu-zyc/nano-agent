@@ -14,6 +14,28 @@
   const ORDER = ['cli', 'web', 'telegram', 'feishu'];
   const X = { chan: 0, sess: 290, gw: 640, right: 850, dir: 1170 };
 
+  // 拖动过的节点记下偏移量（存在浏览器里，下次打开还是这样摆）
+  function loadOffsets(): Record<string, { x: number; y: number }> {
+    try {
+      return JSON.parse(localStorage.getItem('nano.layout') || '{}');
+    } catch {
+      return {};
+    }
+  }
+  let offsets = $state<Record<string, { x: number; y: number }>>(loadOffsets());
+  function saveOffsets() {
+    try {
+      localStorage.setItem('nano.layout', JSON.stringify(offsets));
+    } catch {
+      /* 忽略 */
+    }
+  }
+  function resetLayout() {
+    offsets = {};
+    saveOffsets();
+    fit();
+  }
+
   const layout = $derived.by(() => {
     const ov = store.ov!;
     const nodes: N[] = [];
@@ -91,6 +113,13 @@
       edges.push({ id: 'kernel>d:none', from: 'kernel', to: 'd:none', color: 'var(--muted)', dashed: true });
     }
 
+    for (const n of nodes) {
+      const o = offsets[n.id];
+      if (o) {
+        n.x += o.x;
+        n.y += o.y;
+      }
+    }
     const byId = new Map(nodes.map((n) => [n.id, n]));
     return { nodes, edges, byId, W: X.dir + 210, H, shownSids: new Set(shown.map((s) => s.sid)) };
   });
@@ -143,17 +172,44 @@
   }
 
   let drag: { x: number; y: number; vx: number; vy: number } | null = null;
+  let nodeDrag: { id: string; x: number; y: number; ox: number; oy: number; moved: boolean } | null = null;
+  let dragged = $state<string | null>(null);
+  let swallowClick = false;
+
   function onDown(e: PointerEvent) {
-    if ((e.target as Element).closest('.node')) return;
-    drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
-    el.setPointerCapture(e.pointerId);
+    const g = (e.target as Element).closest('.node') as SVGGElement | null;
+    if (g) {
+      // 拖节点时不捕获指针：否则松手时的点击事件落到画布上，节点就点不开了
+      const id = g.dataset.id!;
+      const o = offsets[id] ?? { x: 0, y: 0 };
+      nodeDrag = { id, x: e.clientX, y: e.clientY, ox: o.x, oy: o.y, moved: false };
+    } else {
+      drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+      el.setPointerCapture(e.pointerId);
+    }
   }
   function onMove(e: PointerEvent) {
+    if (nodeDrag) {
+      const dx = e.clientX - nodeDrag.x;
+      const dy = e.clientY - nodeDrag.y;
+      if (!nodeDrag.moved && Math.hypot(dx, dy) < 4) return;
+      nodeDrag.moved = true;
+      dragged = nodeDrag.id;
+      offsets[nodeDrag.id] = { x: nodeDrag.ox + dx / view.k, y: nodeDrag.oy + dy / view.k };
+      return;
+    }
     if (!drag) return;
     view = { ...view, x: drag.vx + e.clientX - drag.x, y: drag.vy + e.clientY - drag.y };
     userMoved = true;
   }
   function onUp() {
+    if (nodeDrag?.moved) {
+      saveOffsets();
+      swallowClick = true; // 拖完松手不算点击
+      userMoved = true;
+    }
+    nodeDrag = null;
+    dragged = null;
     drag = null;
   }
 
@@ -309,7 +365,8 @@
     if (ph === 'writing') return '正在回复…';
     if (ph === 'tool') return '正在执行工具…';
     if (s.running) return '处理中…';
-    return `${modeMeta[s.mode]?.label ?? s.mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
+    const mode = s.dirs?.length ? (modeMeta[s.mode]?.label ?? s.mode) : '只聊天';
+    return `${mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
   }
 
   async function startWebChat() {
@@ -317,6 +374,10 @@
   }
 
   function activate(n: N) {
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
     if (n.kind === 'more') location.hash = '#/sessions';
     else if (n.target) store.open(n.target);
   }
@@ -330,6 +391,7 @@
   onpointermove={onMove}
   onpointerup={onUp}
   onpointercancel={onUp}
+  onpointerleave={onUp}
   ondblclick={(e) => !(e.target as Element).closest('.node') && fit()}
   role="application"
   aria-label="网关拓扑图"
@@ -378,6 +440,8 @@
       {#each layout.nodes as n (n.id)}
         <g
           class="node {n.kind}"
+          class:dragging={dragged === n.id}
+          data-id={n.id}
           class:dimmed={hover !== null && hover !== n.id && !layout.edges.some((e) => (e.from === hover && e.to === n.id) || (e.to === hover && e.from === n.id))}
           transform="translate({n.x} {n.y})"
           style="--c: {n.color}"
@@ -439,7 +503,7 @@
             <g class="ico"><Icon name="sparkles" x={24} y={28} size={24} /></g>
             <text x="66" y="28" class="t3">模型 · {ov.model.provider}</text>
             <text x="66" y="48" class="t1">{truncate(ov.model.model || '未配置', 19)}</text>
-            <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking || '默认'}</text>
+            <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '默认'}</text>
           {:else if n.kind === 'kernel'}
             <rect class="card" class:active={kernelBusy} class:bad={!ov.kernel} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
@@ -492,10 +556,13 @@
     <span style="--c: var(--c-kernel)">内核</span>
     <i>→</i>
     <span style="--c: var(--c-dir)">工作目录</span>
-    <em>点节点查看和修改设置 · 滚轮缩放 · 拖动平移 · 双击空白处复位</em>
+    <em>点节点查看和修改设置 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处复位</em>
   </div>
 
   <div class="tools">
+    {#if Object.keys(offsets).length}
+      <button class="btn sm" onclick={resetLayout} title="把拖动过的节点放回原位"><Icon name="undo" size={14} />重置布局</button>
+    {/if}
     <button class="btn sm" onclick={fit} title="适应窗口"><Icon name="fit" size={14} /></button>
   </div>
 
@@ -565,6 +632,12 @@
   }
   .node.dimmed {
     opacity: 0.45;
+  }
+  .node.dragging {
+    cursor: grabbing;
+  }
+  .node.dragging .card {
+    filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.35));
   }
   @keyframes fadein {
     from {
@@ -812,6 +885,8 @@
     position: absolute;
     right: 16px;
     bottom: 14px;
+    display: flex;
+    gap: 6px;
   }
   .stats {
     position: absolute;

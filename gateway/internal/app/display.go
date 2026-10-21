@@ -26,21 +26,19 @@ func thinkingName(level string) string {
 
 func (a *App) cmdThink(s *sess, who, arg, reply string) {
 	levels := a.cfg.LLM.ThinkingLevels
-	if a.cfg.LLM.ThinkingStyle == "none" || len(levels) == 0 {
-		a.say(s, "没有配置怎么把思考强度传给模型（gateway.toml 的 llm.thinking_style），/think 不起作用", reply)
-		return
-	}
 	cur := a.thinkingOf(s.sid)
 	if arg == "" {
-		a.say(s, fmt.Sprintf("思考强度：%s\n可选：%s，用 /think <强度> 切换", thinkingName(cur), strings.Join(levels, "、")), reply)
+		a.say(s, fmt.Sprintf("思考强度：%s\n可选：%s（none 表示关闭），用 /think <强度> 切换，/think default 恢复默认", thinkingName(cur), strings.Join(levels, "、")), reply)
 		return
 	}
 	if !a.isAdmin(who) {
 		a.say(s, "只有管理员能切换思考强度", reply)
 		return
 	}
-	if !slices.Contains(levels, arg) {
-		a.say(s, "思考强度只能是 "+strings.Join(levels, "、"), reply)
+	if arg == "default" {
+		arg = ""
+	} else if !slices.Contains(levels, arg) {
+		a.say(s, "思考强度只能是 "+strings.Join(levels, "、")+"，或者 default", reply)
 		return
 	}
 	if arg == cur {
@@ -53,7 +51,7 @@ func (a *App) cmdThink(s *sess, who, arg, reply string) {
 		a.say(s, "保存设置失败："+err.Error(), reply)
 		return
 	}
-	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效", arg), reply)
+	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效", thinkingName(arg)), reply)
 }
 
 // ---- 时间戳 ----

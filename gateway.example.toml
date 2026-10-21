@@ -19,23 +19,20 @@ context_window     = 128000    # 模型的上下文窗口
 max_history_tokens = 64000     # 历史的上限（估算值）。超出时一次裁掉最早的一段，裁到 trim_to 的比例
 trim_to  = 0.5                 # 之后只追加不裁，请求前缀不变，模型的前缀缓存才能一直命中
 timeout  = 600                 # 单次请求超时（秒）
-proxy    = ""                  # "" 跟随环境变量；"none" 直连；或 "http://127.0.0.1:7890"
+proxy    = ""                  # 空：用网关的默认代理（[network]）；"none" 直连；或 "http://127.0.0.1:7890"
 # temperature = 0.7
 # max_tokens  = 4096
 send_reasoning = false         # 把当前这一轮的推理内容回传给模型（部分推理模型需要）
 
-# 思考强度。thinking 是默认值（空表示用模型自己的默认），每个会话可以用 /think 改。
-# thinking_style 是传给模型的方式：
-#   vllm   chat_template_kwargs 里的 thinking 开关和 reasoning_effort（vLLM 上的 DeepSeek、Qwen 等）
-#   openai 顶层的 reasoning_effort（OpenAI 等），关闭时传 "none"
-#   none   不传（默认），/think 不可用
+# 思考强度，作为 reasoning_effort 原样传给模型（vLLM 等兼容接口也认）。
+# thinking 是默认值，空表示不传（用模型自己的默认）；每个会话可以用 /think 改。
 thinking       = ""
-thinking_style = "none"
-# thinking_levels = ["off", "low", "high", "max"]   # /think 可选的值
+# /think 可选的值，none 表示关闭思考。不同模型支持的值不一样，比如有的不支持 medium。
+# thinking_levels = ["none", "low", "medium", "high"]
 
-# 原样合并进请求体的额外参数，比如关掉 vLLM 上模型的思考模式：
+# 原样合并进请求体的额外参数：
 # [llm.extra]
-# chat_template_kwargs = { thinking = false }
+# top_p = 0.9
 
 [persona]
 # 人格（系统提示词）目录：default.md 是默认人格；
@@ -68,6 +65,11 @@ mode = "ask"
 # extra_ro = ["~/.gitconfig", "~/.config/git"]
 # extra_rw = ["~/.cargo/registry"]
 
+[network]
+# 网关的默认代理：模型和各个聊天渠道的 proxy 留空时用它。
+# 空：跟随环境变量（HTTPS_PROXY 等）；"none"：直连；或者写代理地址
+proxy = ""
+
 [web]
 # 网页管理界面：拓扑图、会话、人格、所有设置。启动时会打印带密码的登录链接。
 listen   = "127.0.0.1:7788"    # "off" 表示不开；要从别的机器访问，建议走 SSH 隧道或 Tailscale
@@ -81,14 +83,12 @@ show_usage     = true          # 每轮结束后显示用量和前缀缓存命�
 [telegram]
 enabled = false
 token   = ""                   # 找 @BotFather 创建机器人拿到的 token
-proxy   = ""                   # 国内一般需要代理
+proxy   = ""                   # 空：用网关的默认代理；国内一般需要代理
 # api_base = "https://api.telegram.org"
-group_reply_all = false        # true：群里每条消息都回；false：只回 @ 或回复机器人的消息
 
 [feishu]
 enabled    = false
 app_id     = ""
 app_secret = ""
 domain     = "feishu"          # feishu（飞书）| lark（国际版）
-proxy      = ""
-group_reply_all = false
+proxy      = ""                # 空：用网关的默认代理；飞书在国内一般可以直连（"none"）

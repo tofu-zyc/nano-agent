@@ -11,6 +11,7 @@
 #include "tools.h"
 #include "util.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
@@ -18,10 +19,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      2
+#define PROTO_VERSION      3
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -85,6 +87,18 @@ static void send_hello(kernel_t *k)
 
 /* ---- 命令 → 外部动作 ---- */
 
+/* real（已解析符号链接）是不是包含内核自己：配置目录或执行器 */
+static bool holds_self(const kernel_t *k, const char *real)
+{
+    size_t n = strlen(real);
+    const char *mine[] = { k->conf.dir, k->exec_real };
+    for (size_t i = 0; i < 2; i++) {
+        const char *m = mine[i];
+        if (m && (n == 1 || (!strncmp(m, real, n) && (m[n] == '/' || !m[n])))) return true;
+    }
+    return false;
+}
+
 /* 工作目录不能包含内核自己：配置里有 token，执行器要是能被改写，沙箱就形同虚设 */
 static bool guard_paths(const kernel_t *k, const cJSON *list, char *err, size_t errlen)
 {
@@ -97,13 +111,7 @@ static bool guard_paths(const kernel_t *k, const cJSON *list, char *err, size_t 
         char *real = realpath(full, NULL);
         free(full);
         if (!real) continue;   /* 不存在的目录交给执行器报错 */
-        size_t n = strlen(real);
-        bool bad = false;
-        const char *mine[] = { k->conf.dir, k->exec_real };
-        for (size_t i = 0; i < 2; i++) {
-            const char *m = mine[i];
-            if (m && (n == 1 || (!strncmp(m, real, n) && (m[n] == '/' || !m[n])))) bad = true;
-        }
+        bool bad = holds_self(k, real);
         free(real);
         if (bad) {
             snprintf(err, errlen, "工作目录 %s 包含 nano-agent 自己（内核配置里有密钥，执行器也可能被改写），"
@@ -112,6 +120,74 @@ static bool guard_paths(const kernel_t *k, const cJSON *list, char *err, size_t 
         }
     }
     return true;
+}
+
+/* 列出一个目录下的子目录，给网页上选工作目录用。只返回目录名，不读任何文件内容；
+ * 包含内核自己的目录标成 blocked（不能用作工作目录）。 */
+#define LS_MAX 1000
+
+static int cmp_name(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void handle_ls(kernel_t *k, const cJSON *m)
+{
+    const char *id = sget(m, "id"), *p = sget(m, "path");
+    const char *home = getenv("HOME");
+    if (!home || home[0] != '/') home = "/";
+    char *full = !p || !*p || !strcmp(p, "~") ? xstrdup(home)
+               : p[0] == '~' && p[1] == '/' ? xasprintf("%s%s", home, p + 1)
+               : xstrdup(p);
+    cJSON *r = msg_new("ls_result", NULL);
+    cJSON_AddStringToObject(r, "id", id ? id : "");
+    cJSON_AddStringToObject(r, "home", home);
+    char *real = full[0] == '/' ? realpath(full, NULL) : NULL;
+    DIR *d = real ? opendir(real) : NULL;
+    if (!d) {
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "detail", full[0] != '/' ? "要写绝对路径或 ~ 开头" : strerror(errno));
+    } else {
+        cJSON_AddBoolToObject(r, "ok", true);
+        cJSON_AddStringToObject(r, "path", real);
+        cJSON_AddBoolToObject(r, "blocked", holds_self(k, real));
+        char **names = NULL;
+        size_t n = 0;
+        bool more = false;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            bool dir = e->d_type == DT_DIR;
+            if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+                struct stat st;
+                dir = fstatat(dirfd(d), e->d_name, &st, 0) == 0 && S_ISDIR(st.st_mode);
+            }
+            if (!dir) continue;
+            if (n >= LS_MAX) { more = true; continue; }
+            names = xrealloc(names, (n + 1) * sizeof *names);
+            names[n++] = xstrdup(e->d_name);
+        }
+        closedir(d);
+        qsort(names, n, sizeof *names, cmp_name);
+        cJSON *arr = cJSON_AddArrayToObject(r, "entries");
+        for (size_t i = 0; i < n; i++) {
+            cJSON *it = cJSON_CreateObject();
+            buf_t b = {0};
+            buf_put_utf8(&b, names[i], strlen(names[i]));
+            cJSON_AddStringToObject(it, "name", buf_cstr(&b));
+            buf_free(&b);
+            char *sub = xasprintf("%s/%s", strcmp(real, "/") ? real : "", names[i]);
+            if (holds_self(k, sub)) cJSON_AddBoolToObject(it, "blocked", true);
+            free(sub);
+            cJSON_AddItemToArray(arr, it);
+            free(names[i]);
+        }
+        free(names);
+        if (more) cJSON_AddBoolToObject(r, "truncated", true);
+    }
+    free(real);
+    free(full);
+    link_send(&k->link, r);
 }
 
 static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
@@ -242,6 +318,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     }
     if (!strcmp(t, "error")) {
         log_error("网关报错：%s", sget(m, "detail") ? sget(m, "detail") : "（无详情）");
+        return;
+    }
+    if (!strcmp(t, "ls")) {
+        handle_ls(k, m);
         return;
     }
 

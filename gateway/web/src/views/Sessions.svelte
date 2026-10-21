@@ -84,7 +84,7 @@
         </svg>
       </div>
       <h3>选一个会话，或者在网页里直接聊</h3>
-      <p class="muted">每个聊天窗口（私聊、群聊、终端、网页）都是一个会话，有自己的上下文、工作目录和权限模式。</p>
+      <p class="muted">每个聊天窗口（私聊、终端、网页）都是一个会话，有自己的上下文、工作目录和权限模式。</p>
       <button class="btn primary" onclick={() => (location.hash = '#/sessions/' + encodeURIComponent('web:main'))}>
         <Icon name="chat" size={14} />打开网页聊天
       </button>

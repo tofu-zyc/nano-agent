@@ -47,7 +47,6 @@ type modelInfo struct {
 	Model         string   `json:"model"`
 	BaseURL       string   `json:"base_url"`
 	Thinking      string   `json:"thinking"`
-	ThinkingStyle string   `json:"thinking_style"`
 	Levels        []string `json:"levels"`
 	ContextWindow int      `json:"context_window"`
 	MaxHistory    int      `json:"max_history"`
@@ -61,7 +60,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
 		"kernel": snap.Kernel,
 		"model": modelInfo{Provider: cfg.LLM.Provider, Model: cfg.LLM.Model, BaseURL: cfg.LLM.BaseURL, Thinking: cfg.LLM.Thinking,
-			ThinkingStyle: cfg.LLM.ThinkingStyle, Levels: cfg.LLM.ThinkingLevels, ContextWindow: cfg.LLM.ContextWindow,
+			Levels: cfg.LLM.ThinkingLevels, ContextWindow: cfg.LLM.ContextWindow,
 			MaxHistory: cfg.LLM.MaxHistoryTokens},
 		"channels":  s.app.Channels(),
 		"sessions":  snap.Sessions,
@@ -193,6 +192,19 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// ---- 目录（内核所在机器上的，选工作目录用） ----
+
+func (s *Server) listDir(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	l, err := s.app.ListDir(ctx, r.URL.Query().Get("path"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, l)
+}
+
 // ---- 配置 ----
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +238,7 @@ func (s *Server) reloadConfig(w http.ResponseWriter, r *http.Request) {
 // testModel 用当前配置发一个很小的请求，看接口通不通、多快
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 	cfg := s.conf.Current()
-	client, err := s.newLLM(cfg.LLM)
+	client, err := s.newLLM(cfg.LLMConfig())
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return

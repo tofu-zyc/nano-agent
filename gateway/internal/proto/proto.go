@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 2
+const Version = 3
 
 // 权限模式，随 input 传给内核。
 const (
@@ -24,6 +24,7 @@ const (
 	TNotice     = "notice"
 	TDone       = "done"
 	TPing       = "ping"
+	TLsResult   = "ls_result"
 
 	// 网关 → 内核
 	TWelcome = "welcome"
@@ -33,6 +34,7 @@ const (
 	TApprove = "approve"
 	TCancel  = "cancel"
 	TPong    = "pong"
+	TLs      = "ls" // 列目录，网页上选工作目录用
 )
 
 // turn 的 reason。各家 API 的特殊情况由网关消化掉，内核只看到这四种。
@@ -83,6 +85,19 @@ type Msg struct {
 	Status  string          `json:"status,omitempty"`
 	Detail  string          `json:"detail,omitempty"`
 	Text    string          `json:"text,omitempty"`
+
+	// ls / ls_result
+	Path      string     `json:"path,omitempty"`
+	Home      string     `json:"home,omitempty"`
+	Blocked   bool       `json:"blocked,omitempty"` // 这个目录包含内核自己，不能当工作目录
+	Entries   []DirEntry `json:"entries,omitempty"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
+
+// DirEntry 是 ls_result 里的一个子目录。
+type DirEntry struct {
+	Name    string `json:"name"`
+	Blocked bool   `json:"blocked,omitempty"`
 }
 
 // ToolSpec 是内核报上来的工具描述，原样转成模型的工具定义。

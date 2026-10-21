@@ -125,7 +125,7 @@ func setup(t *testing.T) *env {
 	sock := filepath.Join(dir, "k.sock")
 	cfg := &config.Config{
 		Kernel:    config.Kernel{Listen: "unix:" + sock, Token: "tok"},
-		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000, TrimTo: 0.5, ThinkingStyle: "none"},
+		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000, TrimTo: 0.5},
 		Persona:   config.Persona{Dir: filepath.Join(dir, "personas")},
 		Access:    config.Access{Admins: []string{"fake:u1"}, Guest: "none"},
 		Workspace: config.Workspace{Mode: "ask"},
@@ -199,7 +199,8 @@ func TestFinalAnswer(t *testing.T) {
 		t.Fatalf("turn: %+v", turn)
 	}
 	req := e.llm.lastReq()
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 1 {
+	// 没有工作目录：只聊天，不给模型工具
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 0 {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
@@ -238,17 +239,31 @@ func TestInvalidToolArgsAreForwardedAsString(t *testing.T) {
 	}
 }
 
-func TestGroupNeedsMentionAndPrefixesSender(t *testing.T) {
+func TestGroupIgnored(t *testing.T) {
 	e := setup(t)
 	e.say("随便聊聊", group(false))
+	e.say("@机器人 几点了", group(true))
+	e.ch.wait(t, "暂时只支持私聊")
+	e.say("@机器人 在吗", group(true)) // 只提醒一次
 	e.k.none()
-	e.say("几点了", group(true))
-	e.k.expect(proto.TInput)
+	select {
+	case m := <-e.ch.sent:
+		t.Fatalf("不该再回复：%q", m)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestToolsOnlyWithWorkdir(t *testing.T) {
+	e := setup(t)
+	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	e.say("看看目录")
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || len(in.Dirs) != 1 {
+		t.Fatalf("input: %+v", in)
+	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
 	e.k.expect(proto.TTurn)
-	msgs := e.llm.lastReq().Messages
-	if got := msgs[len(msgs)-1].Content; got != stamp+" [张三] 几点了" {
-		t.Fatalf("user content: %q", got)
+	if n := len(e.llm.lastReq().Tools); n != 1 {
+		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }
 
@@ -393,10 +408,11 @@ func TestWorkspaceAndModes(t *testing.T) {
 	// 没设置工作目录的纯聊天会话：不加环境说明
 	e.say("你好")
 	in := e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeAsk || len(in.Dirs) != 0 {
+	if in.Mode != proto.ModeNone || len(in.Dirs) != 0 { // 没有工作目录：不能用工具
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); got != stamp+" 你好" {
+	// 没有工作目录：告诉模型它没有工具
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有工作目录") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
 		t.Fatalf("user content: %q", got)
 	}
 
@@ -469,6 +485,7 @@ func TestWorkspaceGuards(t *testing.T) {
 
 func TestGuestMode(t *testing.T) {
 	e := setup(t)
+	e.a.cfg.Workspace.Dirs = []string{e.dir}
 	e.say("你好", from("u2", "李四"))
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone {
 		t.Fatalf("guest mode: %+v", in)
@@ -534,7 +551,7 @@ func (e *env) sayOn(ch channel.Channel, text string) {
 
 func TestStreamingView(t *testing.T) {
 	e, sc := setupStream(t)
-	e.a.cfg.LLM.ThinkingStyle, e.a.cfg.LLM.ThinkingLevels = "vllm", []string{"off", "high"}
+	e.a.cfg.LLM.ThinkingLevels = []string{"none", "high"}
 	e.sayOn(sc, "/think high")
 	sc.wait(t, "已切换为 high")
 
@@ -586,13 +603,11 @@ func TestStreamingView(t *testing.T) {
 
 func TestThinkCommand(t *testing.T) {
 	e := setup(t)
-	e.say("/think")
-	e.ch.wait(t, "没有配置")
-	e.a.cfg.LLM.ThinkingStyle, e.a.cfg.LLM.ThinkingLevels = "vllm", []string{"off", "low", "high"}
+	e.a.cfg.LLM.ThinkingLevels = []string{"none", "low", "high"}
 	e.say("/think")
 	e.ch.wait(t, "思考强度：模型默认")
 	e.say("/think max")
-	e.ch.wait(t, "只能是 off、low、high")
+	e.ch.wait(t, "只能是 none、low、high")
 	e.say("/think low", from("u2", "李四"))
 	e.ch.wait(t, "只有管理员")
 	e.say("/think low")
@@ -615,7 +630,7 @@ func TestStamp(t *testing.T) {
 	e.a.cfg.Session.Timestamps = &off
 	e.say("你好")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); got != "你好" {
+	if got := lastUser(e.roundTrip(t)); !strings.HasSuffix(got, "\n你好") || strings.Contains(got, "[2026") {
 		t.Fatalf("timestamps off: %q", got)
 	}
 }

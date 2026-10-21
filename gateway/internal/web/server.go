@@ -43,10 +43,11 @@ type Server struct {
 	log     *slog.Logger
 	newLLM  func(config.LLM) (llm.Client, error)
 
-	mu       sync.Mutex
-	password string
-	sessions map[string]time.Time // 登录令牌 → 过期时间
-	loopback bool                 // 只监听本机：要检查 Host 头
+	mu        sync.Mutex
+	password  string
+	sessions  map[string]time.Time // 登录令牌 → 过期时间
+	loopback  bool                 // 只监听本机：要检查 Host 头
+	regCancel context.CancelFunc   // 进行中的飞书扫码注册
 }
 
 // New 创建网页服务。密码来自 web.password，没配置就用数据目录里的 web.secret（没有就生成一个）。
@@ -154,6 +155,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/stop", s.auth(s.stopSession))
 	mux.HandleFunc("POST /api/chat", s.auth(s.chat))
 	mux.HandleFunc("POST /api/approvals/{n}", s.auth(s.approve))
+	mux.HandleFunc("GET /api/fs", s.auth(s.listDir))
+	mux.HandleFunc("POST /api/feishu/register", s.auth(s.feishuRegister))
+	mux.HandleFunc("DELETE /api/feishu/register", s.auth(s.feishuRegisterCancel))
 	mux.HandleFunc("GET /api/config", s.auth(s.getConfig))
 	mux.HandleFunc("PATCH /api/config", s.auth(s.patchConfig))
 	mux.HandleFunc("POST /api/config/reload", s.auth(s.reloadConfig))

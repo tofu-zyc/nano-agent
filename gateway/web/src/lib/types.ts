@@ -49,7 +49,6 @@ export type Overview = {
     model: string;
     base_url: string;
     thinking: string;
-    thinking_style: string;
     levels: string[] | null;
     context_window: number;
     max_history: number;
@@ -68,7 +67,7 @@ export type FieldState = {
   section?: string;
   label: string;
   help?: string;
-  type: 'string' | 'int' | 'float' | 'bool' | 'enum' | 'list' | 'secret' | 'json';
+  type: 'string' | 'int' | 'float' | 'bool' | 'enum' | 'list' | 'secret' | 'json' | 'proxy';
   options?: string[];
   restart?: boolean;
   readonly?: boolean;

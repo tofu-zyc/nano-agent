@@ -55,11 +55,11 @@ func (a *App) ReconcileChannels(cfg *config.Config) {
 	if a.cli != nil {
 		a.cli.SetDisplay(config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage))
 	}
-	a.reconcile("telegram", cfg.Telegram.Enabled, cfg.Telegram, func() (channel.Channel, error) {
-		return channel.NewTelegram(cfg.Telegram, a.log)
+	a.reconcile("telegram", cfg.Telegram.Enabled, cfg.TelegramConfig(), func() (channel.Channel, error) {
+		return channel.NewTelegram(cfg.TelegramConfig(), a.log)
 	})
-	a.reconcile("feishu", cfg.Feishu.Enabled, cfg.Feishu, func() (channel.Channel, error) {
-		return channel.NewFeishu(cfg.Feishu, a.log)
+	a.reconcile("feishu", cfg.Feishu.Enabled, cfg.FeishuConfig(), func() (channel.Channel, error) {
+		return channel.NewFeishu(cfg.FeishuConfig(), a.log)
 	})
 }
 

@@ -52,7 +52,7 @@ func main() {
 	}
 	cfg := conf.Current()
 
-	client, err := newClient(cfg.LLM)
+	client, err := newClient(cfg.LLMConfig())
 	if err != nil {
 		log.Error("初始化模型客户端失败", "err", err)
 		os.Exit(1)
@@ -112,8 +112,8 @@ func main() {
 	// 网页里改了配置：能立即生效的立即生效，其余的等重启
 	conf.OnChange(func(old, cur *config.Config) {
 		a.SetConfig(cur)
-		if !reflect.DeepEqual(old.LLM, cur.LLM) {
-			if c, err := newClient(cur.LLM); err != nil {
+		if !reflect.DeepEqual(old.LLMConfig(), cur.LLMConfig()) {
+			if c, err := newClient(cur.LLMConfig()); err != nil {
 				log.Warn("新的模型配置有误，继续用原来的", "err", err)
 			} else {
 				a.SetLLM(c)

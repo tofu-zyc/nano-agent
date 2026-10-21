@@ -9,8 +9,8 @@
     { id: 'model', label: '模型', icon: 'sparkles', color: 'var(--c-model)', desc: '接口、思考强度、上下文长度', target: { type: 'model' } },
     { id: 'workspace', label: '工作目录与沙箱', icon: 'folder', color: 'var(--c-dir)', desc: '工具能碰到的范围、默认权限模式', target: { type: 'workspace' } },
     { id: 'gateway', label: '网关', icon: 'hub', color: 'var(--c-gateway)', desc: '管理员、访客权限、消息时间、网页登录', target: { type: 'gateway' } },
-    { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理、群聊行为', target: { type: 'channel', name: 'telegram' } },
-    { id: 'feishu', label: '飞书', icon: 'feishu', color: 'var(--c-feishu)', desc: '应用凭证、群聊行为', target: { type: 'channel', name: 'feishu' } },
+    { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理', target: { type: 'channel', name: 'telegram' } },
+    { id: 'feishu', label: '飞书', icon: 'feishu', color: 'var(--c-feishu)', desc: '扫码创建机器人、应用凭证、代理', target: { type: 'channel', name: 'feishu' } },
     { id: 'cli', label: '命令行', icon: 'terminal', color: 'var(--c-cli)', desc: '终端里显示什么', target: { type: 'channel', name: 'cli' } },
     { id: 'kernel', label: '内核连接', icon: 'shield', color: 'var(--c-kernel)', desc: '监听地址和口令', target: { type: 'kernel' } },
   ];

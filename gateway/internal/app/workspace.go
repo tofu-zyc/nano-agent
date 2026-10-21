@@ -62,13 +62,15 @@ func (a *App) runMode(w workspace, from string) string {
 	return proto.ModeNone
 }
 
-// envNote 描述当前环境，追加在用户消息前面。没设置过工作目录的会话（纯聊天）不打扰。
+// noToolsNote 告诉模型这个会话没有工具。不说的话，模型（尤其是人格里写了“需要时使用工具”）
+// 会在回复里编造工具调用的文本。
+const noToolsNote = "[系统] 这个会话没有工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
+	"用户需要这些的话，请他让管理员添加工作目录（/dir add 路径，或者在网页里设置）。"
+
+// envNote 描述当前环境，追加在用户消息前面（变了才追加，不改系统提示词）。
 func envNote(w workspace, sessionRO []string, prev string) string {
 	if len(w.dirs) == 0 {
-		if prev == "" {
-			return ""
-		}
-		return "[系统] 现在没有工作目录了，文件和命令类工具暂时用不了。"
+		return noToolsNote
 	}
 	var b strings.Builder
 	b.WriteString("[系统] 工作目录：")

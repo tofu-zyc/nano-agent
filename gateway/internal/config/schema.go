@@ -7,7 +7,7 @@ type Field struct {
 	Section  string   `json:"section,omitempty"` // 对象内的小标题
 	Label    string   `json:"label"`
 	Help     string   `json:"help,omitempty"`
-	Type     string   `json:"type"` // string | int | float | bool | enum | list | secret | json
+	Type     string   `json:"type"` // string | int | float | bool | enum | list | secret | json | proxy
 	Options  []string `json:"options,omitempty"`
 	Restart  bool     `json:"restart,omitempty"`  // 要重启网关才生效
 	ReadOnly bool     `json:"readonly,omitempty"` // 只能在配置文件里改
@@ -24,15 +24,13 @@ var Fields = []Field{
 		Help: "到 /v1 为止，比如 https://api.deepseek.com/v1", Keywords: "url endpoint 地址 服务器"},
 	{Key: "llm.api_key", Group: "model", Section: "接口", Label: "API Key", Type: "secret", Keywords: "密钥 key token"},
 	{Key: "llm.model", Group: "model", Section: "接口", Label: "模型名", Type: "string"},
-	{Key: "llm.proxy", Group: "model", Section: "接口", Label: "代理", Type: "string",
-		Help: "空：跟随环境变量；none：直连；或者写代理地址，比如 http://127.0.0.1:7890。内网地址建议写 none", Keywords: "proxy 网络"},
+	{Key: "llm.proxy", Group: "model", Section: "接口", Label: "代理", Type: "proxy",
+		Help: "访问模型接口用的代理。内网地址的模型建议直连", Keywords: "proxy 网络"},
 	{Key: "llm.timeout", Group: "model", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true},
 	{Key: "llm.thinking", Group: "model", Section: "思考", Label: "默认思考强度", Type: "string",
-		Help: "空表示用模型自己的默认值；off 关闭思考。每个会话可以单独改", Keywords: "reasoning effort 推理"},
-	{Key: "llm.thinking_style", Group: "model", Section: "思考", Label: "思考强度的传法", Type: "enum", Options: []string{"none", "vllm", "openai"},
-		Help: "vllm：写进 chat_template_kwargs（vLLM 上的 DeepSeek、Qwen 等）；openai：顶层的 reasoning_effort；none：不传", Keywords: "reasoning"},
-	{Key: "llm.thinking_levels", Group: "model", Section: "思考", Label: "可选的思考强度", Type: "list",
-		Help: "/think 和网页里能选的值"},
+		Help: "作为 reasoning_effort 传给模型；“模型默认”表示不传。每个会话可以单独改", Keywords: "reasoning effort 推理"},
+	{Key: "llm.thinking_levels", Group: "model", Section: "思考", Label: "可选的思考强度", Type: "list", Advanced: true,
+		Help: "/think 和网页里能选的值，原样作为 reasoning_effort 传给模型（none 表示关闭）。不同模型支持的值不一样，比如有的不支持 medium"},
 	{Key: "llm.send_reasoning", Group: "model", Section: "思考", Label: "回传思考内容", Type: "bool", Advanced: true,
 		Help: "把当前这一轮的思考内容回传给模型，部分推理模型调用工具时需要"},
 	{Key: "llm.context_window", Group: "model", Section: "上下文", Label: "上下文窗口", Type: "int", Help: "模型能处理的最大 token 数"},
@@ -53,6 +51,8 @@ var Fields = []Field{
 		Help: "none：只能聊天；readonly：可以读工作目录里的文件和搜索", Keywords: "访客 权限"},
 	{Key: "access.allow_chats", Group: "gateway", Section: "访问控制", Label: "会话白名单", Type: "list",
 		Help: "只响应这些会话（会话 ID 用 /whoami 查），空表示不限制", Keywords: "白名单 群"},
+	{Key: "network.proxy", Group: "gateway", Section: "网络", Label: "默认代理", Type: "proxy",
+		Help: "模型和各个聊天渠道的代理留空时用这里的设置", Keywords: "proxy 代理 网络 翻墙"},
 	{Key: "session.timestamps", Group: "gateway", Section: "消息", Label: "消息带时间", Type: "bool",
 		Help: "在用户消息前加上发送时间，模型不用调工具就知道现在几点"},
 	{Key: "session.timezone", Group: "gateway", Section: "消息", Label: "时区", Type: "string",
@@ -88,17 +88,14 @@ var Fields = []Field{
 
 	{Key: "telegram.enabled", Group: "telegram", Label: "启用", Type: "bool"},
 	{Key: "telegram.token", Group: "telegram", Label: "Bot Token", Type: "secret", Help: "找 @BotFather 创建机器人拿到", Keywords: "机器人 bot"},
-	{Key: "telegram.proxy", Group: "telegram", Label: "代理", Type: "string",
-		Help: "空：跟随环境变量；none：直连；或者写代理地址。国内一般需要代理"},
-	{Key: "telegram.group_reply_all", Group: "telegram", Label: "群里每条都回", Type: "bool", Help: "关闭时只回应 @ 或回复机器人的消息"},
+	{Key: "telegram.proxy", Group: "telegram", Label: "代理", Type: "proxy", Help: "国内访问 Telegram 一般需要代理"},
 	{Key: "telegram.api_base", Group: "telegram", Label: "API 地址", Type: "string", Advanced: true},
 
 	{Key: "feishu.enabled", Group: "feishu", Label: "启用", Type: "bool"},
 	{Key: "feishu.app_id", Group: "feishu", Label: "App ID", Type: "string", Keywords: "应用 机器人"},
 	{Key: "feishu.app_secret", Group: "feishu", Label: "App Secret", Type: "secret"},
 	{Key: "feishu.domain", Group: "feishu", Label: "版本", Type: "enum", Options: []string{"feishu", "lark"}, Help: "feishu：飞书；lark：国际版"},
-	{Key: "feishu.proxy", Group: "feishu", Label: "代理", Type: "string", Help: "飞书一般可以直连：none"},
-	{Key: "feishu.group_reply_all", Group: "feishu", Label: "群里每条都回", Type: "bool", Help: "关闭时只回应 @ 机器人的消息"},
+	{Key: "feishu.proxy", Group: "feishu", Label: "代理", Type: "proxy", Help: "飞书在国内一般可以直连"},
 }
 
 // FieldByKey 按 key 查找配置项。

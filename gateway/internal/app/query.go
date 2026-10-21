@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -253,6 +254,46 @@ func (a *App) cancelRun(s *sess) {
 		s.run.cancelLLM = nil
 	}
 	a.hub.Send(proto.Msg{T: proto.TCancel, SID: s.sid}) // 内核会回 done(cancelled)
+}
+
+// DirListing 是内核列出的一个目录（只有子目录）。
+type DirListing struct {
+	Path      string           `json:"path"`
+	Home      string           `json:"home"`
+	Blocked   bool             `json:"blocked"` // 包含 nano-agent 自己，不能当工作目录
+	Entries   []proto.DirEntry `json:"entries"`
+	Truncated bool             `json:"truncated"`
+}
+
+// ListDir 请内核列出它那台机器上的一个目录，网页上选工作目录用。path 可以是 ~ 开头。
+func (a *App) ListDir(ctx context.Context, path string) (*DirListing, error) {
+	a.mu.Lock()
+	a.lsSeq++
+	id := fmt.Sprintf("ls%d", a.lsSeq)
+	ch := make(chan *proto.Msg, 1)
+	a.pendingLs[id] = ch
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		delete(a.pendingLs, id)
+		a.mu.Unlock()
+	}()
+	if !a.hub.Send(proto.Msg{T: proto.TLs, ID: id, Path: path}) {
+		return nil, errors.New("内核没有连接，没法浏览目录")
+	}
+	select {
+	case m := <-ch:
+		if m.OK == nil || !*m.OK {
+			return nil, errors.New(m.Detail)
+		}
+		l := &DirListing{Path: m.Path, Home: m.Home, Blocked: m.Blocked, Entries: m.Entries, Truncated: m.Truncated}
+		if l.Entries == nil {
+			l.Entries = []proto.DirEntry{}
+		}
+		return l, nil
+	case <-ctx.Done():
+		return nil, errors.New("内核没有响应")
+	}
 }
 
 // Approvals 返回待审批的工具调用。
