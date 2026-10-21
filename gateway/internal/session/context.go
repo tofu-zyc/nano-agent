@@ -92,7 +92,7 @@ func Sanitize(h []Msg) []Msg {
 }
 
 // BuildMessages 生成发给模型的消息：系统提示 + 修补过的历史。summary 是被 Compact 丢掉的
-// 那部分历史的替代说明，放在第一条用户消息前面。
+// 那部分历史的摘要，放在第一条用户消息前面。
 // sendReasoning 为 true 时，当前这一轮（最后一条用户消息之后）的推理内容会回传给模型。
 func BuildMessages(system, summary string, h []Msg, sendReasoning bool) []llm.Message {
 	h = Sanitize(h)

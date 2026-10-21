@@ -139,6 +139,9 @@ func (o *OpenAI) body(req Request, stream bool) map[string]any {
 	if o.maxTokens > 0 {
 		body["max_tokens"] = o.maxTokens
 	}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
 	if stream {
 		body["stream"] = true
 		body["stream_options"] = map[string]any{"include_usage": true}

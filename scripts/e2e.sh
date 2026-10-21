@@ -32,6 +32,7 @@ listen = "unix:$TMP/k.sock"
 token = "e2e"
 [llm]
 provider = "mock"
+max_history_tokens = 4000
 [persona]
 dir = "$ROOT/personas"
 [session]
@@ -131,11 +132,30 @@ else
   echo "  FAIL 技能附带文件传到服务器"; fail=$((fail + 1))
 fi
 send "/node default";                                 expect "切回默认机器" "这个会话改在 pc 上工作了"
+
+# 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
+send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"
+long=$(printf '旧%.0s' {1..1800})
+send "摘要第一轮-$long";                              expect "累积待整理的历史" "（mock）收到：摘要第一轮-"
+send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理较早的对话"
+echo "compaction-e2e-ok" > "$TMP/work/summary.txt"
+send '!call Read {"path":"summary.txt"}';             expect "压缩之后照常调用工具" "compaction-e2e-ok"
+if python3 - "$TMP/data/sessions" <<'PY'
+import json, pathlib, sys
+settings = [json.loads(p.read_text()) for p in pathlib.Path(sys.argv[1]).glob('*.settings.json')]
+assert any(s.get('title') == '压缩测试' and s.get('base', 0) > 0 and '较早对话已整理' in s.get('summary', '') for s in settings)
+PY
+then
+  echo "  ok   摘要和裁剪位置已保存"; pass=$((pass + 1))
+else
+  echo "  FAIL 摘要和裁剪位置已保存"; fail=$((fail + 1))
+fi
+
 # 再开一个终端：顶掉原来的那个，打招呼时补上最近的对话
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" </dev/null >"$TMP/out2" 2>&1 &
 expect "旧终端被顶掉" "另一个终端接进来了"
-for _ in $(seq 50); do grep -qF "最近 3 轮对话" "$TMP/out2" && break; sleep 0.1; done
-if grep -qF "最近 3 轮对话" "$TMP/out2"; then echo "  ok   新终端看到最近的对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到最近的对话"; fail=$((fail + 1)); fi
+for _ in $(seq 50); do grep -qF "compaction-e2e-ok" "$TMP/out2" && break; sleep 0.1; done
+if grep -qF "最近 2 轮对话" "$TMP/out2" && grep -qF "compaction-e2e-ok" "$TMP/out2"; then echo "  ok   新终端看到压缩后保留的对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到压缩后保留的对话"; fail=$((fail + 1)); fi
 
 echo "e2e: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then

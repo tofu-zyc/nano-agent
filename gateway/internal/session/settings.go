@@ -48,7 +48,6 @@ func (s *Store) Settings(sid string) Settings {
 
 // SaveSettings 保存会话设置。
 func (s *Store) SaveSettings(sid string, st Settings) error {
-	s.settings[sid] = st
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
@@ -57,7 +56,11 @@ func (s *Store) SaveSettings(sid string, st Settings) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.settingsFile(sid))
+	if err := os.Rename(tmp, s.settingsFile(sid)); err != nil {
+		return err
+	}
+	s.settings[sid] = st
+	return nil
 }
 
 // List 返回磁盘上所有会话的 ID（有历史或者有设置的）。

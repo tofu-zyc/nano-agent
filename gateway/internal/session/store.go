@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"nano-agent/gateway/internal/llm"
@@ -108,9 +109,9 @@ func (s *Store) Append(sid string, m Msg) error {
 // Compact 在历史估算超过 high 时，一次性丢掉开头的一段，让剩下的不超过 low。
 // 只在用户消息处切，当前这一轮永远保留。返回丢掉的消息数。
 //
-// 被丢掉的部分用 Settings.Summary 里的一段说明代替（现在只是说明加上环境信息，
-// 以后做上下文压缩时换成摘要），它会放在剩下的历史最前面，直到下一次 Compact。
-func (s *Store) Compact(sid string, high, low int) (int, error) {
+// summary 代替被丢掉的部分，放在剩下历史的最前面，直到下一次 Compact。
+// 生成摘要失败时传空字符串，保留已有摘要并注明本次省略了旧对话。
+func (s *Store) Compact(sid string, high, low int, summary string) (int, error) {
 	h := s.History(sid)
 	if Estimate(h) <= high {
 		return 0, nil
@@ -121,8 +122,13 @@ func (s *Store) Compact(sid string, high, low int) (int, error) {
 	}
 	st := s.Settings(sid)
 	st.Base += cut
-	st.Summary = "[系统] 更早的对话因为太长已经省略。"
-	if st.EnvNote != "" {
+	const omitted = "[系统] 更早的对话因为太长已经省略。"
+	if summary != "" {
+		st.Summary = "[系统] 更早对话的摘要：\n" + summary
+	} else if !strings.Contains(st.Summary, omitted) {
+		st.Summary = strings.TrimSpace(st.Summary + "\n" + omitted)
+	}
+	if st.EnvNote != "" && !strings.Contains(st.Summary, st.EnvNote) {
 		st.Summary += "\n" + st.EnvNote
 	}
 	if err := s.SaveSettings(sid, st); err != nil {

@@ -153,6 +153,10 @@ func TestMock(t *testing.T) {
 	if res.Content != "（mock）工具结果：A | B" {
 		t.Fatalf("%+v", res)
 	}
+	res, _ = m.Chat(context.Background(), Request{Messages: []Message{{Role: "user", Content: "[系统] 更早对话的摘要：\n旧目标\n[系统] 工作目录：/w\n[2026-10-21 周三 15:08 · 命令行] 继续"}}}, nil)
+	if res.Content != "（mock）收到：继续" {
+		t.Fatalf("mock 不应回显摘要和环境说明：%+v", res)
+	}
 }
 
 func sse(w http.ResponseWriter, chunks ...string) {
@@ -270,5 +274,33 @@ func TestThinking(t *testing.T) {
 	got = nil
 	if _, err := c.Chat(context.Background(), Request{}, nil); err != nil || got["reasoning_effort"] != nil {
 		t.Fatalf("不设置时不该传：%v", got)
+	}
+}
+
+func TestSummaryRequestOverridesOutputLimitForOneCall(t *testing.T) {
+	requests := make(chan map[string]any, 2)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		requests <- body
+		reply(w, "stop", map[string]any{"content": "保留目标、决定和待办。"})
+	})
+	req := SummaryRequest("旧摘要", []Message{{Role: "user", Content: "继续推进"}})
+	if _, err := c.Chat(context.Background(), req, nil); err != nil {
+		t.Fatal(err)
+	}
+	body := <-requests
+	if body["max_tokens"] != float64(2048) || body["tools"] != nil || body["stream"] != nil {
+		t.Fatalf("摘要请求: %v", body)
+	}
+	if _, err := c.Chat(context.Background(), Request{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if body = <-requests; body["max_tokens"] != float64(100) {
+		t.Fatalf("摘要不应更改后续普通请求的输出上限: %v", body)
+	}
+	res, _ := (&Mock{}).Chat(context.Background(), req, nil)
+	if res.Reason != ReasonFinal || !strings.Contains(res.Content, "较早对话已整理") {
+		t.Fatalf("mock 摘要: %+v", res)
 	}
 }

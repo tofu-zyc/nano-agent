@@ -693,13 +693,19 @@ func (a *App) callModel(s *sess) {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
 	}
-	// 历史太长时一次裁掉一大段；平时只追加，请求的前缀不变，缓存才能命中
 	high := a.cfg.LLM.MaxHistoryTokens
-	if n, err := a.store.Compact(s.sid, high, int(float64(high)*a.cfg.LLM.TrimTo)); err != nil {
-		a.log.Warn("裁剪上下文失败", "sid", s.sid, "err", err)
-	} else if n > 0 {
-		a.log.Info("上下文超过上限，裁掉了最早的一段", "sid", s.sid, "messages", n)
+	low := int(float64(high) * a.cfg.LLM.TrimTo)
+	h := a.store.History(s.sid)
+	if session.Estimate(h) > high && session.CutPoint(h, low) > 0 {
+		a.compact(s, high, low)
+		return
 	}
+	a.generateModel(s)
+}
+
+// generateModel 用准备好的上下文请求本轮回复，调用方持有锁。
+func (a *App) generateModel(s *sess) {
+	r := s.run
 	system, _ := a.persona.For(s.sid)
 	st := a.store.Settings(s.sid)
 	req := llm.Request{
@@ -760,11 +766,7 @@ func (a *App) callModel(s *sess) {
 			return
 		}
 		u := res.Usage
-		r.usage.PromptTokens += u.PromptTokens
-		r.usage.CachedTokens += u.CachedTokens
-		r.usage.CompletionTokens += u.CompletionTokens
-		r.usage.ReasoningTokens += u.ReasoningTokens
-		a.totals.add(u)
+		a.addUsage(r, u)
 		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
 		if res.Content != "" {

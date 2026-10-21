@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -125,7 +126,7 @@ func TestRequestsOnlyGrow(t *testing.T) {
 		s.Append(sid, Msg{Role: "assistant", ToolCalls: []llm.ToolCall{call("c" + string(rune('a'+i)))}})
 		s.Append(sid, Msg{Role: "tool", ToolCallID: "c" + string(rune('a'+i)), Content: "结果"})
 		s.Append(sid, Msg{Role: "assistant", Content: "好"})
-		if n, _ := s.Compact(sid, 1<<20, 1<<19); n != 0 {
+		if n, _ := s.Compact(sid, 1<<20, 1<<19, ""); n != 0 {
 			t.Fatalf("不该裁剪")
 		}
 		st := s.Settings(sid)
@@ -150,14 +151,14 @@ func TestCompactOnceThenAppendOnly(t *testing.T) {
 		s.Append(sid, Msg{Role: "assistant", Content: long})
 	}
 	// 超过 high（4000）才裁
-	if n, _ := s.Compact(sid, 4000, 2000); n != 0 {
+	if n, _ := s.Compact(sid, 4000, 2000, ""); n != 0 {
 		t.Fatalf("没超过上限不该裁剪：%d", n)
 	}
 	for i := 0; i < 5; i++ {
 		s.Append(sid, Msg{Role: "user", Content: long})
 		s.Append(sid, Msg{Role: "assistant", Content: long})
 	}
-	n, err := s.Compact(sid, 4000, 2000)
+	n, err := s.Compact(sid, 4000, 2000, "")
 	if err != nil || n == 0 || Estimate(s.History(sid)) > 2000 || s.History(sid)[0].Role != "user" {
 		t.Fatalf("裁剪：n=%d err=%v 剩 %d", n, err, Estimate(s.History(sid)))
 	}
@@ -172,7 +173,7 @@ func TestCompactOnceThenAppendOnly(t *testing.T) {
 	}
 	// 裁过之后又是只追加：再加一轮不会再裁
 	s.Append(sid, Msg{Role: "user", Content: "短"})
-	if n, _ := s.Compact(sid, 4000, 2000); n != 0 {
+	if n, _ := s.Compact(sid, 4000, 2000, ""); n != 0 {
 		t.Fatalf("刚裁过不该再裁：%d", n)
 	}
 	// 重新加载：从 Base 开始读
@@ -184,5 +185,56 @@ func TestCompactOnceThenAppendOnly(t *testing.T) {
 	s2.Reset(sid)
 	if st := s2.Settings(sid); st.Base != 0 || st.Summary != "" || st.EnvNote != "" {
 		t.Fatalf("after reset: %+v", st)
+	}
+}
+
+func TestCompactStoresSummaryWithoutRewritingHistory(t *testing.T) {
+	s, _ := New(t.TempDir())
+	sid := "main"
+	for _, m := range []Msg{
+		{Role: "user", Content: strings.Repeat("旧", 300)},
+		{Role: "assistant", Content: "已完成"},
+		{Role: "user", Content: "当前任务"},
+	} {
+		if err := s.Append(sid, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := os.ReadFile(s.file(sid))
+	n, err := s.Compact(sid, 200, 100, "已完成第一阶段，下一步继续实现。")
+	if err != nil || n != 2 || !strings.Contains(s.Settings(sid).Summary, "已完成第一阶段") {
+		t.Fatalf("compact: n=%d err=%v settings=%+v", n, err, s.Settings(sid))
+	}
+	after, _ := os.ReadFile(s.file(sid))
+	if string(before) != string(after) {
+		t.Fatal("压缩改写了原始历史")
+	}
+	// 后续摘要失败时，前一次摘要仍保留，省略说明也不重复堆叠。
+	for i := 0; i < 2; i++ {
+		s.Append(sid, Msg{Role: "assistant", Content: strings.Repeat("长", 300)})
+		s.Append(sid, Msg{Role: "user", Content: "继续"})
+		if _, err := s.Compact(sid, 200, 100, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if summary := s.Settings(sid).Summary; !strings.Contains(summary, "已完成第一阶段") || strings.Count(summary, "已经省略") != 1 {
+		t.Fatalf("降级摘要: %q", summary)
+	}
+}
+
+func TestCompactSaveFailureLeavesContextIntact(t *testing.T) {
+	s, _ := New(t.TempDir())
+	sid := "main"
+	s.Append(sid, Msg{Role: "user", Content: strings.Repeat("旧", 300)})
+	s.Append(sid, Msg{Role: "user", Content: "当前任务"})
+	// 占住临时文件路径，让保存失败。
+	if err := os.Mkdir(s.settingsFile(sid)+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Compact(sid, 200, 100, "摘要"); err == nil {
+		t.Fatal("应当报告保存失败")
+	}
+	if st := s.Settings(sid); st.Base != 0 || st.Summary != "" || len(s.History(sid)) != 2 {
+		t.Fatalf("保存失败却改变了上下文: %+v", st)
 	}
 }

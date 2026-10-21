@@ -14,17 +14,17 @@ import (
 //	最后一条是工具结果                       → 把工具结果复述出来作为最终回复
 //	其他                                     → 回显用户消息（去掉网关加的环境说明和时间戳）
 //
-// 流式请求时把回复切成几段依次输出；开了思考（Thinking 不是空或 off）时先输出一段假的思考。
+// 流式请求时把回复切成几段依次输出；开了思考（Thinking 不是空或 none）时先输出一段假的思考。
 type Mock struct {
 	n atomic.Int64
 }
 
-var mockStamp = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2} [^\]]*\] `)
+var mockStamp = regexp.MustCompile(`(?m)^\[\d{4}-\d{2}-\d{2} [^\]]*\] `)
 
 func (m *Mock) Chat(ctx context.Context, req Request, onDelta func(Delta)) (*Result, error) {
 	res := m.reply(req)
 	if onDelta != nil {
-		if req.Thinking != "" && req.Thinking != "off" {
+		if req.Thinking != "" && req.Thinking != "none" {
 			res.Reasoning = "（mock）想一想……"
 			onDelta(Delta{Reasoning: res.Reasoning})
 		}
@@ -41,6 +41,9 @@ func (m *Mock) reply(req Request) *Result {
 	if len(req.Messages) == 0 {
 		return &Result{Reason: ReasonFinal, Content: "（mock）没有消息"}
 	}
+	if req.Messages[0].Content == summaryPrompt {
+		return &Result{Reason: ReasonFinal, Content: "（mock）较早对话已整理，继续处理最近的任务。"}
+	}
 	last := req.Messages[len(req.Messages)-1]
 	if last.Role == "tool" {
 		var parts []string
@@ -50,6 +53,14 @@ func (m *Mock) reply(req Request) *Result {
 		return &Result{Reason: ReasonFinal, Content: "（mock）工具结果：" + strings.Join(parts, " | ")}
 	}
 	text := last.Content
+	// 摘要和环境说明可能占多行，时间戳后面才是这次用户的正文。
+	if loc := mockStamp.FindStringIndex(text); loc != nil {
+		text = text[loc[1]:]
+	} else if strings.HasPrefix(text, "[系统] ") {
+		if _, rest, ok := strings.Cut(text, "\n"); ok {
+			text = rest
+		}
+	}
 	if i := strings.Index(text, "!call "); i >= 0 {
 		name, args, _ := strings.Cut(strings.TrimSpace(text[i+len("!call "):]), " ")
 		if strings.TrimSpace(args) == "" {
@@ -61,11 +72,5 @@ func (m *Mock) reply(req Request) *Result {
 			Function: FunctionCall{Name: name, Arguments: strings.TrimSpace(args)},
 		}}}
 	}
-	if strings.HasPrefix(text, "[系统] ") {
-		if _, rest, ok := strings.Cut(text, "\n"); ok {
-			text = rest
-		}
-	}
-	text = mockStamp.ReplaceAllString(text, "")
 	return &Result{Reason: ReasonFinal, Content: "（mock）收到：" + text}
 }

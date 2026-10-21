@@ -38,9 +38,10 @@ type ToolFunction struct {
 }
 
 type Request struct {
-	Messages []Message
-	Tools    []Tool
-	Thinking string // 思考强度：空表示用模型默认，"off" 关闭，其他值按 llm.thinking_style 传给模型
+	Messages  []Message
+	Tools     []Tool
+	Thinking  string // reasoning_effort，空表示用模型默认，none 表示关闭
+	MaxTokens int    // 单次请求的输出上限；0 表示用配置值
 }
 
 // Delta 是流式输出的一个片段。

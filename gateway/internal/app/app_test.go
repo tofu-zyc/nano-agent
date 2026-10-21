@@ -706,8 +706,8 @@ func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 		msgs := e.roundTrip(t)
 		if prev != nil && !reflect.DeepEqual(msgs[:min(len(prev), len(msgs))], prev[:min(len(prev), len(msgs))]) {
 			compactions++
-			if !strings.HasPrefix(msgs[1].Content, "[系统] 更早的对话因为太长已经省略。") {
-				t.Fatalf("裁剪后缺少说明：%q", msgs[1].Content[:60])
+			if !strings.HasPrefix(msgs[1].Content, "[系统] 更早对话的摘要：") {
+				t.Fatalf("裁剪后缺少摘要：%q", msgs[1].Content)
 			}
 		}
 		prev = msgs

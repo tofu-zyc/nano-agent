@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-21，聊天平台流式回复阶段完成。
+最后更新：2026-10-21，上下文摘要压缩阶段完成。
 
 ## 一句话
 
@@ -25,6 +25,7 @@ kernel/                C 内核和执行器
 gateway/               Go 网关
   cmd/nano-gateway     入口；chat.go 是 `nano-gateway chat` 终端客户端
   internal/app         调度：会话、窗口（endpoints）、节点（nodes）、补聊天记录（recap）、命令
+    compact.go         超限后异步生成摘要，取消、失败裁剪和用量统计
   internal/channel     聊天渠道：cli（unix socket）、web、telegram、feishu（含扫码创建）
     stream.go          平台流式显示：后台合并、限频、结束补齐、失败时发送完整文本
   internal/kernel      内核连接（hub，多节点）
@@ -47,7 +48,7 @@ make web          # 改了前端后重新构建（npm run check && build），�
 cd gateway && go test -race ./...
 ```
 
-- e2e（scripts/e2e.sh）现在 34 项：终端聊天、工具、审批、模式、沙箱、会话切换、两个内核替补、SSH 服务器（假 ssh）、终端重连、本机与远程技能。
+- e2e（scripts/e2e.sh）现在 39 项：终端聊天、工具、审批、模式、沙箱、会话切换、两个内核替补、SSH 服务器（假 ssh）、终端重连、本机与远程技能，以及超限摘要、保存和继续用工具。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在之前会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
 - 本机是 Fedora 43（WSL），glibc 2.42，**不能静态链接**（没装 glibc-static），所以 `nano-exec-static` 不会生成。
 
@@ -66,7 +67,8 @@ cd gateway && go test -race ./...
 | 131e2e2 | 多个内核（节点）：会话绑定机器，掉线时替补只聊天，/node |
 | b3c1929 | SSH 远程执行：服务器作为节点（经由某个内核），自动上传/现编执行器 |
 | fb07909 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
-| 流式回复阶段 | Telegram 发送后编辑、飞书 CardKit 流式卡片，含思考/工具/用量、长回复分段和失败降级 |
+| 8c2e48f | Telegram 发送后编辑、飞书 CardKit 流式卡片，含思考/工具/用量、长回复分段和失败降级 |
+| 摘要压缩阶段 | 超限时合并旧摘要和旧对话，完整保留近期工具链与当前轮；支持取消、失败裁剪、重启恢复和统计 |
 
 ## 关键设计（改之前先理解）
 
@@ -78,6 +80,7 @@ cd gateway && go test -race ./...
 6. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）；内核连接用 token（**目前所有内核共用一个 token，连接不加密**，跨网络要走 Tailscale/WireGuard/SSH 隧道）。
 7. **技能**：由内核管理，默认目录是 kernel.conf 旁的 skills/（skills 配置可改）。名字和简介放在 Skill 工具定义里，正文调用时读。下一轮开始和空闲每 30 秒扫描；元数据变化用 tools 消息同步网关和网页。正文、附带文件更新不改变工具定义。SSH 调用 Skill 时把所选技能打包上传到服务器缓存，后续 Read/Shell 在沙箱里只读访问。沿用 runner 的异步执行和取消，不另起技能服务。
 8. **聊天平台流式显示**：RunView 只追加到内存，streamRun 的后台协程合并更新，Close 不阻塞调度锁，但会补齐尾部并关闭卡片。Telegram 每秒编辑消息，飞书每半秒用 CardKit Content 更新卡片，每张卡片的 sequence 严格递增。长回复分段，错误只记录一次，结束时发送完整文本。无正文增量的模型最终结果也会交给 RunView。飞书需要 cardkit:card:write，扫码注册已加入；平台接口测试用 httptest 模拟，无真实凭据的渠道仍需使用时验证。
+9. **上下文压缩**：历史超限且有完整旧轮次可切时，额外用当前模型生成摘要。已有 Summary 和被切掉的历史作为 JSON 数据传入，不传工具、人格和推理记录；输出 2048 token，支持 none 时关闭思考，60 秒超时。最近消息和当前轮留在原位置；摘要连同 EnvNote 存在 Settings.Summary，只在压缩时替换，JSONL 不改写。生成失败沿用裁剪，已有摘要不丢；取消或迟到结果不提交，保存失败不推进 Base。额外调用和 token 都计入本轮及全局统计。
 
 ## 用户的偏好和约定（重要）
 
@@ -92,8 +95,8 @@ cd gateway && go test -race ./...
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
-1. **上下文压缩**：现在裁掉的部分只换成一句“更早的对话已省略”（Settings.Summary）。改成调模型生成摘要放在那里（只在裁剪时做一次，之后照样只追加）。
-2. 之后：长期记忆、群聊、每台机器单独的 token、审批按钮、Telegram 真机测试（没有凭据，代码写好了没跑过）。
+1. **长期记忆**：在会话摘要之外，补充跨会话保留的用户偏好和项目事实；保持前缀稳定，不把每次检索结果塞进系统提示词。
+2. 群聊、每台机器单独的 token、审批按钮、Telegram / 飞书真机验证（本轮平台接口用模拟服务测试）。
 
 ## 坑
 
