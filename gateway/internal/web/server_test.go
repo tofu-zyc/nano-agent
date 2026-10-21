@@ -172,7 +172,7 @@ func TestConfigAndChatEvents(t *testing.T) {
 	for {
 		select {
 		case l := <-lines:
-			if strings.Contains(l, `"t":"say"`) && strings.Contains(l, "内核没有连接") && strings.Contains(l, `"sid":"main"`) {
+			if strings.Contains(l, `"t":"say"`) && strings.Contains(l, "没有在线的内核") && strings.Contains(l, `"sid":"main"`) {
 				return
 			}
 		case <-deadline:

@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Ev, FieldState, LiveItem, Overview, SessionInfo, Target } from './types';
+import type { Approval, Ev, FieldState, LiveItem, Machine, Overview, SessionInfo, Target } from './types';
 
 export type Toast = {
   id: number;
@@ -162,6 +162,17 @@ class Store {
 
   // ---- 会话 ----
 
+  /** 所有机器：在线的内核，加上有会话要在上面工作但不在线的 */
+  get machines(): Machine[] {
+    const ov = this.ov;
+    if (!ov) return [];
+    const def = ov.workspace.node;
+    const out: Machine[] = ov.kernels.map((k) => ({ name: k.node, online: true, info: k, isDefault: k.node === def }));
+    const want = [def, ...(ov.sessions ?? []).map((s) => s.node)];
+    for (const n of want) if (n && !out.some((m) => m.name === n)) out.push({ name: n, online: false, isDefault: n === def });
+    return out;
+  }
+
   session(sid: string | undefined) {
     return sid ? this.ov?.sessions?.find((s) => s.sid === sid) : undefined;
   }
@@ -226,7 +237,13 @@ class Store {
     const sid = e.sid ?? '';
     switch (e.t) {
       case 'kernel':
-        if (ov) ov.kernel = e.data ?? null;
+        if (ov) {
+          ov.kernels = ov.kernels.filter((k) => k.node !== e.name);
+          if (e.data) ov.kernels = [...ov.kernels, e.data].sort((a, b) => a.node.localeCompare(b.node));
+          for (const s of ov.sessions ?? []) if (s.node === e.name) s.node_online = !!e.data;
+          // 默认机器可能跟着变（和网关同一台机器的内核上线了）
+          this.refresh().catch(() => {});
+        }
         break;
       case 'channel':
         if (ov && e.data) {

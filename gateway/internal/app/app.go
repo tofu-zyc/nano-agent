@@ -29,6 +29,7 @@ const helpText = `可用命令：
 /whoami  查看你的身份、这个窗口和它接着的会话
 /session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
 /history 查看这个会话最近的对话；/history <轮数> 看更多
+/node    查看这个会话在哪台机器上工作；/node <名字> 切换（需管理员）
 /stop    停止当前任务
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）
@@ -65,9 +66,9 @@ type App struct {
 	chans        map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
 	outboxes     map[string]chan outItem
 	eps          map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
-	kernel       *KernelInfo       // 当前连着的内核，nil 表示没有
-	tools        []llm.Tool
-	sandbox      bool // 内核能把工具关在工作目录的沙箱里
+	nodes        map[string]*node  // 在线的内核（nodes.go）
+	localNode    string            // 最近一个和网关在同一台机器上的内核
+	nodeSeq      int
 	totals       Totals
 	sessions     map[string]*sess
 	approvals    map[int]*approval
@@ -104,6 +105,7 @@ type out struct {
 
 type run struct {
 	id         uint64
+	node       string // 跑这一轮的内核
 	from       string // 触发者身份，内核据此判断权限
 	outs       []out  // 第一个是说话的窗口，后面是同步显示的窗口和中途来停止、清空的窗口
 	final      string
@@ -167,6 +169,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		outboxes:     map[string]chan outItem{},
 		sessions:     map[string]*sess{},
 		approvals:    map[int]*approval{},
+		nodes:        map[string]*node{},
 	}
 	a.migrate()
 	a.loadEndpoints()
@@ -225,7 +228,7 @@ func (a *App) SetLLM(c llm.Client) {
 // ---- 聊天消息 ----
 
 var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"dir": true, "mode": true, "think": true, "session": true, "history": true}
+	"dir": true, "mode": true, "think": true, "session": true, "history": true, "node": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -281,6 +284,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "history":
 		a.cmdHistory(c, arg)
+		return
+	case "node":
+		a.cmdNode(c, arg)
 		return
 	case "stop":
 		a.stop(c)
@@ -390,13 +396,16 @@ func (a *App) startRun(s *sess) {
 		return
 	}
 	head := s.queue[0]
-	if !a.hub.Connected() {
-		a.publish(events.Event{T: "say", SID: s.sid, Text: "（内核没有连接，暂时没法处理消息）"})
+	w := a.workspaceOf(s.sid)
+	node, tools, failNote := a.pick(w)
+	if node == "" {
+		const text = "（没有在线的内核，暂时没法处理消息）"
+		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
 		var told []endpoint
 		for _, q := range s.queue {
 			if !slices.Contains(told, q.ep) {
 				told = append(told, q.ep)
-				a.deliver(q.ep, "（内核没有连接，暂时没法处理消息）", "")
+				a.deliver(q.ep, text, "")
 			}
 		}
 		s.queue = nil
@@ -418,10 +427,13 @@ func (a *App) startRun(s *sess) {
 	if config.On(a.cfg.Session.Timestamps) {
 		content = a.stamp(sourceOf(head.ep.ch)) + " " + content
 	}
-	// 工作目录或权限变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
-	w := a.workspaceOf(s.sid)
+	// 工作目录、权限、机器变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	st := a.store.Settings(s.sid)
-	if note := envNote(w, st.RO, st.EnvNote); note != st.EnvNote && note != "" {
+	note := envNote(w, st.RO)
+	if failNote != "" {
+		note = failNote // 会话的机器不在线，替补顶上
+	}
+	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
 		st.EnvNote = note
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
@@ -436,7 +448,7 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{id: a.runSeq, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
+	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
 	}
@@ -458,16 +470,17 @@ func (a *App) startRun(s *sess) {
 	r.stopTyping = a.startTyping(head.ep)
 	s.run = r
 	mode := a.runMode(w, r.from)
-	if len(w.dirs) == 0 {
-		// 没有工作目录：不给模型工具，只当聊天机器人
-		mode, r.noTools = proto.ModeNone, true
+	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
+	if len(w.dirs) == 0 || !tools {
+		// 没有工作目录，或者工作目录所在的机器不在线：不给模型工具，只聊天
+		r.noTools = true
+		in.Mode, in.Dirs, in.RO, in.RW = proto.ModeNone, nil, nil, nil
 	}
-	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", mode)
+	a.log.Info("开始处理", "sid", s.sid, "node", node, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content,
-		Data: map[string]any{"from": r.from, "mode": mode, "channel": chanName(head.ep.ch)}})
-	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
-	if !a.hub.Send(in) {
+		Data: map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}})
+	if !a.hub.Send(node, in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
 }
@@ -537,52 +550,12 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
-	a.hub.Send(proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who})
+	a.hub.Send(c.s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who})
 }
 
 // ---- 内核事件（kernel.Handler） ----
 
-func (a *App) KernelUp(hello *proto.Msg) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.tools = a.tools[:0]
-	names := make([]string, 0, len(hello.Tools))
-	for _, t := range hello.Tools {
-		params := t.InputSchema
-		if len(params) == 0 {
-			params = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		a.tools = append(a.tools, llm.Tool{Type: "function", Function: llm.ToolFunction{
-			Name: t.Name, Description: t.Description, Parameters: params,
-		}})
-		names = append(names, t.Name)
-	}
-	a.sandbox = hello.Sandbox != nil && hello.Sandbox.Landlock > 0
-	ki := &KernelInfo{Node: hello.Node, Tools: names, Since: time.Now().UnixMilli()}
-	if hello.Sandbox != nil {
-		ki.Landlock = hello.Sandbox.Landlock
-	}
-	a.kernel = ki
-	a.publish(events.Event{T: "kernel", Data: ki})
-	a.log.Info("内核报告的工具", "node", hello.Node, "tools", strings.Join(names, ","), "sandbox", a.sandbox)
-	if !a.sandbox {
-		a.log.Warn("内核所在机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批")
-	}
-}
-
-func (a *App) KernelDown() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.kernel = nil
-	a.publish(events.Event{T: "kernel"})
-	for _, s := range a.sessions {
-		s.queue = nil
-		s.resetAfter = false
-		a.endRun(s, "（内核连接断开，本轮已中止）")
-	}
-}
-
-func (a *App) KernelMsg(m *proto.Msg) {
+func (a *App) KernelMsg(node string, m *proto.Msg) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if m.T == proto.TLsResult {
@@ -592,11 +565,11 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		return
 	}
 	s := a.sessions[m.SID]
-	if s == nil || s.run == nil {
+	if s == nil || s.run == nil || s.run.node != node {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束
-			a.hub.Send(proto.Msg{T: proto.TTurn, SID: m.SID, Reason: proto.ReasonError, Detail: "网关没有这个会话的进行中任务"})
+			a.hub.Send(node, proto.Msg{T: proto.TTurn, SID: m.SID, Reason: proto.ReasonError, Detail: "网关没有这个会话在这个内核上的进行中任务"})
 		}
-		a.log.Debug("忽略没有对应 run 的内核消息", "t", m.T, "sid", m.SID)
+		a.log.Debug("忽略没有对应 run 的内核消息", "node", node, "t", m.T, "sid", m.SID)
 		return
 	}
 	switch m.T {
@@ -723,8 +696,8 @@ func (a *App) callModel(s *sess) {
 		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning),
 		Thinking: a.thinkingOf(s.sid),
 	}
-	if !r.noTools {
-		req.Tools = slices.Clone(a.tools)
+	if n := a.nodes[r.node]; n != nil && !r.noTools {
+		req.Tools = slices.Clone(n.tools)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
@@ -767,7 +740,7 @@ func (a *App) callModel(s *sess) {
 		if err != nil {
 			a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: "error: " + err.Error()})
 			a.log.Warn("模型请求失败", "sid", s.sid, "err", err)
-			a.hub.Send(proto.Msg{T: proto.TTurn, SID: s.sid, Reason: proto.ReasonError, Detail: err.Error()})
+			a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, Reason: proto.ReasonError, Detail: err.Error()})
 			return
 		}
 		u := res.Usage
@@ -809,7 +782,7 @@ func (a *App) callModel(s *sess) {
 			turn.Reason = proto.ReasonFinal
 			r.final, r.truncated = res.Content, res.Truncated
 		}
-		a.hub.Send(turn)
+		a.hub.Send(r.node, turn)
 	}()
 }
 

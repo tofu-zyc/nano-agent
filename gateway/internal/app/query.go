@@ -18,14 +18,6 @@ import (
 
 // 网页界面用的查询和操作。都在锁里完成，返回的是副本。
 
-// KernelInfo 是当前连着的内核。
-type KernelInfo struct {
-	Node     string   `json:"node"`
-	Landlock int      `json:"landlock"` // 0 表示没有沙箱
-	Tools    []string `json:"tools"`
-	Since    int64    `json:"since"`
-}
-
 // Totals 是网关启动以来的累计。
 type Totals struct {
 	Runs             int `json:"runs"`
@@ -48,6 +40,10 @@ type SessionInfo struct {
 	Channel     string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints   []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title       string         `json:"title"`
+	Node        string         `json:"node"`        // 在哪台机器上工作，空表示不挑
+	NodeSet     bool           `json:"node_set"`    // 会话单独设置了机器（否则用默认的）
+	NodeOnline  bool           `json:"node_online"` // 那台机器的内核在线
+	RunNode     string         `json:"run_node"`    // 正在跑这一轮的内核
 	Running     bool           `json:"running"`
 	Pending     int            `json:"pending"` // 待审批的工具调用
 	LastAt      int64          `json:"last_at"` // 最后一条消息的时间（秒）
@@ -74,7 +70,8 @@ type ApprovalInfo struct {
 
 type Snapshot struct {
 	Started   int64          `json:"started"`
-	Kernel    *KernelInfo    `json:"kernel"`
+	Kernels   []KernelInfo   `json:"kernels"`
+	Node      string         `json:"node"` // 默认的机器
 	Totals    Totals         `json:"totals"`
 	Sessions  []SessionInfo  `json:"sessions"`
 	Approvals []ApprovalInfo `json:"approvals"`
@@ -84,11 +81,7 @@ type Snapshot struct {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals}
-	if a.kernel != nil {
-		k := *a.kernel
-		snap.Kernel = &k
-	}
+	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Node: a.defaultNode()}
 	for _, sid := range a.sessionIDs() {
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
@@ -124,8 +117,9 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Title = sid
 		}
 	}
+	info.Node, info.NodeSet, info.NodeOnline = w.node, st.Node != "", a.nodes[w.node] != nil
 	if s := a.sessions[sid]; s != nil && s.run != nil {
-		info.Running = true
+		info.Running, info.RunNode = true, s.run.node
 	}
 	for _, ap := range a.approvals {
 		if ap.sid == sid {
@@ -172,6 +166,7 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。
 type SessionPatch struct {
 	Title    *string   `json:"title"`
+	Node     *string   `json:"node"` // 空字符串表示用默认的机器
 	Dirs     *[]string `json:"dirs"`
 	RO       *[]string `json:"ro"`
 	Mode     *string   `json:"mode"`
@@ -183,6 +178,11 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	defer a.mu.Unlock()
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
+	}
+	if p.Node != nil { // 先换机器（会清掉旧机器上的工作目录），再设置这台机器上的目录
+		if _, err := a.setNode(sid, strings.TrimSpace(*p.Node)); err != nil {
+			return err
+		}
 	}
 	st := a.store.Settings(sid)
 	var errs []error
@@ -270,7 +270,7 @@ func (a *App) cancelRun(s *sess) {
 		s.run.cancelLLM()
 		s.run.cancelLLM = nil
 	}
-	a.hub.Send(proto.Msg{T: proto.TCancel, SID: s.sid}) // 内核会回 done(cancelled)
+	a.hub.Send(s.run.node, proto.Msg{T: proto.TCancel, SID: s.sid}) // 内核会回 done(cancelled)
 }
 
 // DirListing 是内核列出的一个目录（只有子目录）。
@@ -282,9 +282,23 @@ type DirListing struct {
 	Truncated bool             `json:"truncated"`
 }
 
-// ListDir 请内核列出它那台机器上的一个目录，网页上选工作目录用。path 可以是 ~ 开头。
-func (a *App) ListDir(ctx context.Context, path string) (*DirListing, error) {
+// ListDir 请节点 node 上的内核列出那台机器上的一个目录，网页上选工作目录用。path 可以是 ~ 开头。
+// node 为空时用默认的机器。
+func (a *App) ListDir(ctx context.Context, node, path string) (*DirListing, error) {
 	a.mu.Lock()
+	if node == "" {
+		node = a.defaultNode()
+	}
+	if node == "" {
+		node = a.substitute()
+	}
+	if a.nodes[node] == nil {
+		a.mu.Unlock()
+		if node == "" {
+			return nil, errors.New("没有在线的内核，没法浏览目录")
+		}
+		return nil, fmt.Errorf("%s 不在线，没法浏览它上面的目录", node)
+	}
 	a.lsSeq++
 	id := fmt.Sprintf("ls%d", a.lsSeq)
 	ch := make(chan *proto.Msg, 1)
@@ -295,7 +309,7 @@ func (a *App) ListDir(ctx context.Context, path string) (*DirListing, error) {
 		delete(a.pendingLs, id)
 		a.mu.Unlock()
 	}()
-	if !a.hub.Send(proto.Msg{T: proto.TLs, ID: id, Path: path}) {
+	if !a.hub.Send(node, proto.Msg{T: proto.TLs, ID: id, Path: path}) {
 		return nil, errors.New("内核没有连接，没法浏览目录")
 	}
 	select {
@@ -325,10 +339,14 @@ func (a *App) Approve(n int, ok bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ap := a.approvals[n]
-	if ap == nil {
+	var s *sess
+	if ap != nil {
+		s = a.sessions[ap.sid]
+	}
+	if s == nil || s.run == nil {
 		return errors.New("没有这个编号的待审批请求，可能已经处理过了")
 	}
-	if !a.hub.Send(proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: "web:admin"}) {
+	if !a.hub.Send(s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: "web:admin"}) {
 		return errors.New("内核没有连接")
 	}
 	return nil

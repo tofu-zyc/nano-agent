@@ -4,7 +4,7 @@
   import { api } from '../lib/api';
   import { ago, channelMeta, homeShort, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
   import Icon from '../components/Icon.svelte';
-  import type { Ev, SessionInfo, Target } from '../lib/types';
+  import type { Ev, Machine, SessionInfo, Target } from '../lib/types';
 
   type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'kernel' | 'dir' | 'more';
   type N = { id: string; kind: Kind; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
@@ -51,7 +51,7 @@
 
     const chans = ov.channels;
     const nS = shown.length + (more > 0 ? 1 : 0);
-    const H = Math.max(600, nS * 64 + 120, chans.length * 96 + 120);
+    const H = Math.max(600, nS * 64 + 120, chans.length * 96 + 120, 2 * (70 + Math.max(1, store.machines.length) * 96));
     const cy = H / 2;
 
     chans.forEach((c, i) => {
@@ -86,36 +86,49 @@
 
     nodes.push({ id: 'gw', kind: 'gateway', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
     nodes.push({ id: 'model', kind: 'model', x: X.right, y: cy - 118, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
-    nodes.push({ id: 'kernel', kind: 'kernel', x: X.right, y: cy + 38, w: 250, h: 80, color: 'var(--c-kernel)', target: { type: 'kernel' } });
     edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
-    edges.push({ id: 'gw>kernel', from: 'gw', to: 'kernel', color: ov.kernel ? 'var(--c-kernel)' : 'var(--err)', dashed: !ov.kernel });
 
-    // 工作目录：显示出来的会话用到的，加上默认工作目录
-    const dirs = new Map<string, { sessions: string[]; ro: boolean; def: boolean }>();
-    const add = (d: string, sid: string | null, ro: boolean) => {
-      const cur = dirs.get(d) ?? { sessions: [], ro: true, def: false };
+    // 内核（节点）：在线的，加上有会话要在上面工作但不在线的；一个都没有时画一个“未连接”
+    const machines: Machine[] = store.machines.length ? store.machines : [{ name: '', online: false, isDefault: false }];
+    const kid = (m: string) => 'k:' + (machines.some((x) => x.name === m) ? m : machines[0].name);
+    machines.forEach((m, i) => {
+      const id = 'k:' + m.name;
+      nodes.push({ id, kind: 'kernel', x: X.right, y: cy + 38 + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
+        target: m.name ? { type: 'kernel', node: m.name } : { type: 'kernel' }, data: m });
+      edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--c-kernel)' : 'var(--err)', dashed: !m.online });
+    });
+
+    // 工作目录：显示出来的会话用到的，加上默认工作目录。挂在它所在的机器下面
+    type DirInfo = { path: string; machine: string; sessions: string[]; ro: boolean; def: boolean };
+    const dirs = new Map<string, DirInfo>();
+    const add = (machine: string, d: string, sid: string | null, ro: boolean) => {
+      const key = kid(machine) + '>' + d;
+      const cur = dirs.get(key) ?? { path: d, machine: kid(machine), sessions: [], ro: true, def: false };
       if (sid && !cur.sessions.includes(sid)) cur.sessions.push(sid);
       if (!ro) cur.ro = false;
       if (!sid) cur.def = true;
-      dirs.set(d, cur);
+      dirs.set(key, cur);
     };
-    for (const d of ov.workspace.dirs ?? []) add(d, null, false);
+    for (const d of ov.workspace.dirs ?? []) add(ov.workspace.node, d, null, false);
     for (const s of all) {
-      for (const d of s.dirs ?? []) add(d, s.sid, false);
-      for (const d of s.ro ?? []) add(d, s.sid, true);
+      for (const d of s.dirs ?? []) add(s.node, d, s.sid, false);
+      for (const d of s.ro ?? []) add(s.node, d, s.sid, true);
     }
-    const list = [...dirs.entries()].slice(0, 7);
-    const kcy = cy + 78;
-    list.forEach(([path, info], i) => {
+    const order = (k: string) => machines.findIndex((m) => 'k:' + m.name === k);
+    const list = [...dirs.entries()].sort((a, b) => order(a[1].machine) - order(b[1].machine)).slice(0, 8);
+    const kcy = cy + 38 + (machines.length * 96 - 16) / 2;
+    list.forEach(([key, info], i) => {
       const y = kcy + (i - (list.length - 1) / 2) * 56;
-      nodes.push({ id: 'd:' + path, kind: 'dir', x: X.dir, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
-        target: { type: 'dir', path }, data: { path, ...info } });
-      edges.push({ id: `kernel>d:${path}`, from: 'kernel', to: 'd:' + path, color: 'var(--c-dir)', dashed: !ov.kernel });
+      const online = machines[order(info.machine)]?.online;
+      nodes.push({ id: 'd:' + key, kind: 'dir', x: X.dir, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
+        target: { type: 'dir', path: info.path }, data: info });
+      edges.push({ id: `${info.machine}>d:${key}`, from: info.machine, to: 'd:' + key, color: 'var(--c-dir)', dashed: !online });
     });
     if (list.length === 0) {
+      const k = 'k:' + machines[0].name;
       nodes.push({ id: 'd:none', kind: 'dir', x: X.dir, y: kcy - 22, w: 210, h: 44, color: 'var(--muted)',
         target: { type: 'workspace' }, data: { path: '', sessions: [], none: true } });
-      edges.push({ id: 'kernel>d:none', from: 'kernel', to: 'd:none', color: 'var(--muted)', dashed: true });
+      edges.push({ id: `${k}>d:none`, from: k, to: 'd:none', color: 'var(--muted)', dashed: true });
     }
 
     for (const n of nodes) {
@@ -279,6 +292,8 @@
 
   // 每个会话正在处理的这一轮是从哪个渠道来的：回复的光点流回那里
   const origin = new Map<string, string>();
+  // 每个会话这一轮在哪个内核上跑：工具调用的光点流向那里
+  const runNodes = new Map<string, string>();
 
   function onEvent(e: Ev) {
     const sid = e.sid ?? '';
@@ -312,12 +327,13 @@
         break;
       }
       case 'tool': {
+        const k = 'k:' + (runNodes.get(sid) ?? s?.run_node ?? s?.node ?? '');
         const dir = s?.dirs?.[0];
-        chain(dir ? [['gw>kernel', false], [`kernel>d:${dir}`, false]] : [['gw>kernel', false]], 'var(--c-kernel)', 600);
+        chain(dir ? [[`gw>${k}`, false], [`${k}>d:${k}>${dir}`, false]] : [[`gw>${k}`, false]], 'var(--c-kernel)', 600);
         break;
       }
       case 'tool_result':
-        pulse('gw>kernel', e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
+        pulse(`gw>k:${runNodes.get(sid) ?? s?.run_node ?? s?.node ?? ''}`, e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
         break;
       case 'say':
         if (sessEdge(sid)) chain([[`s:${sid}>gw`, true], [`c:${ch}>s:${sid}`, true]], chColor);
@@ -325,6 +341,7 @@
         break;
       case 'run':
         if (e.kind === 'start' && e.data?.channel) origin.set(sid, e.data.channel);
+        if (e.kind === 'start' && e.data?.node) runNodes.set(sid, e.data.node);
         if (e.kind === 'end') {
           clearInterval(busyModel.get(sid));
           busyModel.delete(sid);
@@ -352,7 +369,10 @@
 
   const phases = $derived(Object.values(store.phase));
   const modelBusy = $derived(phases.includes('thinking') || phases.includes('writing'));
-  const kernelBusy = $derived(phases.includes('tool'));
+  // 正在执行工具的内核
+  const busyNodes = $derived(
+    new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').map((s) => s.run_node || s.node)),
+  );
   const t = $derived(store.ov!.totals);
   const ov = $derived(store.ov!);
 
@@ -518,18 +538,22 @@
             <text x="66" y="48" class="t1">{truncate(ov.model.model || '未配置', 19)}</text>
             <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '默认'}</text>
           {:else if n.kind === 'kernel'}
-            <rect class="card" class:active={kernelBusy} class:bad={!ov.kernel} width={n.w} height={n.h} rx="16" />
+            {@const m = n.data as Machine}
+            <rect class="card" class:active={busyNodes.has(m.name)} class:bad={!m.online && !m.name} class:off={!m.online && !!m.name} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
             <g class="ico"><Icon name="shield" x={24} y={28} size={24} /></g>
-            <text x="66" y="28" class="t3">内核</text>
-            {#if ov.kernel}
-              <text x="66" y="48" class="t1">{truncate(ov.kernel.node, 18)}</text>
-              <text x="66" y="66" class="t2">{ov.kernel.landlock > 0 ? `Landlock v${ov.kernel.landlock} 沙箱` : '没有沙箱'} · {ov.kernel.tools.length} 个工具</text>
+            <text x="66" y="28" class="t3">内核{m.info?.local ? ' · 本机' : ''}{m.isDefault ? ' · 默认' : ''}</text>
+            {#if m.info}
+              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
+              <text x="66" y="66" class="t2">{m.info.landlock > 0 ? `Landlock v${m.info.landlock} 沙箱` : '没有沙箱'} · {m.info.tools.length} 个工具</text>
+            {:else if m.name}
+              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
+              <text x="66" y="66" class="t2">离线 · 会话由别的内核顶着</text>
             {:else}
               <text x="66" y="48" class="t1 errt">未连接</text>
               <text x="66" y="66" class="t2">启动 nano-kernel 后自动连上</text>
             {/if}
-            <circle cx={n.w - 16} cy="16" r="4" class="sdot {ov.kernel ? 'online' : 'error'}" />
+            <circle cx={n.w - 16} cy="16" r="4" class="sdot {m.online ? 'online' : m.name ? '' : 'error'}" />
           {:else if n.kind === 'dir'}
             {@const d = n.data}
             <rect class="card" class:off={d.none} width={n.w} height={n.h} rx="12" />

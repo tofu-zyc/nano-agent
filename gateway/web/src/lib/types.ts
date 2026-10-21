@@ -10,7 +10,11 @@ export type Usage = {
 export type ChannelStatus = { state: string; identity?: string; error?: string; since: number };
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
-export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number };
+// 一个在线的内核（节点）。local 表示它和网关在同一台机器上
+export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number; local: boolean };
+
+// 一台机器：在线的内核，或者有会话要在上面工作、但现在不在线的
+export type Machine = { name: string; online: boolean; info?: KernelInfo; isDefault: boolean };
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员
@@ -21,6 +25,10 @@ export type SessionInfo = {
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
   endpoints: EndpointInfo[] | null;
   title: string;
+  node: string; // 在哪台机器上工作，空表示不挑
+  node_set: boolean;
+  node_online: boolean;
+  run_node: string; // 正在跑这一轮的内核
   running: boolean;
   pending: number;
   last_at: number;
@@ -48,7 +56,7 @@ export type Totals = {
 
 export type Overview = {
   gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string };
-  kernel: KernelInfo | null;
+  kernels: KernelInfo[];
   model: {
     provider: string;
     model: string;
@@ -62,7 +70,7 @@ export type Overview = {
   sessions: SessionInfo[] | null;
   approvals: Approval[];
   totals: Totals;
-  workspace: { dirs: string[] | null; mode: string };
+  workspace: { node: string; dirs: string[] | null; mode: string };
   access: { admins: string[] | null; guest: string };
 };
 
@@ -121,7 +129,7 @@ export type LiveItem =
 export type Target =
   | { type: 'gateway' }
   | { type: 'model' }
-  | { type: 'kernel' }
+  | { type: 'kernel'; node?: string }
   | { type: 'workspace' }
   | { type: 'channel'; name: string }
   | { type: 'session'; sid: string }

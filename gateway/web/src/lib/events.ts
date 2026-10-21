@@ -24,7 +24,7 @@ export function describe(e: Ev, title: (sid: string) => string): Line | null {
     case 'approval':
       return { icon: 'shield', text: `${who} 需要审批 #${e.n}：${e.name}`, tone: 'warn', sid: e.sid };
     case 'kernel':
-      return e.data ? { icon: 'shield', text: `内核 ${e.data.node} 已连接`, tone: 'ok' } : { icon: 'alert', text: '内核断开了', tone: 'err' };
+      return e.data ? { icon: 'shield', text: `内核 ${e.data.node} 已连接`, tone: 'ok' } : { icon: 'alert', text: `内核 ${e.name} 断开了`, tone: 'err' };
     case 'channel': {
       const st = e.data?.status?.state;
       const label = channelMeta[e.name ?? '']?.label ?? e.name;

@@ -17,8 +17,11 @@
         return { icon: 'hub', color: 'var(--c-gateway)', title: '网关', sub: `已运行 ${since(ov.gateway.started)}` };
       case 'model':
         return { icon: 'sparkles', color: 'var(--c-model)', title: ov.model.model || '模型', sub: ov.model.base_url || '还没配置接口' };
-      case 'kernel':
-        return { icon: 'shield', color: 'var(--c-kernel)', title: ov.kernel ? `内核 · ${ov.kernel.node}` : '内核', sub: ov.kernel ? `已连接 ${since(ov.kernel.since)}` : '没有连接' };
+      case 'kernel': {
+        if (!target.node) return { icon: 'shield', color: 'var(--c-kernel)', title: '内核', sub: ov.kernels.length ? `${ov.kernels.length} 个在线` : '没有连接' };
+        const k = ov.kernels.find((x) => x.node === target.node);
+        return { icon: 'shield', color: k ? 'var(--c-kernel)' : 'var(--muted)', title: `内核 · ${target.node}`, sub: k ? `已连接 ${since(k.since)}` : '不在线' };
+      }
       case 'workspace':
         return { icon: 'folder', color: 'var(--c-dir)', title: '工作目录与沙箱', sub: '工具能碰到的范围' };
       case 'dir':
@@ -98,6 +101,17 @@
       ? (ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === target.name).map((e) => ({ e, s })))
       : [],
   );
+  // 换机器：原来的工作目录是旧机器上的路径，网关会清掉
+  async function setNode(el: HTMLSelectElement) {
+    if (!sess) return;
+    const v = el.value;
+    const to = v || ov.workspace.node || '默认的机器';
+    if (sess.dirs?.length && !confirm(`换到 ${to} 上工作？原来的工作目录是 ${sess.node || '原来那台机器'} 上的路径，会清掉，需要重新选 ${to} 上的目录。`)) {
+      el.value = sess.node_set ? sess.node : '';
+      return;
+    }
+    await patchSession({ node: v });
+  }
   async function rename(title: string) {
     if (!sess || title.trim() === sess.title) return;
     try {
@@ -214,36 +228,78 @@
       </div>
       <FieldGroup group="model" focus={store.focus} />
     {:else if target.type === 'kernel'}
-      {#if ov.kernel}
-        <div class="card">
-          <div class="row">
-            <span class="muted">沙箱</span>
-            {#if ov.kernel.landlock > 0}
-              <span class="tag ok"><Icon name="shield" size={11} />Landlock v{ov.kernel.landlock}</span>
-            {:else}
-              <span class="tag warn">没有沙箱</span>
-            {/if}
+      {#if target.node}
+        {@const m = store.machines.find((x) => x.name === target.node)}
+        {#if m?.info}
+          <div class="card">
+            <div class="row">
+              <span class="muted">沙箱</span>
+              {#if m.info.landlock > 0}
+                <span class="tag ok"><Icon name="shield" size={11} />Landlock v{m.info.landlock}</span>
+              {:else}
+                <span class="tag warn">没有沙箱</span>
+              {/if}
+              {#if m.info.local}<span class="tag">和网关同一台机器</span>{/if}
+              {#if m.isDefault}<span class="tag accent">默认机器</span>{/if}
+            </div>
+            <p class="note">
+              {#if m.info.landlock > 0}
+                每次调用工具都在沙箱里执行：工作目录可读写，系统目录只读，其他地方（包括 HOME）访问不了；不能连 unix socket、不能给沙箱外的进程发信号。
+              {:else}
+                这台机器不支持 Landlock，文件工具仍然只能访问工作目录，但命令没有沙箱，自动模式下也会每次要求审批。
+              {/if}
+            </p>
           </div>
-          <p class="note">
-            {#if ov.kernel.landlock > 0}
-              每次调用工具都在沙箱里执行：工作目录可读写，系统目录只读，其他地方（包括 HOME）访问不了；不能连 unix socket、不能给沙箱外的进程发信号。
-            {:else}
-              这台机器不支持 Landlock，文件工具仍然只能访问工作目录，但命令没有沙箱，自动模式下也会每次要求审批。
-            {/if}
-          </p>
-        </div>
-        <h5>内置工具</h5>
-        <div class="tools">
-          {#each ov.kernel.tools as name}
-            <div class="tool"><code>{name}</code><span>{toolDesc[name] ?? ''}</span></div>
+          <h5>内置工具</h5>
+          <div class="tools">
+            {#each m.info.tools as name}
+              <div class="tool"><code>{name}</code><span>{toolDesc[name] ?? ''}</span></div>
+            {/each}
+          </div>
+        {:else}
+          <div class="card warnc">
+            <p class="note">{target.node} 现在不在线。它上线之前，在它上面工作的会话由别的内核顶上，只能聊天；它连回来之后自动恢复。</p>
+          </div>
+        {/if}
+        {@const users = (ov.sessions ?? []).filter((s) => s.node === target.node)}
+        {#if users.length}
+          <h5>在这台机器上工作的会话</h5>
+          <div class="card">
+            {#each users as s (s.sid)}
+              <button class="srow" onclick={() => store.open({ type: 'session', sid: s.sid })}>
+                <span class="grow">{s.title}</span>
+                {#if s.run_node && s.run_node !== s.node}<span class="tag warn">由 {s.run_node} 顶着</span>{/if}
+                <Icon name="right" size={13} />
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <button class="btn link" onclick={() => store.open({ type: 'kernel' })}><Icon name="hub" size={14} />所有内核</button>
+      {:else}
+        <p class="note lead">每个内核是一个节点：一台能干活的机器。内核没有状态，上下文都在网关，哪个内核在线都能接手；但文件在具体的机器上，会话的机器不在线时，别的内核顶上只能聊天。</p>
+        <div class="card">
+          {#each store.machines as m (m.name)}
+            <button class="srow" onclick={() => store.open({ type: 'kernel', node: m.name })}>
+              <span class="dot {m.online ? 'online' : 'stopped'}"></span>
+              <span class="grow">{m.name}</span>
+              {#if m.isDefault}<span class="tag accent">默认</span>{/if}
+              {#if m.info?.local}<span class="tag">本机</span>{/if}
+              {#if !m.online}<span class="tag">离线</span>{:else if !m.info?.landlock}<span class="tag warn">没有沙箱</span>{/if}
+              <Icon name="right" size={13} />
+            </button>
+          {:else}
+            <p class="note">还没有内核连上来。在内核所在的机器上运行 <code>./kernel/nano-kernel -c kernel.conf</code>，两边配置里的 token 要一致。</p>
           {/each}
         </div>
-      {:else}
-        <div class="card warnc">
-          <p class="note">内核还没连上来。在内核所在的机器上运行：</p>
-          <pre>./kernel/nano-kernel -c kernel.conf</pre>
-          <p class="note">两边配置里的 token 要一致。连上之后这里会自动刷新。</p>
-        </div>
+        <details class="guide">
+          <summary>在另一台机器上加一个内核</summary>
+          <ol>
+            <li>在那台机器上编译（<code>make kernel</code>），或者拷贝 <code>nano-kernel</code> 和 <code>nano-exec</code> 过去；</li>
+            <li>写 <code>kernel.conf</code>：<code>gateway = tcp:网关地址:端口</code>，<code>token</code> 和网关一致，<code>node = 起个名字</code>；</li>
+            <li>网关的“内核监听地址”要是那台机器能连到的地址，比如 <code>tcp:0.0.0.0:7700</code>。内核和网关之间的连接没有加密，跨网络请走 Tailscale、WireGuard 或者 SSH 隧道；</li>
+            <li>运行 <code>./nano-kernel -c kernel.conf</code>，连上之后这里会多一个节点。在会话设置里选它，会话就在那台机器上工作。</li>
+          </ol>
+        </details>
       {/if}
       <button class="btn link" onclick={() => store.open({ type: 'workspace' })}><Icon name="folder" size={14} />工作目录与沙箱的默认设置</button>
       <FieldGroup group="kernel" title="连接" focus={store.focus} />
@@ -406,10 +462,20 @@
           {/each}
         </div>
 
+        <h5>机器 <span class="muted small">工作目录是这台机器上的路径</span></h5>
+        <select class="machine" value={sess.node_set ? sess.node : ''} onchange={(e) => setNode(e.currentTarget)}>
+          <option value="">默认（{ov.workspace.node || '和网关同一台机器'}）</option>
+          {#each store.machines as m (m.name)}
+            <option value={m.name}>{m.name}{m.online ? '' : '（离线）'}</option>
+          {/each}
+        </select>
+        {#if sess.node && !sess.node_online}
+          <p class="note warnline"><Icon name="alert" size={13} />{sess.node} 现在不在线，这个会话由别的内核顶上，只能聊天。</p>
+        {/if}
         <h5>工作目录 <span class="muted small">第一个是默认目录，命令从这里开始执行</span></h5>
-        <DirInput values={sess.dirs ?? []} onchange={(v) => patchSession({ dirs: v })} />
+        <DirInput node={sess.node} values={sess.dirs ?? []} onchange={(v) => patchSession({ dirs: v })} />
         <h5>只读目录</h5>
-        <DirInput values={sess.ro ?? []} first={false} placeholder="只能读不能写的目录" onchange={(v) => patchSession({ ro: v })} />
+        <DirInput node={sess.node} values={sess.ro ?? []} first={false} placeholder="只能读不能写的目录" onchange={(v) => patchSession({ ro: v })} />
 
         {#if ov.model.levels?.length}
           <h5>思考强度</h5>
@@ -606,13 +672,6 @@
   .small {
     font-size: 11.5px;
   }
-  pre {
-    margin: 0;
-    padding: 9px 11px;
-    border-radius: 9px;
-    background: var(--bg-2);
-    font-size: 12px;
-  }
   .result {
     padding: 10px 12px;
     border-radius: 10px;
@@ -790,6 +849,22 @@
     flex: none;
     font-size: 11.5px;
     color: var(--muted);
+  }
+  select.machine {
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    font-size: 13px;
+  }
+  .warnline {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 8px;
+    color: var(--warn);
   }
   select.attach {
     height: 32px;

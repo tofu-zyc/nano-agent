@@ -9,7 +9,8 @@
     onchange,
     placeholder = '输入路径，比如 ~/projects，会自动提示',
     first = true,
-  }: { values: string[]; onchange: (v: string[]) => void; placeholder?: string; first?: boolean } = $props();
+    node = '',
+  }: { values: string[]; onchange: (v: string[]) => void; placeholder?: string; first?: boolean; node?: string } = $props();
 
   let text = $state('');
   let open = $state(false);
@@ -43,7 +44,7 @@
       }
       const my = ++seq;
       try {
-        const l = await listDir(sp.parent);
+        const l = await listDir(sp.parent, node);
         if (my !== seq) return;
         const base = sp.parent === '~' ? '~' : toTilde(l.path, l.home);
         const pre = sp.prefix.toLowerCase();
@@ -133,6 +134,7 @@
 
 {#if picking}
   <DirPicker
+    {node}
     start={splitTyping(text)?.parent ?? '~'}
     onpick={(p) => {
       picking = false;

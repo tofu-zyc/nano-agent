@@ -1,6 +1,7 @@
 // Package kernel 管理内核的连接：监听、校验 hello、收发 NDJSON 消息。
 //
-// 同一时间只认一个内核；新内核连上来会顶掉旧的（旧连接上进行中的 run 全部作废）。
+// 可以同时连着好几个内核（节点），按 hello 里的名字区分。同名的新连接会顶掉旧的
+// （比如网络切换后重连），旧连接上进行中的 run 全部作废。
 package kernel
 
 import (
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"nano-agent/gateway/internal/proto"
 )
@@ -27,11 +30,12 @@ const (
 	maxLine      = 64 << 20
 )
 
-// Handler 接收内核的事件。KernelMsg 在连接的读协程里串行调用，不要阻塞太久。
+// Handler 接收内核的事件。同一个节点的 KernelMsg 在连接的读协程里串行调用，不要阻塞太久。
+// local 表示内核和网关在同一台机器上（通过 unix socket 或本机回环地址连上来）。
 type Handler interface {
-	KernelUp(hello *proto.Msg)
-	KernelMsg(m *proto.Msg)
-	KernelDown()
+	KernelUp(node string, hello *proto.Msg, local bool)
+	KernelMsg(node string, m *proto.Msg)
+	KernelDown(node string)
 }
 
 type Hub struct {
@@ -39,8 +43,8 @@ type Hub struct {
 	h     Handler
 	log   *slog.Logger
 
-	mu  sync.Mutex
-	cur *conn
+	mu    sync.Mutex
+	conns map[string]*conn // 节点名 → 连接
 }
 
 type conn struct {
@@ -58,7 +62,31 @@ func (c *conn) close() {
 }
 
 func NewHub(token string, h Handler, log *slog.Logger) *Hub {
-	return &Hub{token: token, h: h, log: log}
+	return &Hub{token: token, h: h, log: log, conns: map[string]*conn{}}
+}
+
+// validNode：节点名会出现在会话设置、日志和网页上，不能有空白、控制字符和冒号，最长 64 个字
+func validNode(name string) bool {
+	if name == "" || utf8.RuneCountInString(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == ':' || r == '/' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLocal 判断连接是不是来自本机
+func isLocal(nc net.Conn) bool {
+	switch a := nc.RemoteAddr().(type) {
+	case *net.UnixAddr:
+		return true
+	case *net.TCPAddr:
+		return a.IP.IsLoopback()
+	}
+	return false
 }
 
 // Listen 打开监听地址：unix:/path、tcp:host:port 或 host:port。
@@ -86,8 +114,8 @@ func (h *Hub) Serve(ctx context.Context, ln net.Listener) {
 		<-ctx.Done()
 		ln.Close()
 		h.mu.Lock()
-		if h.cur != nil {
-			h.cur.close()
+		for _, c := range h.conns {
+			c.close()
 		}
 		h.mu.Unlock()
 	}()
@@ -105,21 +133,25 @@ func (h *Hub) Serve(ctx context.Context, ln net.Listener) {
 	}
 }
 
-// Connected 报告当前是否有内核在线。
-func (h *Hub) Connected() bool {
+// Connected 报告节点是否在线。
+func (h *Hub) Connected(node string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cur != nil
+	return h.conns[node] != nil
 }
 
-// Send 把消息发给当前内核；没有内核在线时返回 false。
-func (h *Hub) Send(m proto.Msg) bool {
+// Send 把消息发给节点 node；它不在线时返回 false。
+func (h *Hub) Send(node string, m proto.Msg) bool {
 	h.mu.Lock()
-	c := h.cur
+	c := h.conns[node]
 	h.mu.Unlock()
 	if c == nil {
 		return false
 	}
+	return h.send(c, m)
+}
+
+func (h *Hub) send(c *conn, m proto.Msg) bool {
 	b, err := json.Marshal(m)
 	if err != nil {
 		h.log.Error("序列化消息失败", "err", err)
@@ -151,6 +183,9 @@ func (h *Hub) handle(nc net.Conn) {
 	if err == nil && hello.V != proto.Version {
 		err = fmt.Errorf("协议版本不兼容：内核 %d，网关 %d", hello.V, proto.Version)
 	}
+	if err == nil && !validNode(hello.Node) {
+		err = fmt.Errorf("内核的名字 %q 不能用：不能为空、不能有空白和冒号，最长 64 个字（在 kernel.conf 里设 node）", hello.Node)
+	}
 	if err != nil {
 		h.log.Warn("拒绝内核连接", "remote", remote, "err", err)
 		b, _ := json.Marshal(proto.Msg{T: proto.TError, Detail: err.Error()})
@@ -159,14 +194,15 @@ func (h *Hub) handle(nc net.Conn) {
 		return
 	}
 
+	node := hello.Node
 	h.mu.Lock()
-	old := h.cur
-	h.cur = c
+	old := h.conns[node]
+	h.conns[node] = c
 	h.mu.Unlock()
 	if old != nil {
-		h.log.Warn("新的内核连接顶替了旧连接", "node", hello.Node)
+		h.log.Warn("同名内核的新连接顶替了旧连接（两台机器用了同一个名字的话，会互相顶来顶去）", "node", node)
 		old.close()
-		h.h.KernelDown()
+		h.h.KernelDown(node)
 	}
 
 	go func() {
@@ -185,9 +221,9 @@ func (h *Hub) handle(nc net.Conn) {
 		}
 	}()
 
-	h.Send(proto.Msg{T: proto.TWelcome, V: proto.Version})
-	h.log.Info("内核已连接", "node", hello.Node, "tools", len(hello.Tools), "remote", remote)
-	h.h.KernelUp(hello)
+	h.send(c, proto.Msg{T: proto.TWelcome, V: proto.Version})
+	h.log.Info("内核已连接", "node", node, "tools", len(hello.Tools), "remote", remote)
+	h.h.KernelUp(node, hello, isLocal(nc))
 
 	for {
 		nc.SetReadDeadline(time.Now().Add(readTimeout))
@@ -201,20 +237,20 @@ func (h *Hub) handle(nc net.Conn) {
 			break
 		}
 		if m.T == proto.TPing {
-			h.Send(proto.Msg{T: proto.TPong})
+			h.send(c, proto.Msg{T: proto.TPong})
 			continue
 		}
-		h.h.KernelMsg(m)
+		h.h.KernelMsg(node, m)
 	}
 
 	h.mu.Lock()
-	still := h.cur == c
+	still := h.conns[node] == c
 	if still {
-		h.cur = nil
+		delete(h.conns, node)
 	}
 	h.mu.Unlock()
 	if still {
-		h.h.KernelDown()
+		h.h.KernelDown(node)
 	}
 }
 

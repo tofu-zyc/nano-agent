@@ -3,7 +3,12 @@
   import { listDir, toTilde, join, type DirListing } from '../lib/fs';
   import Icon from './Icon.svelte';
 
-  let { start = '~', onpick, onclose }: { start?: string; onpick: (path: string) => void; onclose: () => void } = $props();
+  let {
+    start = '~',
+    node = '',
+    onpick,
+    onclose,
+  }: { start?: string; node?: string; onpick: (path: string) => void; onclose: () => void } = $props();
 
   let cur = $state<DirListing | null>(null);
   let error = $state('');
@@ -15,7 +20,7 @@
     loading = true;
     error = '';
     try {
-      cur = await listDir(path);
+      cur = await listDir(path, node);
       filter = '';
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -74,7 +79,7 @@
     <header>
       <Icon name="folder" size={17} />
       <strong>选择目录</strong>
-      <span class="muted small">内核所在机器上的目录</span>
+      <span class="muted small">{node ? `${node} 上的目录` : '内核所在机器上的目录'}</span>
       <span class="grow"></span>
       <button class="btn sm ghost" onclick={onclose} aria-label="关闭"><Icon name="x" size={14} /></button>
     </header>

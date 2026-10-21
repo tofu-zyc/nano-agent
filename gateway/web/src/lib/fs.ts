@@ -4,8 +4,9 @@ import { api } from './api';
 export type DirEntry = { name: string; blocked?: boolean };
 export type DirListing = { path: string; home: string; blocked: boolean; entries: DirEntry[]; truncated: boolean };
 
-export function listDir(path: string): Promise<DirListing> {
-  return api.get<DirListing>('/api/fs?path=' + encodeURIComponent(path));
+/** 列出机器 node 上的目录；node 为空时用默认的机器 */
+export function listDir(path: string, node = ''): Promise<DirListing> {
+  return api.get<DirListing>('/api/fs?path=' + encodeURIComponent(path) + (node ? '&node=' + encodeURIComponent(node) : ''));
 }
 
 /** 主目录下的路径写成 ~ 开头，短一些，换了机器也能用 */

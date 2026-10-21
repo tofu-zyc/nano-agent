@@ -10,6 +10,7 @@ import (
 
 // Settings 是单个会话覆盖默认值的设置，存在 data/sessions/<会话ID>.settings.json。
 type Settings struct {
+	Node    string   `json:"node,omitempty"`     // 在哪台机器（内核的名字）上工作，空表示用配置里的默认机器
 	DirsSet bool     `json:"dirs_set,omitempty"` // 为 true 时用下面的 Dirs，否则用配置里的默认工作目录
 	Dirs    []string `json:"dirs,omitempty"`     // 工作目录，第一个是默认目录
 	RO      []string `json:"ro,omitempty"`       // 只读的工作目录

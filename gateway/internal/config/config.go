@@ -111,14 +111,15 @@ type Access struct {
 // Workspace 是工具能碰到的范围：工作目录之外的文件一律读写不了（由内核的沙箱保证）。
 // 这里是默认值，每个会话可以用 /dir、/mode 单独改。
 type Workspace struct {
-	Dirs    []string `toml:"dirs" json:"dirs"`         // 工作目录，第一个是默认目录
+	Node    string   `toml:"node" json:"node"`         // 默认在哪台机器（内核的名字）上工作，空表示和网关同一台机器上的内核
+	Dirs    []string `toml:"dirs" json:"dirs"`         // 工作目录（默认机器上的路径），第一个是默认目录
 	Mode    string   `toml:"mode" json:"mode"`         // auto | ask（默认）| readonly
 	ExtraRO []string `toml:"extra_ro" json:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
 	ExtraRW []string `toml:"extra_rw" json:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
 }
 
 type CLI struct {
-	Enabled       *bool `toml:"enabled" json:"enabled"`                 // 终端聊天（make chat 连进来），默认开
+	Enabled       *bool `toml:"enabled" json:"enabled"`               // 终端聊天（make chat 连进来），默认开
 	ShowReasoning *bool `toml:"show_reasoning" json:"show_reasoning"` // 显示模型的思考过程，默认开
 	ShowUsage     *bool `toml:"show_usage" json:"show_usage"`         // 每轮结束后显示用量和缓存命中率，默认开
 }

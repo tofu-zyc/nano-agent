@@ -168,11 +168,23 @@ func setup(t *testing.T) *env {
 	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "test",
 		Tools: []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 	k.expect(proto.TWelcome)
-	for !hub.Connected() {
-		time.Sleep(time.Millisecond)
-	}
+	waitNode(a, "test", true)
 	t.Cleanup(func() { cancel(); conn.Close() })
 	return &env{a: a, ch: ch, k: k, llm: rec, dir: dir, sid: mainSID}
+}
+
+// waitNode 等调度层知道内核 name 上线（或下线）了
+func waitNode(a *App, name string, online bool) {
+	for i := 0; i < 3000; i++ {
+		a.mu.Lock()
+		ok := (a.nodes[name] != nil) == online
+		a.mu.Unlock()
+		if ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	panic("等不到内核 " + name)
 }
 
 func (e *env) say(text string, mod ...func(*channel.Message)) {
@@ -371,9 +383,9 @@ func TestKernelDownAbortsRuns(t *testing.T) {
 	e.say("任务")
 	e.k.expect(proto.TInput)
 	e.k.conn.Close()
-	e.ch.wait(t, "内核连接断开")
+	e.ch.wait(t, "（test 断开了，这一轮已中止）")
 	e.say("还在吗")
-	e.ch.wait(t, "内核没有连接")
+	e.ch.wait(t, "没有在线的内核")
 }
 
 func TestWhoamiAndAllowList(t *testing.T) {
@@ -435,7 +447,7 @@ func TestWorkspaceAndModes(t *testing.T) {
 		t.Fatalf("input: %+v", in)
 	}
 	msgs := e.roundTrip(t)
-	want := "[系统] 工作目录：" + work + "（默认，相对路径和命令都从这里开始）。权限模式：自动，"
+	want := "[系统] 在 test 上工作。工作目录：" + work + "（默认，相对路径和命令都从这里开始）。权限模式：自动，"
 	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n"+stamp+" 看看目录") {
 		t.Fatalf("env note: %q", got)
 	}
@@ -471,7 +483,7 @@ func TestWorkspaceAndModes(t *testing.T) {
 	e.ch.wait(t, "上下文已清空")
 	e.say("新的开始")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 工作目录：") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 在 test 上工作。工作目录：") {
 		t.Fatalf("after reset: %q", got)
 	}
 }

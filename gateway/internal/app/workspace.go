@@ -28,15 +28,21 @@ var modeDesc = map[string]string{
 
 // workspace 是一个会话实际生效的设置。
 type workspace struct {
+	node         string // 在哪台机器上工作（nodes.go），空表示不挑
 	dirs, ro, rw []string
 	mode         string
 }
 
 func (a *App) workspaceOf(sid string) workspace {
 	st := a.store.Settings(sid)
-	w := workspace{dirs: a.cfg.Workspace.Dirs, mode: a.cfg.Workspace.Mode}
+	w := workspace{node: a.defaultNode(), dirs: a.cfg.Workspace.Dirs, mode: a.cfg.Workspace.Mode}
+	if st.Node != "" {
+		w.node = st.Node
+	}
 	if st.DirsSet {
 		w.dirs = st.Dirs
+	} else if w.node != a.defaultNode() {
+		w.dirs = nil // 默认工作目录是默认机器上的路径，换了机器就没有了
 	}
 	if st.Mode != "" {
 		w.mode = st.Mode
@@ -68,12 +74,16 @@ const noToolsNote = "[系统] 这个会话没有工作目录，你没有任何�
 	"用户需要这些的话，请他让管理员添加工作目录（/dir add 路径，或者在网页里设置）。"
 
 // envNote 描述当前环境，追加在用户消息前面（变了才追加，不改系统提示词）。
-func envNote(w workspace, sessionRO []string, prev string) string {
+func envNote(w workspace, sessionRO []string) string {
 	if len(w.dirs) == 0 {
 		return noToolsNote
 	}
 	var b strings.Builder
-	b.WriteString("[系统] 工作目录：")
+	b.WriteString("[系统] ")
+	if w.node != "" {
+		fmt.Fprintf(&b, "在 %s 上工作。", w.node)
+	}
+	b.WriteString("工作目录：")
 	b.WriteString(w.dirs[0])
 	b.WriteString("（默认，相对路径和命令都从这里开始）")
 	for _, d := range w.dirs[1:] {

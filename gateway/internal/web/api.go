@@ -59,7 +59,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"gateway": map[string]any{"started": snap.Started, "kernel_listen": cfg.Kernel.Listen, "web_listen": cfg.Web.Listen,
 			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
-		"kernel": snap.Kernel,
+		"kernels": snap.Kernels,
 		"model": modelInfo{Provider: cfg.LLM.Provider, Model: cfg.LLM.Model, BaseURL: cfg.LLM.BaseURL, Thinking: cfg.LLM.Thinking,
 			Levels: cfg.LLM.ThinkingLevels, ContextWindow: cfg.LLM.ContextWindow,
 			MaxHistory: cfg.LLM.MaxHistoryTokens},
@@ -67,7 +67,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"sessions":  snap.Sessions,
 		"approvals": snap.Approvals,
 		"totals":    snap.Totals,
-		"workspace": map[string]any{"dirs": cfg.Workspace.Dirs, "mode": cfg.Workspace.Mode},
+		"workspace": map[string]any{"node": snap.Node, "dirs": cfg.Workspace.Dirs, "mode": cfg.Workspace.Mode},
 		"access":    map[string]any{"admins": cfg.Access.Admins, "guest": cfg.Access.Guest},
 	})
 }
@@ -267,7 +267,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listDir(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	l, err := s.app.ListDir(ctx, r.URL.Query().Get("path"))
+	l, err := s.app.ListDir(ctx, r.URL.Query().Get("node"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

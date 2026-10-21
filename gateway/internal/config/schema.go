@@ -72,6 +72,8 @@ var Fields = []Field{
 		Help: "和 kernel.conf 里的 token 一致"},
 
 	// ---- 工作目录 ----
+	{Key: "workspace.node", Group: "workspace", Section: "默认值", Label: "默认机器", Type: "string",
+		Help: "会话默认在哪个内核（节点）所在的机器上工作，填内核的名字；空表示和网关在同一台机器上的内核。默认工作目录是这台机器上的路径", Keywords: "节点 node 内核 机器 替补"},
 	{Key: "workspace.dirs", Group: "workspace", Section: "默认值", Label: "默认工作目录", Type: "list",
 		Help: "新会话用的工作目录，第一个是默认目录。要写绝对路径或 ~ 开头。每个会话可以单独改", Keywords: "目录 路径 dir"},
 	{Key: "workspace.mode", Group: "workspace", Section: "默认值", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},

@@ -38,12 +38,15 @@ CONF
 cat > "$TMP/kernel.conf" <<CONF
 gateway = unix:$TMP/k.sock
 token = e2e
+node = pc
 exec = $ROOT/kernel/nano-exec
 approval_timeout = 5
 CONF
+sed 's/^node = pc$/node = phone/' "$TMP/kernel.conf" > "$TMP/kernel2.conf"
 
 "$ROOT/gateway/nano-gateway" -c "$TMP/gateway.toml" </dev/null >"$TMP/gateway.out" 2>"$TMP/gateway.log" &
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>"$TMP/kernel.log" &
+KPID=$!
 for _ in $(seq 50); do grep -q '内核已连接' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
 # 终端聊天：nano-gateway chat 连到网关，消息从 fifo 进
 mkfifo "$TMP/in"
@@ -79,11 +82,25 @@ send "/reset";                                        expect "清空上下文" "
 send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
 send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
 send "回到主会话";                                    expect "在主会话里说话" "（mock）收到：回到主会话"
+
+# 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
+"$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
+for _ in $(seq 50); do grep -q 'node=phone' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
+send "/node";                                         expect "两个内核同时在线" "在线的机器：pc（和网关同一台机器）、phone（和网关同一台机器）"
+kill $KPID; wait $KPID 2>/dev/null || true
+for _ in $(seq 50); do grep -q '内核连接断开.*node=pc' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
+send "pc 关机了";                                     expect "pc 掉线后 phone 顶上" "（mock）收到：pc 关机了"
+if grep -q '开始处理 sid=main node=phone' "$TMP/gateway.log"; then echo "  ok   这一轮由 phone 跑"; pass=$((pass + 1)); else echo "  FAIL 这一轮由 phone 跑"; fail=$((fail + 1)); fi
+send '!call Read {"path":"hello.txt"}';               expect "替补不能用工具" "没有使用工具的权限"
+echo "pc is back" > "$TMP/work/back.txt"
+"$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>>"$TMP/kernel.log" &
+for _ in $(seq 50); do [ "$(grep -c '内核已连接 node=pc' "$TMP/gateway.log")" -ge 2 ] && break; sleep 0.1; done
+send '!call Read {"path":"back.txt"}';                expect "pc 回来后照常用工具" "1	pc is back"
 # 再开一个终端：顶掉原来的那个，打招呼时补上最近的对话
 "$ROOT/gateway/nano-gateway" chat -c "$TMP/gateway.toml" </dev/null >"$TMP/out2" 2>&1 &
 expect "旧终端被顶掉" "另一个终端接进来了"
-for _ in $(seq 50); do grep -qF "最近 1 轮对话" "$TMP/out2" && break; sleep 0.1; done
-if grep -qF "最近 1 轮对话" "$TMP/out2"; then echo "  ok   新终端看到最近的对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到最近的对话"; fail=$((fail + 1)); fi
+for _ in $(seq 50); do grep -qF "最近 3 轮对话" "$TMP/out2" && break; sleep 0.1; done
+if grep -qF "最近 3 轮对话" "$TMP/out2"; then echo "  ok   新终端看到最近的对话"; pass=$((pass + 1)); else echo "  FAIL 新终端看到最近的对话"; fail=$((fail + 1)); fi
 
 echo "e2e: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
