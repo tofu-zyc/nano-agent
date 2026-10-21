@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/app"
+	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
@@ -161,17 +162,17 @@ func TestConfigAndChatEvents(t *testing.T) {
 			lines <- sc.Text()
 		}
 	}()
-	if code, out := c.do("POST", "/api/chat", map[string]string{"chat": "main", "text": "你好"}, true); code != 200 || out["sid"] != "web:main" {
+	if code, out := c.do("POST", "/api/chat", map[string]string{"sid": "main", "text": "你好"}, true); code != 200 || out["sid"] != "main" {
 		t.Fatalf("chat：%d %v", code, out)
 	}
-	if code, _ := c.do("POST", "/api/chat", map[string]string{"chat": "../x", "text": "你好"}, true); code != 400 {
-		t.Fatalf("非法会话名：%d", code)
+	if code, _ := c.do("POST", "/api/chat", map[string]string{"sid": "../x", "text": "你好"}, true); code != 404 {
+		t.Fatalf("不存在的会话：%d", code)
 	}
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
 		case l := <-lines:
-			if strings.Contains(l, `"t":"say"`) && strings.Contains(l, "内核没有连接") && strings.Contains(l, "web:main") {
+			if strings.Contains(l, `"t":"say"`) && strings.Contains(l, "内核没有连接") && strings.Contains(l, `"sid":"main"`) {
 				return
 			}
 		case <-deadline:
@@ -197,6 +198,52 @@ func TestPersonas(t *testing.T) {
 	}
 	if code, _ := c.do("DELETE", "/api/personas/default.md", nil, true); code != 400 {
 		t.Fatalf("默认人格不能删：%d", code)
+	}
+}
+
+func TestSessions(t *testing.T) {
+	srv, s, _ := setup(t)
+	s.app.SetCLI(channel.NewCLI(strings.NewReader(""), io.Discard, false, false), nil)
+	c := newClient(t, srv)
+	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
+	// 主会话一直在，哪怕还没有消息（以前新会话没发过消息时打开设置会显示“会话不存在了”）
+	if code, out := c.do("GET", "/api/sessions/main", nil, false); code != 200 || out["info"].(map[string]any)["title"] != "主会话" {
+		t.Fatalf("main：%d %v", code, out)
+	}
+	if code, _ := c.do("GET", "/api/sessions/nope", nil, false); code != 404 {
+		t.Fatalf("不存在的会话：%d", code)
+	}
+	code, out := c.do("POST", "/api/sessions", map[string]string{"title": "新的"}, true)
+	sid, _ := out["sid"].(string)
+	if code != 200 || out["title"] != "新的" || !strings.HasPrefix(sid, "s-") {
+		t.Fatalf("new：%d %v", code, out)
+	}
+	// 新建的会话还没有消息也能打开、能改设置
+	if code, out := c.do("PATCH", "/api/sessions/"+sid, map[string]any{"title": "改个名", "mode": "readonly"}, true); code != 200 || out["title"] != "改个名" || out["mode"] != "readonly" {
+		t.Fatalf("patch：%d %v", code, out)
+	}
+	if code, _ := c.do("PATCH", "/api/sessions/nope", map[string]any{"mode": "auto"}, true); code != 400 {
+		t.Fatalf("patch 不存在的会话：%d", code)
+	}
+	code, out = c.do("GET", "/api/overview", nil, false)
+	if n := len(out["sessions"].([]any)); code != 200 || n != 2 {
+		t.Fatalf("overview：%d %d", code, n)
+	}
+	// 命令行窗口一开始就接在主会话上
+	if !strings.Contains(mustJSON(out["sessions"]), `"key":"cli:local"`) {
+		t.Fatalf("命令行窗口：%v", out["sessions"])
+	}
+	if code, _ := c.do("PUT", "/api/endpoints/cli:local", map[string]string{"session": sid}, true); code != 200 {
+		t.Fatalf("改接：%d", code)
+	}
+	if code, _ := c.do("DELETE", "/api/sessions/main", nil, true); code != 400 {
+		t.Fatalf("主会话不能删：%d", code)
+	}
+	if code, _ := c.do("DELETE", "/api/sessions/"+sid, nil, true); code != 200 {
+		t.Fatalf("delete：%d", code)
+	}
+	if code, _ := c.do("GET", "/api/sessions/"+sid, nil, false); code != 404 {
+		t.Fatalf("删掉之后：%d", code)
 	}
 }
 

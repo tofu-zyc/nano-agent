@@ -1,10 +1,10 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { store } from '../lib/state.svelte';
-  import { api, sidPath } from '../lib/api';
+  import { api, ApiError, sidPath } from '../lib/api';
   import { buildBlocks, type Block } from '../lib/conv';
   import { markdown } from '../lib/markdown';
-  import { channelMeta, clock, homeShort, modeMeta, pct, shortPath } from '../lib/format';
+  import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
   import type { Msg, SessionInfo } from '../lib/types';
   import ToolCard from './ToolCard.svelte';
   import Icon from './Icon.svelte';
@@ -14,17 +14,19 @@
   let blocks = $state<Block[]>([]);
   let summary = $state('');
   let loading = $state(true);
+  let missing = $state(false);
   let text = $state('');
   let sending = $state(false);
-  let scroller: HTMLDivElement;
+  let scroller = $state<HTMLDivElement>();
   let stick = true;
 
   const info = $derived(store.session(sid));
   const live = $derived(store.live[sid] ?? []);
   const phase = $derived(store.phase[sid]);
   const approvals = $derived(store.ov?.approvals.filter((a) => a.sid === sid) ?? []);
-  const isWeb = $derived(sid.startsWith('web:'));
-  const meta = $derived(channelMeta[sid.split(':')[0]]);
+  const isMain = $derived(sid === 'main');
+  const meta = $derived(isMain ? { label: '主会话', color: 'var(--accent)', icon: 'hub' } : channelMeta[info?.channel ?? 'web']);
+  const eps = $derived(info?.endpoints ?? []);
 
   async function load() {
     try {
@@ -37,10 +39,12 @@
       }
       blocks = buildBlocks(hist);
       summary = r.summary;
-      if (r.info.messages || store.session(sid)) store.upsertSession(r.info);
+      missing = false;
+      store.upsertSession(r.info);
       if (!r.info.running) delete store.live[sid];
     } catch (err) {
-      store.fail(err);
+      if (err instanceof ApiError && err.status === 404) missing = true;
+      else store.fail(err);
     } finally {
       loading = false;
       await tick();
@@ -79,7 +83,7 @@
   }
 
   function onScroll() {
-    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+    if (scroller) stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   }
 
   async function send() {
@@ -87,7 +91,7 @@
     if (!msg || sending) return;
     sending = true;
     try {
-      await api.post('/api/chat', { chat: sid.slice(4), text: msg });
+      await api.post('/api/chat', { sid, text: msg });
       text = '';
       stick = true;
     } catch (err) {
@@ -120,13 +124,22 @@
   const phaseText: Record<string, string> = { thinking: '正在思考', writing: '正在回复', tool: '正在执行工具' };
 </script>
 
+{#if missing}
+  <div class="conv gone">
+    <Icon name="chat" size={26} />
+    <p>没有这个会话，可能已经删掉了。</p>
+    <a class="btn primary" href="#/sessions/main"><Icon name="hub" size={14} />回到主会话</a>
+  </div>
+{:else}
 <div class="conv">
   <header>
     <div class="avatar" style="--c: {meta?.color ?? 'var(--c-session)'}"><Icon name={meta?.icon ?? 'chat'} size={17} /></div>
     <div class="ht">
       <h3>{info?.title ?? sid}</h3>
       <div class="chips">
-        <span class="tag">{meta?.label ?? sid.split(':')[0]}</span>
+        {#each eps as e (e.key)}
+          <span class="tag ep" style="--c: {channelMeta[e.channel]?.color ?? 'var(--muted)'}" title="这个窗口接在这个会话上：{e.key}"><Icon name={channelMeta[e.channel]?.icon ?? 'link'} size={11} />{endpointLabel(e)}</span>
+        {/each}
         {#if info}
           {#if info.dirs?.length}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
@@ -154,8 +167,11 @@
       {#if !loading && !blocks.length && !live.length}
         <div class="empty">
           <Icon name="chat" size={26} />
-          <p>{isWeb ? '说点什么开始对话吧。' : '这个会话还没有消息。'}</p>
-          {#if isWeb && !info?.dirs?.length}
+          <p>说点什么开始对话吧。</p>
+          {#if eps.length}
+            <p class="muted">{eps.map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
+          {/if}
+          {#if !info?.dirs?.length}
             <p class="muted">想让它读写文件、执行命令？先在 <button class="lnk" onclick={() => store.open({ type: 'session', sid })}>会话设置</button> 里给它一个工作目录。</p>
           {/if}
         </div>
@@ -166,7 +182,10 @@
           <div class="sys"><Icon name="folder" size={13} />{b.text}</div>
         {:else if b.type === 'user'}
           <div class="msg user">
-            <div class="meta">{b.sender ?? '用户'}{#if b.time}<span>{b.time}</span>{/if}</div>
+            <div class="meta">
+              {#if b.via}<i class="via" style="--c: {channelMeta[viaChannel[b.via]]?.color ?? 'var(--muted)'}"></i>{b.sender ?? b.via}{:else}{b.sender ?? '用户'}{/if}
+              {#if b.time}<span>{b.time}</span>{/if}
+            </div>
             <div class="bubble">{b.text}</div>
           </div>
         {:else}
@@ -202,7 +221,10 @@
         {#if it.kind === 'user'}
           {@const raw = it.text}
           <div class="msg user">
-            <div class="meta">{it.name ?? '用户'}<span>{clock(it.at)}</span></div>
+            <div class="meta">
+              {#if it.via}<i class="via" style="--c: {channelMeta[it.channel ?? '']?.color ?? 'var(--muted)'}"></i>{it.via}{:else}{it.name ?? '用户'}{/if}
+              <span>{clock(it.at)}</span>
+            </div>
             <div class="bubble">{raw}</div>
           </div>
         {:else if it.kind === 'reasoning'}
@@ -242,17 +264,12 @@
     </div>
   </div>
 
-  {#if isWeb}
-    <div class="composer">
-      <textarea bind:value={text} onkeydown={onkey} rows="1" placeholder="发消息给机器人，Enter 发送，Shift+Enter 换行。/help 查看命令"></textarea>
-      <button class="btn primary" onclick={send} disabled={!text.trim() || sending}><Icon name="send" size={14} />发送</button>
-    </div>
-  {:else}
-    <div class="readonly">
-      <Icon name="lock" size={13} />这是{meta?.label ?? ''}的会话，消息要在原渠道里发。这里可以查看过程、审批、修改会话设置。
-    </div>
-  {/if}
+  <div class="composer">
+    <textarea bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行。/help 查看命令"></textarea>
+    <button class="btn primary" onclick={send} disabled={!text.trim() || sending}><Icon name="send" size={14} />发送</button>
+  </div>
 </div>
+{/if}
 
 <style>
   .conv {
@@ -329,7 +346,17 @@
     font-size: 11.5px;
     color: var(--muted);
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: 6px;
+  }
+  .meta span {
+    margin-left: 2px;
+  }
+  .via {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--c);
   }
   .bubble {
     max-width: 78%;
@@ -552,14 +579,21 @@
     height: 44px;
     border-radius: 13px;
   }
-  .readonly {
-    display: flex;
+  .gone {
     align-items: center;
-    gap: 8px;
     justify-content: center;
-    padding: 11px;
-    font-size: 12.5px;
+    gap: 12px;
     color: var(--muted);
-    border-top: 1px solid var(--line);
+  }
+  .gone p {
+    margin: 0;
+  }
+  .tag.ep {
+    color: var(--text-2);
+    border-color: color-mix(in srgb, var(--c) 40%, var(--line));
+    background: color-mix(in srgb, var(--c) 10%, transparent);
+  }
+  .tag.ep :global(svg) {
+    color: var(--c);
   }
 </style>

@@ -31,8 +31,15 @@ type chanRun struct {
 var channelOrder = []string{"cli", "web", "telegram", "feishu"}
 
 // SetCLI 登记命令行渠道（由 main 创建，它接着终端）。onEOF 在标准输入关闭时调用。
+// 命令行窗口一开始就接在主会话上（拓扑图里能看到），不用等第一条消息。
 func (a *App) SetCLI(c *channel.CLI, onEOF func()) {
 	a.cli, a.cliEOF = c, onEOF
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if key := c.Name() + ":local"; a.eps[key] == nil {
+		a.eps[key] = &epRec{Session: mainSID}
+		a.saveEndpoints()
+	}
 }
 
 // Web 返回网页聊天渠道。

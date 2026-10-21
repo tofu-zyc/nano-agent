@@ -12,9 +12,13 @@ export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatu
 
 export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number };
 
+// 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
+export type EndpointInfo = { key: string; channel: string; name: string; session: string };
+
 export type SessionInfo = {
   sid: string;
-  channel: string;
+  channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
+  endpoints: EndpointInfo[] | null;
   title: string;
   running: boolean;
   pending: number;
@@ -106,7 +110,7 @@ export type Ev = {
 
 // 一轮处理过程中实时收到的内容（结束后换成从历史里读的完整记录）
 export type LiveItem =
-  | { kind: 'user'; text: string; name?: string; at: number }
+  | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; at: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'content'; text: string }
   | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string }

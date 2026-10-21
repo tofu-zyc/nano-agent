@@ -10,8 +10,8 @@ import (
 	"sync"
 )
 
-// CLI 是命令行聊天通道，主要用来本地调试。身份固定为 cli:local，会话为 cli:local。
-// 回复边生成边打印，思考过程和工具调用用灰色显示。
+// CLI 是命令行聊天通道，主要用来本地调试。身份和聊天窗口都是 cli:local，默认接在主会话上。
+// 回复边生成边打印，思考过程和工具调用用灰色显示；同一个会话里别的窗口发来的消息和回复也同步显示。
 type CLI struct {
 	in            io.Reader
 	out           io.Writer
@@ -65,6 +65,17 @@ func (c *CLI) SetDisplay(showReasoning, showUsage bool) {
 	c.mu.Lock()
 	c.showReasoning, c.showUsage = showReasoning, showUsage
 	c.mu.Unlock()
+}
+
+// Echo 显示同一个会话里别的窗口发来的消息。
+func (c *CLI) Echo(_, via, text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lineStart()
+	c.setGray(true)
+	fmt.Fprintf(c.out, "[%s] ", via)
+	c.setGray(false)
+	fmt.Fprintf(c.out, "%s\n", strings.ReplaceAll(text, "\n", "\n     "))
 }
 
 func (c *CLI) Send(_ context.Context, _, text, _ string) error {

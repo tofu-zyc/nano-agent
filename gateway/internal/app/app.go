@@ -26,7 +26,8 @@ import (
 )
 
 const helpText = `可用命令：
-/whoami  查看你的身份和当前会话 ID
+/whoami  查看你的身份、这个窗口和它接着的会话
+/session 查看所有会话；/session <编号> 切换，/session new [名字] 新建（切换需管理员）
 /stop    停止当前任务
 /reset   清空本会话的上下文
 /dir     查看和修改工作目录（修改需管理员）
@@ -63,7 +64,8 @@ type App struct {
 	lsSeq        int
 	chans        map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
 	outboxes     map[string]chan outItem
-	kernel       *KernelInfo // 当前连着的内核，nil 表示没有
+	eps          map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
+	kernel       *KernelInfo       // 当前连着的内核，nil 表示没有
 	tools        []llm.Tool
 	sandbox      bool // 内核能把工具关在工作目录的沙箱里
 	totals       Totals
@@ -75,29 +77,66 @@ type App struct {
 
 type sess struct {
 	sid        string
-	chName     string
-	chatID     string
-	group      bool
-	queue      []channel.Message
+	queue      []queued
 	run        *run
 	resetAfter bool // run 结束后清空上下文（/reset 时正好有任务在跑）
+}
+
+// queued 是排队等处理的一条消息
+type queued struct {
+	m   channel.Message
+	ep  endpoint
+	who string
+}
+
+// in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
+type in struct {
+	s   *sess
+	ep  endpoint
+	who string
+}
+
+// out 是一轮处理要显示到的一个窗口
+type out struct {
+	ep   endpoint
+	view channel.RunView // nil 表示这个窗口不能流式显示，回复在结束时整条发
 }
 
 type run struct {
 	id         uint64
 	from       string // 触发者身份，内核据此判断权限
-	replyTo    string
+	outs       []out  // 第一个是说话的窗口，后面是同步显示的窗口和中途来停止、清空的窗口
 	final      string
 	truncated  bool
 	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
 	stopTyping func()
 
-	view     channel.RunView // 支持流式显示的通道才有
-	streamed bool            // 回复正文已经通过 view 显示过了
+	streamed bool // 回复正文已经通过 RunView 显示过了
 	start    time.Time
 	calls    int       // 这一轮请求了几次模型
 	usage    llm.Usage // 这一轮的累计用量
 	noTools  bool      // 没有工作目录：不给模型工具，只聊天
+}
+
+// views 是这一轮所有能流式显示的窗口
+func (r *run) views() []channel.RunView {
+	var vs []channel.RunView
+	for _, o := range r.outs {
+		if o.view != nil {
+			vs = append(vs, o.view)
+		}
+	}
+	return vs
+}
+
+// addOut 让这个窗口也收到这一轮的结束说明（中途从别的窗口停止、清空时）
+func (r *run) addOut(ep endpoint) {
+	for _, o := range r.outs {
+		if o.ep == ep {
+			return
+		}
+	}
+	r.outs = append(r.outs, out{ep: ep})
 }
 
 type approval struct {
@@ -119,7 +158,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 			loc = l
 		}
 	}
-	return &App{
+	a := &App{
 		ctx: ctx, cfg: cfg, llm: client, store: store, persona: p, log: log,
 		now: time.Now, loc: loc, bus: events.NewBus(), started: time.Now(),
 		chans:        map[string]channel.Channel{},
@@ -129,6 +168,9 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		sessions:     map[string]*sess{},
 		approvals:    map[int]*approval{},
 	}
+	a.migrate()
+	a.loadEndpoints()
+	return a
 }
 
 func (a *App) SetHub(h *kernel.Hub) { a.hub = h }
@@ -183,7 +225,7 @@ func (a *App) SetLLM(c llm.Client) {
 // ---- 聊天消息 ----
 
 var commands = map[string]bool{"help": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"dir": true, "mode": true, "think": true}
+	"dir": true, "mode": true, "think": true, "session": true}
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -199,7 +241,7 @@ func parseCommand(text string) (cmd, arg string) {
 
 // OnMessage 是所有聊天通道共用的消息入口。
 func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
-	sid := ch.Name() + ":" + m.ChatID
+	ep := endpoint{ch: ch.Name(), chat: m.ChatID}
 	who := ch.Name() + ":" + m.SenderID
 	m.Text = strings.TrimSpace(m.Text)
 	cmd, arg := parseCommand(m.Text)
@@ -208,110 +250,124 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	defer a.mu.Unlock()
 	if m.Group {
 		// 群聊暂不支持：被 @ 时提醒一次，其余忽略
-		if m.Mentioned && !a.groupNoticed[sid] {
-			a.groupNoticed[sid] = true
-			a.say(&sess{sid: sid, chName: ch.Name(), chatID: m.ChatID}, "暂时只支持私聊，有事请私聊我", m.MsgID)
+		if m.Mentioned && !a.groupNoticed[ep.key()] {
+			a.groupNoticed[ep.key()] = true
+			a.deliver(ep, "暂时只支持私聊，有事请私聊我", m.MsgID)
 		}
-		a.log.Debug("暂不支持群聊，忽略", "sid", sid)
+		a.log.Debug("暂不支持群聊，忽略", "chat", ep.key())
 		return
 	}
-	s := a.sessions[sid]
-	if s == nil {
-		s = &sess{sid: sid, chName: ch.Name(), chatID: m.ChatID}
-		a.sessions[sid] = s
-	}
-	s.group = m.Group
-	if m.ChatName != "" {
-		if st := a.store.Settings(sid); st.Title != m.ChatName {
-			st.Title = m.ChatName
-			if err := a.store.SaveSettings(sid, st); err != nil {
-				a.log.Warn("保存会话设置失败", "sid", sid, "err", err)
-			}
-		}
-	}
-	reply := a.replyTo(s, m)
-
 	switch cmd {
 	case "help":
-		a.say(s, helpText, reply)
+		a.tell(a.boundSession(ep, m), ep, helpText)
 		return
 	case "whoami":
-		a.say(s, fmt.Sprintf("你的身份：%s\n当前会话：%s", who, sid), reply)
+		sid := a.boundSession(ep, m)
+		where := "还没有接到会话（发第一条消息时自动接上）"
+		if sid != "" {
+			where = a.sessionInfo(sid).Title + "（" + sid + "）"
+		}
+		a.tell(sid, ep, fmt.Sprintf("你的身份：%s\n这个窗口：%s\n接着的会话：%s", who, ep.key(), where))
 		return
 	}
-	if !a.allowed(sid) {
-		a.log.Info("忽略不在白名单里的会话", "sid", sid, "from", who)
+	if !a.allowed(ep.key()) {
+		a.log.Info("忽略不在白名单里的聊天", "chat", ep.key(), "from", who)
 		return
 	}
+	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who}
 	switch cmd {
+	case "session":
+		a.cmdSession(c, arg)
+		return
 	case "stop":
-		a.stop(s, reply)
+		a.stop(c)
 		return
 	case "reset":
-		a.reset(s, reply)
+		a.reset(c)
 		return
 	case "approve", "deny":
-		a.decide(s, who, arg, cmd == "approve", reply)
+		a.decide(c, arg, cmd == "approve")
 		return
 	case "dir":
-		a.cmdDir(s, who, arg, reply)
+		a.cmdDir(c, arg)
 		return
 	case "mode":
-		a.cmdMode(s, who, strings.ToLower(arg), reply)
+		a.cmdMode(c, strings.ToLower(arg))
 		return
 	case "think":
-		a.cmdThink(s, who, strings.ToLower(arg), reply)
+		a.cmdThink(c, strings.ToLower(arg))
 		return
 	}
-	if m.Text == "" || (m.Group && !m.Mentioned) {
+	if m.Text == "" {
 		return
 	}
-	a.publish(events.Event{T: "message", SID: sid, Name: m.SenderName, Text: m.Text, Data: map[string]any{"from": who}})
-	s.queue = append(s.queue, m)
+	s := c.s
+	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text,
+		Data: map[string]any{"from": who, "via": sourceOf(ep.ch), "channel": chanName(ep.ch)}})
+	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
 	if s.run == nil {
 		a.startRun(s)
 	}
 }
 
-func (a *App) allowed(sid string) bool {
-	if len(a.cfg.Access.AllowChats) == 0 || strings.HasPrefix(sid, "cli:") || strings.HasPrefix(sid, "web:") {
+func (a *App) sessOf(sid string) *sess {
+	s := a.sessions[sid]
+	if s == nil {
+		s = &sess{sid: sid}
+		a.sessions[sid] = s
+	}
+	return s
+}
+
+func (a *App) allowed(key string) bool {
+	if len(a.cfg.Access.AllowChats) == 0 || strings.HasPrefix(key, "cli:") || strings.HasPrefix(key, "web:") {
 		return true
 	}
-	return slices.Contains(a.cfg.Access.AllowChats, sid)
+	return slices.Contains(a.cfg.Access.AllowChats, key)
 }
 
-func (a *App) replyTo(s *sess, m channel.Message) string {
-	if s.group {
-		return m.MsgID
-	}
-	return ""
-}
-
-func (a *App) chanOf(s *sess) channel.Channel { return a.chans[s.chName] }
-
-func (a *App) say(s *sess, text, replyTo string) {
-	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
-	ch := a.chanOf(s)
+// deliver 把一条消息发到一个窗口。调用方持有锁。
+func (a *App) deliver(ep endpoint, text, replyTo string) {
+	ch := a.chans[ep.ch]
 	if ch == nil {
-		a.log.Warn("渠道已经不在了，消息没发出去", "sid", s.sid)
+		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return
 	}
 	select {
-	case a.outboxes[s.chName] <- outItem{ch: ch, chatID: s.chatID, text: text, replyTo: replyTo}:
+	case a.outboxes[ep.ch] <- outItem{ch: ch, chatID: ep.chat, text: text, replyTo: replyTo}:
 	default:
-		a.log.Warn("发送队列已满，丢弃一条消息", "sid", s.sid)
+		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
 	}
 }
 
-func (a *App) startTyping(s *sess) func() {
-	t, ok := a.chanOf(s).(channel.Typer)
+// tell 回复一个窗口；sid 不为空时网页上也显示在这个会话里。调用方持有锁。
+func (a *App) tell(sid string, ep endpoint, text string) {
+	if sid != "" {
+		a.publish(events.Event{T: "say", SID: sid, Text: text})
+	}
+	a.deliver(ep, text, "")
+}
+
+// answer 回复发命令的窗口。
+func (a *App) answer(c in, text string) { a.tell(c.s.sid, c.ep, text) }
+
+// notify 把和这一轮有关的消息（审批请求、内核提示）发到这一轮的所有窗口。调用方持有锁。
+func (a *App) notify(s *sess, text string) {
+	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+	for _, o := range s.run.outs {
+		a.deliver(o.ep, text, "")
+	}
+}
+
+func (a *App) startTyping(ep endpoint) func() {
+	t, ok := a.chans[ep.ch].(channel.Typer)
 	if !ok {
 		return func() {}
 	}
 	done := make(chan struct{})
 	go func() {
 		for {
-			t.Typing(a.ctx, s.chatID)
+			t.Typing(a.ctx, ep.chat)
 			select {
 			case <-done:
 				return
@@ -325,34 +381,39 @@ func (a *App) startTyping(s *sess) func() {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// startRun 取出队首的消息（连同同一个人紧接着发的几条）开一个 run。调用方持有锁。
+// startRun 取出队首的消息（连同同一个人在同一个窗口紧接着发的几条）开一个 run。调用方持有锁。
 func (a *App) startRun(s *sess) {
 	if len(s.queue) == 0 || s.run != nil {
 		return
 	}
 	head := s.queue[0]
 	if !a.hub.Connected() {
-		a.say(s, "（内核没有连接，暂时没法处理消息）", a.replyTo(s, head))
+		a.publish(events.Event{T: "say", SID: s.sid, Text: "（内核没有连接，暂时没法处理消息）"})
+		var told []endpoint
+		for _, q := range s.queue {
+			if !slices.Contains(told, q.ep) {
+				told = append(told, q.ep)
+				a.deliver(q.ep, "（内核没有连接，暂时没法处理消息）", "")
+			}
+		}
 		s.queue = nil
 		return
 	}
 	n := 1
-	for n < len(s.queue) && s.queue[n].SenderID == head.SenderID {
+	for n < len(s.queue) && s.queue[n].ep == head.ep && s.queue[n].who == head.who {
 		n++
 	}
 	batch := s.queue[:n]
 	s.queue = slices.Clone(s.queue[n:])
 
 	texts := make([]string, len(batch))
-	for i, m := range batch {
-		texts[i] = m.Text
+	for i, q := range batch {
+		texts[i] = q.m.Text
 	}
-	content := strings.Join(texts, "\n")
-	if s.group {
-		content = fmt.Sprintf("[%s] %s", head.SenderName, content)
-	}
+	text := strings.Join(texts, "\n")
+	content := text
 	if config.On(a.cfg.Session.Timestamps) {
-		content = a.stamp() + " " + content
+		content = a.stamp(sourceOf(head.ep.ch)) + " " + content
 	}
 	// 工作目录或权限变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	w := a.workspaceOf(s.sid)
@@ -369,27 +430,43 @@ func (a *App) startRun(s *sess) {
 	}
 
 	a.runSeq++
-	r := &run{id: a.runSeq, from: s.chName + ":" + head.SenderID, replyTo: a.replyTo(s, batch[len(batch)-1]), start: a.now()}
-	r.stopTyping = a.startTyping(s)
-	if st, ok := a.chanOf(s).(channel.Streamer); ok {
-		r.view = st.OpenRun(s.chatID, r.replyTo)
+	r := &run{id: a.runSeq, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
+	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
+		r.outs[0].view = st.OpenRun(head.ep.chat, "")
 	}
+	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
+	via := sourceOf(head.ep.ch)
+	if name := head.m.SenderName; name != "" && head.ep.ch != "web" && head.ep.ch != "cli" {
+		via += " · " + name
+	}
+	for key, rec := range a.eps {
+		ep := parseEndpoint(key)
+		if rec.Session != s.sid || ep == head.ep {
+			continue
+		}
+		if wt, ok := a.chans[ep.ch].(channel.Watcher); ok {
+			wt.Echo(ep.chat, via, text)
+			r.outs = append(r.outs, out{ep: ep, view: wt.OpenRun(ep.chat, "")})
+		}
+	}
+	r.stopTyping = a.startTyping(head.ep)
 	s.run = r
 	mode := a.runMode(w, r.from)
 	if len(w.dirs) == 0 {
 		// 没有工作目录：不给模型工具，只当聊天机器人
 		mode, r.noTools = proto.ModeNone, true
 	}
-	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "messages", n, "mode", mode)
+	a.log.Info("开始处理", "sid", s.sid, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", mode)
 	a.totals.Runs++
-	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content, Data: map[string]any{"from": r.from, "mode": mode}})
+	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content,
+		Data: map[string]any{"from": r.from, "mode": mode, "channel": chanName(head.ep.ch)}})
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
 	if !a.hub.Send(in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
 }
 
-// endRun 清理一个 run，可选地发一条提示。调用方持有锁。
+// endRun 清理一个 run，可选地给这一轮的所有窗口发一条说明。调用方持有锁。
 func (a *App) endRun(s *sess, note string) {
 	r := s.run
 	if r == nil {
@@ -399,8 +476,8 @@ func (a *App) endRun(s *sess, note string) {
 		r.cancelLLM()
 	}
 	r.stopTyping()
-	if r.view != nil {
-		r.view.Close()
+	for _, v := range r.views() {
+		v.Close()
 	}
 	s.run = nil
 	for n, ap := range a.approvals {
@@ -410,48 +487,51 @@ func (a *App) endRun(s *sess, note string) {
 		}
 	}
 	if note != "" {
-		a.say(s, note, r.replyTo)
+		a.publish(events.Event{T: "say", SID: s.sid, Text: note})
+		for _, o := range r.outs {
+			a.deliver(o.ep, note, "")
+		}
 	}
 }
 
-func (a *App) stop(s *sess, reply string) {
+func (a *App) stop(c in) {
+	s := c.s
 	s.queue = nil
 	if s.run == nil {
-		a.say(s, "当前没有进行中的任务", reply)
+		a.answer(c, "当前没有进行中的任务")
 		return
 	}
-	if s.run.cancelLLM != nil {
-		s.run.cancelLLM()
-		s.run.cancelLLM = nil
-	}
-	a.hub.Send(proto.Msg{T: proto.TCancel, SID: s.sid}) // 内核会回 done(cancelled)
+	s.run.addOut(c.ep)
+	a.cancelRun(s) // 内核会回 done(cancelled)
 }
 
-func (a *App) reset(s *sess, reply string) {
+func (a *App) reset(c in) {
+	s := c.s
 	s.queue = nil
 	if s.run != nil {
 		s.resetAfter = true
-		a.stop(s, reply)
+		s.run.addOut(c.ep)
+		a.cancelRun(s)
 		return
 	}
 	if err := a.store.Reset(s.sid); err != nil {
 		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 	}
-	a.say(s, "上下文已清空", reply)
+	a.answer(c, "上下文已清空")
 }
 
-func (a *App) decide(s *sess, who, arg string, ok bool, reply string) {
+func (a *App) decide(c in, arg string, ok bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
 	ap := a.approvals[n]
-	if err != nil || ap == nil || ap.sid != s.sid {
-		a.say(s, "没有这个编号的待审批请求", reply)
+	if err != nil || ap == nil || ap.sid != c.s.sid {
+		a.answer(c, "没有这个编号的待审批请求")
 		return
 	}
-	if !a.isAdmin(who) {
-		a.say(s, "只有管理员能审批", reply)
+	if !a.isAdmin(c.who) {
+		a.answer(c, "只有管理员能审批")
 		return
 	}
-	a.hub.Send(proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: who})
+	a.hub.Send(proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who})
 }
 
 // ---- 内核事件（kernel.Handler） ----
@@ -524,8 +604,8 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content}); err != nil {
 			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 		}
-		if s.run.view != nil {
-			s.run.view.ToolResult(m.OK == nil || *m.OK, resultDetail(m.Content))
+		for _, v := range s.run.views() {
+			v.ToolResult(m.OK == nil || *m.OK, resultDetail(m.Content))
 		}
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
@@ -541,10 +621,10 @@ func (a *App) KernelMsg(m *proto.Msg) {
 		desc := describeCall(m.Name, m.Args)
 		a.approvals[n] = &approval{sid: s.sid, id: m.ID, name: m.Name, detail: desc, from: m.From, at: a.now()}
 		a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
-		a.say(s, fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
-			n, desc, m.From, n, n), "")
+		a.notify(s, fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
+			n, desc, m.From, n, n))
 	case proto.TNotice:
-		a.say(s, m.Text, "")
+		a.notify(s, m.Text)
 	case proto.TDone:
 		a.finish(s, m.Status, m.Detail)
 	default:
@@ -554,17 +634,16 @@ func (a *App) KernelMsg(m *proto.Msg) {
 
 func (a *App) finish(s *sess, status, detail string) {
 	r := s.run
-	var note string
+	// body 是回复正文，只发给没有流式显示过它的窗口；note 是给所有窗口的说明
+	var body, note string
 	switch status {
 	case proto.StatusOK:
-		note = r.final
-		if r.streamed {
-			note = "" // 已经边生成边显示过了
-		} else if strings.TrimSpace(note) == "" {
-			note = "（模型没有返回内容）"
+		body = r.final
+		if strings.TrimSpace(body) == "" {
+			body = "（模型没有返回内容）"
 		}
 		if r.truncated {
-			note = strings.TrimLeft(note+"\n\n（回复太长，被截断了）", "\n")
+			note = "（回复太长，被截断了）"
 		}
 	case proto.StatusBudget:
 		note = "（这一轮调用工具的次数达到上限，已停止）"
@@ -573,11 +652,9 @@ func (a *App) finish(s *sess, status, detail string) {
 	case proto.StatusCancelled:
 		note = "（已停止）"
 	case proto.StatusRefused:
-		note = r.final
-		if r.streamed {
-			note = ""
-		} else if note == "" {
-			note = "（模型拒绝了这个请求）"
+		body = r.final
+		if body == "" {
+			body = "（模型拒绝了这个请求）"
 		}
 	default:
 		note = "（出错了：" + detail + "）"
@@ -587,16 +664,30 @@ func (a *App) finish(s *sess, status, detail string) {
 		if err := a.store.Reset(s.sid); err != nil {
 			a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 		}
-		note = "上下文已清空"
+		body, note = "", "上下文已清空"
 	}
 	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
 		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)
-	if r.view != nil && r.calls > 0 {
-		r.view.Note(usageLine(r, a.now()))
+	if r.calls > 0 {
+		for _, v := range r.views() {
+			v.Note(usageLine(r, a.now()))
+		}
 	}
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
 		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
-	a.endRun(s, note)
+	a.endRun(s, "")
+	if note != "" {
+		a.publish(events.Event{T: "say", SID: s.sid, Text: note})
+	}
+	for _, o := range r.outs {
+		text := note
+		if body != "" && (o.view == nil || !r.streamed) {
+			text = strings.TrimSpace(body + "\n\n" + note)
+		}
+		if text != "" {
+			a.deliver(o.ep, text, "")
+		}
+	}
 	a.startRun(s)
 }
 
@@ -629,19 +720,19 @@ func (a *App) callModel(s *sess) {
 	a.totals.ModelCalls++
 	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start", Data: map[string]any{"thinking": req.Thinking}})
 
-	// 过程总是发布到事件总线（网页实时显示），支持流式的渠道再自己显示一份
-	view, bus, sid := r.view, a.bus, s.sid
+	// 过程总是发布到事件总线（网页实时显示），支持流式的窗口再自己显示一份
+	views, bus, sid := r.views(), a.bus, s.sid
 	onDelta := func(d llm.Delta) {
 		if d.Reasoning != "" {
 			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "reasoning", Text: d.Reasoning})
-			if view != nil {
-				view.Reasoning(d.Reasoning)
+			for _, v := range views {
+				v.Reasoning(d.Reasoning)
 			}
 		}
 		if d.Content != "" {
 			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "content", Text: d.Content})
-			if view != nil {
-				view.Content(d.Content)
+			for _, v := range views {
+				v.Content(d.Content)
 			}
 		}
 	}
@@ -658,8 +749,8 @@ func (a *App) callModel(s *sess) {
 			return
 		}
 		r.cancelLLM = nil
-		if r.view != nil {
-			r.view.EndMessage()
+		for _, v := range views {
+			v.EndMessage()
 		}
 		if err != nil {
 			a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: "error: " + err.Error()})
@@ -675,7 +766,7 @@ func (a *App) callModel(s *sess) {
 		a.totals.add(u)
 		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
-		if r.view != nil && res.Content != "" {
+		if res.Content != "" {
 			r.streamed = true
 		}
 		a.log.Info("模型回复", "sid", s.sid, "reason", res.Reason, "calls", len(res.Calls),
@@ -693,8 +784,8 @@ func (a *App) callModel(s *sess) {
 			for _, c := range res.Calls {
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)
-				if r.view != nil {
-					r.view.Tool(c.Function.Name, detail)
+				for _, v := range views {
+					v.Tool(c.Function.Name, detail)
 				}
 				a.publish(events.Event{T: "tool", SID: s.sid, ID: c.ID, Name: c.Function.Name, Text: detail,
 					Data: clip(c.Function.Arguments, 4000)})

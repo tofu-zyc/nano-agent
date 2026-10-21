@@ -1,4 +1,5 @@
 // 各种显示用的小函数
+import type { EndpointInfo, SessionInfo } from './types';
 
 export function ago(ms: number): string {
   if (!ms) return '';
@@ -83,8 +84,8 @@ export const toolIcon: Record<string, string> = {
   Shell: 'terminal',
 };
 
-/** 拆开网关加在用户消息前面的东西：[系统] 环境说明、[时间]、群聊里的 [昵称] */
-export function parseUser(content: string): { env: string[]; time?: string; sender?: string; text: string } {
+/** 拆开网关加在用户消息前面的东西：[系统] 环境说明、[时间 · 来源]、群聊里的 [昵称] */
+export function parseUser(content: string): { env: string[]; time?: string; via?: string; sender?: string; text: string } {
   const env: string[] = [];
   let rest = content;
   while (rest.startsWith('[系统] ')) {
@@ -98,9 +99,11 @@ export function parseUser(content: string): { env: string[]; time?: string; send
     rest = rest.slice(i + 1);
   }
   let time: string | undefined;
-  const t = rest.match(/^\[(\d{4}-\d{2}-\d{2}) (周.) (\d{2}:\d{2})\] /);
+  let via: string | undefined;
+  const t = rest.match(/^\[(\d{4}-\d{2}-\d{2}) (周.) (\d{2}:\d{2})(?: · ([^\]\n]{1,40}))?\] /);
   if (t) {
     time = `${t[1].slice(5)} ${t[2]} ${t[3]}`;
+    via = t[4];
     rest = rest.slice(t[0].length);
   }
   let sender: string | undefined;
@@ -109,7 +112,23 @@ export function parseUser(content: string): { env: string[]; time?: string; send
     sender = g[1];
     rest = rest.slice(g[0].length);
   }
-  return { env, time, sender, text: rest };
+  return { env, time, via, sender, text: rest };
+}
+
+/** 消息来源（时间戳里写的）对应的渠道 */
+export const viaChannel: Record<string, string> = { 命令行: 'cli', 网页: 'web', Telegram: 'telegram', 飞书: 'feishu' };
+
+/** 聊天窗口的名字：渠道，加上私聊对方的名字 */
+export function endpointLabel(e: EndpointInfo): string {
+  const label = channelMeta[e.channel]?.label ?? e.channel;
+  return e.name && e.channel !== 'cli' ? `${label} · ${e.name}` : label;
+}
+
+/** 会话接着的渠道（去重）；没有窗口接着的会话只能在网页里聊 */
+export function sessionChannels(s: SessionInfo): string[] {
+  const out: string[] = [];
+  for (const e of s.endpoints ?? []) if (!out.includes(e.channel)) out.push(e.channel);
+  return out.length ? out : ['web'];
 }
 
 export function homeShort(p: string): string {

@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// Web 是网页聊天渠道：会话 ID 是 web:<名字>，网页用户都是登录过的管理员。
+// Web 是网页聊天渠道：网页可以往任何一个会话里发消息，网页用户都是登录过的管理员。
 // 回复和处理过程由调度层统一发布到事件总线，网页从那里订阅，所以这里的 Send 和 RunView 什么都不用做；
 // 实现 Streamer 是为了告诉调度层“正文已经实时显示过了”，不要在结束时再发一遍。
 type Web struct {
@@ -26,15 +26,15 @@ func (w *Web) Run(ctx context.Context, h Handler) error {
 	return nil
 }
 
-// Post 把网页上输入的一条消息交给调度层。
-func (w *Web) Post(chatID, text string) error {
+// Post 把网页上输入的一条消息发到会话 sid。
+func (w *Web) Post(sid, text string) error {
 	w.mu.Lock()
 	h := w.h
 	w.mu.Unlock()
 	if h == nil {
 		return errors.New("网页渠道还没启动")
 	}
-	h(w, Message{ChatID: chatID, SenderID: "admin", SenderName: "我", ChatName: "网页 · " + chatID, Text: text, Mentioned: true})
+	h(w, Message{ChatID: "browser", SenderID: "admin", SenderName: "我", Session: sid, Text: text, Mentioned: true})
 	return nil
 }
 

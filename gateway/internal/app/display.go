@@ -24,45 +24,49 @@ func thinkingName(level string) string {
 	return level
 }
 
-func (a *App) cmdThink(s *sess, who, arg, reply string) {
+func (a *App) cmdThink(c in, arg string) {
 	levels := a.cfg.LLM.ThinkingLevels
-	cur := a.thinkingOf(s.sid)
+	cur := a.thinkingOf(c.s.sid)
 	if arg == "" {
-		a.say(s, fmt.Sprintf("思考强度：%s\n可选：%s（none 表示关闭），用 /think <强度> 切换，/think default 恢复默认", thinkingName(cur), strings.Join(levels, "、")), reply)
+		a.answer(c, fmt.Sprintf("思考强度：%s\n可选：%s（none 表示关闭），用 /think <强度> 切换，/think default 恢复默认", thinkingName(cur), strings.Join(levels, "、")))
 		return
 	}
-	if !a.isAdmin(who) {
-		a.say(s, "只有管理员能切换思考强度", reply)
+	if !a.isAdmin(c.who) {
+		a.answer(c, "只有管理员能切换思考强度")
 		return
 	}
 	if arg == "default" {
 		arg = ""
 	} else if !slices.Contains(levels, arg) {
-		a.say(s, "思考强度只能是 "+strings.Join(levels, "、")+"，或者 default", reply)
+		a.answer(c, "思考强度只能是 "+strings.Join(levels, "、")+"，或者 default")
 		return
 	}
 	if arg == cur {
-		a.say(s, "思考强度已经是 "+arg, reply)
+		a.answer(c, "思考强度已经是 "+arg)
 		return
 	}
-	st := a.store.Settings(s.sid)
+	st := a.store.Settings(c.s.sid)
 	st.Thinking = arg
-	if err := a.store.SaveSettings(s.sid, st); err != nil {
-		a.say(s, "保存设置失败："+err.Error(), reply)
+	if err := a.store.SaveSettings(c.s.sid, st); err != nil {
+		a.answer(c, "保存设置失败："+err.Error())
 		return
 	}
-	a.say(s, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效", thinkingName(arg)), reply)
+	a.answer(c, fmt.Sprintf("思考强度已切换为 %s，下一条消息开始生效", thinkingName(arg)))
 }
 
 // ---- 时间戳 ----
 
 var weekdays = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 
-// stamp 是放在用户消息前面的发送时间，比如 [2026-10-21 周二 15:08]。
-// 写进历史后就不再变，不影响前缀缓存；模型也不用调工具就知道现在几点。
-func (a *App) stamp() string {
+// stamp 是放在用户消息前面的发送时间和来源，比如 [2026-10-21 周三 15:08 · Telegram]。
+// 写进历史后就不再变，不影响前缀缓存；模型也不用调工具就知道现在几点、用户在哪个窗口说的话。
+func (a *App) stamp(source string) string {
 	t := a.now().In(a.loc)
-	return fmt.Sprintf("[%s %s %s]", t.Format("2006-01-02"), weekdays[t.Weekday()], t.Format("15:04"))
+	s := fmt.Sprintf("%s %s %s", t.Format("2006-01-02"), weekdays[t.Weekday()], t.Format("15:04"))
+	if source != "" {
+		s += " · " + source
+	}
+	return "[" + s + "]"
 }
 
 // ---- 过程显示 ----

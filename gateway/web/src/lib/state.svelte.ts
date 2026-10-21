@@ -1,5 +1,5 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
-import { api, setUnauthorizedHandler, sidPath } from './api';
+import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
 import type { Approval, Ev, FieldState, LiveItem, Overview, SessionInfo, Target } from './types';
 
 export type Toast = {
@@ -175,12 +175,36 @@ class Store {
     else list.unshift(info);
   }
 
+  /** 从网关重新读一个会话的信息。会话已经不存在时从列表里去掉，返回 false */
   async refreshSession(sid: string) {
     try {
       const r = await api.get<{ info: SessionInfo }>(sidPath(sid));
       this.upsertSession(r.info);
-    } catch {
-      /* 忽略 */
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        this.dropSession(sid);
+        return false;
+      }
+      return true;
+    }
+  }
+
+  private dropSession(sid: string) {
+    if (this.ov?.sessions) this.ov.sessions = this.ov.sessions.filter((s) => s.sid !== sid);
+    delete this.live[sid];
+    delete this.phase[sid];
+  }
+
+  /** 新建一个会话并打开它 */
+  async newSession(title = '') {
+    try {
+      const info = await api.post<SessionInfo>('/api/sessions', { title });
+      this.upsertSession(info);
+      location.hash = '#/sessions/' + encodeURIComponent(info.sid);
+      return info;
+    } catch (err) {
+      this.fail(err);
     }
   }
 
@@ -214,9 +238,14 @@ class Store {
       case 'session':
         if (e.data) this.upsertSession(e.data);
         break;
+      case 'session_deleted':
+        this.dropSession(sid);
+        if (this.inspector?.type === 'session' && this.inspector.sid === sid) this.inspector = null;
+        if (this.route.view === 'sessions' && this.route.arg === sid) location.hash = '#/sessions';
+        break;
       case 'message':
         if (!this.session(sid)) this.refreshSession(sid);
-        this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, at: e.at });
+        this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, via: e.data?.via, channel: e.data?.channel, at: e.at });
         break;
       case 'run': {
         const s = this.session(sid);

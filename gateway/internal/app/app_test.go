@@ -28,9 +28,17 @@ import (
 
 // ---- 测试替身 ----
 
-type fakeCh struct{ sent chan string }
+type fakeCh struct {
+	name string
+	sent chan string
+}
 
-func (f *fakeCh) Name() string                                     { return "fake" }
+func (f *fakeCh) Name() string {
+	if f.name == "" {
+		return "fake"
+	}
+	return f.name
+}
 func (f *fakeCh) Run(ctx context.Context, _ channel.Handler) error { <-ctx.Done(); return nil }
 func (f *fakeCh) Send(_ context.Context, _, text, _ string) error  { f.sent <- text; return nil }
 
@@ -115,6 +123,7 @@ type env struct {
 	k   *fakeKernel
 	llm *recLLM
 	dir string
+	sid string // 测试用的窗口 fake:c1 接着的会话：管理员默认接在主会话上
 }
 
 func setup(t *testing.T) *env {
@@ -163,7 +172,7 @@ func setup(t *testing.T) *env {
 		time.Sleep(time.Millisecond)
 	}
 	t.Cleanup(func() { cancel(); conn.Close() })
-	return &env{a: a, ch: ch, k: k, llm: rec, dir: dir}
+	return &env{a: a, ch: ch, k: k, llm: rec, dir: dir, sid: mainSID}
 }
 
 func (e *env) say(text string, mod ...func(*channel.Message)) {
@@ -184,16 +193,16 @@ func from(id, name string) func(*channel.Message) {
 
 // ---- 用例 ----
 
-const stamp = "[2026-10-21 周三 15:08]"
+const stamp = "[2026-10-21 周三 15:08 · fake]"
 
 func TestFinalAnswer(t *testing.T) {
 	e := setup(t)
 	e.say("你好")
 	in := e.k.expect(proto.TInput)
-	if in.SID != "fake:c1" || in.From != "fake:u1" {
+	if in.SID != mainSID || in.From != "fake:u1" {
 		t.Fatalf("input: %+v", in)
 	}
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	turn := e.k.expect(proto.TTurn)
 	if turn.Reason != proto.ReasonFinal {
 		t.Fatalf("turn: %+v", turn)
@@ -203,7 +212,7 @@ func TestFinalAnswer(t *testing.T) {
 	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 0 {
 		t.Fatalf("request: %+v", req)
 	}
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	e.ch.wait(t, "（mock）收到：你好")
 }
 
@@ -211,19 +220,19 @@ func TestToolFlowWritesResultsIntoContext(t *testing.T) {
 	e := setup(t)
 	e.say(`!call echo {"a":1}`)
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	turn := e.k.expect(proto.TTurn)
 	if turn.Reason != proto.ReasonToolUse || len(turn.Calls) != 1 || string(turn.Calls[0].Args) != `{"a":1}` {
 		t.Fatalf("turn: %+v", turn)
 	}
-	e.k.send(proto.Msg{T: proto.TResult, SID: "fake:c1", ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "回显成功"})
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TResult, SID: e.sid, ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "回显成功"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
 	if last := msgs[len(msgs)-1]; last.Role != "tool" || last.ToolCallID != turn.Calls[0].ID || last.Content != "回显成功" {
 		t.Fatalf("tool result not in context: %+v", last)
 	}
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	e.ch.wait(t, "工具结果：回显成功")
 }
 
@@ -231,7 +240,7 @@ func TestInvalidToolArgsAreForwardedAsString(t *testing.T) {
 	e := setup(t)
 	e.say(`!call echo {broken`)
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	turn := e.k.expect(proto.TTurn)
 	var s string
 	if json.Unmarshal(turn.Calls[0].Args, &s) != nil || s != "{broken" {
@@ -260,7 +269,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || len(in.Dirs) != 1 {
 		t.Fatalf("input: %+v", in)
 	}
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	if n := len(e.llm.lastReq().Tools); n != 1 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
@@ -275,20 +284,20 @@ func TestQueuedMessagesFromSameSenderAreMerged(t *testing.T) {
 	e.say("第三条")
 	e.say("别人的", from("u2", "李四"))
 	e.k.none() // 上一轮没结束，不能开新 run
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	in := e.k.expect(proto.TInput)
 	if in.From != "fake:u1" {
 		t.Fatalf("second run from: %+v", in)
 	}
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
 	if got := msgs[len(msgs)-1].Content; got != stamp+" 第二条\n第三条" {
 		t.Fatalf("merged: %q", got)
 	}
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	if in := e.k.expect(proto.TInput); in.From != "fake:u2" {
 		t.Fatalf("third run from: %+v", in)
 	}
@@ -303,12 +312,12 @@ func TestStopAndReset(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.say("/stop")
 	e.k.expect(proto.TCancel)
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusCancelled})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
 	e.ch.wait(t, "（已停止）")
 
 	e.say("/reset")
 	e.ch.wait(t, "上下文已清空")
-	if h := e.a.store.History("fake:c1"); len(h) != 0 {
+	if h := e.a.store.History(e.sid); len(h) != 0 {
 		t.Fatalf("history not cleared: %+v", h)
 	}
 }
@@ -319,9 +328,9 @@ func TestResetWhileRunning(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.say("/reset")
 	e.k.expect(proto.TCancel)
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusCancelled})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
 	e.ch.wait(t, "上下文已清空")
-	if h := e.a.store.History("fake:c1"); len(h) != 0 {
+	if h := e.a.store.History(e.sid); len(h) != 0 {
 		t.Fatalf("history not cleared: %+v", h)
 	}
 }
@@ -330,7 +339,7 @@ func TestApproval(t *testing.T) {
 	e := setup(t)
 	e.say("帮我执行命令")
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TApproveReq, SID: "fake:c1", ID: "call_9", Name: "Shell",
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: e.sid, ID: "call_9", Name: "Shell",
 		Args: json.RawMessage(`{"command":"ls -la"}`), From: "fake:u1"})
 	msg := e.ch.wait(t, "需要审批 #1")
 	if !strings.Contains(msg, "执行命令：\nls -la") || !strings.Contains(msg, "/approve 1") {
@@ -350,8 +359,8 @@ func TestApproval(t *testing.T) {
 	if d := e.k.expect(proto.TApprove); d.OK == nil || *d.OK {
 		t.Fatalf("deny: %+v", d)
 	}
-	e.k.send(proto.Msg{T: proto.TResult, SID: "fake:c1", ID: "call_9", OK: proto.Bool(false), Content: "管理员拒绝执行"})
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TResult, SID: e.sid, ID: "call_9", OK: proto.Bool(false), Content: "管理员拒绝执行"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	e.say("/approve 1")
 	e.ch.wait(t, "没有这个编号") // 已经有结果了，审批单作废
@@ -392,10 +401,10 @@ func lastUser(msgs []llm.Message) string {
 // 跑完一轮：内核要模型，模型回复，内核结束
 func (e *env) roundTrip(t *testing.T) []llm.Message {
 	t.Helper()
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	e.ch.wait(t, "（mock）") // 等回复发出来，确认这一轮已经结束
 	return msgs
 }
@@ -485,9 +494,10 @@ func TestWorkspaceGuards(t *testing.T) {
 
 func TestGuestMode(t *testing.T) {
 	e := setup(t)
+	e.sid = "fake:c1" // 不是管理员：有自己的会话
 	e.a.cfg.Workspace.Dirs = []string{e.dir}
 	e.say("你好", from("u2", "李四"))
-	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone {
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone || in.SID != e.sid {
 		t.Fatalf("guest mode: %+v", in)
 	}
 	e.roundTrip(t)
@@ -557,15 +567,15 @@ func TestStreamingView(t *testing.T) {
 
 	e.sayOn(sc, `!call Shell {"command":"ls -la"}`)
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	turn := e.k.expect(proto.TTurn)
 	if e.llm.lastReq().Thinking != "high" {
 		t.Fatalf("thinking: %q", e.llm.lastReq().Thinking)
 	}
-	e.k.send(proto.Msg{T: proto.TResult, SID: "fake:c1", ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "a.txt\nb.txt\n"})
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TResult, SID: e.sid, ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "a.txt\nb.txt\n"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	e.k.send(proto.Msg{T: proto.TDone, SID: "fake:c1", Status: proto.StatusOK})
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -614,7 +624,7 @@ func TestThinkCommand(t *testing.T) {
 	e.ch.wait(t, "已切换为 low")
 	e.say("问题")
 	e.k.expect(proto.TInput)
-	e.k.send(proto.Msg{T: proto.TModel, SID: "fake:c1"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	if got := e.llm.lastReq().Thinking; got != "low" {
 		t.Fatalf("thinking: %q", got)
@@ -623,7 +633,7 @@ func TestThinkCommand(t *testing.T) {
 
 func TestStamp(t *testing.T) {
 	e := setup(t)
-	if got := e.a.stamp(); got != stamp {
+	if got := e.a.stamp("fake"); got != stamp {
 		t.Fatalf("stamp: %q", got)
 	}
 	off := false

@@ -72,6 +72,8 @@ send '!call Read {oops';                              expect "非法参数变成
 send "/whoami";                                       expect "查身份" "你的身份：cli:local"
 send "/dir";                                          expect "查看工作目录" "1. $TMP/work"
 send "/reset";                                        expect "清空上下文" "上下文已清空"
+send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
+send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
 
 echo "e2e: $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then

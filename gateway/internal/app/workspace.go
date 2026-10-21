@@ -92,18 +92,18 @@ func envNote(w workspace, sessionRO []string, prev string) string {
 
 const dirUsage = "用法：/dir 查看；/dir add <路径> [ro] 添加（ro 表示只读）；/dir rm <路径> 移除；/dir default <路径> 设为默认"
 
-func (a *App) cmdDir(s *sess, who, arg, reply string) {
+func (a *App) cmdDir(c in, arg string) {
 	sub, rest, _ := strings.Cut(arg, " ")
 	rest = strings.TrimSpace(rest)
 	if sub == "" {
-		a.say(s, a.describeWorkspace(s.sid), reply)
+		a.answer(c, a.describeWorkspace(c.s.sid))
 		return
 	}
-	if !a.isAdmin(who) {
-		a.say(s, "只有管理员能修改工作目录", reply)
+	if !a.isAdmin(c.who) {
+		a.answer(c, "只有管理员能修改工作目录")
 		return
 	}
-	st := a.store.Settings(s.sid)
+	st := a.store.Settings(c.s.sid)
 	if !st.DirsSet {
 		st.Dirs, st.DirsSet = slices.Clone(a.cfg.Workspace.Dirs), true
 	}
@@ -113,15 +113,15 @@ func (a *App) cmdDir(s *sess, who, arg, reply string) {
 	switch sub {
 	case "add":
 		if path == "" || (flag != "" && flag != "ro") {
-			a.say(s, dirUsage, reply)
+			a.answer(c, dirUsage)
 			return
 		}
 		if msg := a.checkDir(path); msg != "" {
-			a.say(s, msg, reply)
+			a.answer(c, msg)
 			return
 		}
 		if slices.Contains(st.Dirs, path) || slices.Contains(st.RO, path) {
-			a.say(s, path+" 已经在列表里了", reply)
+			a.answer(c, path+" 已经在列表里了")
 			return
 		}
 		if flag == "ro" {
@@ -137,53 +137,53 @@ func (a *App) cmdDir(s *sess, who, arg, reply string) {
 		st.Dirs = slices.DeleteFunc(st.Dirs, func(d string) bool { return d == path })
 		st.RO = slices.DeleteFunc(st.RO, func(d string) bool { return d == path })
 		if len(st.Dirs)+len(st.RO) == n {
-			a.say(s, path+" 不在工作目录列表里", reply)
+			a.answer(c, path+" 不在工作目录列表里")
 			return
 		}
 	case "default":
 		if path == "" {
-			a.say(s, dirUsage, reply)
+			a.answer(c, dirUsage)
 			return
 		}
 		if msg := a.checkDir(path); msg != "" {
-			a.say(s, msg, reply)
+			a.answer(c, msg)
 			return
 		}
 		st.Dirs = append([]string{path}, slices.DeleteFunc(st.Dirs, func(d string) bool { return d == path })...)
 		st.RO = slices.DeleteFunc(st.RO, func(d string) bool { return d == path })
 	default:
-		a.say(s, dirUsage, reply)
+		a.answer(c, dirUsage)
 		return
 	}
-	if err := a.store.SaveSettings(s.sid, st); err != nil {
-		a.say(s, "保存设置失败："+err.Error(), reply)
+	if err := a.store.SaveSettings(c.s.sid, st); err != nil {
+		a.answer(c, "保存设置失败："+err.Error())
 		return
 	}
-	a.say(s, a.describeWorkspace(s.sid)+note, reply)
+	a.answer(c, a.describeWorkspace(c.s.sid)+note)
 }
 
-func (a *App) cmdMode(s *sess, who, arg, reply string) {
+func (a *App) cmdMode(c in, arg string) {
 	if arg == "" {
-		w := a.workspaceOf(s.sid)
-		a.say(s, fmt.Sprintf("权限模式：%s（%s）\n可选：auto 自动、ask 审批、readonly 只读，用 /mode <模式> 切换",
-			modeNames[w.mode], modeDesc[w.mode]), reply)
+		w := a.workspaceOf(c.s.sid)
+		a.answer(c, fmt.Sprintf("权限模式：%s（%s）\n可选：auto 自动、ask 审批、readonly 只读，用 /mode <模式> 切换",
+			modeNames[w.mode], modeDesc[w.mode]))
 		return
 	}
-	if !a.isAdmin(who) {
-		a.say(s, "只有管理员能切换权限模式", reply)
+	if !a.isAdmin(c.who) {
+		a.answer(c, "只有管理员能切换权限模式")
 		return
 	}
 	if _, ok := modeNames[arg]; !ok {
-		a.say(s, "模式只能是 auto、ask 或 readonly", reply)
+		a.answer(c, "模式只能是 auto、ask 或 readonly")
 		return
 	}
-	st := a.store.Settings(s.sid)
+	st := a.store.Settings(c.s.sid)
 	st.Mode = arg
-	if err := a.store.SaveSettings(s.sid, st); err != nil {
-		a.say(s, "保存设置失败："+err.Error(), reply)
+	if err := a.store.SaveSettings(c.s.sid, st); err != nil {
+		a.answer(c, "保存设置失败："+err.Error())
 		return
 	}
-	a.say(s, fmt.Sprintf("权限模式已切换为%s：%s。下一条消息开始生效", modeNames[arg], modeDesc[arg]), reply)
+	a.answer(c, fmt.Sprintf("权限模式已切换为%s：%s。下一条消息开始生效", modeNames[arg], modeDesc[arg]))
 }
 
 func (a *App) describeWorkspace(sid string) string {

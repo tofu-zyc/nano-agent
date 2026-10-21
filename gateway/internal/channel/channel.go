@@ -16,7 +16,8 @@ type Message struct {
 	Text       string // 已去掉 @机器人 的部分
 	MsgID      string // 用于引用回复
 	Group      bool
-	Mentioned  bool // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
+	Mentioned  bool   // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
+	Session    string // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
 }
 
 // Handler 处理收到的消息，必须很快返回。
@@ -37,6 +38,13 @@ type Typer interface {
 // 回复正文已经通过 RunView 显示过，就不会再用 Send 发一遍。
 type Streamer interface {
 	OpenRun(chatID, replyTo string) RunView
+}
+
+// Watcher 是可选能力：同一个会话里，别的窗口发来的消息和回复也在这里同步显示（命令行用）。
+// Echo 显示别的窗口发来的消息，之后的回复过程用 OpenRun 打开的 RunView 显示。
+type Watcher interface {
+	Streamer
+	Echo(chatID, via, text string)
 }
 
 // RunView 显示一轮处理的过程。方法可能在不同的协程里调用，实现要自己加锁，并且不能阻塞太久

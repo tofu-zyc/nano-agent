@@ -103,7 +103,7 @@ type Session struct {
 }
 
 type Access struct {
-	AllowChats []string `toml:"allow_chats" json:"allow_chats"` // 会话 ID 白名单，空表示不限制
+	AllowChats []string `toml:"allow_chats" json:"allow_chats"` // 聊天窗口 ID 白名单，空表示不限制
 	Admins     []string `toml:"admins" json:"admins"`           // 管理员身份；命令行用户始终是管理员
 	Guest      string   `toml:"guest" json:"guest"`             // 非管理员能用的工具：none（默认，只聊天）| readonly
 }

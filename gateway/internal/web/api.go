@@ -110,6 +110,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("sid")
+	info, ok := s.app.Session(sid)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "没有这个会话")
+		return
+	}
 	hist, summary := s.app.History(sid)
 	if len(hist) > 300 {
 		hist = hist[len(hist)-300:]
@@ -117,7 +122,30 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	if hist == nil {
 		hist = []session.Msg{}
 	}
-	writeJSON(w, map[string]any{"info": s.app.Session(sid), "history": hist, "summary": summary})
+	writeJSON(w, map[string]any{"info": info, "history": hist, "summary": summary})
+}
+
+func (s *Server) newSession(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title string `json:"title"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	info, err := s.app.NewSession(req.Title)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, info)
+}
+
+func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.DeleteSession(r.PathValue("sid")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +158,8 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, s.app.Session(sid))
+	info, _ := s.app.Session(sid)
+	writeJSON(w, info)
 }
 
 func (s *Server) resetSession(w http.ResponseWriter, r *http.Request) {
@@ -149,29 +178,43 @@ func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-var chatName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
-
+// chat 以网页管理员的身份往会话里发一条消息。
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Chat string `json:"chat"`
+		SID  string `json:"sid"`
 		Text string `json:"text"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if !chatName.MatchString(req.Chat) {
-		writeErr(w, http.StatusBadRequest, "会话名只能用字母、数字、_ 和 -，最长 32 个字符")
+	if !s.app.HasSession(req.SID) {
+		writeErr(w, http.StatusNotFound, "没有这个会话")
 		return
 	}
 	if strings.TrimSpace(req.Text) == "" {
 		writeErr(w, http.StatusBadRequest, "消息是空的")
 		return
 	}
-	if err := s.app.Web().Post(req.Chat, req.Text); err != nil {
+	if err := s.app.Web().Post(req.SID, req.Text); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	writeJSON(w, map[string]string{"sid": "web:" + req.Chat})
+	writeJSON(w, map[string]string{"sid": req.SID})
+}
+
+// setEndpoint 把一个聊天窗口改接到别的会话。
+func (s *Server) setEndpoint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Session string `json:"session"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.SetEndpoint(r.PathValue("key"), req.Session); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {

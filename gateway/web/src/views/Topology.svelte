@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api } from '../lib/api';
-  import { ago, channelMeta, homeShort, modeMeta, num, pct, shortPath, stateLabel, truncate } from '../lib/format';
+  import { ago, channelMeta, homeShort, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import type { Ev, SessionInfo, Target } from '../lib/types';
 
@@ -45,7 +45,8 @@
     // 先挑出最值得看的会话（在跑的、待审批的、最近活跃的），再按渠道排，连线少交叉
     all.sort((a, b) => Number(b.running || b.pending > 0) - Number(a.running || a.pending > 0) || b.last_at - a.last_at);
     const shown = all.slice(0, MAX_SESSIONS);
-    shown.sort((a, b) => ORDER.indexOf(a.channel) - ORDER.indexOf(b.channel) || b.last_at - a.last_at);
+    const rank = (s: SessionInfo) => (s.sid === 'main' ? -1 : ORDER.indexOf(sessionChannels(s)[0]));
+    shown.sort((a, b) => rank(a) - rank(b) || b.last_at - a.last_at);
     const more = all.length - shown.length;
 
     const chans = ov.channels;
@@ -60,12 +61,16 @@
         target: { type: 'channel', name: c.name }, data: { ...c, meta } });
     });
 
+    // 会话连到它接着的窗口所在的渠道（一个会话可以接好几个渠道的窗口）；没有窗口接着的只能在网页里聊
     shown.forEach((s, j) => {
       const y = cy + (j - (nS - 1) / 2) * 64;
-      const color = channelMeta[s.channel]?.color ?? 'var(--c-session)';
+      const color = s.sid === 'main' ? 'var(--accent)' : (channelMeta[s.channel]?.color ?? 'var(--c-session)');
       nodes.push({ id: 's:' + s.sid, kind: 'session', x: X.sess, y: y - 24, w: 220, h: 48, color,
         target: { type: 'session', sid: s.sid }, data: s });
-      edges.push({ id: `c:${s.channel}>s:${s.sid}`, from: 'c:' + s.channel, to: 's:' + s.sid, color, flow: s.running });
+      for (const ch of sessionChannels(s)) {
+        const cc = channelMeta[ch]?.color ?? 'var(--c-session)';
+        edges.push({ id: `c:${ch}>s:${s.sid}`, from: 'c:' + ch, to: 's:' + s.sid, color: cc, flow: s.running });
+      }
       edges.push({ id: `s:${s.sid}>gw`, from: 's:' + s.sid, to: 'gw', color: 'var(--c-session)', flow: s.running });
     });
     if (more > 0) {
@@ -74,7 +79,7 @@
     }
     // 没有会话的已启用渠道直接连到网关，表示“接上了”
     for (const c of chans) {
-      if (c.status.state !== 'disabled' && !shown.some((s) => s.channel === c.name)) {
+      if (c.status.state !== 'disabled' && !shown.some((s) => sessionChannels(s).includes(c.name))) {
         edges.push({ id: `c:${c.name}>gw`, from: 'c:' + c.name, to: 'gw', color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true });
       }
     }
@@ -272,10 +277,13 @@
     return layout.shownSids.has(sid);
   }
 
+  // 每个会话正在处理的这一轮是从哪个渠道来的：回复的光点流回那里
+  const origin = new Map<string, string>();
+
   function onEvent(e: Ev) {
     const sid = e.sid ?? '';
     const s = store.session(sid);
-    const ch = s?.channel ?? sid.split(':')[0];
+    const ch = (e.t === 'message' ? e.data?.channel : origin.get(sid)) ?? s?.channel ?? 'web';
     const chColor = channelMeta[ch]?.color ?? 'var(--c-session)';
     switch (e.t) {
       case 'message':
@@ -316,6 +324,7 @@
         else pulse(`c:${ch}>gw`, chColor, { reverse: true });
         break;
       case 'run':
+        if (e.kind === 'start' && e.data?.channel) origin.set(sid, e.data.channel);
         if (e.kind === 'end') {
           clearInterval(busyModel.get(sid));
           busyModel.delete(sid);
@@ -370,7 +379,7 @@
   }
 
   async function startWebChat() {
-    location.hash = '#/sessions/' + encodeURIComponent('web:main');
+    location.hash = '#/sessions/main';
   }
 
   function activate(n: N) {
@@ -473,7 +482,11 @@
             {/if}
             <rect class="card" width={n.w} height={n.h} rx="24" />
             <circle class="avatar" cx="24" cy="24" r="15" />
-            <text x="24" y="29" class="initial">{Array.from(s.title.replace(/^.*?·\s*/, ''))[0] ?? '?'}</text>
+            {#if s.sid === 'main'}
+              <g class="ico"><Icon name="hub" x={15} y={15} size={18} /></g>
+            {:else}
+              <text x="24" y="29" class="initial">{Array.from(s.title.replace(/^.*?·\s*/, ''))[0] ?? '?'}</text>
+            {/if}
             <text x="48" y="21" class="t1">{truncate(s.title, 12)}</text>
             <text x="48" y="37" class="t2" class:live={!!ph}>{sessSub(s)}</text>
             {#if s.pending > 0}

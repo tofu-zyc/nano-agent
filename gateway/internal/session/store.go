@@ -147,3 +147,42 @@ func (s *Store) Reset(sid string) error {
 	}
 	return err
 }
+
+// Exists 判断磁盘上有没有这个会话（有历史或者有设置）。
+func (s *Store) Exists(sid string) bool {
+	for _, f := range []string{s.file(sid), s.settingsFile(sid)} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// Rename 把会话的历史和设置换一个 ID（升级旧数据用）。新 ID 不能已经存在。
+func (s *Store) Rename(from, to string) error {
+	if s.Exists(to) {
+		return fmt.Errorf("会话 %s 已经存在", to)
+	}
+	for _, p := range [][2]string{{s.file(from), s.file(to)}, {s.settingsFile(from), s.settingsFile(to)}} {
+		if err := os.Rename(p[0], p[1]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	delete(s.hist, from)
+	delete(s.settings, from)
+	delete(s.hist, to)
+	delete(s.settings, to)
+	return nil
+}
+
+// Delete 删除会话的历史和设置。
+func (s *Store) Delete(sid string) error {
+	for _, f := range []string{s.file(sid), s.settingsFile(sid)} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	delete(s.hist, sid)
+	delete(s.settings, sid)
+	return nil
+}

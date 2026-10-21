@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
-  import { ago, channelMeta, modeMeta } from '../lib/format';
+  import { ago, channelMeta, endpointLabel, sessionChannels } from '../lib/format';
   import Conversation from '../components/Conversation.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -9,19 +9,15 @@
 
   const sessions = $derived(
     (store.ov?.sessions ?? [])
-      .filter((s) => filter === 'all' || s.channel === filter)
+      .filter((s) => filter === 'all' || sessionChannels(s).includes(filter))
       .filter((s) => !q || (s.title + ' ' + s.sid).toLowerCase().includes(q.toLowerCase())),
   );
   const current = $derived(store.route.arg);
   const counts = $derived.by(() => {
     const m: Record<string, number> = {};
-    for (const s of store.ov?.sessions ?? []) m[s.channel] = (m[s.channel] ?? 0) + 1;
+    for (const s of store.ov?.sessions ?? []) for (const c of sessionChannels(s)) m[c] = (m[c] ?? 0) + 1;
     return m;
   });
-
-  function newChat() {
-    location.hash = '#/sessions/' + encodeURIComponent('web:chat-' + Date.now().toString(36).slice(-4));
-  }
 </script>
 
 <div class="sessions">
@@ -31,7 +27,7 @@
         <Icon name="search" size={14} />
         <input bind:value={q} placeholder="搜索会话" />
       </div>
-      <button class="btn sm primary" onclick={newChat} title="新建网页会话"><Icon name="plus" size={14} /></button>
+      <button class="btn sm primary" onclick={() => store.newSession()} title="新建会话"><Icon name="plus" size={14} /></button>
     </div>
     <div class="filters">
       <button class:active={filter === 'all'} onclick={() => (filter = 'all')}>全部</button>
@@ -45,9 +41,10 @@
     </div>
     <div class="items">
       {#each sessions as s (s.sid)}
+        {@const main = s.sid === 'main'}
         {@const m = channelMeta[s.channel]}
-        <a class="item" class:active={current === s.sid} href="#/sessions/{encodeURIComponent(s.sid)}" style="--c: {m?.color ?? 'var(--c-session)'}">
-          <div class="av"><Icon name={m?.icon ?? 'chat'} size={15} /></div>
+        <a class="item" class:active={current === s.sid} href="#/sessions/{encodeURIComponent(s.sid)}" style="--c: {main ? 'var(--accent)' : (m?.color ?? 'var(--c-session)')}">
+          <div class="av"><Icon name={main ? 'hub' : (m?.icon ?? 'chat')} size={15} /></div>
           <div class="txt">
             <div class="t">
               <span class="name">{s.title}</span>
@@ -57,7 +54,8 @@
               {#if store.phase[s.sid]}
                 <span class="live">● 处理中</span>
               {:else}
-                {modeMeta[s.mode]?.label ?? s.mode} · {s.messages} 条消息
+                <span class="eps">{s.endpoints?.length ? s.endpoints.map(endpointLabel).join('、') : '网页'}</span>
+                <span class="n">· {s.messages} 条</span>
               {/if}
               {#if s.pending}<span class="pending">待审批 {s.pending}</span>{/if}
             </div>
@@ -84,10 +82,14 @@
         </svg>
       </div>
       <h3>选一个会话，或者在网页里直接聊</h3>
-      <p class="muted">每个聊天窗口（私聊、终端、网页）都是一个会话，有自己的上下文、工作目录和权限模式。</p>
-      <button class="btn primary" onclick={() => (location.hash = '#/sessions/' + encodeURIComponent('web:main'))}>
-        <Icon name="chat" size={14} />打开网页聊天
-      </button>
+      <p class="muted">
+        会话是一段对话，有自己的上下文、工作目录和权限模式。终端、和机器人的私聊都是接在某个会话上的窗口：
+        你的所有窗口默认都接在主会话上，在哪边说话都是同一段上下文；别人私聊机器人，各自一个会话。
+      </p>
+      <div class="acts">
+        <a class="btn primary" href="#/sessions/main"><Icon name="hub" size={14} />打开主会话</a>
+        <button class="btn" onclick={() => store.newSession()}><Icon name="plus" size={14} />新建会话</button>
+      </div>
     </div>
   {/if}
 </div>
@@ -221,7 +223,17 @@
     font-size: 12px;
     color: var(--muted);
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    min-width: 0;
+  }
+  .s .eps {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .s .n {
+    flex: none;
   }
   .live {
     color: var(--accent-2);
@@ -247,8 +259,13 @@
     margin: 10px 0 0;
   }
   .welcome p {
-    max-width: 420px;
+    max-width: 460px;
     margin: 0 0 8px;
+    line-height: 1.7;
+  }
+  .acts {
+    display: flex;
+    gap: 8px;
   }
   .art path {
     fill: none;

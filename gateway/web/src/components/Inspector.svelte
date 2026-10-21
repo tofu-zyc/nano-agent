@@ -1,8 +1,8 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, homeShort, modeMeta, num, pct, since, stateLabel } from '../lib/format';
-  import type { SessionInfo, Usage } from '../lib/types';
+  import { ago, channelMeta, endpointLabel, homeShort, modeMeta, num, pct, since, stateLabel } from '../lib/format';
+  import type { EndpointInfo, SessionInfo, Usage } from '../lib/types';
   import FieldGroup from './FieldGroup.svelte';
   import DirInput from './DirInput.svelte';
   import FeishuQR from './FeishuQR.svelte';
@@ -30,6 +30,7 @@
       }
       case 'session': {
         const s = store.session(target.sid);
+        if (target.sid === 'main') return { icon: 'hub', color: 'var(--accent)', title: s?.title ?? '主会话', sub: '你的所有窗口默认都接在这里' };
         return { icon: 'chat', color: channelMeta[s?.channel ?? '']?.color ?? 'var(--c-session)', title: s?.title ?? target.sid, sub: target.sid };
       }
     }
@@ -52,6 +53,47 @@
 
   // ---- 会话 ----
   const sess = $derived(target.type === 'session' ? store.session(target.sid) : undefined);
+  // 列表里还没有这个会话（比如刚新建）：去网关问一下，确实没有才说不存在
+  let gone = $state<string | null>(null);
+  $effect(() => {
+    if (target.type !== 'session' || sess) return;
+    const sid = target.sid;
+    store.refreshSession(sid).then((ok) => {
+      if (!ok) gone = sid;
+    });
+  });
+  // 其他会话上的窗口，可以改接到这个会话
+  const otherEndpoints = $derived(
+    target.type === 'session'
+      ? (ov.sessions ?? []).flatMap((s) => (s.sid === target.sid ? [] : (s.endpoints ?? []).map((e) => ({ e, from: s.title }))))
+      : [],
+  );
+  async function attach(e: EndpointInfo) {
+    if (target.type !== 'session') return;
+    try {
+      await api.put(`/api/endpoints/${encodeURIComponent(e.key)}`, { session: target.sid });
+      store.toast({ kind: 'ok', text: `${endpointLabel(e)} 已接到这个会话` }, 2400);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  async function rename(title: string) {
+    if (!sess || title.trim() === sess.title) return;
+    try {
+      store.upsertSession(await api.patch<SessionInfo>(sidPath(sess.sid), { title }));
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  async function deleteSession() {
+    if (!sess || !confirm(`删除会话「${sess.title}」？它的历史和设置都会删掉，接着它的窗口下次说话时重新接（管理员接回主会话）。`)) return;
+    try {
+      await api.del(sidPath(sess.sid));
+      store.toast({ kind: 'ok', text: '会话已删除' });
+    } catch (err) {
+      store.fail(err);
+    }
+  }
   async function patchSession(p: Record<string, unknown>) {
     if (target.type !== 'session') return;
     try {
@@ -216,10 +258,12 @@
           {#if c.status.identity}<div class="row"><span class="muted">机器人</span><span class="grow">{c.status.identity}</span></div>{/if}
           {#if c.status.error}<div class="errbox">{c.status.error}</div>{/if}
           {#if target.name === 'web'}
-            <p class="note">在网页里直接和机器人聊天，网页用户都是管理员。</p>
-            <a class="btn primary" href="#/sessions/{encodeURIComponent('web:main')}" onclick={() => (store.inspector = null)}><Icon name="chat" size={14} />开始聊天</a>
+            <p class="note">网页能看到所有会话，也能往任何一个会话里发消息，网页用户都是管理员。</p>
+            <a class="btn primary" href="#/sessions/main" onclick={() => (store.inspector = null)}><Icon name="chat" size={14} />打开主会话</a>
           {:else if target.name === 'cli'}
-            <p class="note">启动网关的终端就是一个聊天窗口，身份是 <code>cli:local</code>，始终是管理员。</p>
+            <p class="note">启动网关的终端就是一个聊天窗口，身份是 <code>cli:local</code>，始终是管理员，默认接在主会话上（用 <code>/session</code> 切换）。同一个会话里别的窗口说的话和回复，终端里也会同步显示。</p>
+          {:else}
+            <p class="note">私聊机器人的每个人是一个窗口。管理员默认接在主会话上，和终端、网页共享上下文；其他人各自一个会话。管理员可以发 <code>/session</code> 切换。</p>
           {/if}
         </div>
         {#if target.name === 'telegram' && c.status.state === 'disabled'}
@@ -254,10 +298,33 @@
           {#if sess.running}<button class="btn" onclick={() => sessionAction('stop')}><Icon name="stop" size={14} />停止</button>{/if}
           <button class="btn danger" onclick={() => sessionAction('reset')}><Icon name="trash" size={14} />清空上下文</button>
         </div>
+        <input class="title" value={sess.title} maxlength="40" placeholder="会话的名字" title="改名字，回车保存"
+          onchange={(e) => rename(e.currentTarget.value)} onkeydown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
         <div class="grid">
           <div class="stat"><b>{sess.messages}</b><span>条消息</span></div>
           <div class="stat"><b class="acc">{pct(sess.usage.cached_tokens, sess.usage.prompt_tokens)}</b><span>缓存命中</span></div>
           <div class="stat"><b>{num(sess.usage.prompt_tokens)}</b><span>累计输入</span></div>
+        </div>
+
+        <h5>接入的窗口 <span class="muted small">在哪个窗口说话都是同一段上下文</span></h5>
+        <div class="card">
+          {#each sess.endpoints ?? [] as e (e.key)}
+            <div class="row">
+              <span class="dot" style="background: {channelMeta[e.channel]?.color ?? 'var(--muted)'}"></span>
+              <span class="grow">{endpointLabel(e)}</span>
+              <code class="epkey">{e.key}</code>
+            </div>
+          {:else}
+            <p class="note">还没有聊天窗口接在这里，只能在网页里聊。</p>
+          {/each}
+          {#if otherEndpoints.length}
+            <select class="attach" onchange={(ev) => { const i = +ev.currentTarget.value; ev.currentTarget.value = ''; if (i >= 0) attach(otherEndpoints[i].e); }}>
+              <option value="">把其他窗口接到这里…</option>
+              {#each otherEndpoints as o, i}
+                <option value={i}>{endpointLabel(o.e)}（现在在「{o.from}」）</option>
+              {/each}
+            </select>
+          {/if}
         </div>
 
         {#if !sess.dirs?.length}
@@ -308,8 +375,13 @@
         {#if sess.compacted}
           <p class="note">这个会话的历史超过过上限，已经裁掉最早的 {sess.compacted} 条消息。</p>
         {/if}
+        {#if sess.sid !== 'main'}
+          <button class="btn link danger-text" onclick={deleteSession}><Icon name="trash" size={14} />删除这个会话</button>
+        {/if}
+      {:else if gone === target.sid}
+        <p class="note">没有这个会话，可能已经删掉了。</p>
       {:else}
-        <p class="note">会话不存在了。</p>
+        <p class="note">正在读取…</p>
       {/if}
     {/if}
   </div>
@@ -594,6 +666,39 @@
     gap: 8px;
     margin-bottom: 14px;
     flex-wrap: wrap;
+  }
+  input.title {
+    width: 100%;
+    height: 34px;
+    padding: 0 11px;
+    margin-bottom: 14px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    font-size: 14px;
+    font-weight: 600;
+    outline: none;
+  }
+  input.title:focus {
+    border-color: var(--accent);
+  }
+  .epkey {
+    flex: none;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  select.attach {
+    height: 32px;
+    padding: 0 9px;
+    border-radius: 9px;
+    border: 1px dashed var(--line-2);
+    background: var(--panel-solid);
+    font-size: 12.5px;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .danger-text {
+    color: var(--err);
   }
   .chatonly {
     display: flex;

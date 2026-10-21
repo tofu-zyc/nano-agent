@@ -50,8 +50,15 @@
         },
       },
       {
-        id: 'a:newchat', icon: 'plus', title: '新建网页会话', sub: '在网页里开一个新对话', kind: '操作', text: '新建 网页 会话 聊天 new chat',
-        run: go('#/sessions/' + encodeURIComponent('web:chat-' + Date.now().toString(36).slice(-4))),
+        id: 'a:main', icon: 'hub', title: '打开主会话', sub: '终端、网页和你的机器人私聊共用的对话', kind: '操作', text: '主会话 聊天 main chat',
+        run: go('#/sessions/main'),
+      },
+      {
+        id: 'a:newchat', icon: 'plus', title: '新建会话', sub: '开一段新的对话，上下文和设置都是独立的', kind: '操作', text: '新建 会话 聊天 new chat session',
+        run: () => {
+          close();
+          store.newSession();
+        },
       },
       {
         id: 'a:theme', icon: store.dark ? 'sun' : 'moon', title: store.dark ? '切换到浅色' : '切换到深色', kind: '操作', text: '主题 深色 浅色 theme dark light',
@@ -83,7 +90,7 @@
     }
     for (const s of store.ov?.sessions ?? []) {
       out.push({
-        id: 's:' + s.sid, icon: 'chat', color: channelMeta[s.channel]?.color, title: s.title, sub: `${s.sid} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`, kind: '会话',
+        id: 's:' + s.sid, icon: s.sid === 'main' ? 'hub' : 'chat', color: s.sid === 'main' ? 'var(--accent)' : channelMeta[s.channel]?.color, title: s.title, sub: `${s.sid} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`, kind: '会话',
         text: `${s.title} ${s.sid} 会话`, run: go('#/sessions/' + encodeURIComponent(s.sid)),
       });
     }

@@ -6,7 +6,7 @@ export type ToolView = { id: string; name: string; detail: string; args: string;
 
 export type Block =
   | { type: 'env'; text: string }
-  | { type: 'user'; text: string; time?: string; sender?: string }
+  | { type: 'user'; text: string; time?: string; via?: string; sender?: string }
   | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number };
 
 export function toolDetail(name: string, args: string): string {
@@ -46,7 +46,7 @@ export function buildBlocks(history: Msg[]): Block[] {
     if (m.role === 'user') {
       const p = parseUser(m.content ?? '');
       for (const e of p.env) out.push({ type: 'env', text: e });
-      out.push({ type: 'user', text: p.text, time: p.time, sender: p.sender });
+      out.push({ type: 'user', text: p.text, time: p.time, via: p.via, sender: p.sender });
     } else if (m.role === 'assistant') {
       const tools: ToolView[] = (m.tool_calls ?? []).map((c) => {
         const t: ToolView = { id: c.id, name: c.function.name, args: c.function.arguments, detail: toolDetail(c.function.name, c.function.arguments) };

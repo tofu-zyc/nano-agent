@@ -44,21 +44,22 @@ func (t *Totals) add(u llm.Usage) {
 }
 
 type SessionInfo struct {
-	SID         string    `json:"sid"`
-	Channel     string    `json:"channel"`
-	Title       string    `json:"title"`
-	Running     bool      `json:"running"`
-	Pending     int       `json:"pending"` // 待审批的工具调用
-	LastAt      int64     `json:"last_at"` // 最后一条消息的时间（秒）
-	Messages    int       `json:"messages"`
-	Dirs        []string  `json:"dirs"`
-	RO          []string  `json:"ro"`
-	Mode        string    `json:"mode"`
-	Thinking    string    `json:"thinking"`
-	Persona     string    `json:"persona"`      // 用的人格文件名
-	PersonaFile string    `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
-	Usage       llm.Usage `json:"usage"`        // 历史里记下的累计用量
-	Compacted   int       `json:"compacted"`
+	SID         string         `json:"sid"`
+	Channel     string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
+	Endpoints   []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
+	Title       string         `json:"title"`
+	Running     bool           `json:"running"`
+	Pending     int            `json:"pending"` // 待审批的工具调用
+	LastAt      int64          `json:"last_at"` // 最后一条消息的时间（秒）
+	Messages    int            `json:"messages"`
+	Dirs        []string       `json:"dirs"`
+	RO          []string       `json:"ro"`
+	Mode        string         `json:"mode"`
+	Thinking    string         `json:"thinking"`
+	Persona     string         `json:"persona"`      // 用的人格文件名
+	PersonaFile string         `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
+	Usage       llm.Usage      `json:"usage"`        // 历史里记下的累计用量
+	Compacted   int            `json:"compacted"`
 }
 
 type ApprovalInfo struct {
@@ -88,13 +89,7 @@ func (a *App) Snapshot() Snapshot {
 		k := *a.kernel
 		snap.Kernel = &k
 	}
-	sids := a.store.List()
-	for sid := range a.sessions {
-		if !slices.Contains(sids, sid) {
-			sids = append(sids, sid)
-		}
-	}
-	for _, sid := range sids {
+	for _, sid := range a.sessionIDs() {
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })
@@ -114,11 +109,20 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
-	ch, _, _ := strings.Cut(sid, ":")
-	info := SessionInfo{SID: sid, Channel: ch, Title: st.Title, Dirs: w.dirs, RO: st.RO, Mode: w.mode,
-		Thinking: a.thinkingOf(sid), Compacted: st.Base}
+	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title, Dirs: w.dirs, RO: st.RO,
+		Mode: w.mode, Thinking: a.thinkingOf(sid), Compacted: st.Base}
+	if len(info.Endpoints) > 0 {
+		info.Channel = info.Endpoints[0].Channel
+	}
 	if info.Title == "" {
-		info.Title = sid
+		switch {
+		case sid == mainSID:
+			info.Title = "主会话"
+		case a.eps[sid] != nil && a.eps[sid].Name != "":
+			info.Title = a.eps[sid].Name // 某个人自己的会话：用聊天的名字
+		default:
+			info.Title = sid
+		}
 	}
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		info.Running = true
@@ -148,11 +152,14 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	return info
 }
 
-// Session 返回一个会话的信息。
-func (a *App) Session(sid string) SessionInfo {
+// Session 返回一个会话的信息，没有这个会话时 ok 为 false。
+func (a *App) Session(sid string) (info SessionInfo, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.sessionInfo(sid)
+	if !a.hasSession(sid) {
+		return SessionInfo{}, false
+	}
+	return a.sessionInfo(sid), true
 }
 
 // History 返回会话历史（从上次裁剪的位置开始）和代替被裁掉部分的说明。
@@ -164,6 +171,7 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。
 type SessionPatch struct {
+	Title    *string   `json:"title"`
 	Dirs     *[]string `json:"dirs"`
 	RO       *[]string `json:"ro"`
 	Mode     *string   `json:"mode"`
@@ -173,6 +181,9 @@ type SessionPatch struct {
 func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.hasSession(sid) {
+		return errors.New("没有这个会话")
+	}
 	st := a.store.Settings(sid)
 	var errs []error
 	clean := func(list []string) []string {
@@ -189,6 +200,12 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 			out = append(out, d)
 		}
 		return out
+	}
+	if p.Title != nil {
+		st.Title = strings.TrimSpace(*p.Title)
+		if len([]rune(st.Title)) > 40 {
+			errs = append(errs, errors.New("名字最长 40 个字"))
+		}
 	}
 	if p.Dirs != nil {
 		st.Dirs, st.DirsSet = clean(*p.Dirs), true
@@ -214,7 +231,7 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	if err := a.store.SaveSettings(sid, st); err != nil {
 		return err
 	}
-	a.publish(events.Event{T: "session", SID: sid, Data: a.sessionInfo(sid)})
+	a.publishSession(sid)
 	return nil
 }
 
