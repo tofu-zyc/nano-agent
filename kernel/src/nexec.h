@@ -11,6 +11,7 @@
 #define NA_NEXEC_H
 
 #include "cJSON.h"
+#include "plat.h"
 #include "util.h"
 
 #include <stdbool.h>
@@ -43,29 +44,16 @@ bool tool_edit(const xctx *x, const cJSON *args, buf_t *out);
 bool tool_grep(const xctx *x, const cJSON *args, buf_t *out);
 bool tool_shell(const xctx *x, const cJSON *args, buf_t *out);
 
+/* 执行器旁边的 rg（发布包里自带），没有就用 PATH 里的；找不到返回 NULL */
+char *rg_path(const xctx *x);
+
 /* ---- 路径（nexec_fs.c） ---- */
 
-/* 把模型给的路径变成绝对、解析过符号链接的真实路径。文件本身可以不存在（Write 新文件），
- * 这时解析到最近的已存在的上级目录，再接上剩下的部分。失败返回 NULL，原因写进 out。 */
+/* 把模型给的路径变成那台机器上的绝对、规范路径（解析符号链接 / junction / 盘符大小写）。
+ * 文件本身可以不存在（Write 新文件）。失败返回 NULL，原因写进 out。 */
 char *path_resolve(const xctx *x, const char *p, buf_t *out);
-bool  path_inside(const char *path, const char *dir);
 /* 检查能否读 / 写这个真实路径；不能时把原因写进 out */
 bool  path_can_read(const xctx *x, const char *real, buf_t *out);
 bool  path_can_write(const xctx *x, const char *real, buf_t *out);
-char *expand_home(const char *home, const char *p);
-
-/* ---- 子进程（nexec_proc.c） ---- */
-
-typedef struct {
-    int  status;       /* waitpid 的状态 */
-    bool timed_out;
-} proc_status;
-
-/* 在 cwd 下执行 argv（stdin 是 /dev/null，stdout 和 stderr 合在一起），最多 timeout_s 秒。
- * 输出保留开头和结尾、超出部分省略中间，结果写进 out。返回 0；无法启动返回 -1。
- * 期间被取消（stdin 关闭或收到 SIGTERM）时杀掉命令，执行器直接退出。 */
-int   run_proc(const xctx *x, char *const argv[], const char *cwd, int timeout_s,
-               buf_t *out, proc_status *st);
-char *find_in_path(const xctx *x, const char *name);   /* 找不到返回 NULL */
 
 #endif

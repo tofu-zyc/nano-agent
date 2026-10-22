@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md)。
+最后更新：2026-10-22，跨平台阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -20,9 +20,13 @@ kernel/                C 内核和执行器
   src/core.c/h         循环状态机（sans-I/O）：预算、权限模式、审批
   src/runner.c/h       执行器子进程的管理（超时、取消、清理）
   src/conf.c/h         kernel.conf 解析（旧的 remote = / ssh = 给出提示，skills = 忽略并提示）
+  src/plat.h           平台层的接口（路径、文件、自己、子进程、参数）
+  src/plat_posix.c     平台层的 POSIX 实现（Linux 和 macOS 共用）
+  src/plat_win.c       平台层的 Windows 实现（宽字符 API、UTF-8 边界、创建进程、Job Object）
   src/nexec_*.c        执行器 nano-exec：每次工具调用启动一次，套上 Landlock + seccomp 再执行
-  src/sandbox.c        Landlock / seccomp
-  tests/               test_core.c（状态机）、test_exec.py（执行器）、test_host.py（假网关驱动真内核，含多工作目录、代执行）
+  src/sandbox.c        Landlock / seccomp（Linux）
+  src/sandbox_win.c    Windows 上沙箱为空（landlock=0，走无沙箱规则）
+  tests/               test_core.c（状态机）、test_exec.py（执行器）、test_exec_win.py（Windows 执行器，WSL interop）、test_host.py（假网关驱动真内核，含多工作目录、代执行）
 gateway/               Go 网关
   cmd/nano-gateway     入口；chat.go 是 `nano-gateway chat` 终端客户端；localkernel.go 启动和看着本机内核
   internal/app         调度：会话、窗口（endpoints）、命令、补聊天记录（recap）
@@ -50,7 +54,7 @@ gateway/               Go 网关
   internal/config      配置：gateway.toml + data/config.json（网页改的，密钥字段加密），schema 驱动设置页
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
-scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh
+scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh、fetch-zig.sh、fetch-rg.sh
 skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）
 docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-gateway-admin.md
 ```
@@ -61,12 +65,17 @@ docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-
 make install      # 日常使用：全部装到 ~/.nano-agent（NANO_HOME 可改），注册后台服务
 make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页地址，带密码的链接在 data/web.url
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
-make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）
+make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）；装了 zig 和 build/tools/rg.exe 时还跑 Windows 执行器测试
 make web          # 改了前端后重新构建（npm run check && build），产物要提交
 cd gateway && go test -race ./...
+scripts/fetch-zig.sh   # 下载固定版本的 zig 到 build/tools/zig（只用它的 cc，不需要 sudo）
+scripts/fetch-rg.sh    # 下载固定版本的 rg.exe 到 build/tools/（Windows 测试和发布包用）
+make -C kernel windows-exec   # 只交叉编译 Windows 执行器（build/nano-exec.exe）
+python3 kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg.exe   # 单独跑 Windows 执行器测试
 ```
 
 - e2e（scripts/e2e.sh）现在 67 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，Gateway 查询 / GatewayAdmin 审批添加工作目录，以及超限摘要、保存和继续用工具。
+- Windows 执行器（test_exec_win.py）现在 13 项，在 WSL 里通过 interop 跑 `nano-exec.exe`，测试目录和 USERPROFILE 都放在 Windows 临时目录：probe、中文路径和内容、Read/Write/Edit、CRLF 保留、工作目录外拒绝、ro=/ 读所有盘、PowerShell 中文输出和退出码、密钥不泄漏、超时连同子进程杀掉、取消、自带 rg、根目录盘符和 `--ls`、错误请求。没有 zig 时 `make test` 会跳过这一组并提示。
 - host 包：假 ssh 测部署 / 执行 / 断线 / 架构不同时现编，有 sshd 时起一个临时的真 OpenSSH 测一遍。kernel 包测配对。
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
@@ -96,6 +105,7 @@ cd gateway && go test -race ./...
 | 多工作目录 | 一个会话挂好几个工作目录（可跨机器），工具参数 workspace；技能移到网关（Skill 由网关处理，附带文件放到各机器的 ~/.nano-agent/skills）；网关代执行别的电脑上的工具（run）；网关启动本机内核；拓扑加内核节点、右键菜单；输入框命令提示；协议 v5 |
 | 多模型 | 网页上管理多个 OpenAI 兼容接口和模型：默认模型、会话单独选（/model、会话设置）、每个模型自己的上下文窗口、历史上限、思考强度；接口只回传“有没有设置 key” |
 | 图片输入 | 网页粘贴/拖拽/上传、Telegram 照片、飞书图片消息；模型能力（modalities）决定发不发给模型；图片存 data/uploads，历史里只存引用，支持图片的模型收到 OpenAI content parts |
+| 3048b68 | 跨平台阶段 1：平台层（POSIX 一份、Windows 一份）+ Windows 执行器 `nano-exec.exe`；宽字符路径、符号链接/junction 解析、CRLF Edit、PowerShell UTF-8、Job Object 超时/取消、自带 rg；zig 交叉编译，WSL interop 实测 |
 
 ## 关键设计（改之前先理解）
 
@@ -145,7 +155,7 @@ cd gateway && go test -race ./...
 2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。
 4. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
-5. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。
+5. 长期记忆、群聊。跨平台按 [PLAN-cross-platform.md](PLAN-cross-platform.md) 做：阶段 1 Windows 执行器已完成；阶段 2 Windows 内核 + 网关路径/回环修复；阶段 3 本地离线安装包；阶段 4 macOS。移动端暂不做，将来要求在手机本机执行工具。
 
 ## 坑
 
@@ -166,3 +176,8 @@ cd gateway && go test -race ./...
 - 非多模态模型收到图片时只是发 `[图片×N]` + 提醒，这是“先用着”的行为，正式的降级/换模型策略以后单独设计。
 - 图片只在网关这一侧处理，内核和执行器完全不知道图片的存在（工具结果仍然是文字）。
 - `make` 每次都会尝试静态链接执行器，失败只提示一次（build/.static-tried）。
+- Windows 执行器：`argv` 是 ANSI 的，中文路径要用 `plat_args()`（内部走 `GetCommandLineW` + `CommandLineToArgvW`），不要直接用 `argv`。`plat_win.c` 全程用宽字符 API，只在边界上转 UTF-8。
+- 在 WSL 里用 interop 测 Windows 程序时，WSL 会把 `USERPROFILE` 换回真实的 Windows 用户目录，直接 `Popen` 设环境变量没用；test_exec_win.py 写一个临时 `run.cmd` 用 `set "K=V"`（一定要带引号，否则 `&&` 前的空格会进到值里）设好再启动 exe。测试目录放在 Windows 临时目录，`wslpath -w` 转路径。
+- Windows 上 `powershell.exe -Command` 的输出用 `[Console]::OutputEncoding`/`$OutputEncoding` 强制 UTF-8；超时/取消用 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），创建进程要先 `CREATE_SUSPENDED`、加入 Job、再 `ResumeThread`（传的是线程句柄，别传进程句柄）。
+- 交叉编译 Windows 执行器：`zig cc -target x86_64-windows-gnu … -lws2_32 -lshell32`。`build/tools/` 里的 zig/rg 不提交，先跑 `scripts/fetch-zig.sh`、`scripts/fetch-rg.sh`。
+- 在 WSL 的 9p 上覆盖一个马上要运行的 `.exe` 偶尔会拿到旧内容；测试每次复制到新的临时目录，不要复用同一个 exe 路径。

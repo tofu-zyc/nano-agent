@@ -13,3 +13,5 @@
 /gateway/nano-gateway
 /dist/
 /build/
+__pycache__/
+*.pyc

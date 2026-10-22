@@ -1,4 +1,5 @@
 #include "util.h"
+#include "plat.h"
 
 #include <fcntl.h>
 #include <stdarg.h>
@@ -17,7 +18,11 @@ void na_log(int level, const char *fmt, ...)
     char ts[32];
     time_t t = time(NULL);
     struct tm tm;
+#if NA_WINDOWS
+    localtime_s(&tm, &t);
+#else
     localtime_r(&t, &tm);
+#endif
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
 
     va_list ap;
@@ -129,9 +134,7 @@ void buf_free(buf_t *b)
 
 int64_t now_ms(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return plat_now_ms();
 }
 
 size_t utf8_cut(const char *s, size_t len, size_t max)
@@ -195,12 +198,22 @@ void buf_put_utf8(buf_t *b, const char *s, size_t len)
 
 int set_nonblock(int fd)
 {
+#if NA_WINDOWS
+    (void)fd;
+    return -1;
+#else
     int fl = fcntl(fd, F_GETFL);
     return fl < 0 ? -1 : fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+#endif
 }
 
 int set_cloexec(int fd)
 {
+#if NA_WINDOWS
+    (void)fd;
+    return -1;
+#else
     int fl = fcntl(fd, F_GETFD);
     return fl < 0 ? -1 : fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+#endif
 }
