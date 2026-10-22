@@ -147,22 +147,26 @@ func startBackground(cfgPath, logPath string, quiet bool) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	for i := 0; i < 30; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("看护进程启动失败：%w", err)
+			}
+			return fmt.Errorf("看护进程自己退出了，网关没有启动")
+		default:
+		}
 		if pid, ok := readAlivePID(pidFile("gateway.supervisor.pid")); ok && isGatewayProcess(pid) {
 			if !quiet {
 				fmt.Printf("网关已在后台启动（supervisor pid %d）。日志：%s\n", pid, logPath)
 			}
 			return nil
 		}
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			break
-		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !quiet {
-		fmt.Printf("网关已在后台启动，日志：%s\n", logPath)
-	}
-	return nil
+	return fmt.Errorf("看护进程没有起来，日志：%s", logPath)
 }
 
 func stopBackground(quiet bool) error {
