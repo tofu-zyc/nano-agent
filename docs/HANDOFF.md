@@ -98,7 +98,7 @@ cd gateway && go test -race ./...
 8. **聊天平台流式显示**：RunView 只追加到内存，streamRun 的后台协程合并更新，Close 不阻塞调度锁，但会补齐尾部并关闭卡片。Telegram 每秒编辑消息，飞书每半秒用 CardKit Content 更新卡片，每张卡片的 sequence 严格递增。长回复分段，错误只记录一次，结束时发送完整文本。无正文增量的模型最终结果也会交给 RunView。飞书需要 cardkit:card:write，扫码注册已加入；平台接口测试用 httptest 模拟，无真实凭据的渠道仍需使用时验证。
 9. **上下文压缩**：历史超限且有完整旧轮次可切时，额外用当前模型生成摘要。已有 Summary 和被切掉的历史作为 JSON 数据传入，不传工具、人格和推理记录；输出 2048 token，支持 none 时关闭思考，60 秒超时。最近消息和当前轮留在原位置；摘要连同 EnvNote 存在 Settings.Summary，只在压缩时替换，JSONL 不改写。生成失败沿用裁剪，已有摘要不丢；取消或迟到结果不提交，保存失败不推进 Base。额外调用和 token 都计入本轮及全局统计。
 
-10. **平台同步与卡片**：Telegram / 飞书实现 Watcher.OpenMirror，其他窗口开始一轮时同步输入和 RunView。过程、思考、正文分开保存，飞书过程卡用 collapsible_panel（expanded=false），回复卡只放正文；Telegram 独立过程消息用 expandable blockquote，正文按 UTF-16 分段。过程预览有长度限制，网页保留完整记录。/sync 是 /history 的入口，历史查看用 Archive，压缩不再导致旧消息无法查看。
+10. **平台同步与卡片**：Telegram / 飞书实现 Watcher.OpenMirror，其他窗口开始一轮时同步输入和 RunView。streamRun 把过程存成结构化的（思考、工具调用列表 toolEntry、备注），版本号变了才发请求。Telegram：回复正文用 tgHTML 把 Markdown 转成 Telegram 的 HTML 子集（tgmarkdown.go，没闭合的标记保持成对，代码块跨段时 tgMarkdownChunks 补开头），HTML 发不出去（can't parse entities）就退回纯文本；过程是单独一条消息（状态行 + expandable blockquote）。飞书：一张 CardKit 卡片（src 来源、proc 折叠面板里 think / tools、reply、foot 状态、stop 按钮），长回复续卡只放正文，结束时删 stop，没有过程时删 proc；卡片约 30 KB 上限，正文每卡 3500 字、工具只留最近 12 次。审批：渠道实现 channel.Approver（SendApproval / ResolveApproval），app/approvals.go 发审批卡片、记 ref，在哪儿批了（按钮、命令、网页）都 resolveApproval 改成结果；按钮回来是 Message.Action = ActionApprove / ActionDeny（Telegram callback_data ap:编号:1/0，飞书卡片回调 card.action.trigger，value {a, n}），走 decide 的管理员检查。/sync 是 /history 的入口，历史查看用 Archive。
 11. **WSL DrvFS**：9p 可能在 dentry 释放后重建 inode，刚加过的 Landlock 规则就失效。add_rule 成功后保留 O_PATH | O_CLOEXEC 引用直到本次执行器退出，不关闭沙箱，不额外放行父目录。test_exec 增加 Windows 盘上的目录、读写、只读和越界回归。
 
 12. **网页管理 SSH**：host.Manager 保存 data/connections.json，写入后才更新内存，列表只返回 has_password。OpenSSH 处理别名、密钥、跳板机；密码经 SSH_ASKPASS 和 0600 文件传递，不进参数。自动连接在启动和掉线后重试，修改 / 删除前先断开。状态变化 OnChange → app.HostsChanged 推 machines / workspaces 事件。
@@ -119,8 +119,8 @@ cd gateway && go test -race ./...
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
-1. 用户继续使用中反馈平台卡片与跨端同步。此轮未向真实飞书 / Telegram 发送测试消息，平台接口通过模拟服务验证。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1，需在开放平台后台补上（新扫码的自动带）。飞书卡片上的“停止”按钮需要卡片回调（card.action.trigger，长连接），还没做，目前飞书靠发「停」。
-2. 聊天里批准配对（/pair），现在只能在网页上点。审批按钮（Telegram / 飞书卡片）、卡片重新设计、多模型、让 AI 改网关配置（自举，要先定设计）是用户提的下一批。
+1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
+2. 聊天里批准配对（/pair），现在只能在网页上点。多模型、让 AI 改网关配置（自举，要先定设计）是用户提的下一批。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
 3. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
 4. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。
 

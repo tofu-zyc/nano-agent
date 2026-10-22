@@ -10,13 +10,36 @@ import (
 
 // 过程与正文分别保存，平台自己决定折叠和布局。网络请求不占调度锁。
 type streamSnapshot struct {
-	Reasoning, Content, Tools, Notes, Source string
-	ToolCount                                int
-	Closed                                   bool
+	Reasoning, Content, Notes, Source string
+	Tools                             []toolEntry
+	Closed                            bool
+	ver                               int // 每次变化加一，没变就不发请求
+}
+
+// toolEntry 是这一轮的一次工具调用
+type toolEntry struct {
+	Name, Detail string
+	Done, OK     bool
+	Result       string
 }
 
 func (s streamSnapshot) fallbackText() string {
 	return strings.TrimSpace(s.Source + "\n\n" + s.Content + "\n\n" + s.Notes)
+}
+
+// status 是这一轮现在在干什么（给过程区的标题用）
+func (s streamSnapshot) status() string {
+	switch {
+	case s.Closed:
+		return "完成"
+	case len(s.Tools) > 0 && !s.Tools[len(s.Tools)-1].Done:
+		return "正在执行 " + s.Tools[len(s.Tools)-1].Name
+	case s.Content != "":
+		return "正在回复"
+	case s.Reasoning != "":
+		return "正在思考"
+	}
+	return "处理中"
 }
 
 type streamWriter interface {
@@ -25,16 +48,18 @@ type streamWriter interface {
 }
 
 type streamRun struct {
-	mu                               sync.Mutex
-	reasoning, content, tools, notes strings.Builder
-	source                           string
-	toolCount                        int
-	closed                           bool
-	wake, closing, done              chan struct{}
-	interval                         time.Duration
-	writer                           streamWriter
-	fallback                         func(context.Context, string) error
-	log                              *slog.Logger
+	mu                  sync.Mutex
+	reasoning, content  strings.Builder
+	notes               []string
+	tools               []toolEntry
+	source              string
+	closed              bool
+	ver                 int
+	wake, closing, done chan struct{}
+	interval            time.Duration
+	writer              streamWriter
+	fallback            func(context.Context, string) error
+	log                 *slog.Logger
 }
 
 func newStreamRun(w streamWriter, fallback func(context.Context, string) error, log *slog.Logger, interval time.Duration) *streamRun {
@@ -44,52 +69,53 @@ func newStreamRun(w streamWriter, fallback func(context.Context, string) error, 
 	return r
 }
 
-func (r *streamRun) append(kind, text string, tool bool) {
-	if text == "" {
-		return
-	}
+// change 在锁里改一下状态，然后叫醒发送的协程
+func (r *streamRun) change(f func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return
 	}
-	var dst *strings.Builder
-	switch kind {
-	case "reasoning":
-		dst = &r.reasoning
-	case "content":
-		dst = &r.content
-	case "tools":
-		dst = &r.tools
-	default:
-		dst = &r.notes
-	}
-	if (kind == "tools" || kind == "notes") && dst.Len() > 0 {
-		dst.WriteString("\n")
-	}
-	dst.WriteString(text)
-	if tool {
-		r.toolCount++
-	}
+	f()
+	r.ver++
 	select {
 	case r.wake <- struct{}{}:
 	default:
 	}
 }
 
-func (r *streamRun) Reasoning(text string) { r.append("reasoning", text, false) }
-func (r *streamRun) Content(text string)   { r.append("content", text, false) }
-func (r *streamRun) Tool(name, detail string) {
-	r.append("tools", "⚙ "+strings.TrimSpace(name+" · "+streamClip(detail, 240)), true)
-}
-func (r *streamRun) ToolResult(ok bool, detail string) {
-	mark := "✓ "
-	if !ok {
-		mark = "✗ "
+func (r *streamRun) Reasoning(text string) {
+	if text != "" {
+		r.change(func() { r.reasoning.WriteString(text) })
 	}
-	r.append("tools", mark+streamClip(detail, 200), false)
 }
-func (r *streamRun) Note(text string) { r.append("notes", text, false) }
+func (r *streamRun) Content(text string) {
+	if text != "" {
+		r.change(func() { r.content.WriteString(text) })
+	}
+}
+func (r *streamRun) Tool(name, detail string) {
+	r.change(func() {
+		r.tools = append(r.tools, toolEntry{Name: name, Detail: streamClip(strings.TrimSpace(detail), 240)})
+	})
+}
+
+// ToolResult 记到第一个还没结果的调用上（并行的几个调用按顺序对上）
+func (r *streamRun) ToolResult(ok bool, detail string) {
+	r.change(func() {
+		for i := range r.tools {
+			if !r.tools[i].Done {
+				r.tools[i].Done, r.tools[i].OK, r.tools[i].Result = true, ok, streamClip(strings.TrimSpace(detail), 200)
+				return
+			}
+		}
+	})
+}
+func (r *streamRun) Note(text string) {
+	if text != "" {
+		r.change(func() { r.notes = append(r.notes, text) })
+	}
+}
 func (r *streamRun) EndMessage() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -98,10 +124,7 @@ func (r *streamRun) EndMessage() {
 	}
 }
 func (r *streamRun) mirror(via, text string) RunView {
-	r.mu.Lock()
-	r.source = "来自" + via + "\n用户：" + streamClip(text, 1000)
-	r.mu.Unlock()
-	r.Note("正在处理…")
+	r.change(func() { r.source = "来自" + via + "：" + streamClip(text, 1000) })
 	return r
 }
 func (r *streamRun) Close() {
@@ -109,6 +132,7 @@ func (r *streamRun) Close() {
 	defer r.mu.Unlock()
 	if !r.closed {
 		r.closed = true
+		r.ver++
 		close(r.closing)
 	}
 }
@@ -116,8 +140,9 @@ func (r *streamRun) snapshot() streamSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return streamSnapshot{Reasoning: r.reasoning.String(), Content: strings.TrimSpace(r.content.String()),
-		Tools: r.tools.String(), Notes: r.notes.String(), Source: r.source, ToolCount: r.toolCount, Closed: r.closed}
+		Tools: append([]toolEntry(nil), r.tools...), Notes: strings.Join(r.notes, "\n"), Source: r.source, Closed: r.closed, ver: r.ver}
 }
+
 func (r *streamRun) loop() {
 	defer close(r.done)
 	var last streamSnapshot
@@ -137,7 +162,7 @@ func (r *streamRun) loop() {
 			timer.Stop()
 		}
 		snap := r.snapshot()
-		if !failed && snap != last {
+		if !failed && snap.ver != last.ver {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := r.writer.Write(ctx, snap)
 			cancel()

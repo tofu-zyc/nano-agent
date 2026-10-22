@@ -25,13 +25,15 @@ type cardServer struct {
 	seq     map[string]int
 	closed  map[string]bool
 	sent    []string
+	deleted map[string]bool // 卡片ID/组件ID
+	patched []string
 	started chan struct{}
 	deny    bool
 }
 
 func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 	t.Helper()
-	m := &cardServer{seq: map[string]int{}, closed: map[string]bool{}, started: make(chan struct{}, 1), deny: deny}
+	m := &cardServer{seq: map[string]int{}, closed: map[string]bool{}, deleted: map[string]bool{}, started: make(chan struct{}, 1), deny: deny}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/") {
@@ -76,8 +78,8 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 			parts := map[string]string{}
 			var walk func(map[string]any)
 			walk = func(e map[string]any) {
-				if e["tag"] == "markdown" {
-					parts[e["element_id"].(string)] = e["content"].(string)
+				if id, ok := e["element_id"].(string); ok && e["tag"] == "markdown" {
+					parts[id] = e["content"].(string)
 				}
 				if e["tag"] == "collapsible_panel" {
 					m.panels++
@@ -97,6 +99,8 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 			m.parts = append(m.parts, parts)
 			m.texts = append(m.texts, parts["reply"])
 			data["card_id"] = fmt.Sprint(len(m.texts))
+		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/"):
+			m.patched = append(m.patched, p.Content)
 		case r.Method == "POST" && r.URL.Path == "/open-apis/im/v1/messages":
 			m.sent = append(m.sent, p.MsgType+":"+p.Content)
 			data["message_id"] = "msg-test"
@@ -121,6 +125,9 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 				if element == "reply" {
 					m.texts[i-1] = p.Content
 				}
+			} else if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/elements/") {
+				path := strings.Split(r.URL.Path, "/")
+				m.deleted[id+"/"+path[len(path)-1]] = true
 			} else if r.Method == "PATCH" && strings.HasSuffix(r.URL.Path, "/settings") {
 				var settings struct {
 					Config struct {
@@ -156,15 +163,35 @@ func TestFeishuStreamsAndClosesCard(t *testing.T) {
 	r.Tool("Read", "a.txt")
 	r.ToolResult(true, "读取成功")
 	r.Content("完整回复")
+	r.Note("1 次模型调用")
 	r.Close()
 	awaitStream(t, r.done)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.texts) != 2 || m.texts[1] != "完整回复" || !strings.Contains(m.parts[0]["tools"], "读取成功") || m.parts[0]["reasoning"] != "先看一下" || m.panels != 2 || !m.closed["1"] || !m.closed["2"] || m.seq["1"] < 2 {
-		t.Fatalf("texts=%v closed=%v seq=%v", m.texts, m.closed, m.seq)
+	// 一张卡片：折叠的思考和工具、回复、状态；结束后去掉停止按钮
+	p := m.parts[0]
+	if len(m.texts) != 1 || m.texts[0] != "完整回复" || !strings.Contains(p["tools"], "读取成功") || !strings.Contains(p["think"], "先看一下") ||
+		m.panels != 1 || !strings.Contains(p["foot"], "完成") || !strings.Contains(p["foot"], "1 次模型调用") || !m.closed["1"] || m.seq["1"] < 2 {
+		t.Fatalf("parts=%v closed=%v seq=%v", m.parts, m.closed, m.seq)
 	}
-	if len(m.sent) != 2 || !strings.HasPrefix(m.sent[0], "interactive:") || !strings.Contains(m.sent[0], `"card_id":"1"`) {
+	if !m.deleted["1/stop"] || m.deleted["1/proc"] {
+		t.Fatalf("deleted=%v", m.deleted)
+	}
+	if len(m.sent) != 1 || !strings.HasPrefix(m.sent[0], "interactive:") || !strings.Contains(m.sent[0], `"card_id":"1"`) {
 		t.Fatalf("sent=%v", m.sent)
+	}
+}
+
+func TestFeishuSimpleReplyDropsEmptyPanel(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	r := f.OpenRun("chat-test", "").(*streamRun)
+	r.Content("你好")
+	r.Close()
+	awaitStream(t, r.done)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.texts[0] != "你好" || !m.deleted["1/proc"] || !m.deleted["1/stop"] {
+		t.Fatalf("texts=%v deleted=%v", m.texts, m.deleted)
 	}
 }
 
@@ -172,7 +199,7 @@ func TestFeishuSplitsLongReplyAndClosesEveryCard(t *testing.T) {
 	f, m := mockFeishu(t, false)
 	s := &feishuStream{f: f, chat: "chat-test"}
 	text := strings.Repeat("文档🙂", 7000)
-	if err := s.Write(context.Background(), streamSnapshot{Content: text}); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Content: text, ver: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(context.Background()); err != nil {
@@ -180,7 +207,7 @@ func TestFeishuSplitsLongReplyAndClosesEveryCard(t *testing.T) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if strings.Join(m.texts, "") != text || len(m.closed) != len(m.texts) {
+	if strings.Join(m.texts, "") != text || len(m.closed) != len(m.texts) || len(m.texts) < 4 {
 		t.Fatalf("长回复丢失或有卡片未关闭：%d %v", len(m.texts), m.closed)
 	}
 }
@@ -213,7 +240,28 @@ func TestFeishuLargeProcessStaysBoundedAndReplyIsComplete(t *testing.T) {
 	awaitStream(t, r.done)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if strings.Join(m.texts, "") != reply || len(m.parts) != 3 || m.panels != 2 || !strings.Contains(m.parts[0]["status"], "100 次工具调用") {
+	if strings.Join(m.texts, "") != reply || len(m.parts) != 2 || m.panels != 1 || !strings.Contains(m.parts[0]["foot"], "100 次工具调用") ||
+		!strings.Contains(m.parts[0]["src"], "来自网页") {
 		t.Fatalf("过程挤入正文或长回复丢失: cards=%d panels=%d", len(m.parts), m.panels)
+	}
+}
+
+func TestFeishuApprovalCard(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	card := ApprovalCard{N: 5, Title: "写入文件", Detail: "a.txt（3 字节）", From: "feishu:ou_1"}
+	ref, err := f.SendApproval(context.Background(), "chat-test", card)
+	if err != nil || ref != "msg-test" {
+		t.Fatal(ref, err)
+	}
+	if err := f.ResolveApproval(context.Background(), "chat-test", ref, card, "已拒绝 · 张三"); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !strings.Contains(m.sent[0], `"a":"approve"`) || !strings.Contains(m.sent[0], `"n":"5"`) || !strings.Contains(m.sent[0], "需要审批 #5 · 写入文件") {
+		t.Fatalf("审批卡片：%s", m.sent[0])
+	}
+	if len(m.patched) != 1 || strings.Contains(m.patched[0], "approve") || !strings.Contains(m.patched[0], "已拒绝 · 张三") || !strings.Contains(m.patched[0], `"red"`) {
+		t.Fatalf("处理后的卡片：%v", m.patched)
 	}
 }

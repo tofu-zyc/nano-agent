@@ -18,13 +18,33 @@ type Message struct {
 	Group      bool
 	Mentioned  bool   // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
 	Session    string // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
-	Action     string // 不是说话，而是界面上的操作：ActionStop、ActionRecall
+	Action     string // 不是说话，而是界面上的操作：ActionStop、ActionRecall、ActionApprove、ActionDeny
 }
 
 const (
 	ActionStop   = "stop"   // 停止按钮、终端里的 Ctrl-C：停下正在进行的任务，没有任务时不用回话
 	ActionRecall = "recall" // 用户在平台上撤回了 MsgID 那条消息
+	// 审批消息上的按钮：Text 是审批的编号
+	ActionApprove = "approve"
+	ActionDeny    = "deny"
 )
+
+// ApprovalCard 是一次等管理员审批的工具调用。
+type ApprovalCard struct {
+	N      int
+	Title  string // 比如“执行命令”“写入文件”
+	Detail string // 要执行的命令、要改的文件
+	From   string // 发起人
+}
+
+// Approver 是能用按钮审批的渠道：审批请求下面带“批准 / 拒绝”按钮，点了之后渠道交回一条
+// Action 为 ActionApprove / ActionDeny、Text 为编号的消息（和发 /approve 一样要检查是不是管理员）。
+type Approver interface {
+	// SendApproval 发审批消息，返回的 ref 用来之后更新它
+	SendApproval(ctx context.Context, chatID string, c ApprovalCard) (ref string, err error)
+	// ResolveApproval 把审批消息改成处理结果，去掉按钮
+	ResolveApproval(ctx context.Context, chatID, ref string, c ApprovalCard, result string) error
+}
 
 // Handler 处理收到的消息，必须很快返回。
 type Handler func(ch Channel, m Message)

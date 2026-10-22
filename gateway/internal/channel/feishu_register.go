@@ -29,7 +29,8 @@ const regPath = "/oauth/v1/app/registration"
 
 var regDomains = map[string]string{"feishu": "https://accounts.feishu.cn", "lark": "https://accounts.larksuite.com"}
 
-// 机器人收发私聊消息需要的权限和事件，扫码确认页上会预先勾好
+// 机器人收发私聊消息需要的权限和事件，扫码确认页上会预先勾好。
+// 卡片按钮（停止、审批）的回调 card.action.trigger 要另外在开放平台的“事件与回调 → 回调配置”里订阅
 var regAddons = map[string]any{
 	"scopes": map[string][]string{"tenant": {
 		"im:message", "im:message:send_as_bot", "im:message.p2p_msg:readonly", "contact:user.base:readonly",

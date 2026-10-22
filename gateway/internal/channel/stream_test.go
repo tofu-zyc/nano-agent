@@ -69,7 +69,8 @@ func TestStreamRunCoalescesAndClosesWithoutBlocking(t *testing.T) {
 		t.Fatalf("close=%v writes=%d", w.closed, len(w.texts))
 	}
 	snap := w.texts[1]
-	if snap.Reasoning != "先看目录" || !strings.Contains(snap.Tools, "Read · a.txt\n✓ 读到了") || snap.Content != strings.Repeat("好", 100) || snap.Notes != "1 次模型调用" || snap.ToolCount != 1 || !snap.Closed {
+	tool := toolEntry{Name: "Read", Detail: "a.txt", Done: true, OK: true, Result: "读到了"}
+	if snap.Reasoning != "先看目录" || len(snap.Tools) != 1 || snap.Tools[0] != tool || snap.Content != strings.Repeat("好", 100) || snap.Notes != "1 次模型调用" || !snap.Closed {
 		t.Fatalf("过程和正文没有分开：%+v", snap)
 	}
 }

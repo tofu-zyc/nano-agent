@@ -333,5 +333,6 @@ func (a *App) Approve(n int, ok bool) error {
 	if !a.hub.Send(s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: "web:admin"}) {
 		return errors.New("内核没有连接")
 	}
+	a.resolveApproval(ap, a.decided(ok, "web:admin"))
 	return nil
 }

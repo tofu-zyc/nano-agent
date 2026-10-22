@@ -477,8 +477,9 @@
             <ol>
               <li>在 <a href="https://open.feishu.cn/app" target="_blank" rel="noopener">飞书开放平台</a> 创建企业自建应用，添加“机器人”能力；</li>
               <li>把 App ID 和 App Secret 填到下面，打开“启用”；</li>
-              <li>在“事件与回调”里选“使用长连接接收事件”，添加 <code>im.message.receive_v1</code>；</li>
-              <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code> 权限，发布版本。</li>
+              <li>在“事件与回调”里选“使用长连接接收事件”，添加 <code>im.message.receive_v1</code>、<code>im.message.recalled_v1</code>；</li>
+              <li>“回调配置”里同样选长连接，添加 <code>card.action.trigger</code>（卡片上的停止、批准 / 拒绝按钮要用）；</li>
+              <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code>、<code>cardkit:card:write</code> 权限，发布版本。</li>
             </ol>
           </details>
         {/if}

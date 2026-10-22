@@ -128,9 +128,10 @@ type queued struct {
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
 type in struct {
-	s   *sess
-	ep  endpoint
-	who string
+	s    *sess
+	ep   endpoint
+	who  string
+	name string // 说话的人的名字（有的话）
 }
 
 // out 是一轮处理要显示到的一个窗口
@@ -181,11 +182,6 @@ func (r *run) addOut(ep endpoint) {
 		}
 	}
 	r.outs = append(r.outs, out{ep: ep})
-}
-
-type approval struct {
-	sid, id, name, detail, from string
-	at                          time.Time
 }
 
 type outItem struct {
@@ -334,11 +330,16 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		}
 		return
 	}
-	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who}
+	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who, name: m.SenderName}
 	if m.Action == channel.ActionStop {
 		if c.s.run != nil || len(c.s.queue) > 0 {
 			a.stop(c)
 		}
+		return
+	}
+	if m.Action == channel.ActionApprove || m.Action == channel.ActionDeny {
+		// 审批消息上的按钮：和发 /approve、/deny 一样
+		a.decide(c, m.Text, m.Action == channel.ActionApprove)
 		return
 	}
 	if cmd == "" {
@@ -590,8 +591,7 @@ func (a *App) endRun(s *sess, note string) {
 	s.run = nil
 	for n, ap := range a.approvals {
 		if ap.sid == s.sid {
-			delete(a.approvals, n)
-			a.publish(events.Event{T: "approval_done", SID: s.sid, N: n})
+			a.dropApproval(n, "这一轮已经结束，不用审批了")
 		}
 	}
 	if note != "" {
@@ -639,7 +639,13 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
-	a.hub.Send(c.s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who})
+	if a.hub.Send(c.s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
+		who := c.who
+		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
+			who = c.name
+		}
+		a.resolveApproval(ap, a.decided(ok, who))
+	}
 }
 
 // ---- 内核事件（kernel.Handler） ----
@@ -685,20 +691,17 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
-				delete(a.approvals, n)
-				a.publish(events.Event{T: "approval_done", SID: s.sid, N: n})
+				why := "⏱ 没等到审批（超时按拒绝处理）"
+				if strings.Contains(m.Content, "拒绝") {
+					why = "❌ 已拒绝"
+				}
+				a.dropApproval(n, why)
 			}
 		}
 		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000)})
 	case proto.TApproveReq:
-		a.nextAppr++
-		n := a.nextAppr
-		desc := describeCall(m.Name, m.Args)
-		a.approvals[n] = &approval{sid: s.sid, id: m.ID, name: m.Name, detail: desc, from: m.From, at: a.now()}
-		a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
-		a.notify(s, fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝",
-			n, desc, m.From, n, n))
+		a.askApproval(s, m)
 	case proto.TNotice:
 		a.notify(s, m.Text)
 	case proto.TDone:

@@ -123,7 +123,7 @@ func TestTelegramSeparatesCollapsedProcessFromReply(t *testing.T) {
 	awaitStream(t, r.done)
 	mu.Lock()
 	defer mu.Unlock()
-	if len(texts) != 2 || texts[2] != "这是最终答复" || modes[2] != "" {
+	if len(texts) != 2 || texts[2] != "这是最终答复" || modes[2] != "HTML" {
 		t.Fatalf("正文混入过程或消息过多: %v", texts)
 	}
 	if !strings.Contains(texts[1], "<blockquote expandable>") || strings.Contains(texts[1], "<标签>") || !strings.Contains(texts[1], "100 次工具调用") || !strings.Contains(texts[1], "来自网页") {
@@ -188,5 +188,73 @@ func TestTelegramStopButton(t *testing.T) {
 		Message: &tgMessage{Chat: tgChat{ID: 123, Type: "private"}}, Data: tgStopData}, func(_ Channel, m Message) { got <- m })
 	if m := <-got; m.Action != ActionStop || m.ChatID != "123" || m.SenderID != "7" {
 		t.Fatalf("按钮消息不对：%+v", m)
+	}
+}
+
+func TestTelegramRendersMarkdownAndFallsBackToPlainText(t *testing.T) {
+	var mu sync.Mutex
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		json.NewDecoder(r.Body).Decode(&p)
+		mu.Lock()
+		got = append(got, p)
+		n := len(got)
+		mu.Unlock()
+		if n == 1 { // 第一次假装 HTML 解析失败
+			io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := &telegramStream{t: tg, chat: "123"}
+	if err := s.Write(context.Background(), streamSnapshot{Content: "**粗体** 和 `代码`", Closed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0]["text"] != "<b>粗体</b> 和 <code>代码</code>" || got[0]["parse_mode"] != "HTML" {
+		t.Fatalf("第一次应当发 HTML：%v", got)
+	}
+	if got[1]["text"] != "粗体 和 代码" || got[1]["parse_mode"] != nil {
+		t.Fatalf("HTML 发不出去时改发纯文本：%v", got[1])
+	}
+}
+
+func TestTelegramApprovalButtons(t *testing.T) {
+	var mu sync.Mutex
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		json.NewDecoder(r.Body).Decode(&p)
+		p["method"] = strings.TrimPrefix(r.URL.Path, "/bottest/")
+		mu.Lock()
+		got = append(got, p)
+		mu.Unlock()
+		io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	card := ApprovalCard{N: 3, Title: "执行命令", Detail: "rm -rf <build>", From: "tg:1"}
+	ref, err := tg.SendApproval(context.Background(), "123", card)
+	if err != nil || ref != "42" {
+		t.Fatal(ref, err)
+	}
+	kb, _ := json.Marshal(got[0]["reply_markup"])
+	if !strings.Contains(got[0]["text"].(string), "需要审批 #3 · 执行命令") || !strings.Contains(got[0]["text"].(string), "rm -rf &lt;build&gt;") ||
+		!strings.Contains(string(kb), `"ap:3:1"`) || !strings.Contains(string(kb), `"ap:3:0"`) {
+		t.Fatalf("审批消息：%v %s", got[0], kb)
+	}
+	if err := tg.ResolveApproval(context.Background(), "123", ref, card, "已批准 · 张三"); err != nil {
+		t.Fatal(err)
+	}
+	if got[1]["method"] != "editMessageText" || !strings.Contains(got[1]["text"].(string), "已批准 · 张三") {
+		t.Fatalf("处理后的审批消息：%v", got[1])
+	}
+	msgs := make(chan Message, 1)
+	tg.onButton(context.Background(), &tgCallbackQuery{ID: "q", From: tgUser{ID: 7, FirstName: "张"},
+		Message: &tgMessage{Chat: tgChat{ID: 123, Type: "private"}}, Data: "ap:3:0"}, func(_ Channel, m Message) { msgs <- m })
+	if m := <-msgs; m.Action != ActionDeny || m.Text != "3" || m.SenderID != "7" {
+		t.Fatalf("拒绝按钮：%+v", m)
 	}
 }

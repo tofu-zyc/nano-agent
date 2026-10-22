@@ -208,20 +208,30 @@ func expandHome(p string) string {
 
 // describeCall 把工具调用写成人能一眼看懂的样子
 func describeCall(name string, raw json.RawMessage) string {
+	title, body := callCard(name, raw)
+	return title + "：\n" + body
+}
+
+// callCard 是审批时显示的标题（做什么、在哪个工作目录上）和内容（命令、文件）
+func callCard(name string, raw json.RawMessage) (title, body string) {
 	var args map[string]any
 	if json.Unmarshal(raw, &args) != nil {
-		return fmt.Sprintf("工具：%s\n参数：%s", name, prettyArgs(raw))
+		return "工具 " + name, prettyArgs(raw)
 	}
 	str := func(k string) string { v, _ := args[k].(string); return v }
+	where := ""
+	if w := str("workspace"); w != "" {
+		where = "（在 " + w + " 上）"
+	}
 	switch name {
 	case "Shell":
-		return "执行命令：\n" + clip(str("command"), 1500)
+		return "执行命令" + where, clip(str("command"), 1500)
 	case "Write":
-		return fmt.Sprintf("写入文件：%s（%d 字节）\n%s", str("path"), len(str("content")), clip(str("content"), 300))
+		return fmt.Sprintf("写入文件%s：%s（%d 字节）", where, str("path"), len(str("content"))), clip(str("content"), 300)
 	case "Edit":
-		return fmt.Sprintf("修改文件：%s\n原文：\n%s\n改为：\n%s", str("path"), clip(str("old_string"), 400), clip(str("new_string"), 400))
+		return "修改文件" + where + "：" + str("path"), fmt.Sprintf("原文：\n%s\n改为：\n%s", clip(str("old_string"), 400), clip(str("new_string"), 400))
 	}
-	return fmt.Sprintf("工具：%s\n参数：%s", name, prettyArgs(raw))
+	return "工具 " + name + where, prettyArgs(raw)
 }
 
 func clip(s string, n int) string {

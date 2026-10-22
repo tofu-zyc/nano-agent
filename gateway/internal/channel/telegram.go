@@ -294,18 +294,25 @@ func (t *Telegram) convert(m *tgMessage) (Message, bool) {
 	}, true
 }
 
-// onButton：点了回复下面的“停止”。先回应按钮（不然客户端一直转圈），再交给网关。
+// onButton：点了消息下面的按钮（停止、批准、拒绝）。先回应按钮（不然客户端一直转圈），再交给网关。
 func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) {
-	text := ""
-	if q.Data == tgStopData {
-		text = "正在停止…"
+	action, text, toast := "", "", ""
+	switch {
+	case q.Data == tgStopData:
+		action, toast = ActionStop, "正在停止…"
+	case strings.HasPrefix(q.Data, tgApprovePref):
+		n, ok, _ := strings.Cut(strings.TrimPrefix(q.Data, tgApprovePref), ":")
+		action, text, toast = ActionDeny, n, "已拒绝"
+		if ok == "1" {
+			action, toast = ActionApprove, "已批准"
+		}
 	}
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		t.call(cctx, "answerCallbackQuery", map[string]any{"callback_query_id": q.ID, "text": text}, nil)
+		t.call(cctx, "answerCallbackQuery", map[string]any{"callback_query_id": q.ID, "text": toast}, nil)
 	}()
-	if q.Data != tgStopData || q.Message == nil || q.From.IsBot || q.Message.Chat.Type != "private" {
+	if action == "" || q.Message == nil || q.From.IsBot || q.Message.Chat.Type != "private" {
 		return
 	}
 	name := strings.TrimSpace(q.From.FirstName + " " + q.From.LastName)
@@ -314,8 +321,9 @@ func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) 
 		SenderID:   strconv.FormatInt(q.From.ID, 10),
 		SenderName: name,
 		ChatName:   name,
+		Text:       text,
 		Mentioned:  true,
-		Action:     ActionStop,
+		Action:     action,
 	})
 }
 

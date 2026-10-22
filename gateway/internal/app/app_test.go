@@ -382,6 +382,93 @@ func TestApproval(t *testing.T) {
 	e.ch.wait(t, "没有这个编号") // 已经有结果了，审批单作废
 }
 
+// btnCh 是能用按钮审批的渠道（像 Telegram、飞书）
+type btnCh struct {
+	fakeCh
+	mu       sync.Mutex
+	cards    []channel.ApprovalCard
+	resolved map[string]string // ref → 结果
+}
+
+func (b *btnCh) SendApproval(_ context.Context, _ string, c channel.ApprovalCard) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cards = append(b.cards, c)
+	return fmt.Sprintf("ref%d", len(b.cards)), nil
+}
+
+func (b *btnCh) ResolveApproval(_ context.Context, _, ref string, _ channel.ApprovalCard, result string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.resolved[ref] = result
+	return nil
+}
+
+func (b *btnCh) state() ([]channel.ApprovalCard, map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r := map[string]string{}
+	for k, v := range b.resolved {
+		r[k] = v
+	}
+	return append([]channel.ApprovalCard(nil), b.cards...), r
+}
+
+func TestApprovalButtons(t *testing.T) {
+	e := setup(t)
+	b := &btnCh{fakeCh: fakeCh{name: "btn", sent: make(chan string, 100)}, resolved: map[string]string{}}
+	e.a.AddChannel(b)
+	press := func(sender, n string, ok bool) {
+		act := channel.ActionDeny
+		if ok {
+			act = channel.ActionApprove
+		}
+		e.a.OnMessage(b, channel.Message{ChatID: "c1", SenderID: sender, SenderName: "张三", Text: n, Mentioned: true, Action: act})
+	}
+	e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, "btn:u1")
+	e.a.OnMessage(b, channel.Message{ChatID: "c1", SenderID: "u1", SenderName: "张三", Text: "执行命令", Mentioned: true})
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: mainSID, ID: "c9", Name: "Shell", Args: json.RawMessage(`{"command":"make test","workspace":"gpu:~/x"}`), From: "btn:u1"})
+	waitFor(t, func() bool { c, _ := b.state(); return len(c) == 1 })
+	cards, _ := b.state()
+	if c := cards[0]; c.N != 1 || c.Title != "执行命令（在 gpu:~/x 上）" || c.Detail != "make test" || c.From != "btn:u1" {
+		t.Fatalf("审批卡片：%+v", c)
+	}
+	// 不是管理员点了按钮：不算数
+	press("u2", "1", true)
+	b.wait(t, "只有管理员能审批")
+	e.k.none()
+	// 管理员点“批准”：交给内核，审批消息改成结果
+	press("u1", "1", true)
+	if ap := e.k.expect(proto.TApprove); ap.ID != "c9" || ap.OK == nil || !*ap.OK || ap.From != "btn:u1" {
+		t.Fatalf("approve: %+v", ap)
+	}
+	waitFor(t, func() bool { _, r := b.state(); return r["ref1"] != "" })
+	if _, r := b.state(); r["ref1"] != "✅ 已批准 · 张三" {
+		t.Fatalf("结果：%v", r)
+	}
+
+	// 第二个审批在网页上拒绝：按钮消息也改成结果
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: mainSID, ID: "c10", Name: "Write", Args: json.RawMessage(`{"path":"a","content":"x"}`), From: "btn:u1"})
+	waitFor(t, func() bool { c, _ := b.state(); return len(c) == 2 })
+	if err := e.a.Approve(2, false); err != nil {
+		t.Fatal(err)
+	}
+	e.k.expect(proto.TApprove)
+	waitFor(t, func() bool { _, r := b.state(); return r["ref2"] != "" })
+	if _, r := b.state(); r["ref2"] != "❌ 已拒绝 · 网页" {
+		t.Fatalf("结果：%v", r)
+	}
+	// 第三个没人处理、这一轮结束了
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: mainSID, ID: "c11", Name: "Shell", Args: json.RawMessage(`{"command":"x"}`), From: "btn:u1"})
+	waitFor(t, func() bool { c, _ := b.state(); return len(c) == 3 })
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusCancelled})
+	waitFor(t, func() bool { _, r := b.state(); return r["ref3"] != "" })
+	if _, r := b.state(); !strings.Contains(r["ref3"], "这一轮已经结束") {
+		t.Fatalf("结果：%v", r)
+	}
+}
+
 func TestKernelDownAbortsRuns(t *testing.T) {
 	e := setup(t)
 	e.say("任务")

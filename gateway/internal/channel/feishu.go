@@ -13,6 +13,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -84,6 +85,8 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 					m, ok = f.convert(ctx, ev)
 				case *larkim.P2MessageRecalledV1:
 					m, ok = recalled(ev)
+				case Message: // 卡片上的按钮
+					m, ok = ev, true
 				}
 				if ok {
 					h(f, m)
@@ -107,6 +110,16 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 			default:
 			}
 			return nil
+		}).
+		OnP2CardActionTrigger(func(_ context.Context, ev *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			m, toast := cardAction(ev)
+			if m.Action != "" {
+				select {
+				case f.queue <- m:
+				default:
+				}
+			}
+			return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: toast}}, nil
 		})
 
 	pf, err := httpx.ProxyFunc(f.cfg.Proxy)
@@ -339,6 +352,28 @@ func (f *Feishu) Send(ctx context.Context, chatID, text, replyTo string) error {
 		}
 	}
 	return nil
+}
+
+// cardAction 把卡片按钮的回调转成消息：停止、批准、拒绝（需要在开放平台订阅 card.action.trigger 回调）
+func cardAction(ev *callback.CardActionTriggerEvent) (Message, string) {
+	e := ev.Event
+	if e == nil || e.Action == nil || e.Operator == nil || e.Context == nil {
+		return Message{}, ""
+	}
+	val := func(k string) string { v, _ := e.Action.Value[k].(string); return v }
+	m := Message{ChatID: e.Context.OpenChatID, SenderID: e.Operator.OpenID, Mentioned: true}
+	switch val(fsAction) {
+	case "stop":
+		m.Action = ActionStop
+		return m, "正在停止…"
+	case "approve":
+		m.Action, m.Text = ActionApprove, val(fsApprove)
+		return m, "已批准"
+	case "deny":
+		m.Action, m.Text = ActionDeny, val(fsApprove)
+		return m, "已拒绝"
+	}
+	return Message{}, ""
 }
 
 // sdkLogger 把 SDK 的日志接到 slog。
