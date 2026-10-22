@@ -39,7 +39,7 @@ def wslpath(flag, p):
 
 def win_temp():
     if NATIVE:
-        return os.path.abspath(tempfile.gettempdir())
+        return os.path.realpath(tempfile.gettempdir())
     out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd=WIN_CWD, capture_output=True, text=True)
     return out.stdout.strip().splitlines()[-1].strip()
 

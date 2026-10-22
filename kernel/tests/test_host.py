@@ -30,6 +30,9 @@ class Gateway:
         self.srv.settimeout(10)
         self.conn = None
         self.buf = b""
+        # 本机没有沙箱（macOS）时，自动模式下的 Shell 也要审批：不是专门测审批的用例就自动批准
+        self.auto_approve = False
+        self.approved = set()
 
     def accept(self):
         self.conn, _ = self.srv.accept()
@@ -55,6 +58,13 @@ class Gateway:
         if msg.get("t") == "ping":
             self.send(t="pong")
             return self.recv(timeout)
+        if self.auto_approve and msg.get("t") == "approve_req":
+            self.send(t="approve", sid=msg["sid"], id=msg["id"], ok=True, **{"from": "tg:admin"})
+            self.approved.add(msg["sid"])
+            return self.recv(timeout)
+        if msg.get("t") == "notice" and msg.get("sid") in self.approved and "已批准" in msg.get("text", ""):
+            self.approved.discard(msg["sid"])
+            return self.recv(timeout)
         return msg
 
     def expect(self, t, timeout=10, **fields):
@@ -66,16 +76,21 @@ class Gateway:
         return msg
 
 
-def case(name):
+def case(name, approvals=False):
+    """approvals：用例自己检查审批，不自动批准"""
     def wrap(fn):
         def run(gw):
             t0 = time.time()
+            auto = gw.auto_approve
+            gw.auto_approve = auto and not approvals
             try:
                 fn(gw)
                 print(f"  ok   {name} ({time.time() - t0:.1f}s)")
             except Exception as e:  # noqa: BLE001 —— 测试里要把所有失败都记下来
                 FAILS.append(name)
                 print(f"  FAIL {name}: {e}")
+            finally:
+                gw.auto_approve = auto
         run.__name__ = fn.__name__
         return run
     return wrap
@@ -133,7 +148,7 @@ def t_skill(gw):
     finish(gw, "sk")
 
 
-@case("多个工作目录：按 workspace 参数决定在哪台机器上执行")
+@case("多个工作目录：按 workspace 参数决定在哪台机器上执行", approvals=True)
 def t_multi_ws(gw):
     start_run(gw, "mw", workspaces=[local_ws(), box_ws(landlock=0)])
     call(gw, "mw", ("c1", "Read", {"path": "a.txt"}),
@@ -259,7 +274,7 @@ def t_modes(gw):
     finish(gw, "s5")
 
 
-@case("审批模式：Shell 先审批，批准后执行；拒绝的给模型错误结果")
+@case("审批模式：Shell 先审批，批准后执行；拒绝的给模型错误结果", approvals=True)
 def t_approve(gw):
     start_run(gw, "s6", mode="ask", frm="tg:admin")
     call(gw, "s6", ("c1", "Shell", {"command": "echo approved-ran"}))
@@ -277,7 +292,7 @@ def t_approve(gw):
     finish(gw, "s6")
 
 
-@case("审批超时：按拒绝处理")
+@case("审批超时：按拒绝处理", approvals=True)
 def t_approve_timeout(gw):
     start_run(gw, "s7", mode="ask")
     call(gw, "s7", ("c1", "Shell", {"command": "true"}))
@@ -386,7 +401,7 @@ def t_gateway_exec(gw):
     assert not os.path.exists(os.path.join(WORK, "r.txt")), "异机模式不该在本机执行"
 
 
-@case("异机模式：执行的机器没有沙箱时，自动模式的 Shell 也要审批")
+@case("异机模式：执行的机器没有沙箱时，自动模式的 Shell 也要审批", approvals=True)
 def t_gateway_nosandbox(gw):
     start_gateway_run(gw, "g2", landlock=0)
     call(gw, "g2", ("c1", "Shell", {"command": "ls"}), ("c2", "Read", {"path": "a"}))
@@ -450,6 +465,7 @@ def main():
             assert all("workspace" in t["input_schema"]["properties"] for t in hello["tools"]), hello["tools"]
             assert "landlock" in hello["sandbox"], hello
             gw.send(t="welcome", v=5)
+            gw.auto_approve = hello["sandbox"]["landlock"] == 0
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
             for t in (t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,

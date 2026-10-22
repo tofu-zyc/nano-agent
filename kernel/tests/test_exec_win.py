@@ -35,7 +35,8 @@ def wslpath(flag, p):
 
 def windows_temp():
     if NATIVE:
-        return os.path.abspath(tempfile.gettempdir())
+        # realpath 把 8.3 短名（C:\Users\RUNNER~1）换成长名，和执行器给的规范形式一致
+        return os.path.realpath(tempfile.gettempdir())
     out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd=WIN_CWD, capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
         raise RuntimeError("拿不到 Windows 的 TEMP：" + out.stderr)
@@ -255,8 +256,9 @@ def t_timeout():
            "-PassThru -WindowStyle Hidden; Set-Content -Encoding ASCII -Path \"$env:USERPROFILE\\nano-child.pid\" -Value $p.Id; "
            "Start-Sleep -Seconds 60")
     t0 = time.time()
-    bad(run("Shell", {"command": cmd, "timeout": 2}), "执行超时（2 秒）")
-    assert time.time() - t0 < 8, time.time() - t0
+    # PowerShell 冷启动在慢机器（CI）上要一两秒，留够时间让子进程先写出 PID
+    bad(run("Shell", {"command": cmd, "timeout": 6}), "执行超时（6 秒）")
+    assert time.time() - t0 < 15, time.time() - t0
     time.sleep(0.5)
     assert os.path.exists(marker), "子进程 PID 没写出来"
     raw = open(marker, "rb").read()
