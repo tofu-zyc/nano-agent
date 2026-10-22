@@ -110,7 +110,10 @@ os.makedirs(FAKEBIN)
 with open(os.path.join(FAKEBIN, "systemctl"), "w") as f:
     f.write("#!/bin/sh\nexit 1\n")
 os.chmod(os.path.join(FAKEBIN, "systemctl"), 0o755)
-ENV = dict(os.environ, HOME=HOME, PATH=FAKEBIN + ":" + os.environ["PATH"], NANO_DOWNLOAD_URL=BASE)
+LOCALBIN = os.path.join(HOME, ".local", "bin")
+os.makedirs(LOCALBIN)
+ENV = dict(os.environ, HOME=HOME, PATH=FAKEBIN + ":" + LOCALBIN + ":" + os.environ["PATH"], NANO_DOWNLOAD_URL=BASE,
+           SHELL="/bin/bash")
 ENV.pop("NANO_HOME", None)
 NANO = os.path.join(HOME, ".nano-agent")
 
@@ -173,6 +176,11 @@ try:
         r = oneliner("--import", exp, "--old-local-as", "oldwsl", "--yes")
         assert r.returncode == 0, out(r)
         assert "已导入" in out(r) and "oldwsl" in out(r), out(r)
+        # 命令加进 PATH：shell 启动文件里有，~/.local/bin 在 PATH 里时还有链接（当前终端马上能用）
+        for rc in (".profile", ".bashrc"):
+            text = open(os.path.join(HOME, rc)).read()
+            assert text.count("# nano-agent PATH") == 1 and os.path.join(NANO, "bin") in text, (rc, text)
+        assert os.path.realpath(os.path.join(LOCALBIN, "nano-gateway")) == os.path.join(NANO, "bin", "nano-gateway")
         ws = json.load(open(os.path.join(NANO, "data", "workspaces.json")))
         assert ws[0]["host"] == "oldwsl", ws
         gw = os.path.join(NANO, "bin", "nano-gateway")
@@ -192,6 +200,9 @@ try:
         r = subprocess.run(["bash", os.path.join(script, f"nano-gateway-{VER}-linux-{ARCH}", "install-gateway.sh"),
                             "--uninstall", "--yes"], env=ENV, capture_output=True)
         assert r.returncode == 0 and not os.path.exists(NANO), out(r)
+        for rc in (".profile", ".bashrc"):
+            assert "nano-agent" not in open(os.path.join(HOME, rc)).read(), rc
+        assert not os.path.lexists(os.path.join(LOCALBIN, "nano-gateway"))
 
     if os.path.exists(WIN_ZIP) and (os.name == "nt" or os.path.exists("/mnt/c/Windows/System32/cmd.exe")):
         @case("Windows 一行安装（install.ps1）：下载、校验、安装、卸载")

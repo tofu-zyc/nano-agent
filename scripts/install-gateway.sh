@@ -113,6 +113,45 @@ wsl_remove_keepalive() {
   rm -f "$startup/nano-agent-wsl-keepalive.vbs"
 }
 
+# ---- PATH：写进各个 shell 的启动文件（新开的终端生效）；~/.local/bin 已经在 PATH 里时
+# 再放一个链接，当前终端马上就能用 ----
+add_to_path() { # add_to_path 目录 命令…
+  dir=$1; shift
+  shell_name=$(basename "${SHELL:-sh}")
+  for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    case "$f" in
+    */.bashrc) [ -f "$f" ] || [ "$shell_name" = bash ] || continue ;;
+    */.zshrc) [ -f "$f" ] || [ "$shell_name" = zsh ] || continue ;;
+    esac
+    grep -qsF "$PROFILE_MARK" "$f" && continue
+    printf '\nexport PATH="%s:$PATH"  %s\n' "$dir" "$PROFILE_MARK" >>"$f"
+  done
+  if [ "$shell_name" = fish ]; then
+    mkdir -p "$HOME/.config/fish/conf.d"
+    printf 'fish_add_path -g %s  %s\n' "$dir" "$PROFILE_MARK" >"$HOME/.config/fish/conf.d/nano-agent.fish"
+  fi
+  case ":$PATH:" in
+  *":$dir:"*) ;;
+  *":$HOME/.local/bin:"*)
+    for c in "$@"; do
+      if [ ! -e "$HOME/.local/bin/$c" ] || [ -L "$HOME/.local/bin/$c" ]; then ln -sf "$dir/$c" "$HOME/.local/bin/$c"; fi
+    done ;;
+  esac
+}
+remove_from_path() { # remove_from_path 目录 命令…
+  dir=$1; shift
+  for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [ -f "$f" ] && grep -qF "$PROFILE_MARK" "$f"; then
+      { grep -vF "$PROFILE_MARK" "$f" || true; } >"$f.nano-tmp"
+      cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
+    fi
+  done
+  rm -f "$HOME/.config/fish/conf.d/nano-agent.fish"
+  for c in "$@"; do
+    case "$(readlink "$HOME/.local/bin/$c" 2>/dev/null)" in "$dir"/*) rm -f "$HOME/.local/bin/$c" ;; esac
+  done
+}
+
 is_wsl() {
   grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
 }
@@ -129,10 +168,11 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ -x "$BIN/nano-gateway-ctl" ]; then "$BIN/nano-gateway-ctl" stop >/dev/null 2>&1 || true; fi
   for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ -f "$f" ]; then
-      { grep -vF "$PROFILE_MARK" "$f" | grep -vF "$PROFILE_START" || true; } >"$f.nano-tmp"
+      { grep -vF "$PROFILE_START" "$f" || true; } >"$f.nano-tmp"
       cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
     fi
   done
+  remove_from_path "$BIN" nano-gateway nano-kernel-ctl
   if [ -d "$NANO_HOME" ]; then
     confirm "删除 $NANO_HOME？里面有会话记录、模型和 SSH 连接。" || { say "已取消"; exit 0; }
     rm -rf "$NANO_HOME"
@@ -210,11 +250,7 @@ if [ "$MIGRATE" = 1 ] && [ -d "$ROOT/data" ] && [ -z "$(ls -A "$DATA" 2>/dev/nul
 fi
 
 # ---- PATH ----
-if ! grep -qsF "$PROFILE_MARK" "$HOME/.profile" 2>/dev/null; then
-  if confirm "把 $BIN 加进 PATH（写 ~/.profile，重新登录后生效）？"; then
-    printf 'export PATH="%s:$PATH"  %s\n' "$BIN" "$PROFILE_MARK" >>"$HOME/.profile"
-  fi
-fi
+add_to_path "$BIN" nano-gateway
 
 # ---- 后台服务 ----
 CHANNEL="$NANO_HOME/data/gateway.log"
@@ -272,7 +308,7 @@ if is_wsl; then
 fi
 
 say ""
-say "装好了。"
+say "装好了。命令 nano-gateway 已加进 PATH（新开的终端生效；当前终端要马上用就运行：export PATH=\"$BIN:\$PATH\"）"
 say "  网关：   $BIN/nano-gateway -c $CONFIG"
 say "  终端聊： $BIN/nano-gateway chat -c $CONFIG"
 say "  日志：   $CHANNEL"

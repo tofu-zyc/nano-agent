@@ -194,7 +194,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
-0. 按 [PLAN-release.md](PLAN-release.md) 阶段 4 做 v0.1.1：网关 `nano-gateway update`（`/update`、网页按钮、GatewayAdmin `update`，下载校验、备份、换程序、检查配置、自重启，起不来自动退回；每天查一次新版本只提示；包里的 personas/skills 用户没改过的才更新）；内核版本和网关不同时自动推 `update`（网关是 dev 版本时不推，`update_failed` 等于目标版本时不再自动推；内核包按 os/arch 从 Release 下载并缓存）；网页显示各内核版本、添加电脑时给出一行安装命令。
+0. 按 [PLAN-release.md](PLAN-release.md) 阶段 4 做 v0.2.0（v0.1.1 只是修 PATH、长 socket 路径、飞书卡片体积的小版本）：网关 `nano-gateway update`（`/update`、网页按钮、GatewayAdmin `update`，下载校验、备份、换程序、检查配置、自重启，起不来自动退回；每天查一次新版本只提示；包里的 personas/skills 用户没改过的才更新）；内核版本和网关不同时自动推 `update`（网关是 dev 版本时不推，`update_failed` 等于目标版本时不再自动推；内核包按 os/arch 从 Release 下载并缓存）；网页显示各内核版本、添加电脑时给出一行安装命令。
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
 2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。

@@ -29,6 +29,7 @@ PLATFORM=$(uname -s)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LAUNCH_DIR/com.nano-agent.kernel.plist"
 PROFILE_MARK="# nano-agent 内核"
+PATH_MARK="# nano-agent PATH"   # 和网关安装脚本共用，同一台机器上只加一次
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -73,6 +74,45 @@ confirm() { # confirm 提示（默认是）
 	printf '%s [Y/n]：' "$1"
 	IFS= read -r a <"$TTY" || a=n
 	case "$a" in "" | y | Y | yes | 是) return 0 ;; *) return 1 ;; esac
+}
+
+# ---- PATH：写进各个 shell 的启动文件（新开的终端生效）；~/.local/bin 已经在 PATH 里时
+# 再放一个链接，当前终端马上就能用 ----
+add_to_path() { # add_to_path 目录 命令…
+	dir=$1; shift
+	shell_name=$(basename "${SHELL:-sh}")
+	for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+		case "$f" in
+		*/.bashrc) [ -f "$f" ] || [ "$shell_name" = bash ] || continue ;;
+		*/.zshrc) [ -f "$f" ] || [ "$shell_name" = zsh ] || continue ;;
+		esac
+		grep -qsF "$PATH_MARK" "$f" && continue
+		printf '\nexport PATH="%s:$PATH"  %s\n' "$dir" "$PATH_MARK" >>"$f"
+	done
+	if [ "$shell_name" = fish ]; then
+		mkdir -p "$HOME/.config/fish/conf.d"
+		printf 'fish_add_path -g %s  %s\n' "$dir" "$PATH_MARK" >"$HOME/.config/fish/conf.d/nano-agent.fish"
+	fi
+	case ":$PATH:" in
+	*":$dir:"*) ;;
+	*":$HOME/.local/bin:"*)
+		for c in "$@"; do
+			if [ ! -e "$HOME/.local/bin/$c" ] || [ -L "$HOME/.local/bin/$c" ]; then ln -sf "$dir/$c" "$HOME/.local/bin/$c"; fi
+		done ;;
+	esac
+}
+remove_from_path() { # remove_from_path 目录 命令…
+	dir=$1; shift
+	for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+		if [ -f "$f" ] && grep -qF "$PATH_MARK" "$f"; then
+			{ grep -vF "$PATH_MARK" "$f" || true; } >"$f.nano-tmp"
+			cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
+		fi
+	done
+	rm -f "$HOME/.config/fish/conf.d/nano-agent.fish"
+	for c in "$@"; do
+		case "$(readlink "$HOME/.local/bin/$c" 2>/dev/null)" in "$dir"/*) rm -f "$HOME/.local/bin/$c" ;; esac
+	done
 }
 
 has_systemd() {
@@ -141,6 +181,11 @@ if [ "$UNINSTALL" = 1 ]; then
 		fi
 	done
 	rm -f "$HOME/.local/bin/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
+	# 这台机器上没有网关了（bin 空了）才把 PATH 行也去掉
+	if [ -z "$(ls -A "$NANO_HOME/bin" 2>/dev/null)" ]; then
+		remove_from_path "$NANO_HOME/bin" nano-kernel-ctl
+		rmdir "$NANO_HOME/bin" 2>/dev/null || true
+	fi
 	rm -rf "$DIR"
 	[ "$OLD_DIR" = "$DIR" ] || rm -rf "$OLD_DIR"
 	say "已卸载。网关网页「设备」里配对过的这台电脑可以一并移除。"
@@ -406,11 +451,11 @@ EOF
 chmod 755 "$DIR/nano-kernel-ctl"
 mkdir -p "$NANO_HOME/bin"
 ln -sf "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
-rm -f "$HOME/.local/bin/nano-kernel-ctl"
+add_to_path "$NANO_HOME/bin" nano-kernel-ctl
 
 if [ "$SERVICE" = 0 ]; then
 	say ""
-	say "装好了，没有启动。启动：$NANO_HOME/bin/nano-kernel-ctl start"
+	say "装好了，没有启动。启动：nano-kernel-ctl start（已加进 PATH，新开的终端生效）"
 	exit 0
 fi
 
