@@ -114,7 +114,7 @@ cd gateway && go test -race ./...
 
 16. **多模型**（internal/models、app/models.go）：配置文件里的 `[llm]` 是内置端点 `config`，网页里加的接口和模型存 `data/models.json`（0600）。会话的 `Settings.Model` 是模型 ID（端点/模型名），空表示默认模型。`clientFor` 找到模型后，config 端点直接用 `a.llm`（配置热更新由 SetLLM 换），别的端点按需建客户端并按配置指纹（reflect.DeepEqual）缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填时用上下文窗口的一半）。`ModelsChanged` 在模型列表变化后把指向已删模型的会话改回默认，并刷新所有会话（默认模型可能变了）。网页接口只返回 `has_key`，不回传 API key。
 
-17. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源：配置文件 `[llm] modalities` 或每个模型自己的 `modalities`。
+17. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源：配置文件 `[llm] modalities` 或每个模型自己的 `modalities`。设置页的输入类型是配置 schema 的 `multi` 类型（固定选项 + `Fixed` 锁定 text），不要改回手填的 `list`；`store.addModel()` 让设置页和 ⌘K 能直接打开模型面板的“添加模型”流程。
 
 ## 用户的偏好和约定（重要）
 

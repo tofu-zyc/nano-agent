@@ -95,6 +95,16 @@
             </button>
           </div>
           <div class="fields">
+            {#if g.id === 'model'}
+              <div class="callout">
+                <Icon name="sparkles" size={16} />
+                <div class="grow">
+                  <strong>可以加多个接口和模型</strong>
+                  <p>配置文件里的 [llm] 是内置的接口和模型。别的 OpenAI 兼容接口、多模态模型在模型面板里添加，每个会话可以用 <code>/model</code> 单独选。</p>
+                </div>
+                <button class="btn sm primary" onclick={() => store.addModel()}><Icon name="plus" size={13} />添加模型</button>
+              </div>
+            {/if}
             {#each fs as f (f.key)}
               <Field {f} highlight={focus === f.key} />
             {:else}
@@ -294,6 +304,33 @@
     margin: 0;
     font-size: 12.5px;
     color: var(--muted);
+  }
+  .callout {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 4px 0 10px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--c) 8%, var(--panel-2));
+    border: 1px solid color-mix(in srgb, var(--c) 30%, var(--line));
+  }
+  .callout > :global(svg) {
+    color: var(--c);
+    margin-top: 1px;
+  }
+  .callout strong {
+    font-size: 13px;
+  }
+  .callout p {
+    margin: 3px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-2);
+  }
+  .callout .grow {
+    flex: 1;
+    min-width: 0;
   }
   .fields {
     border-radius: 14px;

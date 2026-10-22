@@ -12,6 +12,7 @@
     'workspace.mode': { auto: '自动', ask: '审批', readonly: '只读' },
     'access.guest': { none: '只能聊天', readonly: '可以读文件' },
     'llm.provider': { openai: 'OpenAI 兼容', mock: '假模型' },
+    'llm.modalities': { text: '文字', image: '图片' },
     'feishu.domain': { feishu: '飞书', lark: 'Lark' },
   };
   const sourceLabel = { web: '网页里改过', file: '配置文件', env: '环境变量', default: '默认值' };
@@ -141,6 +142,21 @@
       aria-label={f.label}
       onclick={() => save(!f.value)}
     ><i></i></button>
+  {:else if f.type === 'multi'}
+    <div class="seg">
+      {#each f.options ?? [] as o}
+        {@const list = (f.value ?? []) as string[]}
+        {@const fixed = (f.fixed ?? []).includes(o)}
+        <button
+          class:active={list.includes(o)}
+          disabled={fixed}
+          title={fixed ? '总是支持' : '点击切换'}
+          onclick={() => {
+            if (fixed) return;
+            save(list.includes(o) ? list.filter((x) => x !== o) : [...list, o]);
+          }}>{labelOf(o)}</button>
+      {/each}
+    </div>
   {:else if f.type === 'enum'}
     {#if (f.options?.length ?? 0) <= 4}
       <div class="seg">
@@ -316,6 +332,10 @@
   }
   .seg button:hover {
     color: var(--text);
+  }
+  .seg button:disabled {
+    opacity: 0.85;
+    cursor: default;
   }
   .seg button.active {
     background: var(--panel-solid);

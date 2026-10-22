@@ -52,6 +52,7 @@ class Store {
   focus = $state<string | null>(null); // 设置面板里要高亮的配置项
   private pendingOpen: { t: Target; focus: string | null } | null = null;
   palette = $state(false);
+  addModelTick = $state(0); // 命令面板/设置页要求打开模型面板并直接开始添加模型
   route = $state<Route>(parseRoute());
   theme = $state<Theme>(loadTheme());
   connected = $state(false);
@@ -83,6 +84,12 @@ class Store {
 
   go(hash: string) {
     location.hash = hash;
+  }
+
+  /** 打开模型面板并直接开始添加模型 */
+  addModel() {
+    this.openOnMap({ type: 'model' });
+    this.addModelTick++;
   }
 
   // ---- 登录和启动 ----

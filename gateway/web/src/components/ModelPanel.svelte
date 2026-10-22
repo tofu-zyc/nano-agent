@@ -38,6 +38,19 @@
   let mThink = $state('');
   let mLevels = $state('');
   let mImage = $state(false); // 这个模型能不能接收图片
+  let mEditing = $state(false); // 改已有的模型（接口不能换）
+  let afterEndpoint = $state(false); // 先加接口，存好以后接着加模型
+  const writable = $derived(eps.filter((e) => !e.config));
+
+  // 从命令面板、设置页过来时直接打开添加模型
+  let seenAdd = 0;
+  $effect(() => {
+    const tick = store.addModelTick;
+    if (tick && tick !== seenAdd) {
+      seenAdd = tick;
+      addModelFlow();
+    }
+  });
   let remote = $state<RemoteModel[] | null>(null);
   let remoteErr = $state('');
 
@@ -77,10 +90,14 @@
     err = '';
     const body = { name: epName.trim(), kind: epKind, base_url: epBase.trim(), api_key: epKey, proxy: epProxy.trim() };
     try {
-      if (epID) await api.put('/api/models/endpoints/' + encodeURIComponent(epID), body);
-      else await api.post('/api/models/endpoints', body);
+      const r = epID
+        ? await api.put<{ id: string }>('/api/models/endpoints/' + encodeURIComponent(epID), body)
+        : await api.post<{ id: string }>('/api/models/endpoints', body);
       epOpen = false;
       await store.reloadModels();
+      const next = afterEndpoint;
+      afterEndpoint = false;
+      if (next) newModel(r.id);
       store.toast({ kind: 'ok', text: '接口已保存' }, 1800);
     } catch (e) {
       err = fail(e);
@@ -101,6 +118,16 @@
     }
   }
 
+  // 顶部的「添加模型」：还没有接口就先去加接口，加好以后自动接着加模型
+  function addModelFlow() {
+    if (!writable.length) {
+      afterEndpoint = true;
+      newEndpoint();
+      return;
+    }
+    newModel(writable[0].id);
+  }
+
   function newModel(endpoint: string) {
     mEndpoint = endpoint;
     mName = '';
@@ -111,6 +138,8 @@
     mThink = '';
     mLevels = '';
     mImage = false;
+    mEditing = false;
+    afterEndpoint = false;
     remote = null;
     remoteErr = '';
     err = '';
@@ -128,6 +157,7 @@
     mThink = m.thinking;
     mLevels = (m.thinking_levels ?? []).join(', ');
     mImage = (m.modalities ?? []).includes('image');
+    mEditing = true;
     remote = null;
     remoteErr = '';
     err = '';
@@ -160,6 +190,7 @@
           .filter(Boolean),
       });
       mOpen = false;
+      mEditing = false;
       remote = null;
       await store.reloadModels();
       store.toast({ kind: 'ok', text: '模型已保存' }, 1800);
@@ -265,12 +296,23 @@
   {/if}
 </div>
 
+<div class="acts">
+  <button class="btn primary" onclick={addModelFlow} disabled={epOpen || mOpen}>
+    <Icon name="plus" size={14} />添加模型
+  </button>
+  <button class="btn" onclick={newEndpoint} disabled={epOpen || mOpen}>
+    <Icon name="plus" size={14} />添加接口
+  </button>
+  {#if !writable.length}<span class="muted small">先加一个接口，再给它添加模型</span>{/if}
+</div>
+
 {#if epOpen}
   <div class="card form">
     <div class="row">
       <strong class="grow">{epID ? '编辑接口' : '添加接口'}</strong>
       <button class="btn sm ghost" aria-label="关闭" onclick={() => (epOpen = false)}><Icon name="x" size={13} /></button>
     </div>
+    {#if afterEndpoint}<p class="note small">保存后接着给这个接口添加模型。</p>{/if}
     <label>名字<input class="input" bind:value={epName} placeholder="比如 本地 vLLM" /></label>
     <label>类型
       <select class="input" bind:value={epKind}>
@@ -300,9 +342,18 @@
 {#if mOpen}
   <div class="card form">
     <div class="row">
-      <strong class="grow">添加模型 <span class="muted small">· {epName0(mEndpoint)}</span></strong>
+      <strong class="grow">{mEditing ? '编辑模型' : '添加模型'} <span class="muted small">· {epName0(mEndpoint)}</span></strong>
       <button class="btn sm ghost" aria-label="关闭" onclick={() => (mOpen = false)}><Icon name="x" size={13} /></button>
     </div>
+    {#if mEditing}
+      <div class="muted small">接口：{epName0(mEndpoint)}</div>
+    {:else}
+      <label>接口
+        <select class="input" bind:value={mEndpoint}>
+          {#each writable as e (e.id)}<option value={e.id}>{e.name}</option>{/each}
+        </select>
+      </label>
+    {/if}
     <div class="row">
       <button class="btn sm" disabled={busy === 'fetch'} onclick={fetchRemote}>
         <Icon name={busy === 'fetch' ? 'refresh' : 'down'} size={13} class={busy === 'fetch' ? 'spin' : ''} />
@@ -477,6 +528,13 @@
   }
   .form label.check input {
     accent-color: var(--accent);
+  }
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 4px 0 2px;
   }
   .two {
     display: grid;

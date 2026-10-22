@@ -237,6 +237,25 @@ func normalize(f Field, v any) (any, error) {
 			return nil, errors.New("应该是开或关")
 		}
 		return b, nil
+	case "multi":
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, errors.New("应该是一组选项")
+		}
+		out := []string{}
+		for _, s := range f.Fixed { // 固定值总是选中，而且排在最前面
+			out = append(out, s)
+		}
+		for _, it := range arr {
+			s, ok := it.(string)
+			if !ok || !slices.Contains(f.Options, s) {
+				return nil, fmt.Errorf("只能是 %s", strings.Join(f.Options, "、"))
+			}
+			if !slices.Contains(out, s) {
+				out = append(out, s)
+			}
+		}
+		return out, nil
 	case "list":
 		arr, ok := v.([]any)
 		if !ok {

@@ -104,3 +104,33 @@ func TestStoreOverlay(t *testing.T) {
 		t.Fatalf("pending: %+v", f)
 	}
 }
+
+// 输入类型是一组固定选项：文字总是选中，只能加/去图片，别的值拒绝。
+func TestModalitiesMulti(t *testing.T) {
+	path := writeConf(t)
+	s, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Current().LLM.Modalities; len(got) != 1 || got[0] != "text" {
+		t.Fatalf("默认：%v", got)
+	}
+	if err := s.Set(map[string]any{"llm.modalities": []any{"image"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Current().LLM.Modalities; len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Fatalf("只选图片：%v", got)
+	}
+	if f := find(s.Describe(), "llm.modalities"); f.Source != "web" {
+		t.Fatalf("来源：%+v", f)
+	}
+	if err := s.Set(map[string]any{"llm.modalities": []any{"video"}}); err == nil {
+		t.Fatal("不认识的值应该拒绝")
+	}
+	if err := s.Set(map[string]any{"llm.modalities": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Current().LLM.Modalities; len(got) != 1 || got[0] != "text" {
+		t.Fatalf("恢复默认：%v", got)
+	}
+}

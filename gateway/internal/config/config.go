@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -258,6 +259,9 @@ func (c *Config) applyDefaults() {
 	}
 	if len(c.LLM.Modalities) == 0 {
 		c.LLM.Modalities = []string{"text"}
+	}
+	if !slices.Contains(c.LLM.Modalities, "text") {
+		c.LLM.Modalities = append([]string{"text"}, c.LLM.Modalities...)
 	}
 }
 

@@ -51,6 +51,13 @@
         },
       },
       {
+        id: 'a:addmodel', icon: 'plus', title: '添加模型或接口', sub: '加一个 OpenAI 兼容接口；多模态模型勾“能接收图片”', kind: '操作', text: '添加 新建 模型 接口 endpoint vision 多模态 图片',
+        run: () => {
+          store.addModel();
+          close();
+        },
+      },
+      {
         id: 'a:main', icon: 'hub', title: '打开主会话', sub: '终端、网页和你的机器人私聊共用的对话', kind: '操作', text: '主会话 聊天 main chat',
         run: go('#/sessions/main'),
       },

@@ -143,8 +143,9 @@ export type FieldState = {
   section?: string;
   label: string;
   help?: string;
-  type: 'string' | 'int' | 'float' | 'bool' | 'enum' | 'list' | 'secret' | 'json' | 'proxy';
+  type: 'string' | 'int' | 'float' | 'bool' | 'enum' | 'multi' | 'list' | 'secret' | 'json' | 'proxy';
   options?: string[];
+  fixed?: string[]; // multi 里总是选上、不能去掉的值
   restart?: boolean;
   readonly?: boolean;
   advanced?: boolean;
