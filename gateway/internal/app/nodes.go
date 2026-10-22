@@ -61,6 +61,7 @@ type KernelInfo struct {
 	Node     string   `json:"node"`
 	OS       string   `json:"os,omitempty"`
 	Arch     string   `json:"arch,omitempty"`
+	Version  string   `json:"version,omitempty"`
 	Landlock int      `json:"landlock"` // 0 表示没有沙箱
 	Tools    []string `json:"tools"`
 	Since    int64    `json:"since"`
@@ -134,7 +135,8 @@ func (a *App) Skills() []skills.Skill {
 
 func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Lock()
-	n := &node{info: KernelInfo{Node: name, OS: hello.OS, Arch: hello.Arch, Since: time.Now().UnixMilli(), Local: local}}
+	n := &node{info: KernelInfo{Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
+		Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {

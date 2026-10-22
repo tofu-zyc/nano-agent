@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 8
+const Version = 9
 
 // 权限模式，随 input 传给内核。
 const (
@@ -17,18 +17,19 @@ const (
 // 消息类型。
 const (
 	// 内核 → 网关
-	THello      = "hello"
-	TModel      = "model"
-	TResult     = "result"
-	TApproveReq = "approve_req"
-	TNotice     = "notice"
-	TDone       = "done"
-	TPing       = "ping"
-	TLsResult   = "ls_result"
-	TExec       = "exec"        // 请网关执行一次工具：工作目录不在这个内核的机器上，或者 Skill
-	TExecCancel = "exec_cancel" // 工具超时或这一轮被停止：请网关停下
-	TRunResult  = "run_result"  // run / skill_put 的结果
-	TTools      = "tools"       // 旧内核：技能变化后更新工具定义（现在技能在网关上）
+	THello        = "hello"
+	TModel        = "model"
+	TResult       = "result"
+	TApproveReq   = "approve_req"
+	TNotice       = "notice"
+	TDone         = "done"
+	TPing         = "ping"
+	TLsResult     = "ls_result"
+	TExec         = "exec"          // 请网关执行一次工具：工作目录不在这个内核的机器上，或者 Skill
+	TExecCancel   = "exec_cancel"   // 工具超时或这一轮被停止：请网关停下
+	TRunResult    = "run_result"    // run / skill_put 的结果
+	TTools        = "tools"         // 旧内核：技能变化后更新工具定义（现在技能在网关上）
+	TUpdateResult = "update_result" // update 的结果；成功后内核随即用新版本重启
 
 	// 网关 → 内核
 	TWelcome    = "welcome"
@@ -45,6 +46,7 @@ const (
 	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.nano-agent/skills/<技能名>/
 	TPairing    = "pairing"     // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired     = "paired"      // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
+	TUpdate     = "update"      // 新版本的程序（Files：path 是文件名，data 是 base64），内核换掉自己后重启
 )
 
 // error 的 reason：内核据此决定怎么办
@@ -76,16 +78,20 @@ type Msg struct {
 	T string `json:"t"`
 
 	// hello / welcome
-	V       int         `json:"v,omitempty"`
-	Token   string      `json:"token,omitempty"`
-	Pair    bool        `json:"pair,omitempty"` // hello：没有口令，请求配对
-	Code    string      `json:"code,omitempty"` // pairing：确认码，网页上核对
-	Node    string      `json:"node,omitempty"`
-	OS      string      `json:"os,omitempty"`   // hello：内核所在的系统 linux / windows / macos
-	Arch    string      `json:"arch,omitempty"` // hello：内核所在的 CPU 架构
-	Tools   []ToolSpec  `json:"tools,omitempty"`
-	Skills  []SkillSpec `json:"skills,omitempty"`
-	Sandbox *Sandbox    `json:"sandbox,omitempty"`
+	V     int    `json:"v,omitempty"`
+	Token string `json:"token,omitempty"`
+	Pair  bool   `json:"pair,omitempty"` // hello：没有口令，请求配对
+	Code  string `json:"code,omitempty"` // pairing：确认码，网页上核对
+	Node  string `json:"node,omitempty"`
+	OS    string `json:"os,omitempty"`   // hello：内核所在的系统 linux / windows / macos
+	Arch  string `json:"arch,omitempty"` // hello：内核所在的 CPU 架构
+	// hello：内核的版本；update / update_result：要换成的版本
+	Version string `json:"version,omitempty"`
+	// hello：上次自动更新失败、已经退回的版本，网关别再自动推它
+	UpdateFailed string      `json:"update_failed,omitempty"`
+	Tools        []ToolSpec  `json:"tools,omitempty"`
+	Skills       []SkillSpec `json:"skills,omitempty"`
+	Sandbox      *Sandbox    `json:"sandbox,omitempty"`
 
 	SID    string `json:"sid,omitempty"`
 	From   string `json:"from,omitempty"`

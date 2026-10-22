@@ -43,6 +43,9 @@ size_t utf8_cut(const char *s, size_t len, size_t max);
 /* 追加时把不合法的 UTF-8 字节（包括 \0）替换成 U+FFFD，保证发出去的 JSON 合法 */
 void buf_put_utf8(buf_t *b, const char *s, size_t len);
 
+/* base64 解码（忽略换行和 =）。出错返回 NULL；结果是 malloc 的，*n 是长度。 */
+unsigned char *b64_decode(const char *s, size_t *n);
+
 int set_nonblock(int fd);
 int set_cloexec(int fd);
 

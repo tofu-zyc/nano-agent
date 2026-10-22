@@ -102,6 +102,12 @@ char *plat_self_exe(void)
 #endif
 }
 
+int plat_exec(const char *path, char **argv)
+{
+    execv(path, argv);
+    return -1;
+}
+
 char *plat_exe_dir(void)
 {
     char *self = plat_self_exe();

@@ -1,8 +1,17 @@
 CC       ?= cc
 CFLAGS   ?= -O2 -g
 WARN     := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
-CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson
+CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ibuild -Ithird_party/cjson
 STD      := -std=c11
+
+# 版本号：发布时由上层 make release VERSION=x.y.z 传进来，平时用 git describe
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION_H := build/version.h
+
+# 在 macOS 上直接 make 时自动用 macOS 的平台层
+ifeq ($(shell uname -s 2>/dev/null),Darwin)
+NA_PLATFORM ?= macos
+endif
 
 BIN   := nano-kernel
 EXEC  := nano-exec
@@ -22,11 +31,11 @@ SB   := src/sandbox.c
 RUNNER := src/runner.c
 endif
 
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c $(RUNNER) src/link.c src/util.c $(PLAT)
+SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c $(RUNNER) src/link.c src/util.c $(PLAT)
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
-KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/runner_win.c src/link.c src/util.c src/plat_win.c
-MAC_SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/util.c src/plat_posix.c
+KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/runner_win.c src/link.c src/util.c src/plat_win.c
+MAC_SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/runner.c src/link.c src/util.c src/plat_posix.c
 MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -36,11 +45,11 @@ ZIG      ?= ../build/tools/zig/zig
 RG_WIN   ?= ../build/tools/rg.exe
 WIN_EXEC := build/nano-exec.exe
 WIN_KERNEL := build/nano-kernel.exe
-WIN_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Wshadow -Isrc -Ithird_party/cjson
+WIN_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Wshadow -Isrc -Ibuild -Ithird_party/cjson
 WIN_LIBS   := -lws2_32 -lshell32
 
 # 发布包用：Linux 静态链接（musl），不挑发行版的 glibc
-CROSS_CFLAGS := -O2 -std=c11 -fno-lto -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson
+CROSS_CFLAGS := -O2 -std=c11 -fno-lto -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ibuild -Ithird_party/cjson
 CROSS_DIR    := build/cross
 MAC_CFLAGS   := $(CROSS_CFLAGS) -D_DARWIN_C_SOURCE
 
@@ -52,12 +61,22 @@ SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 SRCTAR := nano-exec-src.tar.gz
 XHDRS  := src/nexec.h src/sandbox.h src/util.h src/plat.h third_party/cjson/cJSON.h
 
-.PHONY: all test test-win windows-exec windows-kernel cross-linux cross-macos clean static
+.DEFAULT_GOAL := all
+.PHONY: all test test-win windows-exec windows-kernel cross-linux cross-macos clean static FORCE
+
+# 版本号变了才重写 version.h，只有用到它的文件会重新编译
+$(VERSION_H): FORCE
+	@mkdir -p $(dir $@)
+	@echo '#define NA_VERSION "$(VERSION)"' > $@.tmp
+	@cmp -s $@.tmp $@ && rm -f $@.tmp || mv $@.tmp $@
 
 all: $(BIN) $(EXEC) $(SRCTAR) static
 
+# GNU tar 才有这些让结果固定的选项；macOS 的 bsdtar 没有，照常打包
+TARFLAGS := $(shell tar --version 2>/dev/null | grep -q GNU && echo --sort=name --owner=0 --group=0 --mtime=@0)
+
 $(SRCTAR): $(XSRCS) $(XHDRS) third_party/cjson/cJSON.c
-	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 $^
+	tar czf $@ $(TARFLAGS) $^
 
 static: build/.static-tried
 
@@ -73,7 +92,7 @@ $(BIN): $(OBJS)
 $(EXEC): $(XOBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-build/src/%.o: src/%.c
+build/src/%.o: src/%.c | $(VERSION_H)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) $(CFLAGS) $(WARN) -MMD -MP -c -o $@ $<
 
@@ -90,7 +109,7 @@ windows-exec: $(WIN_EXEC)
 windows-kernel: $(WIN_KERNEL)
 
 # 本地交叉编译 Linux 发布包（x86_64 和 arm64），只用 zig，不需要 sudo
-cross-linux:
+cross-linux: $(VERSION_H)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
 	@mkdir -p $(CROSS_DIR)/linux-x86_64 $(CROSS_DIR)/linux-aarch64
 	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
@@ -99,7 +118,7 @@ cross-linux:
 	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
 
 # macOS 第一版没有沙箱（landlock=0）；只交叉编译，实际运行测试交给 macOS runner
-cross-macos:
+cross-macos: $(VERSION_H)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
 	@mkdir -p $(CROSS_DIR)/macos-aarch64 $(CROSS_DIR)/macos-x86_64
 	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-aarch64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
@@ -112,7 +131,7 @@ $(WIN_EXEC): $(XWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 	@mkdir -p $(dir $@)
 	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ $(XWIN_SRCS) third_party/cjson/cJSON.c $(WIN_LIBS)
 
-$(WIN_KERNEL): $(KWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
+$(WIN_KERNEL): $(KWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERSION_H)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
 	@mkdir -p $(dir $@)
 	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ $(KWIN_SRCS) third_party/cjson/cJSON.c $(WIN_LIBS)
@@ -136,7 +155,7 @@ build/nano-exec-asan: $(XSRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ $(XSRCS) third_party/cjson/cJSON.c
 
 # 整个内核的 ASan 版本，给宿主层集成测试用
-build/nano-kernel-asan: $(SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
+build/nano-kernel-asan: $(SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERSION_H)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ $(SRCS) third_party/cjson/cJSON.c
 

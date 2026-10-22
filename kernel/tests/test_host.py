@@ -443,7 +443,7 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 8, hello
+            assert hello["token"] == "t0k" and hello["v"] == 9, hello
             assert hello["os"] in ("linux", "macos", "windows") and hello["arch"], hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names   # Skill 由网关提供
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
@@ -475,6 +475,7 @@ def main():
             subprocess.run(["pkill", "-f", "sleep 4646"])
         else:
             print("  ok   内核退出时清理正在执行的命令")
+        update_tests(T)
         kernel_log = open(os.path.join(T, "kernel.log"), errors="replace").read()
         if "Sanitizer" in kernel_log:
             FAILS.append("sanitizer")
@@ -488,6 +489,115 @@ def main():
         return 1 if FAILS else 0
     finally:
         shutil.rmtree(T, ignore_errors=True)
+
+
+def update_tests(T):
+    """内核自我更新：换上新程序后重启并确认；新版本连不上网关时退回；启动次数超了时退回。
+    用单独的内核实例，内核和执行器放在同一个目录（安装布局）。"""
+    import base64
+    U = os.path.join(T, "upd")
+    os.makedirs(os.path.join(U, "home"))
+    kbin, xbin = os.path.join(U, "nano-kernel"), os.path.join(U, "nano-exec")
+    shutil.copy2(KERNEL, kbin)
+    shutil.copy2(EXEC, xbin)
+    sock = os.path.join(U, "gw.sock")
+    conf = os.path.join(U, "kernel.conf")
+    with open(conf, "w") as f:
+        f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {xbin}\n")
+    gw = Gateway(sock)
+    log = open(os.path.join(U, "kernel.log"), "w")
+    env = dict(os.environ, HOME=os.path.join(U, "home"), NA_UPDATE_CONFIRM_MS="2000")
+    files = [{"path": n, "data": base64.b64encode(open(p, "rb").read()).decode()}
+             for n, p in (("nano-kernel", kbin), ("nano-exec", xbin))]
+    pending, failed = os.path.join(U, "update-pending.json"), os.path.join(U, "update-failed")
+
+    def check(name, fn):
+        t0 = time.time()
+        try:
+            fn()
+            print(f"  ok   {name} ({time.time() - t0:.1f}s)")
+        except Exception as e:  # noqa: BLE001
+            FAILS.append(name)
+            print(f"  FAIL {name}：{e}")
+            log.flush()
+            print(open(os.path.join(U, "kernel.log"), errors="replace").read()[-1500:])
+
+    def wait_gone(p, timeout=5):
+        end = time.time() + timeout
+        while os.path.exists(p) and time.time() < end:
+            time.sleep(0.05)
+        return not os.path.exists(p)
+
+    proc = subprocess.Popen([kbin, "-c", conf], stderr=log, env=env)
+    try:
+        gw.accept()
+        hello = gw.expect("hello")
+        ver = hello["version"]
+        assert ver and "update_failed" not in hello, hello
+        gw.send(t="welcome", v=9)
+
+        def ok_update():
+            gw.send(t="update", version=ver, files=files)
+            r = gw.expect("update_result")
+            assert r["ok"] is True and r["version"] == ver, r
+            gw.accept()                       # exec 后同一个进程重新连上
+            h = gw.expect("hello")
+            assert h["version"] == ver and proc.poll() is None, (h, proc.poll())
+            assert os.path.exists(kbin + ".old") and os.path.exists(pending)
+            if os.path.exists(f"/proc/{proc.pid}/exe"):   # 跑的是换上来的新文件，不是改名后的旧文件
+                assert os.readlink(f"/proc/{proc.pid}/exe") == kbin, os.readlink(f"/proc/{proc.pid}/exe")
+            gw.send(t="welcome", v=9)
+            assert wait_gone(pending), "被网关接受后 update-pending.json 还在"
+        check("自我更新：换上新程序、重启、被接受后确认", ok_update)
+
+        def bad_name():
+            gw.send(t="update", version=ver, files=[{"path": "../evil", "data": "AAAA"}] + files)
+            r = gw.expect("update_result")
+            assert r["ok"] is False and "不认识" in r["detail"], r
+            assert not os.path.exists(os.path.join(T, "evil")) and proc.poll() is None
+        check("自我更新：不认识的文件名直接拒绝", bad_name)
+
+        def rollback_unconfirmed():
+            gw.send(t="update", version=ver, files=files)
+            assert gw.expect("update_result")["ok"] is True
+            gw.accept()
+            gw.expect("hello")
+            gw.conn.close()                   # 不接受新版本：超时后退回
+            gw.accept()
+            h = gw.expect("hello", timeout=15)
+            if "update_failed" not in h:      # 退回前的重连
+                gw.conn.close()
+                gw.accept()
+                h = gw.expect("hello", timeout=15)
+            assert h.get("update_failed") == ver, h
+            assert os.path.exists(kbin + ".bad") and not os.path.exists(pending), os.listdir(U)
+            gw.send(t="welcome", v=9)
+        check("自我更新：新版本没被网关接受就退回旧版本", rollback_unconfirmed)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def rollback_tries():
+        shutil.copy2(kbin, kbin + ".old")
+        with open(pending, "w") as f:
+            json.dump({"from": "old", "to": ver, "tries": 3}, f)
+        p = subprocess.Popen([kbin, "-c", conf], stderr=log, env=env)
+        try:
+            gw.accept()
+            h = gw.expect("hello")
+            assert h.get("update_failed") == ver and not os.path.exists(pending), h
+        finally:
+            p.terminate()
+            p.wait(5)
+    check("自我更新：启动次数超了就退回", rollback_tries)
+    log.close()
+    text = open(os.path.join(U, "kernel.log"), errors="replace").read()
+    if "Sanitizer" in text:
+        FAILS.append("update sanitizer")
+        print(text[-3000:])
 
 
 if __name__ == "__main__":

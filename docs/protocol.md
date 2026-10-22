@@ -1,7 +1,7 @@
-# 内核 ⇄ 网关协议（v8）
+# 内核 ⇄ 网关协议（v9）
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
-- **版本**：v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
+- **版本**：v9 起 `hello` 带 `version`（内核的发布版本）和 `update_failed`（上次自动更新失败、已经退回的版本），网关可以发 `update` 让内核换成新版本（见下面「内核更新」）。**从 v9 起，网关遇到协议版本比自己旧、但不低于 9 的内核时，应先推 `update` 把它升上来，而不是直接拒绝**。v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -81,7 +81,7 @@
 ## 一次完整的处理
 
 ```
-K→G {"t":"hello","v":8,"token":"…","node":"home-pc","os":"linux","arch":"x86_64","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
+K→G {"t":"hello","v":9,"token":"…","node":"home-pc","os":"linux","arch":"x86_64","version":"0.1.0","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
 G→K {"t":"welcome","v":5}
 G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","workspaces":[{"name":"本机:~/projects/foo","dirs":["~/projects/foo"],"ro":["~/.gitconfig","~/.nano-agent/skills"],"rw":[],"local":true,"os":"linux"}]}
 K→G {"t":"model","sid":"tg:-1001234"}
@@ -138,3 +138,14 @@ stdout {"ok":true,"content":"a.txt\nb.txt\n"}
 - `nano-exec --probe` 输出本机的沙箱能力：`{"v":1,"landlock":7,"os":"Linux","arch":"x86_64","rg":true}`。
 
 `Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到这一轮挂载的每台机器的 `~/.nano-agent/skills/<技能名>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。每台机器上都是同一个路径，每次执行的 `ro` 都包含 `~/.nano-agent/skills`。
+
+## 内核更新（v9）
+
+```
+G→K {"t":"update","version":"0.1.1","files":[{"path":"nano-kernel","data":"<base64>"},{"path":"nano-exec","data":"<base64>"},{"path":"rg","data":"<base64>"}]}
+K→G {"t":"update_result","ok":true,"version":"0.1.1"}
+```
+
+- `files[].path` 只能是 `nano-kernel`、`nano-exec`、`rg`（Windows 上带 `.exe`），必须有内核和执行器。内核和执行器要在同一个目录（安装脚本装的布局），否则回 `ok:false`。
+- 内核先把所有文件写成 `.new`，再把旧的改名成 `.old`、新的改名过来，写下 `update-pending.json`，回 `update_result` 后重启自己（POSIX 上 exec 同样的参数；Windows 上以退出码 75 退出，由 `run-kernel.ps1` 重新拉起）。
+- 新版本启动后 90 秒内被网关接受（收到 `welcome`）就算成功；启动超过 3 次或 90 秒内没被接受，就把 `.old` 换回来，写下 `update-failed`（之后的 `hello` 带 `update_failed`），再重启成旧版本。

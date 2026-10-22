@@ -217,3 +217,35 @@ int set_cloexec(int fd)
     return fl < 0 ? -1 : fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
 #endif
 }
+
+static int unb64(int ch)
+{
+    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+    if (ch == '+') return 62;
+    if (ch == '/') return 63;
+    return -1;
+}
+
+unsigned char *b64_decode(const char *s, size_t *n)
+{
+    size_t len = strlen(s);
+    unsigned char *out = xmalloc(len / 4 * 3 + 3);
+    size_t o = 0;
+    unsigned v = 0;
+    int bits = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '=' || s[i] == '\n' || s[i] == '\r') continue;
+        int d = unb64((unsigned char)s[i]);
+        if (d < 0) { free(out); return NULL; }
+        v = v << 6 | (unsigned)d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (unsigned char)(v >> bits);
+        }
+    }
+    *n = o;
+    return out;
+}

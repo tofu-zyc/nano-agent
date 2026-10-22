@@ -776,6 +776,14 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.toolsChanged(node, m)
 		return
 	}
+	if m.T == proto.TUpdateResult {
+		if m.OK != nil && *m.OK {
+			a.log.Info("内核已换上新版本，正在重启", "node", node, "version", m.Version)
+		} else {
+			a.log.Warn("内核更新失败", "node", node, "version", m.Version, "err", m.Detail)
+		}
+		return
+	}
 	s := a.sessions[m.SID]
 	if s == nil || s.run == nil || s.run.node != node {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束

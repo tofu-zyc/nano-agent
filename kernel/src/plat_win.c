@@ -229,6 +229,14 @@ char *plat_self_exe(void)
     return u;
 }
 
+int plat_exec(const char *path, char **argv)
+{
+    (void)path;
+    (void)argv;
+    errno = ENOSYS;   /* Windows 上没有 exec：退出码 75 让 run-kernel.ps1 重新拉起 */
+    return -1;
+}
+
 char *plat_exe_dir(void)
 {
     char *self = plat_self_exe();

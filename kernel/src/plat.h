@@ -41,6 +41,8 @@ char *plat_self_exe(void);
 char *plat_exe_dir(void);
 char *plat_home(void);
 char *plat_hostname(void);
+/* 用 argv 执行 path，替换当前进程（更新后重启自己）。POSIX 上成功不返回；Windows 上返回 -1、errno = ENOSYS。 */
+int plat_exec(const char *path, char **argv);
 
 /* ---- 路径（全部是 UTF-8；返回 malloc） ---- */
 

@@ -11,6 +11,7 @@
 #include "plat.h"
 #include "runner.h"
 #include "tools.h"
+#include "update.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -21,7 +22,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PROTO_VERSION      8
+#include "version.h"
+
+#define PROTO_VERSION      9
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -54,6 +57,8 @@ typedef struct {
     int64_t         last_ping;
     int64_t         next_connect;
     int             backoff;
+    bool            restart;          /* 换上了新版本：退出主循环后重启自己 */
+    int64_t         update_deadline;  /* 刚更新完：这之前要被网关接受，否则退回旧版本 */
 } kernel_t;
 
 /* ---- 协议辅助 ---- */
@@ -81,6 +86,12 @@ static void send_hello(kernel_t *k)
     cJSON_AddStringToObject(m, "node", k->conf.node);
     cJSON_AddStringToObject(m, "os", plat_os());
     cJSON_AddStringToObject(m, "arch", plat_arch());
+    cJSON_AddStringToObject(m, "version", NA_VERSION);
+    char *failed = update_failed_version();
+    if (failed) {
+        cJSON_AddStringToObject(m, "update_failed", failed);
+        free(failed);
+    }
     cJSON_AddItemToObject(m, "tools", tools_specs());
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
@@ -471,38 +482,6 @@ static bool safe_rel(const char *p)
     return true;
 }
 
-static int unb64(int ch)
-{
-    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
-    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
-    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
-    if (ch == '+') return 62;
-    if (ch == '/') return 63;
-    return -1;
-}
-
-static unsigned char *base64_decode(const char *s, size_t *n)
-{
-    size_t len = strlen(s);
-    unsigned char *out = xmalloc(len / 4 * 3 + 3);
-    size_t o = 0;
-    unsigned v = 0;
-    int bits = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '=' || s[i] == '\n' || s[i] == '\r') continue;
-        int d = unb64((unsigned char)s[i]);
-        if (d < 0) { free(out); return NULL; }
-        v = v << 6 | (unsigned)d;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out[o++] = (unsigned char)(v >> bits);
-        }
-    }
-    *n = o;
-    return out;
-}
-
 static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_t dirlen, char *err, size_t errlen)
 {
     char *home = plat_home();
@@ -534,7 +513,7 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
             break;
         }
         size_t n = 0;
-        unsigned char *bytes = base64_decode(data, &n);
+        unsigned char *bytes = b64_decode(data, &n);
         char *full = plat_join(tmp, rel);
         char *fdir = plat_dirname(full);
         bool made = bytes && plat_makedirs(fdir) == 0;
@@ -684,6 +663,27 @@ static void save_token(kernel_t *k, const char *token, int64_t now)
     k->next_connect = now;
 }
 
+/* 网关推来新版本：换掉自己，回报结果，然后重启 */
+static void handle_update(kernel_t *k, const cJSON *m)
+{
+    const char *ver = sget(m, "version");
+    log_info("网关推来新版本 %s，开始更新", ver ? ver : "?");
+    char err[512] = "";
+    bool ok = update_apply(m, k->conf.exec, err, sizeof err) == 0;
+    cJSON *r = msg_new("update_result", NULL);
+    cJSON_AddBoolToObject(r, "ok", ok);
+    if (ver) cJSON_AddStringToObject(r, "version", ver);
+    if (!ok) {
+        cJSON_AddStringToObject(r, "detail", err);
+        log_error("更新失败：%s", err);
+    }
+    link_send(&k->link, r);
+    if (ok) {
+        k->restart = true;
+        g_stop = 1;
+    }
+}
+
 static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
 {
     const char *t = sget(m, "t");
@@ -692,6 +692,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     if (!strcmp(t, "welcome")) {
         k->backoff = 1000;
         log_info("网关已接受连接");
+        if (k->update_deadline) {
+            update_confirm();
+            k->update_deadline = 0;
+            log_info("更新到 %s 成功", NA_VERSION);
+        }
+        return;
+    }
+    if (!strcmp(t, "update")) {
+        handle_update(k, m);
         return;
     }
     if (!strcmp(t, "error")) {
@@ -908,6 +917,13 @@ static void loop(kernel_t *k)
 
     while (!g_stop) {
         int64_t now = now_ms();
+        if (k->update_deadline && now >= k->update_deadline) {
+            if (update_rollback("更新后一直没能连上网关") == 0) {
+                k->restart = true;
+                break;
+            }
+            k->update_deadline = 0;
+        }
         if (k->link.fd == NA_SOCK_NONE && now >= k->next_connect) try_connect(k, now);
 
         size_t np = 0;
@@ -984,7 +1000,8 @@ static void usage(const char *argv0)
             "用法：%s [-c kernel.conf] [-t] [-v]\n"
             "  -c 配置文件（默认 kernel.conf）\n"
             "  -t 只检查配置和执行器，然后退出\n"
-            "  -v 输出调试日志（包括收到的每条协议消息）\n",
+            "  -v 输出调试日志（包括收到的每条协议消息）\n"
+            "  --version 显示版本\n",
             argv0);
 }
 
@@ -1035,11 +1052,24 @@ int main(int argc, char **argv)
         else if (!strcmp(args[i], "-t")) check_only = true;
         else if (!strcmp(args[i], "-v")) na_log_level = NA_LOG_DEBUG;
         else if (!strcmp(args[i], "-h")) { usage(nargs > 0 ? args[0] : "nano-kernel"); return 0; }
+        else if (!strcmp(args[i], "--version")) { printf("%s\n", NA_VERSION); return 0; }
         else { usage(nargs > 0 ? args[0] : "nano-kernel"); return 2; }
+    }
+
+    update_init();
+    /* 上次更新后的新版本一直起不来：退回旧版本，重启 */
+    bool update_pending = false;
+    if (!check_only && update_on_start(&update_pending)) {
+        update_reexec(args);
+        return NA_EXIT_RESTART;
     }
 
     kernel_t k;
     memset(&k, 0, sizeof k);
+    if (update_pending) {
+        const char *ms = getenv("NA_UPDATE_CONFIRM_MS");   /* 测试用：缩短等确认的时间 */
+        k.update_deadline = now_ms() + (ms && atoll(ms) > 0 ? atoll(ms) : UPDATE_CONFIRM_MS);
+    }
     k.link.fd = NA_SOCK_NONE;
     k.backoff = 1000;
 
@@ -1079,9 +1109,10 @@ int main(int argc, char **argv)
     setup_signals();
     loop(&k);
 
-    log_info("退出");
+    log_info(k.restart ? "重启" : "退出");
     plat_signals_remove();
     runner_shutdown(&k.runner, 2500);
+    if (k.restart && k.link.fd != NA_SOCK_NONE) link_flush(&k.link);   /* 把 update_result 发出去 */
     link_close(&k.link);
     buf_free(&k.link.in);
     buf_free(&k.link.out);
@@ -1090,5 +1121,9 @@ int main(int argc, char **argv)
     kconf_free(&k.conf);
     plat_wake_close(&g_wake);
     plat_shutdown();
+    if (k.restart) {
+        update_reexec(args);   /* POSIX 上不返回 */
+        return NA_EXIT_RESTART;
+    }
     return 0;
 }

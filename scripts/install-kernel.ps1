@@ -39,6 +39,10 @@ function Die($s) { Write-Host "错误：$s" -ForegroundColor Red; exit 1 }
 
 function Stop-Kernel {
     try { & $Schtasks /End /TN $TaskName 2>$null | Out-Null } catch { }
+    # 手动运行的 run-kernel.ps1 会在内核退出后把它重新拉起，先停掉它
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Runner) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Get-Process nano-kernel -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -eq $Kernel } |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -142,10 +146,17 @@ max_output = 65536
 # 没有口令：第一次连网关时请求配对，在网关网页「设备」里核对确认码。
 # 配对口令由内核写在 kernel.conf 旁边的 paired.token。
 
+# 退出码 75：内核换上了新版本（或退回了旧版本），马上重新拉起；0：正常退出（被网关拒绝等）；其他：崩溃，等一会儿再拉起
 $RunnerText = @"
 `$ErrorActionPreference = 'SilentlyContinue'
-`$p = Start-Process -FilePath "$Kernel" -ArgumentList @('-c', "$Conf") -NoNewWindow -PassThru -RedirectStandardError "$Log"
-`$p.WaitForExit()
+while (`$true) {
+    if (Test-Path "$Log") { Move-Item -Force "$Log" "$Log.1" }
+    `$p = Start-Process -FilePath "$Kernel" -ArgumentList @('-c', "$Conf") -NoNewWindow -PassThru -RedirectStandardError "$Log"
+    `$p.WaitForExit()
+    if (`$p.ExitCode -eq 75) { continue }
+    if (`$p.ExitCode -eq 0) { break }
+    Start-Sleep -Seconds 5
+}
 "@
 [System.IO.File]::WriteAllText($Runner, $RunnerText, (New-Object System.Text.UTF8Encoding($false)))
 
