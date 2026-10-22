@@ -12,6 +12,10 @@ ifeq ($(NA_PLATFORM),windows)
 PLAT := src/plat_win.c
 SB   := src/sandbox_win.c
 RUNNER := src/runner_win.c
+else ifeq ($(NA_PLATFORM),macos)
+PLAT := src/plat_posix.c
+SB   := src/sandbox_stub.c
+RUNNER := src/runner.c
 else
 PLAT := src/plat_posix.c
 SB   := src/sandbox.c
@@ -22,6 +26,8 @@ SRCS  := src/main.c src/core.c src/conf.c src/tools.c $(RUNNER) src/link.c src/u
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
 KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/runner_win.c src/link.c src/util.c src/plat_win.c
+MAC_SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/util.c src/plat_posix.c
+MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
 
@@ -34,8 +40,9 @@ WIN_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Wshadow -Isrc -Ithird_party/cjson
 WIN_LIBS   := -lws2_32 -lshell32
 
 # 发布包用：Linux 静态链接（musl），不挑发行版的 glibc
-CROSS_CFLAGS := -O2 -std=c11 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson
+CROSS_CFLAGS := -O2 -std=c11 -fno-lto -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson
 CROSS_DIR    := build/cross
+MAC_CFLAGS   := $(CROSS_CFLAGS) -D_DARWIN_C_SOURCE
 
 # 测试用 ASan/UBSan 构建，内存问题直接报出来
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -45,7 +52,7 @@ SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 SRCTAR := nano-exec-src.tar.gz
 XHDRS  := src/nexec.h src/sandbox.h src/util.h src/plat.h third_party/cjson/cJSON.h
 
-.PHONY: all test test-win windows-exec windows-kernel cross-linux clean static
+.PHONY: all test test-win windows-exec windows-kernel cross-linux cross-macos clean static
 
 all: $(BIN) $(EXEC) $(SRCTAR) static
 
@@ -90,6 +97,15 @@ cross-linux:
 	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
+
+# macOS 第一版没有沙箱（landlock=0）；只交叉编译，实际运行测试交给 macOS runner
+cross-macos:
+	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
+	@mkdir -p $(CROSS_DIR)/macos-aarch64 $(CROSS_DIR)/macos-x86_64
+	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-aarch64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-aarch64/nano-exec $(MAC_XSRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-x86_64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-x86_64/nano-exec $(MAC_XSRCS) third_party/cjson/cJSON.c
 
 $(WIN_EXEC): $(XWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }

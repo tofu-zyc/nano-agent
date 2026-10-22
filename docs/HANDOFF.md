@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，跨平台阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试；macOS 的 launchd 和交叉编译放到阶段 4）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-22，跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -66,7 +66,7 @@ docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-
 make install      # 日常使用：全部装到 ~/.nano-agent（NANO_HOME 可改），注册后台服务
 make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页地址，带密码的链接在 data/web.url
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
-make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）；有 Windows 内核和 WSL interop 时还跑 Windows 内核 e2e；装了 zig 和 build/tools/rg.exe 时还跑 Windows 执行器测试
+make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）+ 离线安装测试 + macOS 交叉编译检查；有 Windows 内核和 WSL interop 时还跑 Windows 内核 e2e；装了 zig 和 build/tools/rg.exe 时还跑 Windows 执行器测试
 make test-win     # 只跑 Windows 执行器测试和 Windows 内核 e2e
 make test-install # 离线安装测试（临时 HOME / USERPROFILE；Linux 和 Windows）
 make release VERSION=x.y.z  # 本地交叉编译到 dist/：Linux/Windows 内核包、Linux 网关包、SHA256SUMS（不联网发布）
@@ -78,6 +78,8 @@ scripts/fetch-rg.sh --all  # 发布包要的 Linux/macOS/Windows rg
 make -C kernel windows-exec   # 只交叉编译 Windows 执行器（build/nano-exec.exe）
 make -C kernel windows-kernel # 只交叉编译 Windows 内核（build/nano-kernel.exe）
 make -C kernel cross-linux    # 交叉编译 Linux 静态内核/执行器（x86_64、arm64）
+make -C kernel cross-macos    # 交叉编译 macOS 内核/执行器（aarch64、x86_64；本机不能运行）
+make test-macos               # 只做 macOS 交叉编译检查（没有 Mac，运行测试交给 macOS runner）
 python3 kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg.exe   # 单独跑 Windows 执行器测试
 python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关、Windows 内核、WSL interop）
 ```
@@ -86,6 +88,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - Windows 内核 e2e（scripts/e2e-win.py）现在 17 项：WSL 里的网关监听 TCP，网关自己启动的本机内核（AllowToken，local）和通过 interop 启动的 Windows 内核（127.0.0.1 TCP，必须是远程）同时在线；添加 `C:\…\工作 目录` 后路径按 Windows 内核 `--ls` 的规范形式保存；Linux 内核这一轮通过 `run` 在 Windows 内核上执行 Read；只挂 Windows 目录时由 Windows 内核本地执行 Read、Shell（无沙箱要审批）、CRLF Edit、用 `/` 的 Write、Grep、Skill 文件下发；中文路径、空格、PowerShell 输出和工作目录都覆盖。临时 `USERPROFILE`、临时 Windows 目录，结束后清理。
 - Windows 执行器（test_exec_win.py）现在 13 项，在 WSL 里通过 interop 跑 `nano-exec.exe`，测试目录和 USERPROFILE 都放在 Windows 临时目录：probe、中文路径和内容、Read/Write/Edit、CRLF 保留、工作目录外拒绝、ro=/ 读所有盘、PowerShell 中文输出和退出码、密钥不泄漏、超时连同子进程杀掉、取消、自带 rg、根目录盘符和 `--ls`、错误请求。没有 zig 时 `make test` 会跳过这一组并提示。
 - 离线安装（scripts/test-install-linux.py / test-install-win.py）各 4 项：Linux 用 `make release` 的包在临时 HOME 里装、启动后配对、升级保留 `paired.token`、卸载；Windows 用临时 USERPROFILE 和真实 `nano-kernel.exe` 做同样四步（`-NoService`）。Windows 的“注册任务计划程序”在 WSL interop 下被系统拒绝（Access is denied），安装脚本有 `schtasks` 兜底，但这一步没有在真实桌面会话里实测；`-NoService` 的安装/配对/升级/卸载是实测的。
+- macOS：`make -C kernel cross-macos` 交叉编译出 aarch64/x86_64 的 `nano-kernel` 和 `nano-exec`（Mach-O），`make release` 出两个 macOS 包；**没有在真机上运行过**。macOS 上第一版没有沙箱（landlock=0，Shell 在自动模式下要审批）；daemon 用 launchd 用户 agent（`~/Library/LaunchAgents/com.nano-agent.kernel.plist`），卸载时删除。运行测试需要在 macOS 机器或 GitHub Actions 的 macos runner 上跑（这次不建仓库、不推送，所以没跑）。
 - host 包：假 ssh 测部署 / 执行 / 断线 / 架构不同时现编，有 sshd 时起一个临时的真 OpenSSH 测一遍。kernel 包测配对。
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
@@ -117,7 +120,8 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 | 图片输入 | 网页粘贴/拖拽/上传、Telegram 照片、飞书图片消息；模型能力（modalities）决定发不发给模型；图片存 data/uploads，历史里只存引用，支持图片的模型收到 OpenAI content parts |
 | 3048b68 | 跨平台阶段 1：平台层（POSIX 一份、Windows 一份）+ Windows 执行器 `nano-exec.exe`；宽字符路径、符号链接/junction 解析、CRLF Edit、PowerShell UTF-8、Job Object 超时/取消、自带 rg；zig 交叉编译，WSL interop 实测 |
 | 530bbd6 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
-| 本轮提交 | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
+| 95e68da | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
+| 本轮提交 4 | 跨平台阶段 4：macOS 平台层（`_NSGetExecutablePath`、无沙箱 `sandbox_stub`、`nexec_main` 去掉 Linux `sys/syscall.h` 依赖、`_DARWIN_C_SOURCE` 解决 `DT_DIR`）；`cross-macos` 交叉编译 aarch64/x86_64；`make release` 出 macOS 包；`install-kernel.sh` 的 launchd 用户 agent（启动、卸载）和 `nano-kernel-ctl` 的 macOS 支持。没有真机测试 |
 
 ## 关键设计（改之前先理解）
 
@@ -167,7 +171,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。
 4. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
-5. 长期记忆、群聊。跨平台按 [PLAN-cross-platform.md](PLAN-cross-platform.md) 做：阶段 1 Windows 执行器已完成；阶段 2 Windows 内核 + 网关路径/回环修复已完成；阶段 3 本地离线安装包已完成（Linux/Windows）；阶段 4 macOS 还差交叉编译和 launchd 的收尾（本机没有 Mac，实际运行测试交给 macOS runner）。移动端暂不做，将来要求在手机本机执行工具。
+5. 长期记忆、群聊。跨平台按 [PLAN-cross-platform.md](PLAN-cross-platform.md) 做：阶段 1 Windows 执行器已完成；阶段 2 Windows 内核 + 网关路径/回环修复已完成；阶段 3 本地离线安装包已完成（Linux/Windows）；阶段 4 macOS 已完成交叉编译和 launchd 支持，但**没有真机测试**（本机没有 Mac）。移动端暂不做，将来要求在手机本机执行工具。
 
 ## 坑
 
@@ -192,4 +196,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - 在 WSL 里用 interop 测 Windows 程序时，WSL 会把 `USERPROFILE` 换回真实的 Windows 用户目录，直接 `Popen` 设环境变量没用；test_exec_win.py 写一个临时 `run.cmd` 用 `set "K=V"`（一定要带引号，否则 `&&` 前的空格会进到值里）设好再启动 exe。测试目录放在 Windows 临时目录，`wslpath -w` 转路径。
 - Windows 上 `powershell.exe -Command` 的输出用 `[Console]::OutputEncoding`/`$OutputEncoding` 强制 UTF-8；超时/取消用 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），创建进程要先 `CREATE_SUSPENDED`、加入 Job、再 `ResumeThread`（传的是线程句柄，别传进程句柄）。
 - 交叉编译 Windows 执行器：`zig cc -target x86_64-windows-gnu … -lws2_32 -lshell32`。`build/tools/` 里的 zig/rg 不提交，先跑 `scripts/fetch-zig.sh`、`scripts/fetch-rg.sh`。
+- macOS 交叉编译（zig）：`-target aarch64-macos` / `x86_64-macos`，必须加 `-D_DARWIN_C_SOURCE`，否则 `dirent.h` 的 `DT_DIR` 等不出现；`nexec_main.c` 的 `sys/syscall.h` 只在非 macOS 包含；macOS 用 `sandbox_stub.c`（landlock=0）。`zig cc` 的 macOS 产物只能编译检查，不能在本机运行。
+- macOS 安装脚本用 launchd 用户 agent（`~/Library/LaunchAgents/com.nano-agent.kernel.plist`），`nano-kernel-ctl` 不能用 `readlink -f` 和 `/proc`，要用 `readlink` 循环解析符号链接、`ps -p … -o comm=` 确认进程。`install-kernel.sh` 默认在 GUI 登录会话里 `launchctl load -w`；SSH 会话里可能需要先登录桌面。
+- `make test` 在没有 Mac 的机器上只做 macOS 交叉编译检查，不运行 macOS 二进制。
 - 在 WSL 的 9p 上覆盖一个马上要运行的 `.exe` 偶尔会拿到旧内容；测试每次复制到新的临时目录，不要复用同一个 exe 路径。

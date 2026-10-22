@@ -12,7 +12,9 @@
 #if !NA_WINDOWS
 #include <dirent.h>
 #include <sys/stat.h>
+#if !NA_MACOS
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 #endif
 

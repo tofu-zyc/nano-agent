@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test test-win test-install run chat clean install installer install-kernel release release-kernel release-linux release-windows release-gateway
+.PHONY: all kernel gateway web test test-win test-install test-macos run chat clean install installer install-kernel release release-kernel release-linux release-windows release-macos release-gateway
 
 all: kernel gateway
 
@@ -21,11 +21,17 @@ test: all
 	  python3 scripts/e2e-win.py; \
 	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
 	$(MAKE) test-install
+	$(MAKE) test-macos
 
 # 只跑 Windows 执行器和内核的测试（需要 zig、build/tools/rg.exe、WSL interop）
 test-win:
 	$(MAKE) -C kernel test-win
 	python3 scripts/e2e-win.py
+
+# macOS 只做交叉编译检查；没有 Mac，实际运行测试交给 macOS runner
+test-macos:
+	@if [ -x $(ZIG) ]; then $(MAKE) -C kernel cross-macos; \
+	else echo "（没有 zig，跳过 macOS 交叉编译）"; fi
 
 # 离线安装测试：make release 的包在临时 HOME / USERPROFILE 里装、配对、升级、卸载
 test-install:
@@ -82,7 +88,7 @@ release: release-kernel release-gateway
 	@echo "发布包在 $(DIST)/："
 	@ls -1 $(DIST)
 
-release-kernel: release-linux release-windows
+release-kernel: release-linux release-windows release-macos
 
 release-linux: $(ZIG) $(RG)/linux-x86_64
 	$(MAKE) -C kernel cross-linux
@@ -109,6 +115,20 @@ release-windows: $(ZIG) $(RG)/windows-x86_64.exe
 	  cp scripts/install-kernel.ps1 $$dir/; \
 	  echo '$(VERSION)' > $$dir/VERSION; \
 	  python3 scripts/zipdir.py $$dir "$(DIST)/nano-kernel-$(VERSION)-windows-x86_64.zip"
+
+release-macos: $(ZIG) $(RG)/linux-x86_64
+	$(MAKE) -C kernel cross-macos
+	@mkdir -p $(DIST) $(RELEASE)
+	@for arch in aarch64 x86_64; do \
+	  dir=$(RELEASE)/nano-kernel-$(VERSION)-macos-$$arch; \
+	  rm -rf $$dir; mkdir -p $$dir; \
+	  cp kernel/build/cross/macos-$$arch/nano-kernel $$dir/; \
+	  cp kernel/build/cross/macos-$$arch/nano-exec $$dir/; \
+	  cp $(RG)/macos-$$arch $$dir/rg; \
+	  cp scripts/install-kernel.sh $$dir/; \
+	  echo '$(VERSION)' > $$dir/VERSION; \
+	  tar czf $(DIST)/nano-kernel-$(VERSION)-macos-$$arch.tar.gz -C $(RELEASE) nano-kernel-$(VERSION)-macos-$$arch; \
+	done
 
 release-gateway: $(ZIG) $(RG)/linux-x86_64
 	$(MAKE) -C kernel cross-linux

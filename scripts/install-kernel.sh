@@ -25,6 +25,9 @@ YES=0
 UNINSTALL=0
 UNIT=nano-kernel.service
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+PLATFORM=$(uname -s)
+LAUNCH_DIR="$HOME/Library/LaunchAgents"
+PLIST="$LAUNCH_DIR/com.nano-agent.kernel.plist"
 PROFILE_MARK="# nano-agent 内核"
 
 say() { printf '%s\n' "$*"; }
@@ -73,8 +76,12 @@ confirm() { # confirm 提示（默认是）
 }
 
 has_systemd() {
-	[ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 &&
+	[ "$PLATFORM" = Linux ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 &&
 		systemctl --user show-environment >/dev/null 2>&1
+}
+
+has_launchd() {
+	[ "$PLATFORM" = Darwin ] && command -v launchctl >/dev/null 2>&1
 }
 
 conf_get() { # conf_get 键 → 配置文件里的值
@@ -89,12 +96,19 @@ running_pid() {
 	pid=$(cat "$DIR/kernel.pid" 2>/dev/null) || return 1
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
 	# pid 可能被别的程序复用了，确认确实是这个内核
-	case "$(readlink "/proc/$pid/exe" 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$pid" ;; *) return 1 ;; esac
+	if [ "$PLATFORM" = Darwin ]; then
+		case "$(ps -p "$pid" -o comm= 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$pid" ;; *) return 1 ;; esac
+	else
+		case "$(readlink "/proc/$pid/exe" 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$pid" ;; *) return 1 ;; esac
+	fi
 }
 
 stop_kernel() {
 	if [ -f "$UNIT_DIR/$UNIT" ] && has_systemd; then
 		systemctl --user stop "$UNIT" 2>/dev/null || true
+	fi
+	if has_launchd && [ -f "$PLIST" ]; then
+		launchctl unload "$PLIST" 2>/dev/null || true
 	fi
 	if pid=$(running_pid); then
 		kill "$pid" 2>/dev/null || true
@@ -115,6 +129,10 @@ if [ "$UNINSTALL" = 1 ]; then
 		rm -f "$UNIT_DIR/$UNIT"
 		has_systemd && systemctl --user daemon-reload || true
 	fi
+	if [ -f "$PLIST" ]; then
+		has_launchd && launchctl unload "$PLIST" >/dev/null 2>&1 || true
+		rm -f "$PLIST"
+	fi
 	for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
 		if [ -f "$f" ] && grep -qF "$PROFILE_MARK" "$f"; then
 			# 全部行都被去掉时 grep 返回 1，不算错
@@ -129,7 +147,7 @@ if [ "$UNINSTALL" = 1 ]; then
 	exit 0
 fi
 
-[ "$(uname -s)" = Linux ] || die "内核只支持 Linux（Windows 上请在 WSL2 里运行这个脚本）"
+case "$PLATFORM" in Linux | Darwin) ;; *) die "内核支持 Linux、macOS 和 Windows（Windows 用 install-kernel.ps1）；当前系统：$PLATFORM" ;; esac
 
 # ---- 源码或离线包 ----
 
@@ -326,24 +344,39 @@ fi
 }
 rm -f "$DIR/check.log"
 
-# 控制脚本：启动、停止、看日志。没有 systemd 的机器（比如没开 systemd 的 WSL）靠它在后台跑
+# 控制脚本：启动、停止、看日志。没有 systemd / launchd 的机器靠它在后台跑
 cat >"$DIR/nano-kernel-ctl" <<'EOF'
 #!/bin/sh
 # nano-agent 内核：nano-kernel-ctl start|stop|restart|status|log
 umask 077
-DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+SELF=$0
+case "$SELF" in /*) ;; *) SELF=$PWD/$SELF ;; esac
+while [ -L "$SELF" ]; do
+	link=$(readlink "$SELF")
+	case "$link" in /*) SELF=$link ;; *) SELF=$(dirname "$SELF")/$link ;; esac
+done
+DIR=$(cd "$(dirname "$SELF")" && pwd)
 UNIT=nano-kernel.service
+PLIST="$HOME/Library/LaunchAgents/com.nano-agent.kernel.plist"
 use_systemd() {
 	[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT" ] && [ -d /run/systemd/system ] &&
 		systemctl --user show-environment >/dev/null 2>&1
 }
+use_launchd() {
+	[ "$(uname -s)" = Darwin ] && [ -f "$PLIST" ] && command -v launchctl >/dev/null 2>&1
+}
 pid() {
-	p=$(cat "$DIR/kernel.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null &&
+	p=$(cat "$DIR/kernel.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
+	if [ "$(uname -s)" = Darwin ]; then
+		case "$(ps -p "$p" -o comm= 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$p" ;; *) false ;; esac
+	else
 		case "$(readlink "/proc/$p/exe" 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$p" ;; *) false ;; esac
+	fi
 }
 case "${1:-status}" in
 start)
 	if use_systemd; then exec systemctl --user start "$UNIT"; fi
+	if use_launchd; then launchctl load -w "$PLIST"; exit 0; fi
 	pid >/dev/null && { [ "${2:-}" = --quiet ] || echo "内核已经在运行"; exit 0; }
 	: >>"$DIR/kernel.log"
 	chmod 600 "$DIR/kernel.log"
@@ -353,12 +386,17 @@ start)
 	;;
 stop)
 	if use_systemd; then exec systemctl --user stop "$UNIT"; fi
+	if use_launchd; then launchctl unload "$PLIST"; exit 0; fi
 	if p=$(pid); then kill "$p"; echo "已停止"; else echo "内核没有在运行"; fi
 	rm -f "$DIR/kernel.pid"
 	;;
 restart) "$0" stop >/dev/null; sleep 0.3; exec "$0" start ;;
 status)
 	if use_systemd; then systemctl --user --no-pager status "$UNIT"; exit $?; fi
+	if use_launchd; then
+		if launchctl list | grep -q com.nano-agent.kernel; then echo "运行中（launchd）"; exit 0; fi
+		echo "没有运行"; exit 3
+	fi
 	if p=$(pid); then echo "运行中（pid $p）"; else echo "没有运行"; exit 3; fi
 	;;
 log) exec tail -n 50 -F "$DIR/kernel.log" ;;
@@ -410,8 +448,30 @@ EOF
 		say "提示：现在只有登录后内核才会运行。想让它开机就运行（不用登录），执行："
 		say "  sudo loginctl enable-linger $(id -un)"
 	fi
+elif has_launchd; then
+	step "注册 launchd 用户 agent（登录时启动，掉线自动重启）"
+	mkdir -p "$LAUNCH_DIR"
+	cat >"$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.nano-agent.kernel</string>
+	<key>ProgramArguments</key>
+	<array><string>$DIR/nano-kernel</string><string>-c</string><string>$DIR/kernel.conf</string></array>
+	<key>WorkingDirectory</key><string>$DIR</string>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>Umask</key><integer>63</integer>
+	<key>StandardOutPath</key><string>$LOG</string>
+	<key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+EOF
+	launchctl unload "$PLIST" 2>/dev/null || true
+	launchctl load -w "$PLIST"
 else
-	step "这台机器没有 systemd，用后台进程运行"
+	step "这台机器没有 systemd / launchd，用后台进程运行"
 	"$DIR/nano-kernel-ctl" start
 	if ! grep -qsF "$PROFILE_MARK" "$HOME/.profile" &&
 		confirm "每次登录（打开终端）时自动启动内核？会在 ~/.profile 里加一行"; then
