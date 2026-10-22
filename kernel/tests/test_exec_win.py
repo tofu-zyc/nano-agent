@@ -252,15 +252,17 @@ def t_timeout():
     marker = os.path.join(HOME_LINUX, "nano-child.pid")
     if os.path.exists(marker):
         os.unlink(marker)
-    cmd = ("$p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' "
-           "-PassThru -WindowStyle Hidden; Set-Content -Encoding ASCII -Path \"$env:USERPROFILE\\nano-child.pid\" -Value $p.Id; "
+    # 直接用 .NET 启动子进程、写 PID：不依赖 cmdlet 所在模块的加载（CI 上第一次加载可能很慢）
+    cmd = ("$p = [Diagnostics.Process]::Start('powershell.exe', '-NoProfile -Command Start-Sleep -Seconds 60'); "
+           "[IO.File]::WriteAllText(\"$env:USERPROFILE\\nano-child.pid\", [string]$p.Id); "
            "Start-Sleep -Seconds 60")
     t0 = time.time()
-    # PowerShell 冷启动在慢机器（CI）上要一两秒，留够时间让子进程先写出 PID
-    bad(run("Shell", {"command": cmd, "timeout": 6}), "执行超时（6 秒）")
-    assert time.time() - t0 < 15, time.time() - t0
+    # PowerShell 冷启动在慢机器（CI）上要好几秒，留够时间让子进程先写出 PID
+    res = run("Shell", {"command": cmd, "timeout": 10})
+    bad(res, "执行超时（10 秒）")
+    assert time.time() - t0 < 20, time.time() - t0
     time.sleep(0.5)
-    assert os.path.exists(marker), "子进程 PID 没写出来"
+    assert os.path.exists(marker), "子进程 PID 没写出来：" + res["content"][:500]
     raw = open(marker, "rb").read()
     print("    marker:", raw[:80])
     pid = raw.decode("ascii", "ignore").strip()

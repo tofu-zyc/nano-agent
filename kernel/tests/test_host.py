@@ -62,8 +62,8 @@ class Gateway:
             self.send(t="approve", sid=msg["sid"], id=msg["id"], ok=True, **{"from": "tg:admin"})
             self.approved.add(msg["sid"])
             return self.recv(timeout)
-        if msg.get("t") == "notice" and msg.get("sid") in self.approved and "已批准" in msg.get("text", ""):
-            self.approved.discard(msg["sid"])
+        if (self.auto_approve and msg.get("t") == "notice" and msg.get("sid") in self.approved
+                and "已批准" in msg.get("text", "")):
             return self.recv(timeout)
         return msg
 
