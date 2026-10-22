@@ -52,6 +52,8 @@ var Fields = []Field{
 		Help: "默认只监听本机。要从别的机器访问，建议走 SSH 隧道或 Tailscale"},
 	{Key: "web.password", Group: "gateway", Section: "网页管理", Label: "登录密码", Type: "secret",
 		Help: "空表示自动生成（存在数据目录的 web.secret 里）。改了之后要重新登录"},
+	{Key: "security.redact", Group: "gateway", Section: "安全", Label: "工具结果脱敏", Type: "enum", Options: []string{"off", "public", "always"},
+		Help: "off：不脱敏；public（默认）：模型接口在外网、或发到 Telegram / 飞书时，把工具结果里的密钥打星；always：发给模型时总是打星。网页和终端显示原文", Keywords: "脱敏 密钥 redact secret"},
 
 	// ---- 内核 ----
 	{Key: "kernel.listen", Group: "kernel", Section: "连接", Label: "监听地址", Type: "string", Restart: true,

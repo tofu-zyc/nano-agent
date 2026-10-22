@@ -18,6 +18,7 @@ import (
 
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/paths"
+	"nano-agent/gateway/internal/secret"
 )
 
 // Connection 是一个 SSH 服务器的设置，存在 data/connections.json（0600）。
@@ -91,6 +92,24 @@ func New(ctx context.Context, dir string, e Executor, guard []string, hub *kerne
 	if len(b) > 0 {
 		if err := json.Unmarshal(b, &m.records); err != nil {
 			return nil, fmt.Errorf("读取服务器连接：%w", err)
+		}
+		old := false
+		for id, c := range m.records {
+			pw, err := secret.Decrypt(c.Password)
+			if err != nil {
+				return nil, fmt.Errorf("connections.json 里的密码：%w", err)
+			}
+			if pw != c.Password {
+				c.Password = pw
+				m.records[id] = c
+			} else if pw != "" && secret.Ready() && !secret.IsEncrypted(pw) {
+				old = true
+			}
+		}
+		if old {
+			if err := m.persist(m.records); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for id, c := range m.records {
@@ -210,8 +229,31 @@ func (m *Manager) List() []Info {
 	return out
 }
 
+// Secrets 是已知的 SSH 密码，给脱敏用。
+func (m *Manager) Secrets() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, c := range m.records {
+		if c.Password != "" {
+			out = append(out, c.Password)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (m *Manager) persist(records map[string]Connection) error {
-	b, err := json.MarshalIndent(records, "", "  ")
+	disk := make(map[string]Connection, len(records))
+	for id, c := range records {
+		enc, err := secret.Encrypt(c.Password)
+		if err != nil {
+			return err
+		}
+		c.Password = enc
+		disk[id] = c
+	}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -3,13 +3,13 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，阶段 1/4 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v6。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型简化为“管理员读全盘、写工作目录，没有工作目录只读”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md)。
+最后更新：2026-10-22，阶段 2/4 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v6。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型简化为“管理员读全盘、写工作目录，没有工作目录只读”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md)。
 
 ## 一句话
 
 nano-agent 是作者自己的轻量 bot 智能体：**C 内核**（agent 循环、权限、沙箱里执行工具，没有状态）+ **Go 网关**（上下文、模型、聊天平台、网页界面，唯一有状态的中心）。工作目录 = 机器 + 目录，机器是网关所在的本机、网关自己 SSH 连的服务器（只放执行器）、装了内核的电脑；不管内核跑在哪，都能在任何挂在网关上的工作目录里干活（同机由内核本地执行，异机由网关执行）。
 
-所有自己产生的文件都在 **`~/.nano-agent`**（`NANO_HOME` 可改）：`bin/` 程序、`lib/` 内核和执行器、`gateway.toml`、`personas/`、`skills/`、`data/`、`run/` 以及即将加入的 `secret.key`。删掉这个目录就清理干净；只有 systemd 服务文件和 shell 的 PATH 行在目录外，`--uninstall` 会一起删。
+所有自己产生的文件都在 **`~/.nano-agent`**（`NANO_HOME` 可改）：`bin/` 程序、`lib/` 内核和执行器、`gateway.toml`、`personas/`、`skills/`、`data/`、`run/` 以及 `secret.key`。删掉这个目录就清理干净；只有 systemd 服务文件和 shell 的 PATH 行在目录外，`--uninstall` 会一起删。
 
 
 ## 目录
@@ -44,9 +44,9 @@ gateway/               Go 网关
   internal/skills      技能（放在网关上）：扫描、Skill 工具定义、加载说明和附带文件
   internal/session     历史（JSONL 只追加）、会话设置、裁剪
   internal/llm         OpenAI 兼容接口（流式）、mock
-  internal/models      模型列表：接口、模型、默认模型（data/models.json，0600）
+  internal/models      模型列表：接口、模型、默认模型（data/models.json，0600，API key 加密）
   internal/media       图片存储（data/uploads，按内容哈希去重，权限 0600）
-  internal/config      配置：gateway.toml + data/config.json（网页改的），schema 驱动设置页
+  internal/config      配置：gateway.toml + data/config.json（网页改的，密钥字段加密），schema 驱动设置页
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
 scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh
@@ -102,23 +102,25 @@ cd gateway && go test -race ./...
 2. **网关是唯一有状态的中心，内核无状态**。会话 = 一段对话（上下文、工作目录、模式、思考强度、人格、机器）；窗口（endpoint）= 终端、某个私聊，接在会话上（data/endpoints.json）。管理员的窗口默认接主会话；别人各自一个会话。
 3. **机器、工作目录和执行**（详见 ARCHITECTURE.md）：机器 = 本机（host.LocalName「本机」）、SSH 服务器（host.Manager）、内核所在的电脑（非本机内核，机器名 = 内核名；本机内核都算本机）。工作目录 `{id, host, path, default}` 存 data/workspaces.json；会话的 Settings.Workspaces / WorkspacesSet（挂载的 ID 列表；没设过就在第一轮落到默认挂载的那些，空列表且 WorkspacesSet 表示只读；旧的 Workspace 字段启动时迁移）。每一轮 `route()`：挑内核（第一个挂载的机器上的 → 别的挂载机器上的 → preferred），每个工作目录：在内核的机器上 local=true，否则 hostFor() 能用就挂上（网关执行），用不了的进 down。input.workspaces 由 route.spec() 生成（同一台机器上挂的目录一起放进 dirs；管理员 ro 为 /，访客 ro 只有技能缓存目录）。没有工作目录的管理员会拿到一个空的“只读”工作目录（dirs 空、ro /），配合只读模式跑 Read/Grep。内核按工具参数 workspace 找工作目录（全名 / 序号 / 只写机器 / 只写路径），预检的错误通过 na_call.error 直接作为结果，沙箱按调用（na_call.sandbox）。
 4. **沙箱**：执行器每次调用启动一次，Landlock（管理员读整个文件系统、只写工作目录和临时/缓存目录；访客仍然只读工作目录）+ seccomp（禁 AF_UNIX、io_uring 等）+ 清理环境变量。没有工作目录的管理员是只读模式（Read/Grep），访客没有工具。工作目录不能包含网关的运行时、配置和数据目录（用 `make install` 后它们在用户目录）。没有沙箱的机器，自动模式下 Shell 也要审批（按每一轮实际执行的机器算）。
-5. **SSH 服务器**（internal/host/ssh.go）：网关起一个 `ssh -M -N` 主连接（ControlPersist=no，控制路径在 `$NANO_HOME/run/nano-ssh`，路径太长时退回 $XDG_RUNTIME_DIR 或 /tmp），之后的命令都 `-o ControlMaster=no -o BatchMode=yes` 复用它。连上后探测（uname、有没有执行器）→ 架构相同就上传（有 nano-exec-static 优先）→ 否则传 nano-exec-src.tar.gz 用 cc 现编。执行器在服务器 `~/.nano-agent/nano-exec-<sha256 前 8 位>`；部署成功后删旧的 `~/.cache/nano-agent`。每 5 分钟复查，掉线 5s→60s 退避重连；ssh 退出码 255 视为连接断了。工具调用 stdin 保持打开，关 stdin 就是取消（3 秒后杀）。测试用 NANO_SSH_PROGRAM 换成假 ssh。
-6. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）。内核口令两种：共用 token（本机、手写 kernel.conf 的）；配对得到的专用口令（绑定节点名，冒充不了别的节点，网关只存 SHA-256，网页移除即作废）。Hub.Attach 不查口令，只给测试用。TCP 本身不加密，跨网络使用私有网络或隧道。SSH 密码只在 data/connections.json（0600）和 askpass 临时文件里。
-7. **技能**：放在网关上（internal/skills，`[skills] dir` 默认 gateway.toml 旁的 skills/），每一轮开始时 Scan()，名字或简介变了才发 skills 事件；Skill 工具定义由网关加进模型请求（toolsFor，和内核的工具一起按名字排序，内核报的 Skill 忽略）。调用 Skill 时内核用 exec（没有 workspace）交给网关，网关读说明、把附带文件 PutFiles 到这一轮挂载的每台机器的 ~/.nano-agent/skills/<名字>/（本机、SSH 自己放，别的电脑用 skill_put，内核只肯写这个目录），说明里给的就是这个路径，每台机器一样。
-8. **聊天平台流式显示**：RunView 只追加到内存，streamRun 的后台协程合并更新，Close 不阻塞调度锁，但会补齐尾部并关闭卡片。Telegram 每秒编辑消息，飞书每半秒用 CardKit Content 更新卡片，每张卡片的 sequence 严格递增。长回复分段，错误只记录一次，结束时发送完整文本。无正文增量的模型最终结果也会交给 RunView。飞书需要 cardkit:card:write，扫码注册已加入；平台接口测试用 httptest 模拟，无真实凭据的渠道仍需使用时验证。
-9. **上下文压缩**：历史超限且有完整旧轮次可切时，额外用当前模型生成摘要。已有 Summary 和被切掉的历史作为 JSON 数据传入，不传工具、人格和推理记录；输出 2048 token，支持 none 时关闭思考，60 秒超时。最近消息和当前轮留在原位置；摘要连同 EnvNote 存在 Settings.Summary，只在压缩时替换，JSONL 不改写。生成失败沿用裁剪，已有摘要不丢；取消或迟到结果不提交，保存失败不推进 Base。额外调用和 token 都计入本轮及全局统计。
+5. **密钥和脱敏**：`secret.Init` 在 main/chat 启动时读 `~/.nano-agent/secret.key`（没有就生成 32 字节）；models/host/config/web 在读写时加解密，旧明文启动时重写。`[security] redact`（off/public/always，默认 public）只对工具结果脱敏：模型请求按接口 BaseURL 是否为内网判断，Telegram/飞书过程卡片总是脱敏，网页和终端保留原文；同一段内容每次结果一致。
 
-10. **平台同步与卡片**：Telegram / 飞书实现 Watcher.OpenMirror，其他窗口开始一轮时同步输入和 RunView。streamRun 把过程存成结构化的（思考、工具调用列表 toolEntry、备注），版本号变了才发请求。Telegram：回复正文用 tgHTML 把 Markdown 转成 Telegram 的 HTML 子集（tgmarkdown.go，没闭合的标记保持成对，代码块跨段时 tgMarkdownChunks 补开头），HTML 发不出去（can't parse entities）就退回纯文本；过程是单独一条消息（状态行 + expandable blockquote）。飞书：一张 CardKit 卡片（src 来源、proc 折叠面板里 think / tools、reply、foot 状态、stop 按钮），长回复续卡只放正文，结束时删 stop，没有过程时删 proc；卡片约 30 KB 上限，正文每卡 3500 字、工具只留最近 12 次。审批：渠道实现 channel.Approver（SendApproval / ResolveApproval），app/approvals.go 发审批卡片、记 ref，在哪儿批了（按钮、命令、网页）都 resolveApproval 改成结果；按钮回来是 Message.Action = ActionApprove / ActionDeny（Telegram callback_data ap:编号:1/0，飞书卡片回调 card.action.trigger，value {a, n}），走 decide 的管理员检查。/sync 是 /history 的入口，历史查看用 Archive。
-11. **WSL DrvFS**：9p 可能在 dentry 释放后重建 inode，刚加过的 Landlock 规则就失效。add_rule 成功后保留 O_PATH | O_CLOEXEC 引用直到本次执行器退出，不关闭沙箱，不额外放行父目录。test_exec 增加 Windows 盘上的目录、读写、只读和越界回归。
+6. **SSH 服务器**（internal/host/ssh.go）：网关起一个 `ssh -M -N` 主连接（ControlPersist=no，控制路径在 `$NANO_HOME/run/nano-ssh`，路径太长时退回 $XDG_RUNTIME_DIR 或 /tmp），之后的命令都 `-o ControlMaster=no -o BatchMode=yes` 复用它。连上后探测（uname、有没有执行器）→ 架构相同就上传（有 nano-exec-static 优先）→ 否则传 nano-exec-src.tar.gz 用 cc 现编。执行器在服务器 `~/.nano-agent/nano-exec-<sha256 前 8 位>`；部署成功后删旧的 `~/.cache/nano-agent`。每 5 分钟复查，掉线 5s→60s 退避重连；ssh 退出码 255 视为连接断了。工具调用 stdin 保持打开，关 stdin 就是取消（3 秒后杀）。测试用 NANO_SSH_PROGRAM 换成假 ssh。
+7. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）。内核口令两种：共用 token（本机、手写 kernel.conf 的）；配对得到的专用口令（绑定节点名，冒充不了别的节点，网关只存 SHA-256，网页移除即作废）。Hub.Attach 不查口令，只给测试用。TCP 本身不加密，跨网络使用私有网络或隧道。SSH 密码在 data/connections.json（0600，加密）和 askpass 临时文件里。
+8. **技能**：放在网关上（internal/skills，`[skills] dir` 默认 gateway.toml 旁的 skills/），每一轮开始时 Scan()，名字或简介变了才发 skills 事件；Skill 工具定义由网关加进模型请求（toolsFor，和内核的工具一起按名字排序，内核报的 Skill 忽略）。调用 Skill 时内核用 exec（没有 workspace）交给网关，网关读说明、把附带文件 PutFiles 到这一轮挂载的每台机器的 ~/.nano-agent/skills/<名字>/（本机、SSH 自己放，别的电脑用 skill_put，内核只肯写这个目录），说明里给的就是这个路径，每台机器一样。
+9. **聊天平台流式显示**：RunView 只追加到内存，streamRun 的后台协程合并更新，Close 不阻塞调度锁，但会补齐尾部并关闭卡片。Telegram 每秒编辑消息，飞书每半秒用 CardKit Content 更新卡片，每张卡片的 sequence 严格递增。长回复分段，错误只记录一次，结束时发送完整文本。无正文增量的模型最终结果也会交给 RunView。飞书需要 cardkit:card:write，扫码注册已加入；平台接口测试用 httptest 模拟，无真实凭据的渠道仍需使用时验证。
+10. **上下文压缩**：历史超限且有完整旧轮次可切时，额外用当前模型生成摘要。已有 Summary 和被切掉的历史作为 JSON 数据传入，不传工具、人格和推理记录；输出 2048 token，支持 none 时关闭思考，60 秒超时。最近消息和当前轮留在原位置；摘要连同 EnvNote 存在 Settings.Summary，只在压缩时替换，JSONL 不改写。生成失败沿用裁剪，已有摘要不丢；取消或迟到结果不提交，保存失败不推进 Base。额外调用和 token 都计入本轮及全局统计。
 
-12. **网页管理 SSH**：host.Manager 保存 data/connections.json，写入后才更新内存，列表只返回 has_password。OpenSSH 处理别名、密钥、跳板机；密码经 SSH_ASKPASS 和 0600 文件传递，不进参数。自动连接在启动和掉线后重试，修改 / 删除前先断开。状态变化 OnChange → app.HostsChanged 推 machines / workspaces 事件。
-13. **本机内核**（cmd/nano-gateway/localkernel.go）：`[kernel] local` 默认开，网关找到 nano-exec 旁边的 nano-kernel，生成 data/local-kernel.conf（随机口令，hub.AllowToken 接受它），起子进程，stderr 追加到 data/kernel.log，退出了退避重启（1s→30s，跑满一分钟重置），网关退出时 SIGTERM 等 4 秒。名字默认 gateway（不用主机名：同一台机器上 WSL 里装的电脑内核多半叫主机名，同名会互相顶掉）。make run 只起网关。
-14. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
-15. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
+11. **平台同步与卡片**：Telegram / 飞书实现 Watcher.OpenMirror，其他窗口开始一轮时同步输入和 RunView。streamRun 把过程存成结构化的（思考、工具调用列表 toolEntry、备注），版本号变了才发请求。Telegram：回复正文用 tgHTML 把 Markdown 转成 Telegram 的 HTML 子集（tgmarkdown.go，没闭合的标记保持成对，代码块跨段时 tgMarkdownChunks 补开头），HTML 发不出去（can't parse entities）就退回纯文本；过程是单独一条消息（状态行 + expandable blockquote）。飞书：一张 CardKit 卡片（src 来源、proc 折叠面板里 think / tools、reply、foot 状态、stop 按钮），长回复续卡只放正文，结束时删 stop，没有过程时删 proc；卡片约 30 KB 上限，正文每卡 3500 字、工具只留最近 12 次。审批：渠道实现 channel.Approver（SendApproval / ResolveApproval），app/approvals.go 发审批卡片、记 ref，在哪儿批了（按钮、命令、网页）都 resolveApproval 改成结果；按钮回来是 Message.Action = ActionApprove / ActionDeny（Telegram callback_data ap:编号:1/0，飞书卡片回调 card.action.trigger，value {a, n}），走 decide 的管理员检查。/sync 是 /history 的入口，历史查看用 Archive。
+12. **WSL DrvFS**：9p 可能在 dentry 释放后重建 inode，刚加过的 Landlock 规则就失效。add_rule 成功后保留 O_PATH | O_CLOEXEC 引用直到本次执行器退出，不关闭沙箱，不额外放行父目录。test_exec 增加 Windows 盘上的目录、读写、只读和越界回归。
 
-16. **模型管理**（internal/models、app/models.go）：接口和模型只存在 `data/models.json`（0600，含 API key；网页只返回 `has_key`）。旧版 `[llm]` 的单模型在第一次启动时由 `models.Open` 一次性导入成普通接口 + 模型（接口 ID 仍是 `config`，只为兼容已有会话的 `config/模型名` 引用，没有特殊行为），并写 `seeded: true`；删掉后重启不会复活。没有模型时网关正常启动，聊天直接提示去模型节点添加，不启动 run，也不隐式兜底。会话的 `Settings.Model` 是模型 ID，空表示默认模型；默认模型只来自 models.json。`clientFor` 按模型建客户端并按 `LLMConfig` 指纹缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填按上下文窗口一半，窗口没填兜底 128000）。`[llm]` 只保留 timeout / temperature / extra / send_reasoning / trim_to 这些全局默认，模型相关字段不再从网页设置里改。
+13. **网页管理 SSH**：host.Manager 保存 data/connections.json，密码加密，写入后才更新内存，列表只返回 has_password。OpenSSH 处理别名、密钥、跳板机；密码经 SSH_ASKPASS 和 0600 文件传递，不进参数。自动连接在启动和掉线后重试，修改 / 删除前先断开。状态变化 OnChange → app.HostsChanged 推 machines / workspaces 事件。
+14. **本机内核**（cmd/nano-gateway/localkernel.go）：`[kernel] local` 默认开，网关找到 nano-exec 旁边的 nano-kernel，生成 data/local-kernel.conf（随机口令，hub.AllowToken 接受它），起子进程，stderr 追加到 data/kernel.log，退出了退避重启（1s→30s，跑满一分钟重置），网关退出时 SIGTERM 等 4 秒。名字默认 gateway（不用主机名：同一台机器上 WSL 里装的电脑内核多半叫主机名，同名会互相顶掉）。make run 只起网关。
+15. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
+16. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
 
-17. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源只有模型自己的 `modalities`；在模型节点面板里勾“图片”。`store.openModel(intent)` 让 ⌘K、右键菜单能直接打开模型面板并进入添加模型/接口。
+17. **模型管理**（internal/models、app/models.go）：接口和模型只存在 `data/models.json`（0600，API key 加密；网页只返回 `has_key`）。旧版 `[llm]` 的单模型在第一次启动时由 `models.Open` 一次性导入成普通接口 + 模型（接口 ID 仍是 `config`，只为兼容已有会话的 `config/模型名` 引用，没有特殊行为），并写 `seeded: true`；删掉后重启不会复活。没有模型时网关正常启动，聊天直接提示去模型节点添加，不启动 run，也不隐式兜底。会话的 `Settings.Model` 是模型 ID，空表示默认模型；默认模型只来自 models.json。`clientFor` 按模型建客户端并按 `LLMConfig` 指纹缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填按上下文窗口一半，窗口没填兜底 128000）。`[llm]` 只保留 timeout / temperature / extra / send_reasoning / trim_to 这些全局默认，模型相关字段不再从网页设置里改。
+
+18. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源只有模型自己的 `modalities`；在模型节点面板里勾“图片”。`store.openModel(intent)` 让 ⌘K、右键菜单能直接打开模型面板并进入添加模型/接口。
 
 ## 用户的偏好和约定（重要）
 
@@ -127,7 +129,7 @@ cd gateway && go test -race ./...
 - 思考强度只用 OpenAI 风格的 `reasoning_effort`（用户的模型接受 none/low/high/xhigh/max，不接受 medium/minimal/off）。切换思考强度导致缓存失效是 vLLM 的问题，**不要提示**。
 - 目前只支持私聊，群聊以后做。
 - 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，Co-Authored-By 记录实际参与者。用户说过“提交，然后开始下一步即可”。
-- **密钥**：API key 在本地 gateway.toml、data/models.json、data/config.json（网页改过的字段），SSH 密码在 data/connections.json，都是 0600 明文；不要提交，提交前用 `git grep --cached` 查一遍。不要删用户的 data/。工作目录不能包含网关的运行时、配置和数据目录；用 `make install` 后它们在 ~/.local / ~/.config。
+- **密钥**：API key、SSH 密码、机器人 token、网页密码在 models.json / connections.json / config.json / web.secret 里是 `enc:v1:`（AES-256-GCM），密钥文件是 `~/.nano-agent/secret.key`（0600）；gateway.toml 里旧的明文会在启动时搬进 data/config.json 加密并清空那一行。不要删用户的 data/ 和 secret.key。工作目录不能包含 ~/.nano-agent；用 `make install` 后它就在 ~/.nano-agent。
 - 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），迁移后地址/模型保存在 data/models.json。
 - 杀进程前确认 /proc/PID/cwd 是演示目录，用户自己可能开着网关（cwd 是项目目录）。
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"nano-agent/gateway/internal/secret"
 )
 
 func writeConf(t *testing.T) string {
@@ -99,5 +101,48 @@ func TestStoreOverlay(t *testing.T) {
 	s.Set(map[string]any{"kernel.listen": "tcp:127.0.0.1:7701"})
 	if f := find(s.Describe(), "kernel.listen"); !f.Pending {
 		t.Fatalf("pending: %+v", f)
+	}
+}
+
+func TestMigrateGatewaySecrets(t *testing.T) {
+	home := t.TempDir()
+	if err := secret.Init(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(secret.Reset)
+	path := writeConf(t)
+	s, warns, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Current().Kernel.Token != "k" || s.Current().LLM.APIKey != "sk-file" {
+		t.Fatalf("迁移后配置变了：%+v", s.Current())
+	}
+	if len(warns) == 0 || !strings.Contains(strings.Join(warns, " "), "已把") {
+		t.Fatalf("没有迁移提示：%v", warns)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), `"k"`) || strings.Contains(string(b), "sk-file") {
+		t.Fatalf("gateway.toml 还留着明文：%s", b)
+	}
+	ov, _ := os.ReadFile(filepath.Join(filepath.Dir(path), "data", "config.json"))
+	if !strings.Contains(string(ov), "enc:v1:") || strings.Contains(string(ov), "sk-file") || strings.Contains(string(ov), `"k"`) {
+		t.Fatalf("config.json 没有加密：%s", ov)
+	}
+}
+
+func TestEncryptedConfigWithoutKey(t *testing.T) {
+	home := t.TempDir()
+	if err := secret.Init(home); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConf(t)
+	if _, _, err := Open(path); err != nil {
+		t.Fatal(err)
+	}
+	secret.Reset()
+	_, _, err := Open(path)
+	if err == nil || !strings.Contains(err.Error(), "secret.key") {
+		t.Fatalf("密钥丢失的错误不清楚：%v", err)
 	}
 }

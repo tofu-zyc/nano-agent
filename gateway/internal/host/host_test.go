@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/kernel"
+	"nano-agent/gateway/internal/secret"
 )
 
 // 测试用仓库里编译好的执行器（make 之后才有）
@@ -356,3 +357,31 @@ func TestRealOpenSSH(t *testing.T) {
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func TestConnectionPasswordEncrypted(t *testing.T) {
+	home := t.TempDir()
+	if err := secret.Init(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(secret.Reset)
+	dir := t.TempDir()
+	m, err := New(context.Background(), dir, Executor{}, nil, nil, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := m.Save(Connection{Name: "box", Host: "127.0.0.1", Password: "hunter2-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "connections.json"))
+	if strings.Contains(string(b), "hunter2-secret") || !strings.Contains(string(b), "enc:v1:") {
+		t.Fatalf("connections.json 没加密：%s", b)
+	}
+	m2, err := New(context.Background(), dir, Executor{}, nil, nil, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.records[id].Password; got != "hunter2-secret" {
+		t.Fatalf("密码读回来不对：%q", got)
+	}
+}

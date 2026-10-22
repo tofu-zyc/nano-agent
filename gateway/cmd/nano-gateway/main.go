@@ -27,6 +27,7 @@ import (
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/paths"
 	"nano-agent/gateway/internal/persona"
+	"nano-agent/gateway/internal/secret"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/web"
 )
@@ -55,6 +56,10 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	if err := secret.Init(paths.Home()); err != nil {
+		log.Error("读取密钥文件失败", "err", err)
+		os.Exit(1)
+	}
 	conf, warnings, err := config.Open(*cfgPath)
 	for _, w := range warnings {
 		log.Warn(w)

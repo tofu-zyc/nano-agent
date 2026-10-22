@@ -24,6 +24,7 @@ import (
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/redact"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
 )
@@ -181,6 +182,18 @@ func (r *run) views() []channel.RunView {
 		}
 	}
 	return vs
+}
+
+// knownSecrets 是网关自己知道的密钥，脱敏时精确匹配。
+func (a *App) knownSecrets() []string {
+	out := a.cfg.Secrets()
+	if a.models != nil {
+		out = append(out, a.models.Secrets()...)
+	}
+	if s, ok := a.hosts.(interface{ Secrets() []string }); ok {
+		out = append(out, s.Secrets()...)
+	}
+	return out
 }
 
 // addOut 让这个窗口也收到这一轮的结束说明（中途从别的窗口停止、清空时）
@@ -746,8 +759,15 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content}); err != nil {
 			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 		}
-		for _, v := range s.run.views() {
-			v.ToolResult(m.OK == nil || *m.OK, resultDetail(m.Content))
+		for _, o := range s.run.outs {
+			if o.view == nil {
+				continue
+			}
+			detail := m.Content
+			if (o.ep.ch == "tg" || o.ep.ch == "feishu") && redact.Needed(a.cfg.Security.Redact, false, true) {
+				detail = redact.ToolResult(detail, a.knownSecrets())
+			}
+			o.view.ToolResult(m.OK == nil || *m.OK, resultDetail(detail))
 		}
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
@@ -861,6 +881,18 @@ func (a *App) generateModel(s *sess) {
 	req := llm.Request{
 		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
+	}
+	if a.cfg.Security.Redact != "off" {
+		_, e, ok := a.modelOf(s.sid)
+		public := ok && e.Kind != "mock" && redact.IsPublicBaseURL(e.BaseURL)
+		if redact.Needed(a.cfg.Security.Redact, public, false) {
+			known := a.knownSecrets()
+			for i := range req.Messages {
+				if req.Messages[i].Role == "tool" {
+					req.Messages[i].Content = redact.ToolResult(req.Messages[i].Content, known)
+				}
+			}
+		}
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
 		req.Tools = a.toolsFor(n, r.readOnly)

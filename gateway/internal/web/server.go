@@ -28,6 +28,7 @@ import (
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/persona"
+	"nano-agent/gateway/internal/secret"
 )
 
 //go:embed all:dist
@@ -78,11 +79,25 @@ func (s *Server) loadPassword(cfg *config.Config) error {
 	path := filepath.Join(cfg.Session.DataDir, "web.secret")
 	b, err := os.ReadFile(path)
 	pw := strings.TrimSpace(string(b))
+	if err == nil && secret.IsEncrypted(pw) {
+		if pw, err = secret.Decrypt(pw); err != nil {
+			return err
+		}
+	} else if err == nil && pw != "" && secret.Ready() {
+		enc, _ := secret.Encrypt(pw)
+		if err := os.WriteFile(path, []byte(enc+"\n"), 0o600); err != nil {
+			return err
+		}
+	}
 	if err != nil || pw == "" {
 		buf := make([]byte, 12)
 		rand.Read(buf)
 		pw = hex.EncodeToString(buf)
-		if err := os.WriteFile(path, []byte(pw+"\n"), 0o600); err != nil {
+		store := pw
+		if secret.Ready() {
+			store, _ = secret.Encrypt(pw)
+		}
+		if err := os.WriteFile(path, []byte(store+"\n"), 0o600); err != nil {
 			return err
 		}
 	}

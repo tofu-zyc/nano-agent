@@ -14,6 +14,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/paths"
+	"nano-agent/gateway/internal/secret"
 )
 
 // runChat 是 `nano-gateway chat`：在终端里和正在运行的网关聊天。只负责收发文字，
@@ -27,6 +28,10 @@ func runChat(args []string) int {
 		*cfgPath = paths.Config()
 	}
 
+	if err := secret.Init(paths.Home()); err != nil {
+		fmt.Fprintln(os.Stderr, "读取密钥文件失败：", err)
+		return 1
+	}
 	conf, _, err := config.Open(*cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "配置有误：", err)

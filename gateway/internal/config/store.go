@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+
+	"nano-agent/gateway/internal/secret"
 )
 
 // Store 管理运行中的配置。gateway.toml 是手写的底稿；网页里的修改存在数据目录的 config.json，
@@ -39,7 +41,7 @@ var envKeys = map[string]string{
 
 // Open 读取配置文件和网页里保存的修改。网页的修改有问题时忽略它（不删除），只给出警告。
 func Open(path string) (*Store, []string, error) {
-	base, md, warnings, err := parse(path, nil)
+	base, md, warnings, err := parseRaw(path, nil)
 	if err != nil {
 		return nil, warnings, err
 	}
@@ -48,16 +50,26 @@ func Open(path string) (*Store, []string, error) {
 		if err := json.Unmarshal(b, &s.overlay); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s 不是合法的 JSON，已忽略：%v", s.overlayPath, err))
 			s.overlay = map[string]any{}
+		} else if err := decryptOverlay(s.overlay); err != nil {
+			return nil, warnings, err
+		} else if secret.Ready() && overlayNeedsEncryption(s.overlay) {
+			if err := s.saveOverlay(s.overlay); err != nil {
+				return nil, warnings, fmt.Errorf("给 config.json 里的密钥加密：%w", err)
+			}
 		}
 	}
 	cur, md2, _, err := s.build(s.overlay)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("网页里保存的配置有误，已忽略：%v", err))
+		if verr := base.validate(); verr != nil {
+			return nil, warnings, verr
+		}
 		cur, s.overlay = base, map[string]any{}
 	} else {
 		md = md2
 	}
 	s.cur, s.boot, s.md = cur, cur, md
+	warnings = append(warnings, s.migrateFileSecrets()...)
 	return s, warnings, nil
 }
 
@@ -149,7 +161,11 @@ func (s *Store) Reload() error {
 }
 
 func (s *Store) saveOverlay(ov map[string]any) error {
-	b, err := json.MarshalIndent(ov, "", "  ")
+	disk, err := encryptedOverlay(ov)
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}

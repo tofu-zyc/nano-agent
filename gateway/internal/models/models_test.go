@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/secret"
 )
 
 func testConfig() *config.Config {
@@ -218,5 +222,32 @@ func TestFetch(t *testing.T) {
 	}
 	if !list[0].Added || list[1].Added {
 		t.Fatalf("已添加的标记：%+v", list)
+	}
+}
+
+func TestAPIKeyEncryptedAtRest(t *testing.T) {
+	home := t.TempDir()
+	if err := secret.Init(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(secret.Reset)
+	dir := t.TempDir()
+	st, err := Open(dir, &config.Config{LLM: config.LLM{Provider: "openai"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveEndpoint(Endpoint{Name: "x", Kind: "openai", BaseURL: "https://x/v1", APIKey: "sk-super-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "models.json"))
+	if strings.Contains(string(b), "sk-super-secret") || !strings.Contains(string(b), "enc:v1:") {
+		t.Fatalf("models.json 没加密：%s", b)
+	}
+	st2, err := Open(dir, &config.Config{LLM: config.LLM{Provider: "openai"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eps := st2.Endpoints(); len(eps) != 1 || eps[0].APIKey != "sk-super-secret" {
+		t.Fatalf("重新读出来的 key 不对：%+v", eps)
 	}
 }

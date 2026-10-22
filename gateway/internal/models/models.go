@@ -25,6 +25,7 @@ import (
 
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/httpx"
+	"nano-agent/gateway/internal/secret"
 )
 
 // ConfigEndpoint 是旧配置模型迁移后的接口 ID。只为了兼容已经引用 config/模型名 的会话设置，
@@ -80,6 +81,24 @@ func Open(dataDir string, cfg *config.Config) (*Store, error) {
 	if err == nil {
 		if err := json.Unmarshal(b, &s.f); err != nil {
 			return nil, fmt.Errorf("%s 读不了：%w", s.path, err)
+		}
+		// api_key 存盘时是加密的；老的明文在启动时加密后重写。
+		old := false
+		for i := range s.f.Endpoints {
+			k, err := secret.Decrypt(s.f.Endpoints[i].APIKey)
+			if err != nil {
+				return nil, fmt.Errorf("%s 里的 api_key：%w", s.path, err)
+			}
+			if k != s.f.Endpoints[i].APIKey {
+				s.f.Endpoints[i].APIKey = k
+			} else if k != "" && secret.Ready() && !secret.IsEncrypted(k) {
+				old = true
+			}
+		}
+		if old {
+			if err := s.save(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	// 旧版本没有 modalities：按纯文本处理；写坏的也按纯文本，不挡住启动
@@ -146,6 +165,19 @@ func legacyEndpointName(l config.LLM) string {
 }
 
 // SetConfig 换上新的配置（[llm] 改了的时候）
+// Secrets 是已知的接口 API key，给脱敏用。
+func (s *Store) Secrets() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, e := range s.f.Endpoints {
+		if e.APIKey != "" {
+			out = append(out, e.APIKey)
+		}
+	}
+	return out
+}
+
 func (s *Store) SetConfig(cfg *config.Config) {
 	s.mu.Lock()
 	s.cfg = cfg
@@ -153,7 +185,16 @@ func (s *Store) SetConfig(cfg *config.Config) {
 }
 
 func (s *Store) save() error {
-	b, err := json.MarshalIndent(s.f, "", "  ")
+	disk := s.f
+	disk.Endpoints = slices.Clone(s.f.Endpoints)
+	for i := range disk.Endpoints {
+		enc, err := secret.Encrypt(disk.Endpoints[i].APIKey)
+		if err != nil {
+			return err
+		}
+		disk.Endpoints[i].APIKey = enc
+	}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -27,6 +27,7 @@ type Config struct {
 	Feishu    Feishu    `toml:"feishu" json:"feishu"`
 	Web       Web       `toml:"web" json:"web"`
 	Network   Network   `toml:"network" json:"network"`
+	Security  Security  `toml:"security" json:"security"`
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
@@ -71,6 +72,17 @@ type Network struct {
 	// 网关的默认代理，模型和各个聊天渠道的代理留空时用它。
 	// 空：跟随环境变量（HTTPS_PROXY 等）；none：直连；或者写代理地址。
 	Proxy string `toml:"proxy" json:"proxy"`
+}
+
+// Security 是工具结果脱敏：off 不脱敏；public（默认）只在模型接口不在本机/内网、
+// 以及发到 Telegram/飞书时脱敏；always 发给模型时总是脱敏。
+type Security struct {
+	Redact string `toml:"redact" json:"redact"`
+}
+
+// Secrets 是网关自己保存的密钥原文（给脱敏用，不要写日志）。
+func (c *Config) Secrets() []string {
+	return []string{c.Kernel.Token, c.Web.Password, c.Telegram.Token, c.Feishu.AppSecret, c.LLM.APIKey}
 }
 
 // ProxyFor 是某个组件实际用的代理：组件自己没设置就用网关的默认代理。
@@ -171,11 +183,29 @@ func Load(path string) (*Config, []string, error) {
 // parse 读取配置文件，再把 overlay（网页里改过的配置，JSON）叠加上去。
 // 优先级：配置文件 < 环境变量 < 网页。
 func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error) {
+	return parseCheck(path, overlay, true)
+}
+
+// parseRaw 不校验（token 可能已经被搬到 config.json，底稿里是空值；等叠加后再校验）。
+func parseRaw(path string, overlay []byte) (*Config, toml.MetaData, []string, error) {
+	return parseCheck(path, overlay, false)
+}
+
+func parseCheck(path string, overlay []byte, check bool) (*Config, toml.MetaData, []string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, toml.MetaData{}, nil, fmt.Errorf("读取 %s：%w", path, err)
+	}
 	var c Config
-	md, err := toml.DecodeFile(path, &c)
+	md, err := toml.Decode(string(b), &c)
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("读取 %s：%w", path, err)
 	}
+	return finish(&c, md, overlay, path, check)
+}
+
+// finish 在已经解析出 TOML 之后叠加环境变量、网页修改和默认值，并换算路径。
+func finish(c *Config, md toml.MetaData, overlay []byte, path string, check bool) (*Config, toml.MetaData, []string, error) {
 	var warnings []string
 	for _, k := range md.Undecoded() {
 		if len(k) > 1 && k[0] == "llm" && k[1] == "extra" {
@@ -186,7 +216,7 @@ func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error
 
 	c.applyEnv()
 	if len(overlay) > 0 {
-		if err := json.Unmarshal(overlay, &c); err != nil {
+		if err := json.Unmarshal(overlay, c); err != nil {
 			return nil, md, warnings, fmt.Errorf("网页里保存的配置有误：%w", err)
 		}
 	}
@@ -202,7 +232,12 @@ func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error
 	if strings.HasPrefix(c.Kernel.Listen, "unix:") {
 		c.Kernel.Listen = "unix:" + resolve(base, strings.TrimPrefix(c.Kernel.Listen, "unix:"))
 	}
-	return &c, md, warnings, c.validate()
+	if check {
+		if err := c.validate(); err != nil {
+			return c, md, warnings, err
+		}
+	}
+	return c, md, warnings, nil
 }
 
 // 敏感信息也可以放在环境变量里，优先于配置文件。
@@ -246,6 +281,7 @@ func (c *Config) applyDefaults() {
 	def(&c.Web.Listen, "127.0.0.1:7788")
 	def(&c.Workspace.Mode, "ask")
 	def(&c.Access.Guest, "none")
+	def(&c.Security.Redact, "public")
 	if c.LLM.TrimTo <= 0 || c.LLM.TrimTo >= 1 {
 		c.LLM.TrimTo = 0.5
 	}
@@ -293,6 +329,9 @@ func (c *Config) validate() error {
 	}
 	if c.Access.Guest != "none" && c.Access.Guest != "readonly" {
 		errs = append(errs, fmt.Errorf("access.guest 只能是 none 或 readonly，现在是 %q", c.Access.Guest))
+	}
+	if c.Security.Redact != "off" && c.Security.Redact != "public" && c.Security.Redact != "always" {
+		errs = append(errs, fmt.Errorf("security.redact 只能是 off、public 或 always，现在是 %q", c.Security.Redact))
 	}
 	for _, m := range c.LLM.Modalities {
 		switch m {

@@ -73,6 +73,11 @@ proxy = ""
 listen   = "127.0.0.1:7788"    # "off" 表示不开；要从别的机器访问，建议走 SSH 隧道或 Tailscale
 password = ""                  # 空表示自动生成一个，存在数据目录的 web.secret 里
 
+[security]
+# 工具结果里的密钥脱敏：off 不脱敏；public（默认）只在模型接口在外网、或发到 Telegram / 飞书时脱敏；
+# always 发给模型时总是脱敏。网页和终端显示原文。
+redact = "public"
+
 [cli]
 enabled = true                 # 终端聊天：另开一个终端 make chat 连进来（只有自己能连）
 show_reasoning = true          # 灰色显示模型的思考过程
