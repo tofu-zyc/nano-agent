@@ -89,14 +89,15 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 	var err error
 	switch args.What {
 	case "status":
-		snap := a.Snapshot()
-		st := a.ModelStore()
-		def := ""
-		if st != nil {
-			def = st.Default()
+		st := a.Status()
+		out = map[string]any{
+			"running": st.Running, "pid": st.PID, "version": st.Version,
+			"started": st.Started, "uptime_ms": st.UptimeMS, "mode": st.Mode,
+			"web_url": st.WebURL, "kernel_listen": st.KernelListen,
+			"kernels": st.Kernels, "machines": st.Machines, "channels": st.Channels,
+			"workspaces": a.Workspaces(), "default_model": st.DefaultModel,
+			"pending_restart": st.PendingRestart, "recent_errors": st.RecentErrors,
 		}
-		out = map[string]any{"kernels": snap.Kernels, "machines": snap.Machines, "workspaces": snap.Workspaces,
-			"default_model": def, "channels": a.Channels()}
 	case "logs":
 		n := args.Lines
 		if n <= 0 {

@@ -128,6 +128,11 @@ func formatStatusBrief(st Status) string {
 	if st.DefaultModel != "" {
 		fmt.Fprintf(&b, "\n默认模型：%s", st.DefaultModel)
 	}
+	for _, m := range st.Machines {
+		if m.Online {
+			fmt.Fprintf(&b, "\n机器：%s（%s，在线）", m.Name, m.Kind)
+		}
+	}
 	for _, c := range st.Channels {
 		if c.Enabled {
 			fmt.Fprintf(&b, "\n渠道：%s（%s）", c.Name, c.Status.State)

@@ -51,3 +51,19 @@ func TestGatewayAdminRestartRequestsRestart(t *testing.T) {
 		t.Fatalf("结果不对：%s", text)
 	}
 }
+
+func TestGatewayStatusIncludesRuntime(t *testing.T) {
+	e := setup(t)
+	e.a.SetRuntime("test-version", "background", "http://127.0.0.1:1/")
+	var ok bool
+	var text string
+	e.a.gatewayQuery(mainSID, `{"what":"status"}`, func(o bool, s string) { ok, text = o, s })
+	if !ok {
+		t.Fatalf("status 查询失败：%s", text)
+	}
+	for _, want := range []string{`"version": "test-version"`, `"mode": "background"`, `"machines"`, `"channels"`, `"pending_restart"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status 缺 %s：%s", want, text)
+		}
+	}
+}

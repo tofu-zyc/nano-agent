@@ -99,6 +99,19 @@ func printStatus(st app.Status) {
 		}
 		fmt.Println("在线内核：" + strings.Join(parts, "、"))
 	}
+	if len(st.Machines) == 0 {
+		fmt.Println("机器：没有")
+	} else {
+		parts := make([]string, 0, len(st.Machines))
+		for _, m := range st.Machines {
+			state := "离线"
+			if m.Online {
+				state = "在线"
+			}
+			parts = append(parts, fmt.Sprintf("%s（%s，%s）", m.Name, m.Kind, state))
+		}
+		fmt.Println("机器：" + strings.Join(parts, "、"))
+	}
 	for _, c := range st.Channels {
 		if c.Enabled {
 			fmt.Printf("渠道：%s（%s）\n", c.Name, c.Status.State)
