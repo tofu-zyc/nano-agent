@@ -176,6 +176,7 @@
   let el: HTMLDivElement;
   let view = $state({ x: 0, y: 0, k: 1 });
   let userMoved = false;
+  let fitted = false; // 只在第一次拿到布局时自动适配，之后打开面板/加节点都不动视图
   let hover = $state<string | null>(null);
 
   function fit() {
@@ -185,12 +186,16 @@
     const k = Math.min((r.width - pad * 2) / layout.W, (r.height - pad * 2) / layout.H, 1.15);
     view = { k, x: (r.width - layout.W * k) / 2, y: (r.height - layout.H * k) / 2 };
     userMoved = false;
+    fitted = true;
   }
 
   $effect(() => {
     layout.W;
     layout.H;
-    if (!userMoved) queueMicrotask(fit);
+    if (fitted || userMoved) return;
+    queueMicrotask(() => {
+      if (!fitted) fit();
+    });
   });
 
   function onWheel(e: WheelEvent) {
@@ -392,13 +397,8 @@
 
   onMount(() => {
     const off = store.on(onEvent);
-    const ro = new ResizeObserver(() => {
-      if (!userMoved) fit();
-    });
-    ro.observe(el);
     return () => {
       off();
-      ro.disconnect();
       cancelAnimationFrame(raf);
       for (const t of busyModel.values()) clearInterval(t);
     };
