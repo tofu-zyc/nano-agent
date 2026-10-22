@@ -44,7 +44,7 @@ func TestLocalExecLsAndFiles(t *testing.T) {
 	os.MkdirAll(work, 0o755)
 	os.MkdirAll(data, 0o755)
 	l := NewLocal(e, []string{data})
-	if _, ok, detail := l.Probe(); !ok {
+	if _, _, ok, detail := l.Probe(); !ok {
 		t.Fatal(detail)
 	}
 	ctx := context.Background()

@@ -3,12 +3,13 @@
 #define NA_LINK_H
 
 #include "cJSON.h"
+#include "plat.h"
 #include "util.h"
 
 #include <stdbool.h>
 
 typedef struct {
-    int     fd;        /* -1 表示未连接 */
+    na_sock fd;        /* NA_SOCK_NONE 表示未连接 */
     buf_t   in, out;
     int64_t last_rx;   /* 最近一次收到数据的时刻 */
 } link_t;

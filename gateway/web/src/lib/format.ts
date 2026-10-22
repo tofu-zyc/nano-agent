@@ -41,18 +41,32 @@ export function since(ms: number): string {
 /** 太长的路径从中间省略 */
 export function shortPath(p: string, max = 28): string {
   if (p.length <= max) return p;
-  const parts = p.split('/');
+  const win = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+  const sep = win ? '\\' : '/';
+  const parts = p.split(win ? /[\\/]/ : '/');
   const last = parts.pop() || '';
-  let head = parts.join('/');
+  let head = parts.join(sep);
   const keep = max - last.length - 2;
   if (keep < 4) return '…' + p.slice(-max + 1);
   head = head.slice(0, keep);
-  return head + '…/' + last;
+  return head + '…' + sep + last;
 }
 
 export function truncate(s: string, n: number): string {
   const r = Array.from(s);
   return r.length > n ? r.slice(0, n - 1).join('') + '…' : s;
+}
+
+export function osLabel(os?: string): string {
+  switch (os) {
+    case 'windows':
+      return 'Windows';
+    case 'macos':
+      return 'macOS';
+    case 'linux':
+      return 'Linux';
+  }
+  return '';
 }
 
 /** 机器的种类：网关所在的本机、装了内核的电脑、网关通过 SSH 连的服务器 */

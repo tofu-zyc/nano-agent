@@ -443,7 +443,8 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 7, hello
+            assert hello["token"] == "t0k" and hello["v"] == 8, hello
+            assert hello["os"] in ("linux", "macos", "windows") and hello["arch"], hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names   # Skill 由网关提供
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
             assert all("workspace" in t["input_schema"]["properties"] for t in hello["tools"]), hello["tools"]

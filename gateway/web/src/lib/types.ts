@@ -14,7 +14,7 @@ export type ChannelStatus = { state: string; identity?: string; error?: string; 
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
 // 一个在线的内核（agent）。local 表示它和网关在同一台机器上，managed 表示是网关自己启动的
-export type KernelInfo = { node: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
+export type KernelInfo = { node: string; os?: string; arch?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
 
 // 技能放在网关上
 export type SkillInfo = { name: string; description: string; dir: string };
@@ -26,6 +26,7 @@ export type CommandInfo = { name: string; args?: string; desc: string; admin?: b
 export type MachineInfo = {
   name: string;
   kind: 'local' | 'kernel' | 'ssh';
+  os?: string;
   online: boolean; // 上面的工作目录现在能用
   landlock: number;
   state?: string;
@@ -34,7 +35,7 @@ export type MachineInfo = {
 };
 
 // 工作目录：机器 + 路径。会话可以同时挂好几个；default 表示新会话默认挂上
-export type WorkspaceInfo = { id: string; host: string; path: string; default?: boolean; sessions: number; online: boolean };
+export type WorkspaceInfo = { id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
 
 // 模型接口（端点）：模型服务的地址和密钥，一个接口上可以放多个模型
 export type ModelEndpoint = {

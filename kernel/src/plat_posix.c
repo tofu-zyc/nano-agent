@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <limits.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -16,8 +18,10 @@
 #if !NA_MACOS
 #include <sys/prctl.h>
 #endif
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -241,7 +245,9 @@ char *plat_canonical(const char *abs)
         if (cut > 0) cut--;
         if (cut == 0) {
             /* 连根都不存在（不可能），按字面返回 */
-            return normalize(abs);
+            char *res = normalize(abs);
+            free(p);
+            return res;
         }
     }
 }
@@ -763,4 +769,216 @@ char *plat_shell_exe(char *const envp[])
 const char *plat_shell_prefix(void)
 {
     return NULL;
+}
+
+/* ---- 网络、poll、唤醒 ---- */
+
+int plat_poll(na_pollfd *fds, size_t n, int timeout_ms)
+{
+    struct pollfd *p = xcalloc(n ? n : 1, sizeof *p);
+    for (size_t i = 0; i < n; i++) {
+        p[i].fd = (int)fds[i].id;
+        short e = 0;
+        if (fds[i].events & NA_POLLIN) e |= POLLIN;
+        if (fds[i].events & NA_POLLOUT) e |= POLLOUT;
+        p[i].events = e;
+    }
+    int rc = poll(p, (nfds_t)n, timeout_ms);
+    if (rc >= 0)
+        for (size_t i = 0; i < n; i++) {
+            short e = 0;
+            if (p[i].revents & POLLIN) e |= NA_POLLIN;
+            if (p[i].revents & POLLOUT) e |= NA_POLLOUT;
+            if (p[i].revents & POLLERR) e |= NA_POLLERR;
+            if (p[i].revents & POLLHUP) e |= NA_POLLHUP;
+            if (p[i].revents & POLLNVAL) e |= NA_POLLNVAL;
+            fds[i].revents = e;
+        }
+    free(p);
+    return rc;
+}
+
+long plat_sock_read(na_sock s, void *buf, size_t n)
+{
+    for (;;) {
+        ssize_t r = read((int)s, buf, n);
+        if (r < 0 && errno == EINTR) continue;
+        return (long)r;
+    }
+}
+
+long plat_sock_write(na_sock s, const void *buf, size_t n)
+{
+    for (;;) {
+        ssize_t r = write((int)s, buf, n);
+        if (r < 0 && errno == EINTR) continue;
+        return (long)r;
+    }
+}
+
+void plat_sock_close(na_sock s)
+{
+    if (s != NA_SOCK_NONE) close((int)s);
+}
+
+static int connect_wait(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms)
+{
+    if (set_nonblock(fd) < 0) return -1;
+    if (connect(fd, sa, len) == 0) return 0;
+    if (errno != EINPROGRESS) return -1;
+    struct pollfd p = { .fd = fd, .events = POLLOUT };
+    int n = poll(&p, 1, timeout_ms);
+    if (n == 0) { errno = ETIMEDOUT; return -1; }
+    if (n < 0) return -1;
+    int soerr = 0;
+    socklen_t sl = sizeof soerr;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0) return -1;
+    if (soerr) { errno = soerr; return -1; }
+    return 0;
+}
+
+static int connect_unix(const char *path, int timeout_ms, char *err, size_t errlen)
+{
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    if (strlen(path) >= sizeof sa.sun_path) {
+        snprintf(err, errlen, "socket 路径太长：%s", path);
+        return -1;
+    }
+    strcpy(sa.sun_path, path);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0 || connect_wait(fd, (struct sockaddr *)&sa, sizeof sa, timeout_ms) < 0) {
+        snprintf(err, errlen, "连接 %s 失败：%s", path, strerror(errno));
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int connect_tcp(const char *hostport, int timeout_ms, char *err, size_t errlen)
+{
+    char host[256];
+    const char *port;
+    if (hostport[0] == '[') {
+        const char *rb = strchr(hostport, ']');
+        if (!rb || rb[1] != ':' || (size_t)(rb - hostport - 1) >= sizeof host) goto bad;
+        memcpy(host, hostport + 1, (size_t)(rb - hostport - 1));
+        host[rb - hostport - 1] = 0;
+        port = rb + 2;
+    } else {
+        const char *colon = strrchr(hostport, ':');
+        if (!colon || (size_t)(colon - hostport) >= sizeof host) goto bad;
+        memcpy(host, hostport, (size_t)(colon - hostport));
+        host[colon - hostport] = 0;
+        port = colon + 1;
+    }
+
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res;
+    int gai = getaddrinfo(host, port, &hints, &res);
+    if (gai) {
+        snprintf(err, errlen, "解析 %s 失败：%s", hostport, gai_strerror(gai));
+        return -1;
+    }
+    int fd = -1, last = 0;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) { last = errno; continue; }
+        if (connect_wait(fd, ai->ai_addr, ai->ai_addrlen, timeout_ms) == 0) break;
+        last = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) {
+        snprintf(err, errlen, "连接 %s 失败：%s", hostport, strerror(last));
+        return -1;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+    return fd;
+
+bad:
+    snprintf(err, errlen, "地址格式不对：%s（应为 host:port）", hostport);
+    return -1;
+}
+
+int plat_connect(const char *addr, int timeout_ms, na_sock *out, char *err, size_t errlen)
+{
+    int fd;
+    if (!strncmp(addr, "unix:", 5)) fd = connect_unix(addr + 5, timeout_ms, err, errlen);
+    else if (!strncmp(addr, "tcp:", 4)) fd = connect_tcp(addr + 4, timeout_ms, err, errlen);
+    else fd = connect_tcp(addr, timeout_ms, err, errlen);
+    if (fd < 0) return -1;
+    set_nonblock(fd);
+    set_cloexec(fd);
+    *out = (na_sock)fd;
+    return 0;
+}
+
+int plat_wake_open(na_wake *w)
+{
+    int p[2];
+    if (pipe(p) < 0) return -1;
+    set_nonblock(p[0]);
+    set_nonblock(p[1]);
+    set_cloexec(p[0]);
+    set_cloexec(p[1]);
+    w->rd = (intptr_t)p[0];
+    w->wr = (intptr_t)p[1];
+    return 0;
+}
+
+void plat_wake_signal(na_wake *w)
+{
+    if (w->wr < 0) return;
+    char c = 1;
+    if (write((int)w->wr, &c, 1) < 0) { /* 满了也无妨 */ }
+}
+
+void plat_wake_drain(na_wake *w)
+{
+    char buf[64];
+    while (read((int)w->rd, buf, sizeof buf) > 0) {}
+}
+
+void plat_wake_close(na_wake *w)
+{
+    if (w->rd >= 0) close((int)w->rd);
+    if (w->wr >= 0) close((int)w->wr);
+    w->rd = w->wr = -1;
+}
+
+static na_wake *g_swake;
+static volatile int *g_sstop;
+
+static void on_stop_signal(int sig)
+{
+    int saved = errno;
+    if (g_sstop && (sig == SIGINT || sig == SIGTERM || sig == SIGHUP)) *g_sstop = 1;
+    if (g_swake) plat_wake_signal(g_swake);
+    errno = saved;
+}
+
+int plat_signals_install(na_wake *w, volatile int *stop)
+{
+    g_swake = w;
+    g_sstop = stop;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGCHLD, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+    return 0;
+}
+
+void plat_signals_remove(void)
+{
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGHUP, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
 }

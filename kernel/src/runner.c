@@ -1,4 +1,4 @@
-/* runner.c —— 子进程任务，见 runner.h */
+/* runner.c —— 子进程任务（POSIX），见 runner.h */
 #include "runner.h"
 
 #include "cJSON.h"
@@ -133,6 +133,8 @@ void runner_reap(runner_t *r, int64_t now)
             if (j->pid == pid && !j->exited) {
                 j->exited = true;
                 j->status = st;
+                j->exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+                j->term_signal = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
                 j->exit_at = now;
                 break;
             }
@@ -140,7 +142,7 @@ void runner_reap(runner_t *r, int64_t now)
     }
 }
 
-size_t runner_pollfds(runner_t *r, struct pollfd *pfds, pollref_t *refs, size_t max)
+size_t runner_pollfds(runner_t *r, na_pollfd *pfds, pollref_t *refs, size_t max)
 {
     size_t n = 0;
     for (job_t *j = r->jobs; j; j = j->next) {
@@ -149,8 +151,8 @@ size_t runner_pollfds(runner_t *r, struct pollfd *pfds, pollref_t *refs, size_t 
         int fds[3] = { j->in_off < j->in_len ? j->fd_in : -1, j->fd_out, j->fd_err };
         for (int w = 0; w < 3 && n < max; w++) {
             if (fds[w] < 0) continue;
-            pfds[n].fd = fds[w];
-            pfds[n].events = w == 0 ? POLLOUT : POLLIN;
+            pfds[n].id = (intptr_t)fds[w];
+            pfds[n].events = w == 0 ? NA_POLLOUT : NA_POLLIN;
             pfds[n].revents = 0;
             refs[n].job = j;
             refs[n].which = w;
@@ -181,7 +183,7 @@ static void drain(int *fd, buf_t *b, size_t *total, size_t cap)
     }
 }
 
-void runner_on_poll(runner_t *r, const struct pollfd *pfds, const pollref_t *refs, size_t n)
+void runner_on_poll(runner_t *r, const na_pollfd *pfds, const pollref_t *refs, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
         job_t *j = refs[i].job;
@@ -190,7 +192,7 @@ void runner_on_poll(runner_t *r, const struct pollfd *pfds, const pollref_t *ref
         switch (refs[i].which) {
         case 0:
             if (j->fd_in < 0) break;
-            if (re & (POLLERR | POLLHUP | POLLNVAL)) {
+            if (re & (NA_POLLERR | NA_POLLHUP | NA_POLLNVAL)) {
                 close_fd(&j->fd_in);
                 break;
             }
@@ -236,6 +238,25 @@ size_t runner_count(const runner_t *r)
     return n;
 }
 
+void runner_shutdown(runner_t *r, int grace_ms)
+{
+    runner_kill_all(r);
+    for (int64_t until = now_ms() + grace_ms; r->jobs && now_ms() < until;) {
+        runner_reap(r, now_ms());
+        runner_tick(r, now_ms());
+        bool alive = false;
+        for (job_t *j = r->jobs; j; j = j->next) alive |= !j->exited;
+        if (!alive) break;
+        plat_sleep_ms(20);
+    }
+    for (job_t *j; (j = r->jobs);) {
+        if (!j->exited) kill(-j->pid, SIGKILL);
+        r->jobs = j->next;
+        j->next = NULL;
+        job_free(j);
+    }
+}
+
 char *job_result(const job_t *j, bool *ok)
 {
     *ok = false;
@@ -254,9 +275,8 @@ char *job_result(const job_t *j, bool *ok)
     /* 执行器没有正常给出结果：多半是崩溃了、被杀了，或者根本没启动起来 */
     buf_t b = {0};
     char note[128];
-    if (WIFEXITED(j->status)) snprintf(note, sizeof note, "执行器异常结束（退出码 %d）", WEXITSTATUS(j->status));
-    else if (WIFSIGNALED(j->status)) snprintf(note, sizeof note, "执行器被信号 %d 终止", WTERMSIG(j->status));
-    else snprintf(note, sizeof note, "执行器异常结束");
+    if (j->term_signal) snprintf(note, sizeof note, "执行器被信号 %d 终止", j->term_signal);
+    else snprintf(note, sizeof note, "执行器异常结束（退出码 %d）", j->exit_code);
     buf_puts(&b, note);
     if (j->out_total > j->out.len) buf_puts(&b, "：输出超出上限");
     if (j->err.len) {

@@ -126,4 +126,43 @@ int plat_probe(char *const argv[], int timeout_ms, buf_t *out);
 char *plat_shell_exe(char *const envp[]);
 const char *plat_shell_prefix(void);
 
+/* ---- 网络、poll、唤醒（内核用；Windows 上只有 TCP） ---- */
+
+typedef intptr_t na_sock;
+#define NA_SOCK_NONE ((na_sock)-1)
+
+/* 一项 poll；id 在 POSIX 上是 fd，在 Windows 上是 SOCKET（也可能是唤醒 socket）。 */
+enum {
+    NA_POLLIN = 0x01,
+    NA_POLLOUT = 0x02,
+    NA_POLLERR = 0x04,
+    NA_POLLHUP = 0x08,
+    NA_POLLNVAL = 0x10,
+};
+
+typedef struct {
+    intptr_t id;
+    short    events, revents;
+} na_pollfd;
+
+int  plat_poll(na_pollfd *fds, size_t n, int timeout_ms);
+long plat_sock_read(na_sock s, void *buf, size_t n);      /* 0 = 对端关闭，-1 = 出错/EAGAIN */
+long plat_sock_write(na_sock s, const void *buf, size_t n);
+void plat_sock_close(na_sock s);
+/* addr：unix:/path（只有 POSIX）、tcp:host:port 或 host:port。成功返回非阻塞 socket。 */
+int  plat_connect(const char *addr, int timeout_ms, na_sock *out, char *err, size_t errlen);
+
+/* 信号或控制台事件唤醒 poll 用的一对描述符 */
+typedef struct {
+    intptr_t rd, wr;
+} na_wake;
+
+int  plat_wake_open(na_wake *w);
+void plat_wake_signal(na_wake *w);   /* 可以在信号处理函数里调用 */
+void plat_wake_drain(na_wake *w);
+void plat_wake_close(na_wake *w);
+/* 安装 SIGINT/SIGTERM/SIGHUP（POSIX）或控制台 Ctrl-C 处理（Windows）；stop 置 1 并唤醒 poll */
+int  plat_signals_install(na_wake *w, volatile int *stop);
+void plat_signals_remove(void);
+
 #endif

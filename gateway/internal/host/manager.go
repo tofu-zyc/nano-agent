@@ -40,7 +40,8 @@ type Info struct {
 	Kind     string `json:"kind"`  // local（网关所在的机器）或 ssh
 	Ready    bool   `json:"ready"` // 能执行工具
 	Landlock int    `json:"landlock"`
-	State    string `json:"state"` // offline、connecting、preparing、online、reconnecting、disconnecting、error
+	OS       string `json:"os,omitempty"` // linux / macos / windows
+	State    string `json:"state"`        // offline、connecting、preparing、online、reconnecting、disconnecting、error
 	Detail   string `json:"detail,omitempty"`
 
 	ID           string `json:"id,omitempty"`
@@ -186,8 +187,8 @@ func (m *Manager) Host(name string) (h Host, info Info, ok bool) {
 }
 
 func (m *Manager) localInfo() Info {
-	landlock, ok, detail := m.local.Probe()
-	info := Info{Name: LocalName, Kind: "local", Ready: ok, Landlock: landlock, State: "online", Detail: detail}
+	landlock, osName, ok, detail := m.local.Probe()
+	info := Info{Name: LocalName, Kind: "local", Ready: ok, Landlock: landlock, OS: osName, State: "online", Detail: detail}
 	if !ok {
 		info.State = "error"
 	}
@@ -203,7 +204,7 @@ func (m *Manager) infoOf(id string, c Connection) Info {
 	info := Info{Name: c.Name, Kind: "ssh", State: st.state, Detail: st.detail, ID: id, Host: c.Host, Port: c.Port,
 		User: c.User, IdentityFile: c.IdentityFile, HasPassword: c.Password != "", AutoConnect: c.AutoConnect}
 	if conn := m.conns[id]; conn != nil {
-		info.Ready, info.Landlock = conn.state()
+		info.Ready, info.Landlock, info.OS = conn.state()
 	}
 	if info.Ready && st.state != "disconnecting" {
 		info.State = "online"

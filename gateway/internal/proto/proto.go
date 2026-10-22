@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 7
+const Version = 8
 
 // 权限模式，随 input 传给内核。
 const (
@@ -81,6 +81,8 @@ type Msg struct {
 	Pair    bool        `json:"pair,omitempty"` // hello：没有口令，请求配对
 	Code    string      `json:"code,omitempty"` // pairing：确认码，网页上核对
 	Node    string      `json:"node,omitempty"`
+	OS      string      `json:"os,omitempty"`   // hello：内核所在的系统 linux / windows / darwin
+	Arch    string      `json:"arch,omitempty"` // hello：内核所在的 CPU 架构
 	Tools   []ToolSpec  `json:"tools,omitempty"`
 	Skills  []SkillSpec `json:"skills,omitempty"`
 	Sandbox *Sandbox    `json:"sandbox,omitempty"`
@@ -146,6 +148,7 @@ type WorkspaceSpec struct {
 	Home     bool     `json:"home,omitempty"` // 没有工作目录时的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME
 	Local    bool     `json:"local,omitempty"`
 	Landlock int      `json:"landlock,omitempty"`
+	OS       string   `json:"os,omitempty"` // 这台机器上的路径属于哪个系统：linux / macos / windows
 }
 
 // SkillSpec 是技能简介，正文在调用 Skill 时才加载。

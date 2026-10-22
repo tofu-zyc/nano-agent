@@ -3,14 +3,14 @@
  * 每次工具调用启动一个执行器进程（本机是 nano-exec，远程是 ssh … nano-exec）。
  * 请求写进它的 stdin 后 stdin 保持打开；终止时先关 stdin、发 SIGTERM，让执行器
  * 自己清理它启动的命令，过一会儿还没退出再 SIGKILL。
- * 也用来跑别的子进程（比如准备服务器时上传执行器），用 kind / tag 区分。
+ * POSIX 上这些管道都在内核的 poll 里；Windows 上用两个读线程，读到数据后唤醒 poll。
  */
 #ifndef NA_RUNNER_H
 #define NA_RUNNER_H
 
+#include "plat.h"
 #include "util.h"
 
-#include <poll.h>
 #include <stdbool.h>
 #include <sys/types.h>
 
@@ -25,14 +25,21 @@ typedef struct job {
     buf_t   out, err;
     size_t  out_total, err_total;  /* 实际产生的字节数，超出上限的部分丢弃 */
     bool    exited, killed;
-    int     status;
+    int     status;                /* POSIX wait 状态；Windows 上不用 */
+    int     exit_code, term_signal;
     int64_t exit_at, term_at;
+#if NA_WINDOWS
+    void   *hproc, *hjob, *h_in, *h_out, *h_err;
+    void   *th_out, *th_err, *rarg_out, *rarg_err;
+    volatile long out_done, err_done;
+#endif
     struct job *next;
 } job_t;
 
 typedef struct {
-    job_t *jobs;
-    size_t out_cap;   /* stdout 最多保留多少字节 */
+    job_t  *jobs;
+    size_t  out_cap;   /* stdout 最多保留多少字节 */
+    na_wake *wake;     /* Windows 读线程用它唤醒主循环 */
 } runner_t;
 
 /* poll 集成：runner_pollfds 填 pollfd，refs 记录每一项属于哪个任务的哪个管道 */
@@ -51,10 +58,12 @@ void   runner_kill(runner_t *r, const char *sid, const char *id);
 void   runner_kill_all(runner_t *r);
 void   runner_reap(runner_t *r, int64_t now);
 void   runner_tick(runner_t *r, int64_t now);   /* SIGTERM 之后迟迟不退出的，改用 SIGKILL */
-size_t runner_pollfds(runner_t *r, struct pollfd *pfds, pollref_t *refs, size_t max);
-void   runner_on_poll(runner_t *r, const struct pollfd *pfds, const pollref_t *refs, size_t n);
+size_t runner_pollfds(runner_t *r, na_pollfd *pfds, pollref_t *refs, size_t max);
+void   runner_on_poll(runner_t *r, const na_pollfd *pfds, const pollref_t *refs, size_t n);
 job_t *runner_take_finished(runner_t *r, int64_t now);
 size_t runner_count(const runner_t *r);
+/* 内核退出：停掉所有任务，最多等 grace_ms，然后强制清理 */
+void   runner_shutdown(runner_t *r, int grace_ms);
 
 /* 解析执行器的输出 {"ok":…,"content":…}；执行器异常时根据退出状态和 stderr 生成说明 */
 char  *job_result(const job_t *j, bool *ok);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { listDir, splitTyping, toTilde, type DirEntry } from '../lib/fs';
+  import { listDir, splitTyping, toTilde, join, type DirEntry } from '../lib/fs';
   import DirPicker from './DirPicker.svelte';
   import Icon from './Icon.svelte';
 
@@ -22,7 +22,8 @@
   let seq = 0;
 
   function add(v: string) {
-    v = v.trim().replace(/(.)\/+$/, '$1');
+    v = v.trim();
+    if (v !== '/' && !/^[A-Za-z]:[\\/]$/.test(v)) v = v.replace(/[\\/]+$/, '');
     text = '';
     open = false;
     if (v && !values.includes(v)) onchange([...values, v]);
@@ -38,7 +39,7 @@
       const sp = splitTyping(text);
       if (!sp) {
         items = [];
-        note = '要写绝对路径（/ 开头）或者 ~ 开头';
+        note = '要写绝对路径（/ 或 C:\\ 开头）或者 ~ 开头';
         open = true;
         return;
       }
@@ -51,7 +52,7 @@
         const match = (e: DirEntry) => (pre.startsWith('.') || !e.name.startsWith('.')) && e.name.toLowerCase().startsWith(pre);
         const contains = (e: DirEntry) => !match(e) && pre && !e.name.startsWith('.') && e.name.toLowerCase().includes(pre);
         const list = [...l.entries.filter(match), ...l.entries.filter(contains)].slice(0, 12);
-        items = list.map((e) => ({ name: e.name, blocked: e.blocked, path: (base === '/' ? '' : base) + '/' + e.name }));
+        items = list.map((e) => ({ name: e.name, blocked: e.blocked, path: join(base, e.name) }));
         note = list.length ? '' : '没有匹配的子目录';
         sel = 0;
         open = true;

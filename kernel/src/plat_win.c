@@ -8,6 +8,7 @@
 #define _WIN32_WINNT 0x0A00
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <io.h>
@@ -1230,4 +1231,202 @@ const char *plat_shell_prefix(void)
 {
     return "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
            "$OutputEncoding=[Text.UTF8Encoding]::new($false);";
+}
+
+/* ---- 网络、poll、唤醒 ---- */
+
+static void set_wsa_errno(void)
+{
+    switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: errno = EAGAIN; break;
+    case WSAEINTR: errno = EINTR; break;
+    case WSAETIMEDOUT: errno = ETIMEDOUT; break;
+    case WSAECONNREFUSED: errno = ECONNREFUSED; break;
+    default: errno = EIO; break;
+    }
+}
+
+int plat_poll(na_pollfd *fds, size_t n, int timeout_ms)
+{
+    WSAPOLLFD *p = xcalloc(n ? n : 1, sizeof *p);
+    for (size_t i = 0; i < n; i++) {
+        p[i].fd = (SOCKET)fds[i].id;
+        short e = 0;
+        if (fds[i].events & NA_POLLIN) e |= POLLRDNORM;
+        if (fds[i].events & NA_POLLOUT) e |= POLLWRNORM;
+        p[i].events = e;
+    }
+    int rc = WSAPoll(p, (ULONG)n, timeout_ms);
+    if (rc > 0)
+        for (size_t i = 0; i < n; i++) {
+            short e = 0;
+            if (p[i].revents & (POLLRDNORM | POLLIN)) e |= NA_POLLIN;
+            if (p[i].revents & POLLWRNORM) e |= NA_POLLOUT;
+            if (p[i].revents & POLLERR) e |= NA_POLLERR;
+            if (p[i].revents & POLLHUP) e |= NA_POLLHUP;
+            if (p[i].revents & POLLNVAL) e |= NA_POLLNVAL;
+            fds[i].revents = e;
+        }
+    free(p);
+    return rc;
+}
+
+long plat_sock_read(na_sock s, void *buf, size_t n)
+{
+    int r = recv((SOCKET)s, buf, (int)n, 0);
+    if (r == 0) return 0;
+    if (r == SOCKET_ERROR) { set_wsa_errno(); return -1; }
+    return r;
+}
+
+long plat_sock_write(na_sock s, const void *buf, size_t n)
+{
+    int r = send((SOCKET)s, buf, (int)n, 0);
+    if (r == SOCKET_ERROR) { set_wsa_errno(); return -1; }
+    return r;
+}
+
+void plat_sock_close(na_sock s)
+{
+    if (s != NA_SOCK_NONE) closesocket((SOCKET)s);
+}
+
+static int connect_wait(SOCKET s, const struct sockaddr *sa, int len, int timeout_ms)
+{
+    u_long nb = 1;
+    ioctlsocket(s, FIONBIO, &nb);
+    if (connect(s, sa, len) == 0) return 0;
+    if (WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+    WSAPOLLFD p = { .fd = s, .events = POLLOUT };
+    int n = WSAPoll(&p, 1, timeout_ms);
+    if (n == 0) { WSASetLastError(WSAETIMEDOUT); return -1; }
+    if (n < 0) return -1;
+    int soerr = 0, sl = sizeof soerr;
+    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl) < 0) return -1;
+    if (soerr) { WSASetLastError(soerr); return -1; }
+    return 0;
+}
+
+int plat_connect(const char *addr, int timeout_ms, na_sock *out, char *err, size_t errlen)
+{
+    if (!strncmp(addr, "unix:", 5)) {
+        snprintf(err, errlen, "Windows 内核不支持 unix socket，请在 kernel.conf 里用 tcp:主机:端口");
+        return -1;
+    }
+    const char *hostport = !strncmp(addr, "tcp:", 4) ? addr + 4 : addr;
+    char host[256];
+    const char *port;
+    if (hostport[0] == '[') {
+        const char *rb = strchr(hostport, ']');
+        if (!rb || rb[1] != ':' || (size_t)(rb - hostport - 1) >= sizeof host) goto bad;
+        memcpy(host, hostport + 1, (size_t)(rb - hostport - 1));
+        host[rb - hostport - 1] = 0;
+        port = rb + 2;
+    } else {
+        const char *colon = strrchr(hostport, ':');
+        if (!colon || (size_t)(colon - hostport) >= sizeof host) goto bad;
+        memcpy(host, hostport, (size_t)(colon - hostport));
+        host[colon - hostport] = 0;
+        port = colon + 1;
+    }
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res;
+    int gai = getaddrinfo(host, port, &hints, &res);
+    if (gai) {
+        snprintf(err, errlen, "解析 %s 失败：%s", hostport, gai_strerrorA(gai));
+        return -1;
+    }
+    SOCKET s = INVALID_SOCKET;
+    int last = 0;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == INVALID_SOCKET) { last = WSAGetLastError(); continue; }
+        if (connect_wait(s, ai->ai_addr, (int)ai->ai_addrlen, timeout_ms) == 0) break;
+        last = WSAGetLastError();
+        closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    freeaddrinfo(res);
+    if (s == INVALID_SOCKET) {
+        WSASetLastError(last);
+        set_wsa_errno();
+        snprintf(err, errlen, "连接 %s 失败：%s", hostport, strerror(errno));
+        return -1;
+    }
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char *)&one, sizeof one);
+    *out = (na_sock)s;
+    return 0;
+
+bad:
+    snprintf(err, errlen, "地址格式不对：%s（应为 host:port）", hostport);
+    return -1;
+}
+
+int plat_wake_open(na_wake *w)
+{
+    SOCKET rd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (rd == INVALID_SOCKET) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(rd, (struct sockaddr *)&a, sizeof a) < 0) { closesocket(rd); return -1; }
+    int al = sizeof a;
+    if (getsockname(rd, (struct sockaddr *)&a, &al) < 0) { closesocket(rd); return -1; }
+    SOCKET wr = socket(AF_INET, SOCK_DGRAM, 0);
+    if (wr == INVALID_SOCKET) { closesocket(rd); return -1; }
+    if (connect(wr, (struct sockaddr *)&a, sizeof a) < 0) { closesocket(rd); closesocket(wr); return -1; }
+    u_long nb = 1;
+    ioctlsocket(rd, FIONBIO, &nb);
+    w->rd = (intptr_t)rd;
+    w->wr = (intptr_t)wr;
+    return 0;
+}
+
+void plat_wake_signal(na_wake *w)
+{
+    if (w->wr < 0) return;
+    char c = 1;
+    send((SOCKET)w->wr, &c, 1, 0);
+}
+
+void plat_wake_drain(na_wake *w)
+{
+    char buf[64];
+    while (recv((SOCKET)w->rd, buf, sizeof buf, 0) > 0) {}
+}
+
+void plat_wake_close(na_wake *w)
+{
+    if (w->rd >= 0) closesocket((SOCKET)w->rd);
+    if (w->wr >= 0) closesocket((SOCKET)w->wr);
+    w->rd = w->wr = -1;
+}
+
+static na_wake *g_swake;
+static volatile int *g_sstop;
+
+static BOOL WINAPI on_console_event(DWORD type)
+{
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT ||
+        type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        if (g_sstop) *g_sstop = 1;
+        if (g_swake) plat_wake_signal(g_swake);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+int plat_signals_install(na_wake *w, volatile int *stop)
+{
+    g_swake = w;
+    g_sstop = stop;
+    SetConsoleCtrlHandler(on_console_event, TRUE);
+    return 0;
+}
+
+void plat_signals_remove(void)
+{
+    SetConsoleCtrlHandler(on_console_event, FALSE);
 }

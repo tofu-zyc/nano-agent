@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type Local struct {
 	mu       sync.Mutex
 	probed   bool
 	landlock int
+	osName   string
 	detail   string
 }
 
@@ -40,29 +42,34 @@ func NewLocal(e Executor, guard []string) *Local {
 	return l
 }
 
-// Probe 运行一次执行器的自检，返回沙箱版本（0 表示没有）。失败时 detail 是原因。
-func (l *Local) Probe() (landlock int, ok bool, detail string) {
+// Probe 运行一次执行器的自检，返回沙箱版本、系统和架构（0 表示没有沙箱）。失败时 detail 是原因。
+func (l *Local) Probe() (landlock int, osName string, ok bool, detail string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.probed {
 		l.probed = true
+		l.osName = runtime.GOOS
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, l.exec.Path, "--probe").Output()
 		var p struct {
-			Landlock *int `json:"landlock"`
+			Landlock *int   `json:"landlock"`
+			OS       string `json:"os"`
 		}
 		if err != nil || json.Unmarshal(out, &p) != nil || p.Landlock == nil {
 			l.detail = "执行器 " + l.exec.Path + " 运行不了"
 		} else {
 			l.landlock = *p.Landlock
+			if p.OS != "" {
+				l.osName = p.OS
+			}
 		}
 	}
-	return l.landlock, l.detail == "", l.detail
+	return l.landlock, l.osName, l.detail == "", l.detail
 }
 
 func (l *Local) Exec(ctx context.Context, req []byte) Result {
-	if _, ok, detail := l.Probe(); !ok {
+	if _, _, ok, detail := l.Probe(); !ok {
 		return Result{Content: detail}
 	}
 	out, errOut, code, err := run(ctx, exec.Command(l.exec.Path), req, true)

@@ -1,49 +1,35 @@
 /* main.c —— nano-kernel：连接网关，驱动状态机，调执行器执行工具
  *
- * 单线程 poll 循环：网关连接、执行器的管道、信号唤醒管道都在同一个 poll 里。
+ * 单线程 poll 循环：网关连接、执行器的管道、信号唤醒都在同一个 poll 里。
  * 外部消息 → 事件 → na_core_feed；na_core_next 取出的命令 → 发给网关或交给执行器。
+ * 平台相关的东西（找自己的路径、HOME、文件、信号、poll、子进程）在 plat.h 后面。
  */
-#define _XOPEN_SOURCE 700   /* nftw */
 #include "cJSON.h"
 #include "conf.h"
 #include "core.h"
 #include "link.h"
+#include "plat.h"
 #include "runner.h"
 #include "tools.h"
 #include "util.h"
 
-#include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <ftw.h>
 #include <limits.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
-#define PROTO_VERSION      7
+#define PROTO_VERSION      8
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
 #define MAX_BACKOFF_MS     30000
 #define MAX_POLL           1024
 
-static volatile sig_atomic_t g_stop;
-static int g_wake[2] = { -1, -1 };   /* 信号处理函数往这里写一个字节，唤醒 poll */
-
-static void on_signal(int sig)
-{
-    int saved = errno;
-    if (sig == SIGINT || sig == SIGTERM) g_stop = 1;
-    char c = (char)sig;
-    if (write(g_wake[1], &c, 1) < 0) { /* 管道满了也无妨，poll 已经会醒 */ }
-    errno = saved;
-}
+static volatile int g_stop;
+static na_wake g_wake = { -1, -1 };   /* 信号处理函数往这里写一个字节，唤醒 poll */
 
 /* 交给网关执行的工具调用（工作目录不在这台机器上，或者 Skill），等 exec_result */
 typedef struct gwjob {
@@ -93,6 +79,8 @@ static void send_hello(kernel_t *k)
     cJSON_AddStringToObject(m, "token", k->conf.token);
     if (!*k->conf.token) cJSON_AddBoolToObject(m, "pair", true);
     cJSON_AddStringToObject(m, "node", k->conf.node);
+    cJSON_AddStringToObject(m, "os", plat_os());
+    cJSON_AddStringToObject(m, "arch", plat_arch());
     cJSON_AddItemToObject(m, "tools", tools_specs());
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
@@ -104,12 +92,9 @@ static void send_hello(kernel_t *k)
 /* real（已解析符号链接）是不是包含内核自己：配置目录或执行器 */
 static bool holds_self(const kernel_t *k, const char *real)
 {
-    size_t n = strlen(real);
     const char *mine[] = { k->conf.dir, k->exec_real };
-    for (size_t i = 0; i < 2; i++) {
-        const char *m = mine[i];
-        if (m && (n == 1 || (!strncmp(m, real, n) && (m[n] == '/' || !m[n])))) return true;
-    }
+    for (size_t i = 0; i < 2; i++)
+        if (mine[i] && plat_inside(mine[i], real)) return true;
     return false;
 }
 
@@ -120,9 +105,8 @@ static bool guard_paths(const kernel_t *k, const cJSON *list, char *err, size_t 
     cJSON_ArrayForEach(it, list) {
         if (!cJSON_IsString(it)) continue;
         const char *p = it->valuestring;
-        const char *home = getenv("HOME");
-        char *full = p[0] == '~' && (p[1] == '/' || !p[1]) && home ? xasprintf("%s%s", home, p + 1) : xstrdup(p);
-        char *real = realpath(full, NULL);
+        char *full = plat_expand_home(p);
+        char *real = plat_canonical(full);
         free(full);
         if (!real) continue;   /* 不存在的目录交给执行器报错 */
         bool bad = holds_self(k, real);
@@ -148,59 +132,70 @@ static int cmp_name(const void *a, const void *b)
 static void handle_ls(kernel_t *k, const cJSON *m)
 {
     const char *id = sget(m, "id"), *p = sget(m, "path");
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/') home = "/";
-    char *full = !p || !*p || !strcmp(p, "~") ? xstrdup(home)
-               : p[0] == '~' && p[1] == '/' ? xasprintf("%s%s", home, p + 1)
-               : xstrdup(p);
+    char *home = plat_home();
+    bool roots = NA_WINDOWS && (!p || !*p || !strcmp(p, "/") || !strcmp(p, "\\"));
+    char *full = roots ? xstrdup(home) : plat_expand_home(p && *p ? p : "~");
     cJSON *r = msg_new("ls_result", NULL);
     cJSON_AddStringToObject(r, "id", id ? id : "");
     cJSON_AddStringToObject(r, "home", home);
-    char *real = full[0] == '/' ? realpath(full, NULL) : NULL;
-    DIR *d = real ? opendir(real) : NULL;
-    if (!d) {
-        cJSON_AddBoolToObject(r, "ok", false);
-        cJSON_AddStringToObject(r, "detail", full[0] != '/' ? "要写绝对路径或 ~ 开头" : strerror(errno));
-    } else {
+
+    if (roots) {
+        size_t nr = 0;
+        char **v = plat_drives(&nr);
         cJSON_AddBoolToObject(r, "ok", true);
-        cJSON_AddStringToObject(r, "path", real);
-        cJSON_AddBoolToObject(r, "blocked", holds_self(k, real));
-        char **names = NULL;
+        cJSON_AddStringToObject(r, "path", "");
+        cJSON *arr = cJSON_AddArrayToObject(r, "entries");
+        for (size_t i = 0; i < nr; i++) {
+            cJSON *it = cJSON_CreateObject();
+            cJSON_AddStringToObject(it, "name", v[i]);
+            cJSON_AddItemToArray(arr, it);
+        }
+        plat_drives_free(v, nr);
+    } else {
+        char *abs = plat_abspath(NULL, full);
+        char *real = abs ? plat_canonical(abs) : NULL;
+        free(abs);
+        plat_dirent *ents = NULL;
         size_t n = 0;
         bool more = false;
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            bool dir = e->d_type == DT_DIR;
-            if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
-                struct stat st;
-                dir = fstatat(dirfd(d), e->d_name, &st, 0) == 0 && S_ISDIR(st.st_mode);
+        char err[256] = "";
+        if (!real || !plat_read_dir(real, LS_MAX, &ents, &n, &more, err, sizeof err)) {
+            cJSON_AddBoolToObject(r, "ok", false);
+            cJSON_AddStringToObject(r, "detail", !plat_is_abs(full) ? "要写绝对路径或 ~ 开头"
+                                       : real ? err : "目录不存在或不可访问");
+        } else {
+            cJSON_AddBoolToObject(r, "ok", true);
+            cJSON_AddStringToObject(r, "path", real);
+            cJSON_AddBoolToObject(r, "blocked", holds_self(k, real));
+            char **names = NULL;
+            size_t nd = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (!ents[i].dir) continue;
+                names = xrealloc(names, (nd + 1) * sizeof *names);
+                names[nd++] = xstrdup(ents[i].name);
             }
-            if (!dir) continue;
-            if (n >= LS_MAX) { more = true; continue; }
-            names = xrealloc(names, (n + 1) * sizeof *names);
-            names[n++] = xstrdup(e->d_name);
+            qsort(names, nd, sizeof *names, cmp_name);
+            cJSON *arr = cJSON_AddArrayToObject(r, "entries");
+            for (size_t i = 0; i < nd; i++) {
+                cJSON *it = cJSON_CreateObject();
+                buf_t b = {0};
+                buf_put_utf8(&b, names[i], strlen(names[i]));
+                cJSON_AddStringToObject(it, "name", buf_cstr(&b));
+                buf_free(&b);
+                char *sub = plat_join(real, names[i]);
+                if (holds_self(k, sub)) cJSON_AddBoolToObject(it, "blocked", true);
+                free(sub);
+                cJSON_AddItemToArray(arr, it);
+                free(names[i]);
+            }
+            free(names);
+            if (more) cJSON_AddBoolToObject(r, "truncated", true);
         }
-        closedir(d);
-        qsort(names, n, sizeof *names, cmp_name);
-        cJSON *arr = cJSON_AddArrayToObject(r, "entries");
-        for (size_t i = 0; i < n; i++) {
-            cJSON *it = cJSON_CreateObject();
-            buf_t b = {0};
-            buf_put_utf8(&b, names[i], strlen(names[i]));
-            cJSON_AddStringToObject(it, "name", buf_cstr(&b));
-            buf_free(&b);
-            char *sub = xasprintf("%s/%s", strcmp(real, "/") ? real : "", names[i]);
-            if (holds_self(k, sub)) cJSON_AddBoolToObject(it, "blocked", true);
-            free(sub);
-            cJSON_AddItemToArray(arr, it);
-            free(names[i]);
-        }
-        free(names);
-        if (more) cJSON_AddBoolToObject(r, "truncated", true);
+        plat_dirents_free(ents, n);
+        free(real);
     }
-    free(real);
     free(full);
+    free(home);
     link_send(&k->link, r);
 }
 
@@ -260,12 +255,47 @@ static void ws_names(const cJSON *list, char *out, size_t outlen)
 }
 
 /* 名字里冒号前面是机器，后面是路径 */
-static bool ws_part_is(const char *name, const char *want, bool machine)
+static bool ws_is_windows(const cJSON *it)
 {
-    const char *colon = strchr(name, ':');
+    const char *os = sget(it, "os");
+    return os && !strcmp(os, "windows");
+}
+
+/* 路径属于那台机器：Windows 上不区分大小写，\ 和 / 当成一样 */
+static bool ws_path_eq(const char *a, const char *b, bool win)
+{
+    if (!a || !b) return false;
+    if (!win) return !strcmp(a, b);
+    while (*a && *b) {
+        char ca = *a == '\\' ? '/' : *a;
+        char cb = *b == '\\' ? '/' : *b;
+        if (tolower((unsigned char)ca) != tolower((unsigned char)cb)) return false;
+        a++;
+        b++;
+    }
+    return !*a && !*b;
+}
+
+static bool ws_part_is(const cJSON *it, const char *want, bool machine)
+{
+    const char *name = sget(it, "name");
+    const char *colon = name ? strchr(name, ':') : NULL;
     if (!colon) return false;
     return machine ? (size_t)(colon - name) == strlen(want) && !strncmp(name, want, (size_t)(colon - name))
-                   : !strcmp(colon + 1, want);
+                   : ws_path_eq(colon + 1, want, ws_is_windows(it));
+}
+
+/* 完整的“机器:路径” */
+static bool ws_name_is(const cJSON *it, const char *want)
+{
+    const char *name = sget(it, "name");
+    if (!name) return false;
+    if (!strcmp(name, want)) return true;
+    if (!ws_is_windows(it)) return false;
+    const char *a = strchr(name, ':'), *b = strchr(want, ':');
+    if (!a || !b) return false;
+    if ((size_t)(a - name) != (size_t)(b - want) || strncmp(name, want, (size_t)(a - name))) return false;
+    return ws_path_eq(a + 1, b + 1, true);
 }
 
 /* 按参数里的 workspace 找挂载的工作目录：完整的名字、序号（从 1 开始）、只写机器或只写路径（唯一时）。
@@ -294,13 +324,13 @@ static const cJSON *pick_workspace(const cJSON *policy, const cJSON *args, char 
         const cJSON *it, *hit = NULL;
         int hits = 0;
         cJSON_ArrayForEach(it, list)
-            if (sget(it, "name") && !strcmp(sget(it, "name"), w)) return it;
+            if (ws_name_is(it, w)) return it;
         char *end;
         long i = strtol(w, &end, 10);
         if (!*end && i >= 1 && i <= n) return cJSON_GetArrayItem(list, (int)i - 1);
         for (int pass = 0; pass < 2 && !hits; pass++) {
             cJSON_ArrayForEach(it, list) {
-                if (sget(it, "name") && ws_part_is(sget(it, "name"), w, pass == 0)) {
+                if (ws_part_is(it, w, pass == 0)) {
                     hit = it;
                     hits++;
                 }
@@ -473,42 +503,27 @@ static unsigned char *base64_decode(const char *s, size_t *n)
     return out;
 }
 
-static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
-{
-    (void)st; (void)flag; (void)ftw;
-    return remove(path);
-}
-
-static bool mkdirs(char *path)
-{
-    for (char *p = path + 1; *p; p++) {
-        if (*p != '/') continue;
-        *p = 0;
-        int rc = mkdir(path, 0755);
-        *p = '/';
-        if (rc < 0 && errno != EEXIST) return false;
-    }
-    return mkdir(path, 0755) == 0 || errno == EEXIST;
-}
-
 static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_t dirlen, char *err, size_t errlen)
 {
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/') { snprintf(err, errlen, "没有 HOME"); return false; }
+    char *home = plat_home();
     if (!name || !*name || strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != strlen(name) || name[0] == '.') {
         snprintf(err, errlen, "技能名字不能用：%s", name ? name : "");
+        free(home);
         return false;
     }
     const char *nh = getenv("NANO_HOME");
-    char *base = nh && nh[0] == '/' ? xstrdup(nh) : xasprintf("%s/.nano-agent", home);
-    char *root = xasprintf("%s/skills", base);
+    char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(home, ".nano-agent");
+    char *root = plat_join(base, "skills");
+    char *dir = plat_join(root, name);
+    char *tmpname = xasprintf(".%s.tmp", name);
+    char *tmp = plat_join(root, tmpname);
+    free(tmpname);
     free(base);
-    char *dir = xasprintf("%s/%s", root, name);
-    char *tmp = xasprintf("%s/.%s.tmp", root, name);
-    bool ok = mkdirs(root);
-    if (ok) nftw(tmp, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
-    ok = ok && mkdir(tmp, 0755) == 0;
-    if (!ok) snprintf(err, errlen, "建不了目录 %s：%s", tmp, strerror(errno));
+
+    bool ok = plat_makedirs(root) == 0;
+    if (ok) plat_remove_tree(tmp);
+    ok = ok && plat_mkdir(tmp) == 0;
+    if (!ok) snprintf(err, errlen, "建不了目录 %s", tmp);
     const cJSON *f;
     cJSON_ArrayForEach(f, files) {
         if (!ok) break;
@@ -518,37 +533,37 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
             ok = false;
             break;
         }
-        size_t n;
+        size_t n = 0;
         unsigned char *bytes = base64_decode(data, &n);
-        char *full = xasprintf("%s/%s", tmp, rel);
-        char *slash = strrchr(full, '/');
-        *slash = 0;
-        ok = bytes && mkdirs(full);
-        *slash = '/';
-        int fd = ok ? open(full, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                           cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(f, "exec")) ? 0755 : 0644) : -1;
-        ok = fd >= 0 && (n == 0 || write(fd, bytes, n) == (ssize_t)n);
-        if (fd >= 0) close(fd);
-        if (!ok) snprintf(err, errlen, "写不了 %s：%s", rel, bytes ? strerror(errno) : "数据不是 base64");
+        char *full = plat_join(tmp, rel);
+        char *fdir = plat_dirname(full);
+        bool made = bytes && plat_makedirs(fdir) == 0;
+        if (made)
+            made = plat_write_atomic(full, (const char *)bytes, n,
+                                     cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(f, "exec")) ? 0755 : 0644) == 0;
+        if (!made) snprintf(err, errlen, "写不了 %s：%s", rel, bytes ? strerror(errno) : "数据不是 base64");
+        ok = made;
+        free(fdir);
         free(full);
         free(bytes);
     }
     if (ok) {
-        nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
-        ok = rename(tmp, dir) == 0;
+        plat_remove_tree(dir);
+        ok = plat_rename(tmp, dir) == 0;
         if (!ok) snprintf(err, errlen, "放不到 %s：%s", dir, strerror(errno));
     }
-    if (!ok) nftw(tmp, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    if (!ok) plat_remove_tree(tmp);
     else snprintf(dir_out, dirlen, "%s", dir);
     free(root);
     free(dir);
     free(tmp);
+    free(home);
     return ok;
 }
 
 static void handle_skill_put(kernel_t *k, const cJSON *m)
 {
-    char err[512] = "", dir[PATH_MAX] = "";
+    char err[512] = "", dir[4096] = "";
     bool ok = put_skill(sget(m, "skill"), cJSON_GetObjectItemCaseSensitive(m, "files"), dir, sizeof dir, err, sizeof err);
     if (ok) log_info("技能 %s 的文件放到了 %s", sget(m, "skill"), dir);
     else log_warn("放技能文件失败：%s", err);
@@ -657,10 +672,10 @@ static void disconnect(kernel_t *k, int64_t now, const char *why);
 static void save_token(kernel_t *k, const char *token, int64_t now)
 {
     if (!token || !*token || strchr(token, '\n')) return;
-    int fd = open(k->conf.token_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0 || write(fd, token, strlen(token)) < 0 || write(fd, "\n", 1) < 0)
+    char *line = xasprintf("%s\n", token);
+    if (plat_write_atomic(k->conf.token_file, line, strlen(line), 0600) < 0)
         log_warn("保存配对口令失败（%s），下次启动要重新配对：%s", k->conf.token_file, strerror(errno));
-    if (fd >= 0) close(fd);
+    free(line);
     free(k->conf.token);
     k->conf.token = xstrdup(token);
     k->conf.paired = true;
@@ -687,7 +702,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             g_stop = 1;
         } else if (!strcmp(reason, "auth") && k->conf.paired) {
             log_warn("网关不认这台电脑的配对口令了（可能在网页里移除了它），重新请求配对");
-            unlink(k->conf.token_file);
+            plat_unlink(k->conf.token_file);
             k->conf.token[0] = 0;
             k->conf.paired = false;
         }
@@ -837,7 +852,7 @@ static void try_connect(kernel_t *k, int64_t now)
 
 static void disconnect(kernel_t *k, int64_t now, const char *why)
 {
-    if (k->link.fd < 0) return;
+    if (k->link.fd == NA_SOCK_NONE) return;
     log_warn("与网关断开：%s", why);
     link_close(&k->link);
     na_event ev = { .type = NA_EV_RESET };
@@ -878,7 +893,7 @@ static int64_t next_wakeup(kernel_t *k, int64_t now)
     int64_t wake = now + 1000;   /* 至少每秒醒一次，顺带处理退出后迟迟不关管道的进程 */
     int64_t dl = na_core_next_deadline(k->core);
     if (dl >= 0 && dl < wake) wake = dl;
-    if (k->link.fd >= 0) {
+    if (k->link.fd != NA_SOCK_NONE) {
         if (k->last_ping + PING_INTERVAL_MS < wake) wake = k->last_ping + PING_INTERVAL_MS;
     } else if (k->next_connect < wake) {
         wake = k->next_connect;
@@ -888,41 +903,39 @@ static int64_t next_wakeup(kernel_t *k, int64_t now)
 
 static void loop(kernel_t *k)
 {
-    static struct pollfd pfds[MAX_POLL];
+    static na_pollfd pfds[MAX_POLL];
     static pollref_t refs[MAX_POLL];
 
     while (!g_stop) {
         int64_t now = now_ms();
-        if (k->link.fd < 0 && now >= k->next_connect) try_connect(k, now);
+        if (k->link.fd == NA_SOCK_NONE && now >= k->next_connect) try_connect(k, now);
 
         size_t np = 0;
-        pfds[np++] = (struct pollfd){ .fd = g_wake[0], .events = POLLIN };
+        pfds[np++] = (na_pollfd){ .id = g_wake.rd, .events = NA_POLLIN };
         int li = -1;
-        if (k->link.fd >= 0) {
+        if (k->link.fd != NA_SOCK_NONE) {
             li = (int)np;
-            pfds[np++] = (struct pollfd){ .fd = k->link.fd, .events = POLLIN | (k->link.out.len ? POLLOUT : 0) };
+            pfds[np++] = (na_pollfd){ .id = (intptr_t)k->link.fd,
+                                      .events = NA_POLLIN | (k->link.out.len ? NA_POLLOUT : 0) };
         }
         size_t base = np;
         np += runner_pollfds(&k->runner, pfds + base, refs + base, MAX_POLL - base);
 
         int64_t wake = next_wakeup(k, now);
         int timeout = wake > now ? (int)(wake - now) : 0;
-        if (poll(pfds, np, timeout) < 0 && errno != EINTR) {
+        if (plat_poll(pfds, np, timeout) < 0 && errno != EINTR) {
             log_error("poll 失败：%s", strerror(errno));
             break;
         }
         now = now_ms();
 
-        if (pfds[0].revents & POLLIN) {
-            char tmp[64];
-            while (read(g_wake[0], tmp, sizeof tmp) > 0) {}
-        }
+        if (pfds[0].revents & NA_POLLIN) plat_wake_drain(&g_wake);
         runner_reap(&k->runner, now);
         runner_tick(&k->runner, now);
 
-        if (li >= 0 && k->link.fd >= 0) {
+        if (li >= 0 && k->link.fd != NA_SOCK_NONE) {
             short re = pfds[li].revents;
-            if (re & (POLLIN | POLLHUP | POLLERR)) {
+            if (re & (NA_POLLIN | NA_POLLHUP | NA_POLLERR)) {
                 int rc = link_fill(&k->link, now);
                 for (;;) {
                     bool bad;
@@ -939,7 +952,7 @@ static void loop(kernel_t *k)
                 }
                 if (rc < 0) disconnect(k, now, "连接被关闭");
             }
-            if (k->link.fd >= 0 && (re & POLLOUT) && link_flush(&k->link) < 0)
+            if (k->link.fd != NA_SOCK_NONE && (re & NA_POLLOUT) && link_flush(&k->link) < 0)
                 disconnect(k, now, "写入失败");
         }
 
@@ -950,7 +963,7 @@ static void loop(kernel_t *k)
         na_core_feed(k->core, now, &tick);
         pump(k, now);
 
-        if (k->link.fd >= 0) {
+        if (k->link.fd != NA_SOCK_NONE) {
             if (now - k->link.last_rx > DEAD_AFTER_MS) {
                 disconnect(k, now, "长时间没有收到网关的消息");
             } else if (now - k->last_ping >= PING_INTERVAL_MS) {
@@ -958,7 +971,7 @@ static void loop(kernel_t *k)
                 k->last_ping = now;
             }
         }
-        if (k->link.fd >= 0 && k->link.out.len && link_flush(&k->link) < 0)
+        if (k->link.fd != NA_SOCK_NONE && k->link.out.len && link_flush(&k->link) < 0)
             disconnect(k, now, "写入失败");
     }
 }
@@ -977,96 +990,57 @@ static void usage(const char *argv0)
 
 static void setup_signals(void)
 {
-    if (pipe(g_wake) < 0) {
-        perror("pipe");
+    if (plat_wake_open(&g_wake) < 0) {
+        perror("wake");
         exit(1);
     }
-    set_nonblock(g_wake[0]);
-    set_nonblock(g_wake[1]);
-    set_cloexec(g_wake[0]);
-    set_cloexec(g_wake[1]);
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);
+    plat_signals_install(&g_wake, &g_stop);
 }
 
 /* 运行 nano-exec --probe，看执行器能不能用、本机支持什么沙箱 */
 static int probe_exec(kernel_t *k, char *err, size_t errlen)
 {
-    int p[2];
-    if (pipe(p) < 0) {
-        snprintf(err, errlen, "创建管道失败：%s", strerror(errno));
-        return -1;
-    }
-    pid_t pid = fork();
-    if (pid < 0) {
-        snprintf(err, errlen, "fork 失败：%s", strerror(errno));
-        close(p[0]);
-        close(p[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        dup2(p[1], 1);
-        close(p[0]);
-        close(p[1]);
-        execl(k->conf.exec, k->conf.exec, "--probe", (char *)NULL);
-        _exit(127);
-    }
-    close(p[1]);
+    char *argv[] = { k->conf.exec, "--probe", NULL };
     buf_t b = {0};
-    char tmp[1024];
-    int64_t deadline = now_ms() + 5000;
-    for (;;) {
-        struct pollfd pf = { .fd = p[0], .events = POLLIN };
-        int64_t left = deadline - now_ms();
-        if (left <= 0 || poll(&pf, 1, (int)left) <= 0) break;
-        ssize_t n = read(p[0], tmp, sizeof tmp);
-        if (n <= 0) break;
-        buf_append(&b, tmp, (size_t)n);
+    if (plat_probe(argv, 5000, &b) < 0) {
+        snprintf(err, errlen, "执行器 %s 无法运行（用 exec = 指定它的路径）", k->conf.exec);
+        buf_free(&b);
+        return -1;
     }
-    close(p[0]);
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-
     cJSON *r = cJSON_ParseWithLength(b.p ? b.p : "", b.len);
     buf_free(&b);
     const cJSON *ll = cJSON_GetObjectItemCaseSensitive(r, "landlock");
     if (!cJSON_IsNumber(ll)) {
         cJSON_Delete(r);
-        snprintf(err, errlen, "执行器 %s 无法运行（用 exec = 指定它的路径）", k->conf.exec);
+        snprintf(err, errlen, "执行器 %s 的自检结果看不懂（用 exec = 指定它的路径）", k->conf.exec);
         return -1;
     }
     k->landlock = (int)ll->valuedouble;
     k->rg = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "rg"));
     cJSON_Delete(r);
-    k->exec_real = realpath(k->conf.exec, NULL);
+    k->exec_real = plat_canonical(k->conf.exec);
+    if (!k->exec_real) k->exec_real = xstrdup(k->conf.exec);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
+    plat_init();
+    int nargs = 0;
+    char **args = plat_args(argc, argv, &nargs);
     const char *conf_path = "kernel.conf";
     bool check_only = false;
-    int opt;
-    while ((opt = getopt(argc, argv, "c:tvh")) != -1) {
-        switch (opt) {
-        case 'c': conf_path = optarg; break;
-        case 't': check_only = true; break;
-        case 'v': na_log_level = NA_LOG_DEBUG; break;
-        default: usage(argv[0]); return opt == 'h' ? 0 : 2;
-        }
+    for (int i = 1; i < nargs; i++) {
+        if (!strcmp(args[i], "-c") && i + 1 < nargs) conf_path = args[++i];
+        else if (!strcmp(args[i], "-t")) check_only = true;
+        else if (!strcmp(args[i], "-v")) na_log_level = NA_LOG_DEBUG;
+        else if (!strcmp(args[i], "-h")) { usage(nargs > 0 ? args[0] : "nano-kernel"); return 0; }
+        else { usage(nargs > 0 ? args[0] : "nano-kernel"); return 2; }
     }
 
     kernel_t k;
     memset(&k, 0, sizeof k);
-    k.link.fd = -1;
+    k.link.fd = NA_SOCK_NONE;
     k.backoff = 1000;
 
     char err[512];
@@ -1083,7 +1057,7 @@ int main(int argc, char **argv)
     if (k.landlock > 0)
         log_info("执行器 %s，沙箱 Landlock v%d%s", k.conf.exec, k.landlock, k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
     else
-        log_warn("执行器 %s：本机不支持 Landlock，没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
+        log_warn("执行器 %s：本机没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {
         free(k.exec_real);
         kconf_free(&k.conf);
@@ -1100,31 +1074,21 @@ int main(int argc, char **argv)
     k.core = na_core_new(&cc);
     /* 执行器的输出是一行 JSON，内容转义后可能比原文长不少，留足余量 */
     k.runner.out_cap = k.conf.max_output * 6 + 4096;
+    k.runner.wake = &g_wake;
 
     setup_signals();
     loop(&k);
 
     log_info("退出");
-    /* 让执行器先清理它们启动的命令，最多等一会儿 */
-    runner_kill_all(&k.runner);
-    for (int64_t until = now_ms() + 2500; k.runner.jobs && now_ms() < until;) {
-        runner_reap(&k.runner, now_ms());
-        runner_tick(&k.runner, now_ms());
-        bool alive = false;
-        for (job_t *j = k.runner.jobs; j; j = j->next) alive |= !j->exited;
-        if (!alive) break;
-        poll(NULL, 0, 20);
-    }
-    for (job_t *j; (j = k.runner.jobs);) {
-        if (!j->exited) kill(-j->pid, SIGKILL);
-        k.runner.jobs = j->next;
-        job_free(j);
-    }
+    plat_signals_remove();
+    runner_shutdown(&k.runner, 2500);
     link_close(&k.link);
     buf_free(&k.link.in);
     buf_free(&k.link.out);
     na_core_free(k.core);
     free(k.exec_real);
     kconf_free(&k.conf);
+    plat_wake_close(&g_wake);
+    plat_shutdown();
     return 0;
 }

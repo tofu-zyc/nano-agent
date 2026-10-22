@@ -43,9 +43,10 @@ func (a *App) SetHosts(h Hosts) {
 // HostsChanged：SSH 服务器连上、断开了（host 包通知），网页刷新机器和工作目录
 func (a *App) HostsChanged() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.publish(events.Event{T: "machines", Data: a.machineList()})
 	a.publishWorkspaces()
+	a.mu.Unlock()
+	go a.normalizeWorkspaces("")
 }
 
 // SetManagedKernel 记下网关自己启动的本机内核的名字（网页上标出来）。
@@ -58,6 +59,8 @@ func (a *App) SetManagedKernel(name string) {
 // KernelInfo 是一个在线的内核。
 type KernelInfo struct {
 	Node     string   `json:"node"`
+	OS       string   `json:"os,omitempty"`
+	Arch     string   `json:"arch,omitempty"`
 	Landlock int      `json:"landlock"` // 0 表示没有沙箱
 	Tools    []string `json:"tools"`
 	Since    int64    `json:"since"`
@@ -131,8 +134,7 @@ func (a *App) Skills() []skills.Skill {
 
 func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := &node{info: KernelInfo{Node: name, Since: time.Now().UnixMilli(), Local: local}}
+	n := &node{info: KernelInfo{Node: name, OS: hello.OS, Arch: hello.Arch, Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
@@ -164,6 +166,9 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	if n.info.Landlock == 0 {
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
+	a.mu.Unlock()
+	// 机器上线后把离线时先按原样保存的工作目录换成那台机器给的规范形式
+	go a.normalizeWorkspaces(a.machineOf(name))
 }
 
 func (a *App) toolsChanged(name string, m *proto.Msg) {
@@ -278,6 +283,7 @@ type mount struct {
 	ws       *Workspace
 	local    bool // 在跑这一轮的内核的机器上，内核自己执行
 	landlock int  // 异机时执行的那台机器的沙箱版本
+	os       string
 }
 
 // route 是一轮怎么跑
@@ -304,13 +310,13 @@ func (a *App) route(w workspace) route {
 	here := a.machineOf(rt.kernel)
 	for _, x := range w.wss {
 		if x.Host == here {
-			rt.mounts = append(rt.mounts, mount{ws: x, local: true, landlock: a.nodes[rt.kernel].info.Landlock})
+			rt.mounts = append(rt.mounts, mount{ws: x, local: true, landlock: a.nodes[rt.kernel].info.Landlock, os: a.machineOS(x.Host)})
 			continue
 		}
 		if _, landlock, why := a.hostFor(x.Host); why != "" {
 			rt.down = append(rt.down, fmt.Sprintf("%s：%s %s", x.Label(), x.Host, why))
 		} else {
-			rt.mounts = append(rt.mounts, mount{ws: x, landlock: landlock})
+			rt.mounts = append(rt.mounts, mount{ws: x, landlock: landlock, os: a.machineOS(x.Host)})
 		}
 	}
 	return rt
@@ -339,7 +345,8 @@ func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
 	if readAll {
 		ro = []string{"/"}
 	}
-	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock}
+	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock,
+		OS: m.os}
 }
 
 // hostUsable：机器 name 上的工作目录现在能用（有内核，或者网关能在上面执行）
@@ -351,7 +358,8 @@ func (a *App) hostUsable(name string) bool {
 // MachineInfo 是网页和 /node 上显示的一台机器。
 type MachineInfo struct {
 	Name     string   `json:"name"`
-	Kind     string   `json:"kind"`   // local（网关所在的机器）、kernel（装了内核的电脑）、ssh（SSH 服务器）
+	Kind     string   `json:"kind"` // local（网关所在的机器）、kernel（装了内核的电脑）、ssh（SSH 服务器）
+	OS       string   `json:"os,omitempty"`
 	Online   bool     `json:"online"` // 上面的工作目录能用
 	Landlock int      `json:"landlock"`
 	State    string   `json:"state,omitempty"`
@@ -366,9 +374,10 @@ func (a *App) machineList() []MachineInfo {
 		for _, h := range a.hosts.Infos() {
 			if h.Kind == "local" {
 				local.Online, local.Landlock, local.State, local.Detail = h.Ready, h.Landlock, h.State, h.Detail
+				local.OS = h.OS
 				continue
 			}
-			others = append(others, MachineInfo{Name: h.Name, Kind: "ssh", Online: h.Ready, Landlock: h.Landlock, State: h.State, Detail: h.Detail, Kernels: []string{}})
+			others = append(others, MachineInfo{Name: h.Name, Kind: "ssh", OS: h.OS, Online: h.Ready, Landlock: h.Landlock, State: h.State, Detail: h.Detail, Kernels: []string{}})
 		}
 	}
 	for _, k := range a.kernelList() {
@@ -377,9 +386,12 @@ func (a *App) machineList() []MachineInfo {
 			if !local.Online {
 				local.Online, local.Landlock, local.Detail = true, k.Landlock, ""
 			}
+			if local.OS == "" {
+				local.OS = k.OS
+			}
 			continue
 		}
-		others = append(others, MachineInfo{Name: k.Node, Kind: "kernel", Online: true, Landlock: k.Landlock, Kernels: []string{k.Node}})
+		others = append(others, MachineInfo{Name: k.Node, Kind: "kernel", OS: k.OS, Online: true, Landlock: k.Landlock, Kernels: []string{k.Node}})
 	}
 	seen := map[string]bool{}
 	for _, m := range others {

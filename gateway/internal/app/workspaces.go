@@ -29,7 +29,8 @@ import (
 type Workspace struct {
 	ID      string `json:"id"`
 	Host    string `json:"host"` // 机器
-	Path    string `json:"path"` // 那台机器上的路径，绝对路径或者 ~ 开头
+	Path    string `json:"path"` // 那台机器上的路径，规范形式由那台机器给
+	OS      string `json:"os,omitempty"`
 	Default bool   `json:"default,omitempty"`
 }
 
@@ -87,7 +88,7 @@ func (a *App) migrateWorkspaces() {
 	}
 	defNode := a.cfg.Workspace.Node
 	for i, d := range a.cfg.Workspace.Dirs {
-		if w := a.addWorkspaceLocked(hostFor(defNode), cleanPath(d)); w != nil && i == 0 {
+		if w := a.addWorkspaceLocked(hostFor(defNode), cleanPath(d), ""); w != nil && i == 0 {
 			w.Default = true
 		}
 	}
@@ -108,7 +109,7 @@ func (a *App) migrateWorkspaces() {
 		}
 		st.Workspaces, st.WorkspacesSet = nil, true
 		for _, d := range dirs {
-			if w := a.addWorkspaceLocked(hostFor(node), cleanPath(d)); w != nil {
+			if w := a.addWorkspaceLocked(hostFor(node), cleanPath(d), ""); w != nil {
 				st.Workspaces = append(st.Workspaces, w.ID)
 			}
 		}
@@ -155,15 +156,18 @@ func (a *App) defaultWorkspaces() []*Workspace {
 }
 
 // addWorkspaceLocked 把 host:path 加进列表（已经有了就返回原来的），不保存。调用方持有锁。
-func (a *App) addWorkspaceLocked(hostName, path string) *Workspace {
+func (a *App) addWorkspaceLocked(hostName, path, osName string) *Workspace {
 	for i := range a.wss {
 		if a.wss[i].Host == hostName && a.wss[i].Path == path {
+			if osName != "" {
+				a.wss[i].OS = osName
+			}
 			return &a.wss[i]
 		}
 	}
 	var id [4]byte
 	rand.Read(id[:])
-	a.wss = append(a.wss, Workspace{ID: hex.EncodeToString(id[:]), Host: hostName, Path: path})
+	a.wss = append(a.wss, Workspace{ID: hex.EncodeToString(id[:]), Host: hostName, Path: path, OS: osName})
 	return &a.wss[len(a.wss)-1]
 }
 
@@ -186,11 +190,22 @@ func (a *App) knownHost(name string) bool {
 }
 
 // parseWorkspace 把“机器:路径”拆开；只写路径时用 dflt 那台机器。“local”也表示本机。
-func parseWorkspace(s, dflt string) (hostName, path string) {
+// 冒号前面的名字必须是一台已知的机器，否则整串都当路径（Windows 的 C:\x 就是路径）。
+func (a *App) parseWorkspace(s, dflt string) (hostName, path string) {
 	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "~") {
+	if s == "" {
+		return dflt, ""
+	}
+	if !strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "~") && !isWindowsAbs(s) {
 		if h, p, ok := strings.Cut(s, ":"); ok {
-			hostName, s = strings.TrimSpace(h), strings.TrimSpace(p)
+			h, p = strings.TrimSpace(h), strings.TrimSpace(p)
+			drive := len(h) == 1 && ((h[0] >= 'A' && h[0] <= 'Z') || (h[0] >= 'a' && h[0] <= 'z'))
+			if a.knownHost(h) || strings.EqualFold(h, "local") {
+				hostName, s = h, p
+			} else if !drive && (strings.HasPrefix(p, "/") || strings.HasPrefix(p, "~") || isWindowsAbs(p)) {
+				// 看起来是“机器:路径”，但机器不存在：留给 checkWorkspace 报错
+				hostName, s = h, p
+			}
 		}
 	}
 	if hostName == "" {
@@ -199,18 +214,26 @@ func parseWorkspace(s, dflt string) (hostName, path string) {
 	if strings.EqualFold(hostName, "local") {
 		hostName = host.LocalName
 	}
-	return hostName, cleanPath(s)
+	return hostName, s
+}
+
+func isWindowsAbs(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		return (p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')
+	}
+	return strings.HasPrefix(p, `\\`)
 }
 
 // checkWorkspace 检查 host:path 能不能当工作目录。调用方持有锁。
+// 路径属于那台机器：远程机器的路径网关不解析，只检查机器存在，交给那台机器的执行器。
 func (a *App) checkWorkspace(hostName, path string) error {
-	if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") {
-		return errors.New("路径要写成绝对路径或 ~ 开头，比如 ~/projects/foo")
-	}
 	if !a.knownHost(hostName) {
 		return fmt.Errorf("没有叫 %s 的机器（本机、在「设备」里添加的 SSH 服务器、或者连上来的内核）", hostName)
 	}
 	if hostName == host.LocalName {
+		if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") {
+			return errors.New("路径要写成绝对路径或 ~ 开头，比如 ~/projects/foo")
+		}
 		if msg := a.checkDir(path); msg != "" {
 			return errors.New(msg)
 		}
@@ -251,7 +274,7 @@ func (a *App) publishWorkspaces() {
 
 // AddWorkspace 添加一个工作目录（已经有了就返回原来的）。机器能用时先确认目录存在。
 func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefault bool) (Workspace, error) {
-	hostName, path = parseWorkspace(path, hostName)
+	hostName, path = a.parseWorkspace(path, hostName)
 	a.mu.Lock()
 	err := a.checkWorkspace(hostName, path)
 	usable := a.hostUsable(hostName)
@@ -259,6 +282,7 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 	if err != nil {
 		return Workspace{}, err
 	}
+	osName := ""
 	if usable {
 		l, err := a.ListDir(ctx, hostName, path)
 		if err != nil {
@@ -267,10 +291,20 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 		if l.Blocked {
 			return Workspace{}, fmt.Errorf("%s 包含 nano-agent 自己，不能当工作目录", path)
 		}
+		// 规范形式由那台机器给：~、相对路径、符号链接、Windows 的盘符大小写都在 ListDir 里定好
+		if l.Path != "" {
+			path = l.Path
+		}
+		osName = l.OS
+	}
+	if osName == "" {
+		a.mu.Lock()
+		osName = a.machineOS(hostName)
+		a.mu.Unlock()
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	w := a.addWorkspaceLocked(hostName, path)
+	w := a.addWorkspaceLocked(hostName, path, osName)
 	if makeDefault {
 		w.Default = true
 	}
@@ -280,6 +314,58 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 	}
 	a.publishWorkspaces()
 	return added, nil
+}
+
+// normalizeWorkspaces 把机器上的工作目录换成那台机器给的规范形式。
+// 机器不在线时只能先按原样保存；它上线后第一次 list 时再换，换完通知网页。
+func (a *App) normalizeWorkspaces(hostName string) {
+	type item struct{ id, host, path string }
+	a.mu.Lock()
+	var items []item
+	for _, w := range a.wss {
+		if hostName != "" && w.Host != hostName {
+			continue
+		}
+		if !a.hostUsable(w.Host) {
+			continue
+		}
+		items = append(items, item{w.ID, w.Host, w.Path})
+	}
+	a.mu.Unlock()
+	if len(items) == 0 {
+		return
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	changed := false
+	for _, it := range items {
+		l, err := a.ListDir(ctx, it.host, it.path)
+		if err != nil || l.Path == "" {
+			continue
+		}
+		a.mu.Lock()
+		if w := a.findWorkspace(it.id); w != nil && w.Path == it.path && (w.Path != l.Path || (l.OS != "" && w.OS != l.OS)) {
+			w.Path = l.Path
+			if l.OS != "" {
+				w.OS = l.OS
+			}
+			changed = true
+		}
+		a.mu.Unlock()
+	}
+	if !changed {
+		return
+	}
+	a.mu.Lock()
+	if err := a.saveWorkspaces(); err != nil && a.log != nil {
+		a.log.Warn("保存工作目录列表失败", "err", err)
+	}
+	a.publishWorkspaces()
+	a.mu.Unlock()
 }
 
 // RemoveWorkspace 从列表里删掉一个工作目录，挂着它的会话取下它。不动机器上的文件。
@@ -464,7 +550,7 @@ func (a *App) cmdDir(c in, arg string) {
 			a.answer(c, dirUsage)
 			return
 		}
-		hostName, path := parseWorkspace(rest, host.LocalName)
+		hostName, path := a.parseWorkspace(rest, host.LocalName)
 		// 确认目录存在要等机器回复，不能拿着锁等
 		go func() {
 			ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)

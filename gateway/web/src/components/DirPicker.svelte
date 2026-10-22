@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listDir, toTilde, join, type DirListing } from '../lib/fs';
+  import { listDir, toTilde, join, isWindowsOS, isWindowsPath, type DirListing } from '../lib/fs';
   import Icon from './Icon.svelte';
 
   let {
@@ -39,15 +39,31 @@
     (cur?.entries ?? []).filter((e) => (hidden || !e.name.startsWith('.')) && (!filter || e.name.toLowerCase().includes(filter.toLowerCase()))),
   );
 
-  // 面包屑：主目录下从 ~ 开始
+  // 路径属于它所在的机器：Windows 上看盘符和反斜杠，不把 POSIX 规则套过去
+  const win = $derived(isWindowsOS(cur?.os) || isWindowsPath(cur?.path ?? ''));
+  const rootPath = $derived(win ? '' : '/');
+  const rootLabel = $derived(win ? '盘符' : '/');
+
+  // 面包屑：主目录下从 ~ 开始；Windows 从盘符开始
   const crumbs = $derived.by(() => {
     if (!cur) return [];
-    const t = toTilde(cur.path, cur.home);
+    if (!cur.path) return [{ label: '此电脑', path: '' }];
     const out: { label: string; path: string }[] = [];
-    if (t.startsWith('~')) {
+    const t = toTilde(cur.path, cur.home);
+    if (t === '~') {
+      out.push({ label: '~', path: cur.home });
+    } else if (t.startsWith('~')) {
       out.push({ label: '~', path: cur.home });
       let p = cur.home;
-      for (const seg of t.slice(1).split('/').filter(Boolean)) {
+      for (const seg of t.slice(1).split(/[\\/]/).filter(Boolean)) {
+        p = join(p, seg);
+        out.push({ label: seg, path: p });
+      }
+    } else if (win) {
+      const drive = cur.path.slice(0, 2);
+      out.push({ label: drive, path: drive + '\\' });
+      let p = drive + '\\';
+      for (const seg of cur.path.slice(2).split(/[\\/]/).filter(Boolean)) {
         p = join(p, seg);
         out.push({ label: seg, path: p });
       }
@@ -63,7 +79,17 @@
   });
 
   function up() {
-    if (!cur || cur.path === '/') return;
+    if (!cur || !cur.path) return;
+    if (win) {
+      if (/^[A-Za-z]:[\\/]?$/.test(cur.path)) {
+        go('');
+        return;
+      }
+      const m = cur.path.match(/^(.*)[\\/][^\\/]+$/);
+      go(m ? m[1] : '');
+      return;
+    }
+    if (cur.path === '/') return;
     go(cur.path.replace(/\/[^/]+$/, '') || '/');
   }
 
@@ -95,15 +121,15 @@
     </header>
 
     <div class="nav">
-      <button class="btn sm" onclick={up} disabled={!cur || cur.path === '/'} title="上一级"><Icon name="right" size={13} class="flip" /></button>
+      <button class="btn sm" onclick={up} disabled={!cur || !cur.path} title="上一级"><Icon name="right" size={13} class="flip" /></button>
       <div class="crumbs">
         {#each crumbs as c, i}
-          {#if i > 0 && crumbs[i - 1].label !== '/'}<span class="sep">/</span>{/if}
+          {#if i > 0}<span class="sep">{win ? '\\' : '/'}</span>{/if}
           <button class="crumb" class:last={i === crumbs.length - 1} onclick={() => go(c.path)}>{c.label}</button>
         {/each}
       </div>
       <button class="btn sm ghost" onclick={() => go('~')} title="主目录">~</button>
-      <button class="btn sm ghost" onclick={() => go('/')} title="根目录">/</button>
+      <button class="btn sm ghost" onclick={() => go(rootPath)} title={win ? '盘符' : '根目录'}>{rootLabel}</button>
     </div>
 
     <div class="tools">

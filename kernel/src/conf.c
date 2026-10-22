@@ -1,14 +1,12 @@
 #include "conf.h"
+#include "plat.h"
 #include "util.h"
 
 #include <ctype.h>
 #include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 static char *trim(char *s)
 {
@@ -34,40 +32,35 @@ static int parse_int(const char *v, long lo, long hi, long *out)
     return 0;
 }
 
-/* 配置文件所在目录，不带结尾的 / */
-static char *dir_of(const char *path)
-{
-    const char *slash = strrchr(path, '/');
-    if (!slash) return xstrdup(".");
-    if (slash == path) return xstrdup("/");
-    char *d = xstrdup(path);
-    d[slash - path] = 0;
-    return d;
-}
-
 /* 节点名会出现在网关和网页上：不能有空白、控制字符、冒号和斜杠，最长 64 字节 */
 int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 {
     memset(k, 0, sizeof *k);
-    k->gateway = xstrdup("unix:/tmp/nano-agent.sock");
+    k->gateway = xstrdup(NA_WINDOWS ? "tcp:127.0.0.1:7700" : "unix:/tmp/nano-agent.sock");
     k->max_steps = 16;
     k->run_timeout = 600;
     k->approval_timeout = 300;
     k->max_output = 64 * 1024;
 
-    FILE *f = fopen(path, "r");
-    if (!f) {
+    buf_t text = {0};
+    if (plat_read_file(path, &text, 1u << 20) < 0) {
         snprintf(err, errlen, "打开 %s 失败：%s", path, strerror(errno));
+        buf_free(&text);
         return -1;
     }
 
-    char *line = NULL;
-    size_t cap = 0;
     int lineno = 0, rc = 0;
-    while (getline(&line, &cap, f) >= 0) {
+    char *p = text.p ? text.p : "";
+    while (*p || p == text.p) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = 0;
         lineno++;
-        char *s = trim(line);
-        if (!*s || *s == '#') continue;
+        char *s = trim(p);
+        if (!*s || *s == '#') {
+            if (!nl) break;
+            p = nl + 1;
+            continue;
+        }
 
         char *eq = strchr(s, '=');
         if (!eq) {
@@ -110,53 +103,42 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
             rc = -1;
             break;
         }
+        if (!nl) break;
+        p = nl + 1;
     }
-    free(line);
-    fclose(f);
+    buf_free(&text);
     if (rc) return rc;
 
-    if (!k->node) {
-        char host[256] = "kernel";
-        gethostname(host, sizeof host - 1);
-        k->node = xstrdup(host);
-    }
-    char *base = dir_of(path);
-    k->dir = realpath(base, NULL);
-    if (!k->dir) k->dir = xstrdup(base);
+    if (!k->node) k->node = plat_hostname();
+    char *base = plat_dirname(path);
+    char *real = plat_canonical(base);
+    k->dir = real ? real : xstrdup(base);
     /* 没写 token：用配对得到的口令；还没配对过就是空的，连上网关后请求配对 */
-    k->token_file = xasprintf("%s/paired.token", base);
+    k->token_file = plat_join(base, "paired.token");
     if (!k->token || !*k->token) {
-        FILE *tf = fopen(k->token_file, "r");
-        char buf[256] = "";
-        if (tf) {
-            if (!fgets(buf, sizeof buf, tf)) buf[0] = 0;
-            fclose(tf);
+        buf_t tb = {0};
+        if (plat_read_file(k->token_file, &tb, 4096) == 0) {
+            char *t = trim(tb.p ? tb.p : "");
+            if (*t) {
+                set_str(&k->token, t);
+                k->paired = true;
+            }
         }
-        char *t = trim(buf);
-        if (*t) {
-            set_str(&k->token, t);
-            k->paired = true;
-        }
+        buf_free(&tb);
     }
     if (!k->token) k->token = xstrdup("");
-    if (k->exec && k->exec[0] != '/') {
-        char *full = xasprintf("%s/%s", base, k->exec);
+    if (k->exec && !plat_is_abs(k->exec)) {
+        char *full = plat_join(base, k->exec);
         free(k->exec);
         k->exec = full;
     }
     free(base);
     if (!k->exec) {
         /* 默认：和内核程序放在同一个目录 */
-        char self[4096];
-        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
-        if (n > 0) {
-            self[n] = 0;
-            char *d = dir_of(self);
-            k->exec = xasprintf("%s/nano-exec", d);
-            free(d);
-        } else {
-            k->exec = xstrdup("nano-exec");
-        }
+        char *d = plat_exe_dir();
+        k->exec = d ? plat_join(d, NA_WINDOWS ? "nano-exec.exe" : "nano-exec")
+                    : xstrdup(NA_WINDOWS ? "nano-exec.exe" : "nano-exec");
+        free(d);
     }
     return 0;
 }

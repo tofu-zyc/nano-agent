@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
+  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
@@ -431,9 +431,10 @@
   function machineSub(m: MachineInfo) {
     if (!m.online) return truncate(m.detail || '现在用不了', 18);
     const box = m.landlock > 0 ? `Landlock v${m.landlock} 沙箱` : '没有沙箱';
-    if (m.kind === 'ssh') return `网关直连 · ${box}`;
-    if (m.kernels.length) return truncate(`内核 ${m.kernels.join('、')} · ${box}`, 22);
-    return `网关执行工具 · ${box}`;
+    const os = osLabel(m.os);
+    if (m.kind === 'ssh') return [os, '网关直连', box].filter(Boolean).join(' · ');
+    if (m.kernels.length) return truncate([os, `内核 ${m.kernels.join('、')}`, box].filter(Boolean).join(' · '), 26);
+    return [os, '网关执行工具', box].filter(Boolean).join(' · ');
   }
 
   function sessSub(s: SessionInfo) {
@@ -750,7 +751,7 @@
             {#if k}
               <text x="62" y="24" class="t3">{k.managed ? '内核 · 网关启动的' : k.local ? '内核 · 在本机' : '内核 · 在别的电脑上'}</text>
               <text x="62" y="43" class="t1">{truncate(k.node, 18)}</text>
-              <text x="62" y="59" class="t2">{k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱'}{busyKernels.has(k.node) ? ' · 正在跑' : ''}</text>
+              <text x="62" y="59" class="t2">{[osLabel(k.os), k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱', busyKernels.has(k.node) ? '正在跑' : ''].filter(Boolean).join(' · ')}</text>
               <circle cx={n.w - 16} cy="16" r="4" class="sdot online" />
             {:else}
               <text x="62" y="31" class="t1 errt">没有内核在线</text>

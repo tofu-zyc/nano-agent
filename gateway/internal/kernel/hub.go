@@ -102,15 +102,12 @@ func validNode(name string) bool {
 	return true
 }
 
-// isLocal 判断连接是不是来自本机
+// isLocal 判断连接是不是来自本机：只认 unix socket。
+// 从 127.0.0.1 用 TCP 连上来的可能是 WSL 转发的另一台机器（Windows 内核），
+// 不能按回环地址判断；网关自己启动的本机内核在 serve 里用 AllowToken 认。
 func isLocal(nc net.Conn) bool {
-	switch a := nc.RemoteAddr().(type) {
-	case *net.UnixAddr:
-		return true
-	case *net.TCPAddr:
-		return a.IP.IsLoopback()
-	}
-	return false
+	_, ok := nc.RemoteAddr().(*net.UnixAddr)
+	return ok
 }
 
 // Listen 打开监听地址：unix:/path、tcp:host:port 或 host:port。
@@ -239,6 +236,7 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 			return
 		case hello.Token != "" && subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.token)) == 1:
 		case hello.Token != "" && h.extraToken(hello.Token):
+			local = true // 网关自己启动的本机内核，哪怕走的是 127.0.0.1 TCP
 		case hello.Token != "" && h.pairedToken(hello.Node, hello.Token):
 			c.paired = true
 		default:

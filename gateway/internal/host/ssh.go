@@ -27,6 +27,7 @@ type sshConn struct {
 	mu       sync.Mutex
 	ready    bool
 	landlock int
+	osName   string
 	master   *exec.Cmd
 }
 
@@ -97,10 +98,10 @@ func (h *sshConn) exe() string {
 	return `"$HOME/.nano-agent/nano-exec-` + h.m.exec.Ver + `"`
 }
 
-func (h *sshConn) state() (ready bool, landlock int) {
+func (h *sshConn) state() (ready bool, landlock int, osName string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.ready, h.landlock
+	return h.ready, h.landlock, h.osName
 }
 
 // lost：执行时发现连不上了。关掉主连接，由 session 重新连。
@@ -162,12 +163,12 @@ func (h *sshConn) session(ctx context.Context) error {
 		if first {
 			h.m.setStatus(id, "preparing", "正在检查服务器上的执行器")
 		}
-		landlock, err := h.prepare(ctx)
+		landlock, osName, err := h.prepare(ctx)
 		if err != nil {
 			return err
 		}
 		h.mu.Lock()
-		h.ready, h.landlock = true, landlock
+		h.ready, h.landlock, h.osName = true, landlock, osName
 		h.mu.Unlock()
 		h.m.setStatus(id, "online", "")
 		if first {
@@ -209,14 +210,22 @@ func (h *sshConn) step(ctx context.Context, script string, input []byte) (string
 	return last, nil
 }
 
-func parseProbe(line string) (int, error) {
+func parseProbe(line string) (int, string, error) {
 	var p struct {
-		Landlock *int `json:"landlock"`
+		Landlock *int   `json:"landlock"`
+		OS       string `json:"os"`
 	}
 	if json.Unmarshal([]byte(strings.TrimPrefix(line, "OK ")), &p) != nil || p.Landlock == nil {
-		return 0, fmt.Errorf("执行器的自检结果看不懂：%s", clip(line, 200))
+		return 0, "", fmt.Errorf("执行器的自检结果看不懂：%s", clip(line, 200))
 	}
-	return *p.Landlock, nil
+	osName := strings.ToLower(p.OS)
+	if osName == "" {
+		osName = "linux"
+	}
+	if osName == "darwin" {
+		osName = "macos"
+	}
+	return *p.Landlock, osName, nil
 }
 
 // dropOldCache 删掉旧版本放在 ~/.cache/nano-agent 的执行器和技能文件；失败不影响使用。
@@ -225,12 +234,12 @@ func (h *sshConn) dropOldCache(ctx context.Context) {
 }
 
 // prepare 确保服务器上有能用的执行器：检查 → 架构相同就上传 → 跑不了或者架构不同就传源码现编。
-func (h *sshConn) prepare(ctx context.Context) (int, error) {
+func (h *sshConn) prepare(ctx context.Context) (int, string, error) {
 	e := h.m.exec
 	line, err := h.step(ctx, `f=`+h.exe()+`; if [ -x "$f" ] && o=$("$f" --probe 2>/dev/null); then echo "OK $o"; `+
-		`else echo "NEED $(uname -m) $(command -v cc || command -v gcc || true)"; fi`, nil)
+		`else echo "NEED $(uname -m) $(uname -s) $(command -v cc || command -v gcc || true)"; fi`, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if strings.HasPrefix(line, "OK ") {
 		h.dropOldCache(ctx)
@@ -238,53 +247,59 @@ func (h *sshConn) prepare(ctx context.Context) (int, error) {
 	}
 	f := strings.Fields(strings.TrimPrefix(line, "NEED"))
 	if !strings.HasPrefix(line, "NEED") || len(f) == 0 {
-		return 0, fmt.Errorf("检查执行器失败：%s", clip(line, 200))
+		return 0, "", fmt.Errorf("检查执行器失败：%s", clip(line, 200))
 	}
-	arch, cc := f[0], ""
+	arch, osName, cc := f[0], "linux", ""
 	if len(f) > 1 {
-		cc = f[1]
+		osName = strings.ToLower(f[1])
+		if osName == "darwin" {
+			osName = "macos"
+		}
+	}
+	if len(f) > 2 {
+		cc = f[2]
 	}
 	if arch == e.Arch {
 		h.m.setStatus(h.c.ID, "preparing", "正在上传执行器")
 		bin, err := os.ReadFile(e.Upload)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		line, err = h.step(ctx, `d="$HOME/.nano-agent"; f=`+h.exe()+`; `+
 			`mkdir -p "$d" && chmod 700 "$d" && cat > "$f.tmp" && chmod 700 "$f.tmp" && mv -f "$f.tmp" "$f" || exit 1; `+
 			`if o=$("$f" --probe 2>&1); then echo "OK $o"; else rm -f "$f"; echo "FAIL $o"; fi`, bin)
 		if err != nil {
-			return 0, err
+			return 0, "", err
 		}
 		if strings.HasPrefix(line, "OK ") {
 			return parseProbe(line)
 		}
 		if cc == "" || e.SrcTar == "" {
-			return 0, fmt.Errorf("上传的执行器在服务器上跑不起来（%s）。服务器上装个 C 编译器（cc）就能现编", clip(strings.TrimPrefix(line, "FAIL "), 200))
+			return 0, "", fmt.Errorf("上传的执行器在服务器上跑不起来（%s）。服务器上装个 C 编译器（cc）就能现编", clip(strings.TrimPrefix(line, "FAIL "), 200))
 		}
 		h.m.log.Info("服务器跑不了上传的执行器，改为现编", "server", h.c.Name, "why", clip(line, 200))
 	} else if cc == "" || e.SrcTar == "" {
-		return 0, fmt.Errorf("服务器是 %s，网关这边的执行器是 %s，服务器上又没有 C 编译器（cc），没法现编。装上 gcc 后重新连接", arch, e.Arch)
+		return 0, "", fmt.Errorf("服务器是 %s，网关这边的执行器是 %s，服务器上又没有 C 编译器（cc），没法现编。装上 gcc 后重新连接", arch, e.Arch)
 	}
 	h.m.setStatus(h.c.ID, "preparing", "正在服务器上编译执行器")
 	src, err := os.ReadFile(e.SrcTar)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	line, err = h.step(ctx, `d="$HOME/.nano-agent"; s="$d/src-`+e.Ver+`"; f=`+h.exe()+`; `+
 		`mkdir -p "$s" && chmod 700 "$d" && cd "$s" && tar xzf - || exit 1; `+
 		`if `+shellQuote(cc)+` -std=c11 -O2 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson -o "$f.tmp" `+
-		`src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c third_party/cjson/cJSON.c -lm > build.log 2>&1 `+
+		`src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c src/plat_posix.c third_party/cjson/cJSON.c -lm > build.log 2>&1 `+
 		`&& mv -f "$f.tmp" "$f"; then if o=$("$f" --probe 2>&1); then echo "OK $o"; else echo "FAIL $o"; fi; `+
 		`else echo "FAIL $(tail -n 3 build.log)"; fi`, src)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if strings.HasPrefix(line, "OK ") {
 		h.dropOldCache(ctx)
 		return parseProbe(line)
 	}
-	return 0, fmt.Errorf("在服务器上编译执行器失败：%s", clip(strings.TrimPrefix(line, "FAIL "), 300))
+	return 0, osName, fmt.Errorf("在服务器上编译执行器失败：%s", clip(strings.TrimPrefix(line, "FAIL "), 300))
 }
 
 // sshHost 是一个就绪的 SSH 服务器（实现 Host）

@@ -94,15 +94,71 @@ const noToolsNote = "[系统] 这个会话没有挂载工作目录，你没有�
 const homeNote = "[系统] 这个会话没有挂载工作目录，工作目录是 HOME：可以读这台机器上当前用户能读的文件，Shell 在这里运行，" +
 	"但只能写临时目录和缓存。要写工作目录外的文件或让命令写外面，给 Write / Edit / Shell 加 elevated: true，会请用户批准。"
 
-// machineDesc 是给模型看的机器说明
+// machineDesc 是给模型看的机器说明（加上那台机器的系统和 shell）
 func (a *App) machineDesc(name string) string {
+	base := "电脑"
 	switch {
 	case name == host.LocalName:
-		return "网关所在的机器"
+		base = "网关所在的机器"
 	case a.isSSH(name):
-		return "SSH 服务器"
+		base = "SSH 服务器"
 	}
-	return "电脑"
+	osName := a.machineOS(name)
+	if osName == "" {
+		return base
+	}
+	return base + "，" + osLabel(osName) + "，命令用 " + shellName(osName)
+}
+
+// machineOS 返回机器所在的系统：本机 / SSH 服务器 / 装了内核的电脑；不知道时返回空。
+func (a *App) machineOS(name string) string {
+	if name == host.LocalName && a.hosts != nil {
+		for _, h := range a.hosts.Infos() {
+			if h.Kind == "local" && h.OS != "" {
+				return h.OS
+			}
+		}
+	}
+	if n := a.nodes[name]; n != nil && n.info.OS != "" {
+		return n.info.OS
+	}
+	if name == host.LocalName {
+		for _, n := range a.nodes {
+			if n.info.Local && n.info.OS != "" {
+				return n.info.OS
+			}
+		}
+	}
+	if a.hosts != nil {
+		if _, info, ok := a.hosts.Host(name); ok && info.OS != "" {
+			return info.OS
+		}
+	}
+	for _, w := range a.wss {
+		if w.Host == name && w.OS != "" {
+			return w.OS
+		}
+	}
+	return ""
+}
+
+func osLabel(osName string) string {
+	switch osName {
+	case "windows":
+		return "Windows"
+	case "macos":
+		return "macOS"
+	case "linux":
+		return "Linux"
+	}
+	return osName
+}
+
+func shellName(osName string) string {
+	if osName == "windows" {
+		return "PowerShell"
+	}
+	return "/bin/sh"
 }
 
 // envNote 描述这一轮的环境，追加在用户消息前面（变了才追加，不改系统提示词）。
@@ -217,7 +273,7 @@ func expandHome(p string) string {
 }
 
 // homeSpec 是没有工作目录的管理员用的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME；
-// ro 是整台机器，只有提权时才会加 rw "/"。
+// ro 是整台机器，只有提权时才会加 rw "/"（Windows 执行器把 "/" 当成所有盘）。
 func homeSpec() proto.WorkspaceSpec {
 	return proto.WorkspaceSpec{Name: "HOME", RO: []string{"/"}, Home: true, Local: true}
 }

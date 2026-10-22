@@ -182,9 +182,11 @@ send '!call Read {"path":"back.txt"}';                expect "pc 回来后照常
 
 # 再挂上服务器 box 上的目录：网关自己连 SSH，工具交给网关在服务器上执行（服务器上不跑内核）
 for _ in $(seq 100); do grep -q '服务器已就绪.*server=box' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
-send "/dir add box:~/proj";                           expect "挂上服务器上的目录" "挂上了 box:~/proj"
+# 工作目录的规范形式由那台机器给：~/proj 会被换成服务器上的真实路径
+BOXWS="box:$TMP/remote/box/proj"
+send "/dir add box:~/proj";                           expect "挂上服务器上的目录" "挂上了 $BOXWS"
 send '!call Write {"path":"r.txt","content":"x"}';    expect "挂了两个要写明在哪个上执行" "用 workspace 参数指明"
-send '!call Write {"path":"r.txt","content":"remote-e2e","workspace":"box:~/proj"}'; expect "在服务器上写文件" "已创建"
+send '!call Write {"path":"r.txt","content":"remote-e2e","workspace":"'"$BOXWS"'"}'; expect "在服务器上写文件" "已创建"
 for _ in $(seq 50); do [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ] && break; sleep 0.1; done
 got=$(cat "$TMP/remote/box/proj/r.txt" 2>&1 || true)
 if [ "$got" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上（$got）"; fail=$((fail + 1)); fi
@@ -201,7 +203,7 @@ else
 fi
 send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt","workspace":"box"}'; expect_n "服务器上读技能文件" "skill-e2e-data" 2
 send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
-send "/dir -3";                                       expect "取下服务器上的目录" "取下了 box:~/proj"
+send "/dir -3";                                       expect "取下服务器上的目录" "取下了 $BOXWS"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"

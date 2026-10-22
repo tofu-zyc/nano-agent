@@ -89,6 +89,70 @@ func dial(t *testing.T, sock, node string) (net.Conn, *proto.Msg) {
 	return c, &m
 }
 
+// 从 127.0.0.1 TCP 连上来的远程内核不算本机（WSL 网关 + Windows 内核就是这种情况）；
+// 只有网关自己启动的本机内核（AllowToken）走 TCP 也算本机。
+func TestLoopbackTCPIsNotLocal(t *testing.T) {
+	ln, err := Listen("tcp:127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recHandler{}
+	h := NewHub("tok", rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.Serve(ctx, ln)
+
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	b, _ := json.Marshal(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "winpc"})
+	c.Write(append(b, '\n'))
+	sc := bufio.NewScanner(c)
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if !sc.Scan() {
+		t.Fatal("没有回复")
+	}
+	var m proto.Msg
+	json.Unmarshal(sc.Bytes(), &m)
+	if m.T != proto.TWelcome {
+		t.Fatalf("welcome: %+v", m)
+	}
+	ev := rec.wait(t, 1)
+	if ev[0] != "up winpc" {
+		t.Fatalf("TCP 回环连接不应该算本机：%v", ev)
+	}
+
+	// 网关自己启动的内核用额外口令，哪怕走 TCP 也算本机
+	ln2, err := Listen("tcp:127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2 := &recHandler{}
+	h2 := NewHub("tok", rec2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h2.AllowToken("managed")
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	go h2.Serve(ctx2, ln2)
+	c2, err := net.Dial("tcp", ln2.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	b2, _ := json.Marshal(proto.Msg{T: proto.THello, V: proto.Version, Token: "managed", Node: "gateway"})
+	c2.Write(append(b2, '\n'))
+	sc2 := bufio.NewScanner(c2)
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if !sc2.Scan() {
+		t.Fatal("没有回复")
+	}
+	ev2 := rec2.wait(t, 1)
+	if ev2[0] != "up gateway local" {
+		t.Fatalf("AllowToken 的 TCP 连接应该算本机：%v", ev2)
+	}
+}
+
 // 同时连着好几个内核，按名字区分；同名的新连接顶掉旧的；名字不合规的拒绝
 func TestHubNodes(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "k.sock")

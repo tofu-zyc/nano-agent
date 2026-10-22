@@ -301,7 +301,8 @@ func (a *App) cancelRun(s *sess) {
 type DirListing struct {
 	Path      string           `json:"path"`
 	Home      string           `json:"home"`
-	Blocked   bool             `json:"blocked"` // 包含 nano-agent 自己，不能当工作目录
+	OS        string           `json:"os,omitempty"` // 这台机器的系统：linux / macos / windows
+	Blocked   bool             `json:"blocked"`      // 包含 nano-agent 自己，不能当工作目录
 	Entries   []proto.DirEntry `json:"entries"`
 	Truncated bool             `json:"truncated"`
 }
@@ -326,7 +327,7 @@ func (a *App) ListDir(ctx context.Context, hostName, path string) (*DirListing, 
 	if err != nil {
 		return nil, err
 	}
-	out := &DirListing{Path: l.Path, Home: l.Home, Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
+	out := &DirListing{Path: l.Path, Home: l.Home, OS: a.machineOS(hostName), Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
 	if out.Entries == nil {
 		out.Entries = []proto.DirEntry{}
 	}

@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test run chat clean install installer install-kernel
+.PHONY: all kernel gateway web test test-win run chat clean install installer install-kernel
 
 all: kernel gateway
 
@@ -17,6 +17,14 @@ test: all
 	$(MAKE) -C kernel test
 	cd gateway && go test -race ./...
 	./scripts/e2e.sh
+	@if [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
+	  python3 scripts/e2e-win.py; \
+	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
+
+# 只跑 Windows 执行器和内核的测试（需要 zig、build/tools/rg.exe、WSL interop）
+test-win:
+	$(MAKE) -C kernel test-win
+	python3 scripts/e2e-win.py
 
 # 本机一键运行，在终端里直接聊天
 run: all
