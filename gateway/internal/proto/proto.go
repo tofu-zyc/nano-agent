@@ -81,7 +81,7 @@ type Msg struct {
 	Pair    bool        `json:"pair,omitempty"` // hello：没有口令，请求配对
 	Code    string      `json:"code,omitempty"` // pairing：确认码，网页上核对
 	Node    string      `json:"node,omitempty"`
-	OS      string      `json:"os,omitempty"`   // hello：内核所在的系统 linux / windows / darwin
+	OS      string      `json:"os,omitempty"`   // hello：内核所在的系统 linux / windows / macos
 	Arch    string      `json:"arch,omitempty"` // hello：内核所在的 CPU 架构
 	Tools   []ToolSpec  `json:"tools,omitempty"`
 	Skills  []SkillSpec `json:"skills,omitempty"`

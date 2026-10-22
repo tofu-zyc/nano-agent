@@ -274,8 +274,8 @@ func (a *App) publishWorkspaces() {
 
 // AddWorkspace 添加一个工作目录（已经有了就返回原来的）。机器能用时先确认目录存在。
 func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefault bool) (Workspace, error) {
-	hostName, path = a.parseWorkspace(path, hostName)
 	a.mu.Lock()
+	hostName, path = a.parseWorkspace(path, hostName) // 要查已知机器，持锁
 	err := a.checkWorkspace(hostName, path)
 	usable := a.hostUsable(hostName)
 	a.mu.Unlock()

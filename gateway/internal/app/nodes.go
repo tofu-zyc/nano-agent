@@ -166,9 +166,10 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	if n.info.Landlock == 0 {
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
+	machine := a.machineOf(name)
 	a.mu.Unlock()
 	// 机器上线后把离线时先按原样保存的工作目录换成那台机器给的规范形式
-	go a.normalizeWorkspaces(a.machineOf(name))
+	go a.normalizeWorkspaces(machine)
 }
 
 func (a *App) toolsChanged(name string, m *proto.Msg) {
