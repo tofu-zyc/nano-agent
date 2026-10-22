@@ -153,6 +153,17 @@ typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
 /* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
 static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, bool elevated, bool allowElevate, const char **why)
 {
+    if (kind == NA_TOOL_ADMIN) {
+        if (!allowElevate) {
+            *why = "当前身份不能使用网关管理工具";
+            return DECIDE_DENY;
+        }
+        if (mode == NA_MODE_NONE || mode == NA_MODE_READONLY) {
+            *why = "当前是只读模式，不能使用网关管理工具";
+            return DECIDE_DENY;
+        }
+        return DECIDE_ASK;   /* 管理工具在任何模式都要审批 */
+    }
     if (elevated) {
         if (!allowElevate) {
             *why = "当前身份不能提权写工作目录外";

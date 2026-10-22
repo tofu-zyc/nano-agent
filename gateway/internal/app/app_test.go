@@ -19,8 +19,10 @@ import (
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -224,8 +226,9 @@ func TestFinalAnswer(t *testing.T) {
 		t.Fatalf("turn: %+v", turn)
 	}
 	req := e.llm.lastReq()
-	// 没有工作目录：HOME 模式，工具仍然给（echo 是内核报的工具）
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 1 || req.Tools[0].Function.Name != "echo" {
+	// 没有工作目录：HOME 模式，工具仍然给；管理员还有 Gateway / GatewayAdmin
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 3 ||
+		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -315,7 +318,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 1 {
+	if n := len(e.llm.lastReq().Tools); n != 3 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }
@@ -860,5 +863,139 @@ func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 	// 每轮约 230 token，上限 600、裁到 300：12 轮里应该只裁几次，而不是每轮都裁
 	if compactions == 0 || compactions > 5 {
 		t.Fatalf("裁剪次数：%d", compactions)
+	}
+}
+
+func TestGatewayToolsOnlyForAdmin(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	admin := e.a.toolsFor(e.a.nodes["test"], false, true)
+	guest := e.a.toolsFor(e.a.nodes["test"], false, false)
+	e.a.mu.Unlock()
+	names := func(ts []llm.Tool) []string {
+		var out []string
+		for _, x := range ts {
+			out = append(out, x.Function.Name)
+		}
+		return out
+	}
+	if a := names(admin); !slices.Contains(a, "Gateway") || !slices.Contains(a, "GatewayAdmin") {
+		t.Fatalf("管理员没有网关工具：%v", a)
+	}
+	if g := names(guest); slices.Contains(g, "Gateway") || slices.Contains(g, "GatewayAdmin") {
+		t.Fatalf("访客看到了网关工具：%v", g)
+	}
+}
+
+func TestGatewayAdminApprovalCardMasksSecrets(t *testing.T) {
+	title, body := callCard("GatewayAdmin", json.RawMessage(`{"action":"ssh_setup","host":"10.0.0.1","name":"gpu","password":"hunter2-secret","api_key":"sk-very-secret"}`))
+	if !strings.Contains(title, "提权") || !strings.Contains(title, "ssh_setup") {
+		t.Fatalf("标题没有提权/动作：%q", title)
+	}
+	for _, leak := range []string{"hunter2-secret", "sk-very-secret"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("审批卡片泄露了密钥：%s", body)
+		}
+	}
+	if !strings.Contains(body, "10.0.0.1") || !strings.Contains(body, "***") {
+		t.Fatalf("审批卡片内容不对：%s", body)
+	}
+}
+
+func TestGatewayAdminNonAdminAndWorkspaceAdd(t *testing.T) {
+	e := setup(t)
+	var ok bool
+	var text string
+	e.a.gatewayAdminCall(mainSID, "fake:u2", `{"action":"workspace_add","host":"本机","path":"/tmp"}`, func(o bool, s string) { ok, text = o, s })
+	if ok || !strings.Contains(text, "管理员") {
+		t.Fatalf("访客调用了管理工具：%v %q", ok, text)
+	}
+
+	dir := filepath.Join(e.dir, "gw-ws")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.a.gatewayAdminCall(mainSID, "fake:u1", `{"action":"workspace_add","host":"本机","path":"`+dir+`"}`, func(o bool, s string) { ok, text = o, s })
+	if !ok || !strings.Contains(text, "工作目录已添加") {
+		t.Fatalf("添加失败：%v %q", ok, text)
+	}
+	found := false
+	for _, w := range e.a.Workspaces() {
+		if w.Path == dir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("列表里没有：%+v", e.a.Workspaces())
+	}
+}
+
+type fakeAdminHosts struct {
+	*fakeHosts
+	mu       sync.Mutex
+	infos    []host.Info
+	saves    int
+	connects int
+}
+
+func (f *fakeAdminHosts) setInfos(xs []host.Info) { f.mu.Lock(); f.infos = xs; f.mu.Unlock() }
+
+func (f *fakeAdminHosts) Save(c host.Connection) (string, error) {
+	f.saves++
+	if c.ID == "" {
+		c.ID = "id-" + c.Name
+	}
+	return c.ID, nil
+}
+func (f *fakeAdminHosts) Delete(string) error     { return nil }
+func (f *fakeAdminHosts) Connect(string) error    { f.connects++; return nil }
+func (f *fakeAdminHosts) Disconnect(string) error { return nil }
+func (f *fakeAdminHosts) Infos() []host.Info      { f.mu.Lock(); defer f.mu.Unlock(); return f.infos }
+
+func TestSSHSetupStates(t *testing.T) {
+	old := sshSetupTimeout
+	sshSetupTimeout = 80 * time.Millisecond
+	defer func() { sshSetupTimeout = old }()
+	e := setup(t)
+	nilInfos := func() []host.Info { return nil }
+	f := &fakeAdminHosts{fakeHosts: e.hosts}
+	f.setInfos(nilInfos())
+	e.a.SetHosts(f)
+	if _, err := e.a.sshSetup(mainSID, gatewayArgs{Name: "gpu", Host: "10.0.0.1"}); err == nil || !strings.Contains(err.Error(), "超时") {
+		t.Fatalf("超时：%v", err)
+	}
+	f.setInfos([]host.Info{{ID: "id-gpu", Name: "gpu", Ready: false, State: "error", Detail: "认证失败"}})
+	if _, err := e.a.sshSetup(mainSID, gatewayArgs{Name: "gpu", Host: "10.0.0.1"}); err == nil || !strings.Contains(err.Error(), "认证失败") {
+		t.Fatalf("认证失败：%v", err)
+	}
+	f.setInfos([]host.Info{{ID: "id-gpu", Name: "gpu", Ready: true, State: "online"}})
+	res, err := e.a.sshSetup(mainSID, gatewayArgs{Name: "gpu", Host: "10.0.0.1"})
+	if err != nil || !strings.Contains(res, "在线") {
+		t.Fatalf("在线：%q %v", res, err)
+	}
+}
+
+func TestGatewayModelsQueryDoesNotLeakKey(t *testing.T) {
+	e := setup(t)
+	ms, err := models.Open(t.TempDir(), &config.Config{LLM: config.LLM{Provider: "openai"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.SaveEndpoint(models.Endpoint{Name: "x", Kind: "openai", BaseURL: "https://x/v1", APIKey: "sk-should-not-leak"}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.SetModels(ms, nil)
+	var out string
+	e.a.gatewayQuery(mainSID, `{"what":"models"}`, func(ok bool, s string) {
+		if !ok {
+			t.Fatal(s)
+		}
+		out = s
+	})
+	if strings.Contains(out, "sk-should-not-leak") {
+		t.Fatalf("查询泄露了 key：%s", out)
+	}
+	if !strings.Contains(out, "has_key") {
+		t.Fatalf("没显示 has_key：%s", out)
 	}
 }

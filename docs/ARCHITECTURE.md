@@ -63,6 +63,10 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 - **别的电脑**：`make installer` 生成单文件安装包 `dist/nano-kernel-install.sh`（脚本 + 内核源码），拷过去 `sh nano-kernel-install.sh --gateway 地址`。脚本装编译工具、编译、装到 `~/.nano-agent/kernel/`、写 `kernel.conf`、注册 systemd 用户服务（没有 systemd 就用后台进程），然后等网页上核对确认码。再运行一次是升级，`--uninstall` 卸载。源码目录里也能直接 `scripts/install-kernel.sh`。
 - **SSH 服务器**：什么都不用装，在网页“设备”里添加。
 
+## 在聊天里管理网关
+
+管理员会话额外有 `Gateway`（查询）和 `GatewayAdmin`（修改，任何模式都审批）。工具定义由网关加，内核只把它们当管理工具（`NA_TOOL_ADMIN`），调用时用 `exec` 交给网关。查询返回模型/SSH/工作目录/配对状态，不含密钥；修改直接调用 `models.Store`、`host.Manager`、`AddWorkspace`、`UpdateSession` 和配对 API，实时生效。`ssh_setup` 会等连接结果（在线/认证失败/超时）。监听地址等要重启的配置不开放。详见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
+
 ## 安全
 
 - 网页只听本机、密码登录。

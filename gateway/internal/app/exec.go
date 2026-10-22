@@ -29,6 +29,22 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		a.skillTool(r, s.sid, m, reply)
 		return
 	}
+	if m.Name == "Gateway" || m.Name == "GatewayAdmin" {
+		if !a.isAdmin(r.from) {
+			reply(false, "只有管理员能用网关管理工具")
+			return
+		}
+		raw := string(m.Args)
+		if raw == "" {
+			raw = "{}"
+		}
+		if m.Name == "Gateway" {
+			go a.gatewayQuery(s.sid, raw, reply)
+		} else {
+			go a.gatewayAdminCall(s.sid, r.from, raw, reply)
+		}
+		return
+	}
 	mt := r.rt.find(m.Workspace)
 	if mt == nil {
 		reply(false, "这一轮没有挂载工作目录 "+m.Workspace)

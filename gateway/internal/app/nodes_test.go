@@ -114,7 +114,7 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	}
 	phone.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	phone.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 1 {
+	if n := len(e.llm.lastReq().Tools); n != 3 {
 		t.Fatalf("替补也能用工具：%d", n)
 	}
 	phone.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
@@ -395,8 +395,9 @@ func TestGatewaySkills(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
 	got := e.llm.lastReq().Tools
-	if len(got) != 2 || got[0].Function.Name != "Skill" || got[1].Function.Name != "echo" ||
-		!strings.Contains(got[0].Function.Description, "- demo：示例技能") {
+	if len(got) != 4 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" ||
+		got[2].Function.Name != "Skill" || got[3].Function.Name != "echo" ||
+		!strings.Contains(got[2].Function.Description, "- demo：示例技能") {
 		t.Fatalf("模型没收到技能工具：%+v", got)
 	}
 	if s := e.a.Skills(); len(s) != 1 || s[0].Name != "demo" {
@@ -409,7 +410,7 @@ func TestGatewaySkills(t *testing.T) {
 	e.say("技能删掉了")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if got := e.llm.lastReq().Tools; len(got) != 1 || got[0].Function.Name != "echo" {
+	if got := e.llm.lastReq().Tools; len(got) != 3 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" || got[2].Function.Name != "echo" {
 		t.Fatalf("模型仍然带着已经删除的技能：%+v", got)
 	}
 }

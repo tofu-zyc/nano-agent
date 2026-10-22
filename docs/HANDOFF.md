@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，阶段 3/4 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v6。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md)。
+最后更新：2026-10-22，阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md)。
 
 ## 一句话
 
@@ -34,6 +34,7 @@ gateway/               Go 网关
     compact.go         超限后异步生成摘要，取消、失败裁剪和用量统计
     undo.go            撤回（/undo、「撤回」、平台撤回事件）和不带斜杠的「停」
     models.go          可用的模型：/model、按会话选模型、按模型建客户端、思考强度和历史上限
+    gateway_tools.go   Gateway / GatewayAdmin：查询和修改网关，管理动作走审批
     images.go          图片输入：模型能力、把历史里的图片读成 data URL
   internal/host        网关能直接执行工具的机器：本机（local.go）、SSH 服务器（ssh.go：主连接、
                        探测、上传 / 现编执行器、重连）、连接管理（manager.go，data/connections.json）
@@ -51,7 +52,7 @@ gateway/               Go 网关
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
 scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh
 skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）
-docs/                  ARCHITECTURE.md、protocol.md、本文件
+docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-gateway-admin.md
 ```
 
 ## 怎么跑、怎么测
@@ -65,7 +66,7 @@ make web          # 改了前端后重新构建（npm run check && build），�
 cd gateway && go test -race ./...
 ```
 
-- e2e（scripts/e2e.sh）现在 62 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，以及超限摘要、保存和继续用工具。
+- e2e（scripts/e2e.sh）现在 67 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，Gateway 查询 / GatewayAdmin 审批添加工作目录，以及超限摘要、保存和继续用工具。
 - host 包：假 ssh 测部署 / 执行 / 断线 / 架构不同时现编，有 sshd 时起一个临时的真 OpenSSH 测一遍。kernel 包测配对。
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
@@ -124,6 +125,8 @@ cd gateway && go test -race ./...
 
 19. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源只有模型自己的 `modalities`；在模型节点面板里勾“图片”。`store.openModel(intent)` 让 ⌘K、右键菜单能直接打开模型面板并进入添加模型/接口。
 
+20. **网关管理工具**（app/gateway_tools.go）：`Gateway` 查询状态/模型/SSH/工作目录/配对/ssh 别名，只给管理员、不审批、不返回密钥；`GatewayAdmin` 复用 models.Store、host.Manager、AddWorkspace、UpdateSession 和配对 API，任何模式都审批（NA_TOOL_ADMIN），结果和审计日志不回显密钥。改完立即生效，不重启；监听地址等重启项不开放。协议 v7。
+
 ## 用户的偏好和约定（重要）
 
 - 中文交流；界面、日志、文档都是中文。用户喜欢“有创意、好看、好用”的网页，不要填表式的设置；拓扑图节点能拖动。
@@ -139,10 +142,10 @@ cd gateway && go test -race ./...
 ## 接下来要做的（用户要求先把主体功能做齐）
 
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
-2. 聊天里批准配对（/pair），现在只能在网页上点。让 AI 改网关配置（自举）是用户提的下一批：设计见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。注意设计稿里“没有工作目录就没工具”的前提已经过时：现在管理员没工作目录也能在 HOME 下用全部工具，写外面用 elevated；但还没有 Gateway 管理工具。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
+2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。
-3. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
-4. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。
+4. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
+5. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。
 
 ## 坑
 
@@ -153,7 +156,7 @@ cd gateway && go test -race ./...
 - 测试内核都通过 unix socket 连上来，都算本机；要模拟别的电脑上的内核用 Hub.Attach(local=false)（nodes_test 的 dialRemote）。从 127.0.0.1 用 TCP 连上来的也算本机。
 - `~` 本身不能当工作目录（里面有 `~/.nano-agent`，改坏了网关自己的配置/数据/执行器）；`~` 下面的子目录都可以。SSH 服务器同理。
 - 起演示网关时别用 `cd X && cmd &` 记 `$!`：那是子 shell 的 pid，杀了它网关还在跑。
-- 协议 v6（技能路径统一到 ~/.nano-agent）。旧内核会被拒，错误里说要重新运行安装脚本；升级内核安装脚本会把旧 kernel.conf / paired.token 搬到 ~/.nano-agent/kernel，不需要重新配对。
+- 协议 v7（新增 Gateway / GatewayAdmin 管理工具）。旧内核会被拒，错误里说要重新运行安装脚本；升级内核安装脚本会把旧 kernel.conf / paired.token 搬到 ~/.nano-agent/kernel，不需要重新配对。
 - 内核日志用 `%.*s` + `utf8_cut` 截断，别用 `%.200s`（会切坏中文）。
 - 模型列表在网关内存里也有一份（models.Store）：直接改 `data/models.json` 要重启网关才生效，平时用网页或 `/model`。
 - 模型 ID 是「接口/模型名」，带斜杠：网页里删除模型用查询参数 `/api/models/items?id=…`，别改成路径参数（`{id}` 匹配不了斜杠）。

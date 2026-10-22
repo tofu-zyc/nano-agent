@@ -905,7 +905,7 @@ func (a *App) generateModel(s *sess) {
 		}
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = a.toolsFor(n, r.readOnly)
+		req.Tools = a.toolsFor(n, r.readOnly, a.isAdmin(r.from))
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel

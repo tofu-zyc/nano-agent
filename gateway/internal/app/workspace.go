@@ -243,8 +243,11 @@ func callCard(name string, raw json.RawMessage) (title, body string) {
 		where = "（在 " + w + " 上）"
 	}
 	prefix := "提权 · "
-	if !elevated {
+	if !elevated && name != "GatewayAdmin" {
 		prefix = ""
+	}
+	if name == "GatewayAdmin" {
+		return prefix + "管理网关：" + str("action"), maskedGatewayArgs(raw)
 	}
 	switch name {
 	case "Shell":
@@ -262,4 +265,19 @@ func clip(s string, n int) string {
 		return string(r[:n]) + "…"
 	}
 	return s
+}
+
+// maskedGatewayArgs 给审批卡片看：密钥打星，其他字段照常显示。
+func maskedGatewayArgs(raw json.RawMessage) string {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return prettyArgs(raw)
+	}
+	for _, k := range []string{"api_key", "password"} {
+		if _, ok := m[k]; ok {
+			m[k] = "***"
+		}
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
+	return strings.TrimSpace(string(b))
 }

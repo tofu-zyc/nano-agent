@@ -153,6 +153,14 @@ send '!call Shell {"command":"echo x > ~/.nano-e2e-readonly"}'; expect "HOME 会
 send '!call Write {"path":"~/.nano-e2e-elevated.txt","content":"elevated-ok","elevated":true}'; expect "提权要审批" "需要审批 #4"
 send "/approve 4";                                    expect "批准提权后写入" "elevated-ok"
 send '!call Read {"path":"~/.nano-e2e-elevated.txt"}'; expect "提权写到了工作目录外" "elevated-ok"
+# 网关管理工具：查询不审批，修改要审批；结果和日志里没有密钥
+send '!call Gateway {"what":"status"}';                 expect "Gateway 查询状态" "\"kernels\""
+mkdir -p "$TMP/gw-ws"
+send "!call GatewayAdmin {\"action\":\"workspace_add\",\"host\":\"本机\",\"path\":\"$TMP/gw-ws\"}"
+expect "GatewayAdmin 要审批" "提权"
+expect "GatewayAdmin 审批编号" "需要审批 #5"
+send "/approve 5";                                    expect "GatewayAdmin 添加工作目录" "工作目录已添加"
+send "/dir";                                          expect "网关工具添加的目录出现在列表里" "本机:$TMP/gw-ws"
 send "/session 1";                                    expect "回到主会话" "已切换到会话「主会话」"
 send "撤回";                                          expect "撤回最近一轮" "已撤回：「回到主会话」"
 if ! grep -qF "回到主会话" "$TMP/data/sessions/main.jsonl"; then echo "  ok   撤回的一轮从历史文件里删掉"; pass=$((pass + 1)); else echo "  FAIL 撤回的一轮从历史文件里删掉"; fail=$((fail + 1)); fi
@@ -193,7 +201,7 @@ else
 fi
 send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt","workspace":"box"}'; expect_n "服务器上读技能文件" "skill-e2e-data" 2
 send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
-send "/dir -2";                                       expect "取下服务器上的目录" "取下了 box:~/proj"
+send "/dir -3";                                       expect "取下服务器上的目录" "取下了 box:~/proj"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"

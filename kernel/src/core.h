@@ -22,6 +22,7 @@ typedef enum {
     NA_TOOL_READ,    /* 只读：Read、Grep */
     NA_TOOL_WRITE,   /* 改文件：Write、Edit */
     NA_TOOL_SHELL,   /* 任意命令 */
+    NA_TOOL_ADMIN,   /* 网关管理工具：任何模式都要审批 */
 } na_tool_kind;
 
 /* 工具的策略部分。描述和参数 schema 由宿主直接报给网关，内核不关心。 */

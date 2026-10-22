@@ -16,12 +16,13 @@ static na_tool_policy tools[] = {
     { "Read",  NA_TOOL_READ,  5000 },
     { "Write", NA_TOOL_WRITE, 10000 },
     { "Shell", NA_TOOL_SHELL, 30000 },
+    { "GatewayAdmin", NA_TOOL_ADMIN, 610000 },
 };
 
 static na_core *mk_sb(int max_steps, bool sandbox)
 {
     na_core_config cfg = {
-        .tools = tools, .ntools = 3,
+        .tools = tools, .ntools = 4,
         .sandbox = sandbox,
         .max_steps = max_steps,
         .run_timeout_ms = 600000,
@@ -448,6 +449,29 @@ static void test_elevated_always_needs_approval(void)
     na_core_free(c);
 }
 
+
+static void test_admin_tool_always_approves(void)
+{
+    na_core *c = mk(16);
+    na_event ev = { .type = NA_EV_INPUT, .sid = "a1", .from = "tg:1", .mode = NA_MODE_AUTO,
+                    .elevate = true, .policy = "{}" };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    na_call calls[] = { { "a", "GatewayAdmin", "{}", true, NA_SB_DEFAULT, NULL } };
+    CHECK(turn(c, 10, "a1", NA_TURN_TOOL_USE, calls, 1) == 0);
+    EXPECT(c, "APPROVE_REQ(a,GatewayAdmin,tg:1)");
+    na_core_free(c);
+
+    c = mk(16);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "a2", .from = "tg:1", .mode = NA_MODE_READONLY, .elevate = true, .policy = "{}" };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    na_call ro[] = { { "b", "GatewayAdmin", "{}", true, NA_SB_DEFAULT, NULL } };
+    CHECK(turn(c, 10, "a2", NA_TURN_TOOL_USE, ro, 1) == 0);
+    EXPECT(c, "RESULT(b,err,当前是只读模式，不能使用网关管理工具) MODEL(a2)");
+    na_core_free(c);
+}
+
 int main(void)
 {
     test_final_answer();
@@ -468,6 +492,7 @@ int main(void)
     test_turn_error_and_refusal();
     test_long_args_preview_keeps_utf8();
     test_elevated_always_needs_approval();
+    test_admin_tool_always_approves();
     printf("core: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

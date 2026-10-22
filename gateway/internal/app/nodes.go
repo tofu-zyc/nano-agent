@@ -91,10 +91,10 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 	}
 }
 
-// toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill），按名字排序（顺序固定，方便前缀缓存）。
-// 没有工作目录的管理员只给 Read/Grep 和 Skill；访客没有工具（调用方跳过）。
+// toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill）；管理员再加 Gateway /
+// GatewayAdmin。按名字排序（顺序固定，方便前缀缓存）。访客没有工具（调用方跳过）。
 // 调用方持有锁。
-func (a *App) toolsFor(n *node, readOnly bool) []llm.Tool {
+func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
 	if readOnly {
 		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
@@ -103,6 +103,11 @@ func (a *App) toolsFor(n *node, readOnly bool) []llm.Tool {
 	}
 	if spec, ok := a.skills.ToolSpec(); ok {
 		tools = append(tools, toolOf(spec))
+	}
+	if admin {
+		for _, spec := range a.gatewayTools() {
+			tools = append(tools, toolOf(spec))
+		}
 	}
 	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	return tools

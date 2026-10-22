@@ -57,6 +57,8 @@ static const builtin BUILTINS[] = {
       "\"timeout\":{\"type\":\"integer\",\"description\":\"超时秒数，默认 120，最大 600\"}," WS_PROP "," ELEV_PROP "},"
       "\"required\":[\"command\"]}" },
     { { "Skill", NA_TOOL_READ, 70 * 1000 }, NULL, NULL },   /* 技能在网关，描述由网关给模型，调用交给网关 */
+    { { "Gateway", NA_TOOL_READ, 70 * 1000 }, NULL, NULL }, /* 网关查询：描述由网关给模型 */
+    { { "GatewayAdmin", NA_TOOL_ADMIN, 610 * 1000 }, NULL, NULL }, /* 网关修改：任何模式都要审批 */
     { { "Write", NA_TOOL_WRITE, 30 * 1000 },
       "创建或覆盖文件，写入完整内容；上级目录不存在会自动创建。默认只能写工作目录；写工作目录外要把 elevated 设为 true，会请用户批准。"
       "只改文件的一部分时用 Edit，不要用 Write 重写整个文件。",

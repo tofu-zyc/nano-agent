@@ -26,7 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      6
+#define PROTO_VERSION      7
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -358,7 +358,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-    if (!strcmp(c->name, "Skill")) {
+    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin")) {
         send_exec(k, c, args, NULL);
         return;
     }
@@ -776,7 +776,8 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             if (calls[i].args_ok && cJSON_IsObject(args))
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
-            if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") && run_pol) {
+            if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") &&
+                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && run_pol) {
                 char err[1024];
                 const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
                 if (!ws) {

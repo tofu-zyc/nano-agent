@@ -1,7 +1,7 @@
-# 内核 ⇄ 网关协议（v6）
+# 内核 ⇄ 网关协议（v7）
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
-- **版本**：v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
+- **版本**：v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -74,10 +74,14 @@
 
 谁用什么模式由网关决定（管理员用会话设置的模式，其他人用 `access.guest`）；内核负责按模式放行，执行器负责把工具关在工作目录里。`Write` / `Edit` / `Shell` 带 `elevated: true` 时，不管 mode 是什么都要审批（readonly / none 和访客直接拒绝）；批准后这一次调用的 `rw` 加 `/`。
 
+## 网关管理工具
+
+`Gateway`（查询）和 `GatewayAdmin`（修改，任何模式都审批）不在 `hello.tools` 里报描述：内核只在 `BUILTINS` 里登记名字和类型（`Gateway` 是只读，`GatewayAdmin` 是 `NA_TOOL_ADMIN`），模型看到的描述和 schema 由网关加。调用时内核和 `Skill` 一样，用 `exec` 交给网关（没有 `workspace`）；网关再查一次管理员身份后执行。修改直接走网页接口背后的函数，不重启。详见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
+
 ## 一次完整的处理
 
 ```
-K→G {"t":"hello","v":6,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
+K→G {"t":"hello","v":7,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
 G→K {"t":"welcome","v":5}
 G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","workspaces":[{"name":"本机:~/projects/foo","dirs":["~/projects/foo"],"ro":["~/.gitconfig","~/.nano-agent/skills"],"rw":[],"local":true}]}
 K→G {"t":"model","sid":"tg:-1001234"}
