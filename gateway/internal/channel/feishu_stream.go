@@ -203,7 +203,9 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 			map[string]any{"tag": "collapsible_panel", "element_id": "proc", "expanded": false,
 				"header":   map[string]any{"title": map[string]string{"tag": "plain_text", "content": "💭 思考和工具调用"}},
 				"elements": []any{notation("think", feishuThink(snap)), markdown("tools", feishuTools(snap))}},
-			markdown("reply", first),
+			// 正文先放占位，建好后再单独更新：创建时如果已经攒了很多内容（第一次写得晚），
+			// 思考、工具记录、来源和一整段正文加起来会超过卡片的体积上限
+			markdown("reply", "…"),
 			notation("foot", feishuFoot(snap)),
 			fsButton("stop", "停止", "default", map[string]string{fsAction: "stop"}),
 		)
@@ -211,7 +213,7 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 		if err != nil {
 			return err
 		}
-		c.parts = map[string]string{"think": feishuThink(snap), "tools": feishuTools(snap), "reply": first, "foot": feishuFoot(snap)}
+		c.parts = map[string]string{"think": feishuThink(snap), "tools": feishuTools(snap), "reply": "…", "foot": feishuFoot(snap)}
 	}
 	main := s.cards[0]
 	for _, p := range [][2]string{{"think", feishuThink(snap)}, {"tools", feishuTools(snap)}, {"reply", first}, {"foot", feishuFoot(snap)}} {

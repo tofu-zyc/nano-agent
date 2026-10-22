@@ -246,6 +246,25 @@ func TestFeishuLargeProcessStaysBoundedAndReplyIsComplete(t *testing.T) {
 	}
 }
 
+func TestFeishuFirstCardStaysSmallWhenWrittenLate(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	s := &feishuStream{f: f, chat: "chat-test"}
+	snap := streamSnapshot{Source: "来自网页：" + strings.Repeat("用户消息🙂", 200), Reasoning: strings.Repeat("思考🙂", 6000),
+		Content: strings.Repeat("🙂", 7000)}
+	for range 100 {
+		snap.Tools = append(snap.Tools, toolEntry{Name: "Shell", Detail: strings.Repeat("参数🙂", 200), Done: true, OK: true,
+			Result: strings.Repeat("结果🙂", 100)})
+	}
+	if err := s.Write(context.Background(), snap); err != nil { // 体积超了 mock 会报错
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.parts) != 2 {
+		t.Fatalf("长回复应该分两张卡：%d", len(m.parts))
+	}
+}
+
 func TestFeishuApprovalCard(t *testing.T) {
 	f, m := mockFeishu(t, false)
 	card := ApprovalCard{N: 5, Title: "写入文件", Detail: "a.txt（3 字节）", From: "feishu:ou_1"}
