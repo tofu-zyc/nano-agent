@@ -134,11 +134,11 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 		err = fmt.Errorf("不认识的查询 %q", args.What)
 	}
 	if err != nil {
-		reply(false, err.Error())
+		reply(false, a.safeToolText(err.Error()))
 		return
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
-	reply(true, string(b))
+	reply(true, a.safeToolText(string(b)))
 }
 
 func sshAliases() []string {
@@ -190,7 +190,7 @@ type gatewayArgs struct {
 func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
 	var args gatewayArgs
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		reply(false, "参数不是合法的 JSON 对象："+err.Error())
+		reply(false, a.safeToolText("参数不是合法的 JSON 对象："+err.Error()))
 		return
 	}
 	if args.Action == "" {
@@ -216,7 +216,7 @@ func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
 	}
 	a.log.Info("GatewayAdmin", "who", who, "sid", sid, "action", args.Action, "target", target, "ok", err == nil, "error", detail)
 	if err != nil {
-		reply(false, err.Error())
+		reply(false, a.safeToolText(err.Error()))
 		return
 	}
 	reply(true, res)

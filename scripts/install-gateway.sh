@@ -101,8 +101,10 @@ fi
 if [ -d "$ROOT/skills" ] && [ -z "$(ls -A "$NANO_HOME/skills" 2>/dev/null)" ]; then
   cp -a "$ROOT/skills/." "$NANO_HOME/skills/"
 fi
+COPIED_CONF=0
 if [ "$MIGRATE" = 1 ] && [ -f "$ROOT/gateway.toml" ] && [ ! -f "$CONFIG" ]; then
   install -m600 "$ROOT/gateway.toml" "$CONFIG"
+  COPIED_CONF=1
   say "已复制源码目录的 gateway.toml（监听地址原样保留）"
 fi
 if [ ! -f "$CONFIG" ]; then
@@ -117,7 +119,7 @@ if [ ! -f "$CONFIG" ]; then
       "$ROOT/gateway.example.toml" >"$CONFIG"
   chmod 600 "$CONFIG"
   say "已生成新的 gateway.toml（token 已随机生成）"
-else
+elif [ "$COPIED_CONF" = 0 ]; then
   say "$CONFIG 已存在，保留不动"
 fi
 
@@ -137,6 +139,7 @@ fi
 # ---- 后台服务 ----
 CHANNEL="$NANO_HOME/data/gateway.log"
 : >>"$CHANNEL"
+chmod 600 "$CHANNEL"
 if has_systemd; then
   step "注册 systemd 用户服务（开机自启，挂了自动重启）"
   mkdir -p "$UNIT_DIR"
@@ -153,6 +156,7 @@ Environment=NANO_HOME=$NANO_HOME
 ExecStart=$BIN/nano-gateway -c $CONFIG
 Restart=always
 RestartSec=3
+UMask=0077
 StandardOutput=append:$CHANNEL
 StandardError=append:$CHANNEL
 
@@ -162,7 +166,7 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1
   systemctl --user restart "$UNIT"
-  say "网关服务已启动。网页登录链接在 $CHANNEL 里。"
+  say "网关服务已启动。带密码的网页登录链接在 $NANO_HOME/data/web.url（只有你能读）。"
   if command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
     say "提示：现在只有登录后网关才会运行。想开机就运行：sudo loginctl enable-linger $(id -un)"
   fi
@@ -170,6 +174,7 @@ else
   step "没有 systemd，用后台进程运行"
   cat >"$BIN/nano-gateway-ctl" <<'CTL'
 #!/bin/sh
+umask 077
 # nano-agent 网关：nano-gateway-ctl start|stop|restart|status|log
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PID="$ROOT/run/gateway.pid"

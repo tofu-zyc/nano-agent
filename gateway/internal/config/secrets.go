@@ -166,7 +166,7 @@ func rewriteTomlSecrets(path string, move map[string]string) (string, error) {
 			if _, ok := move[k]; ok && !strings.Contains(raw[eq+1:], "# 已加密") {
 				rest := raw[eq+1:]
 				comment := ""
-				if i := strings.IndexByte(rest, '#'); i >= 0 {
+				if i := tomlComment(rest); i >= 0 {
 					comment = strings.TrimSpace(rest[i:])
 				}
 				line = raw[:eq+1] + ` ""`
@@ -179,6 +179,31 @@ func rewriteTomlSecrets(path string, move map[string]string) (string, error) {
 		out.WriteString(line)
 	}
 	return out.String(), nil
+}
+
+// tomlComment 返回引号外的第一个 #；单双引号里的 # 是值的一部分，不是注释。
+func tomlComment(s string) int {
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote == 0 {
+			switch c {
+			case '#':
+				return i
+			case '\'', '"':
+				quote = c
+			}
+			continue
+		}
+		if quote == '"' && c == '\\' {
+			i++
+			continue
+		}
+		if c == quote {
+			quote = 0
+		}
+	}
+	return -1
 }
 
 func writeFileAtomic(path, content string) error {

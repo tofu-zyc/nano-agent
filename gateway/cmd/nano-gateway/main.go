@@ -69,6 +69,9 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := conf.Current()
+	for _, name := range []string{"gateway.log", "kernel.log"} {
+		_ = os.Chmod(filepath.Join(cfg.Session.DataDir, name), 0o600)
+	}
 
 	store, err := session.New(cfg.Session.DataDir)
 	if err != nil {
@@ -151,9 +154,12 @@ func main() {
 			}
 		}()
 		url := ws.LoginURL(cfg.Web.Listen)
-		log.Info("网页管理界面", "url", strings.Split(url, "#")[0])
-		fmt.Printf("网页管理界面：%s\n", url)
-		os.WriteFile(filepath.Join(cfg.Session.DataDir, "web.url"), []byte(url+"\n"), 0o600)
+		public := publicURL(url)
+		log.Info("网页管理界面", "url", public)
+		fmt.Printf("网页管理界面：%s\n", public)
+		if err := writePrivate(filepath.Join(cfg.Session.DataDir, "web.url"), url+"\n"); err != nil {
+			log.Warn("写不了网页登录链接文件", "err", err)
+		}
 	}
 
 	// 网页里改了配置：能立即生效的立即生效，其余的等重启
@@ -192,4 +198,36 @@ func main() {
 	if p, ok := strings.CutPrefix(cfg.Kernel.Listen, "unix:"); ok {
 		os.Remove(p)
 	}
+}
+
+// publicURL 去掉 # 后面的登录密码，只用于终端输出和日志。
+func publicURL(u string) string {
+	if i := strings.IndexByte(u, '#'); i >= 0 {
+		return u[:i]
+	}
+	return u
+}
+
+// writePrivate 原子写一个只有自己能读的文件；已存在的文件也收紧到 0600。
+func writePrivate(path, text string) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(text); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }

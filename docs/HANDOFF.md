@@ -59,7 +59,7 @@ docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-
 
 ```sh
 make install      # 日常使用：全部装到 ~/.nano-agent（NANO_HOME 可改），注册后台服务
-make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页登录链接
+make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页地址，带密码的链接在 data/web.url
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
 make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）
 make web          # 改了前端后重新构建（npm run check && build），产物要提交
@@ -118,7 +118,7 @@ cd gateway && go test -race ./...
 
 14. **网页管理 SSH**：host.Manager 保存 data/connections.json，密码加密，写入后才更新内存，列表只返回 has_password。OpenSSH 处理别名、密钥、跳板机；密码经 SSH_ASKPASS 和 0600 文件传递，不进参数。自动连接在启动和掉线后重试，修改 / 删除前先断开。状态变化 OnChange → app.HostsChanged 推 machines / workspaces 事件。
 15. **本机内核**（cmd/nano-gateway/localkernel.go）：`[kernel] local` 默认开，网关找到 nano-exec 旁边的 nano-kernel，生成 data/local-kernel.conf（随机口令，hub.AllowToken 接受它），起子进程，stderr 追加到 data/kernel.log，退出了退避重启（1s→30s，跑满一分钟重置），网关退出时 SIGTERM 等 4 秒。名字默认 gateway（不用主机名：同一台机器上 WSL 里装的电脑内核多半叫主机名，同名会互相顶掉）。make run 只起网关。
-16. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
+16. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log，UMask=0077），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删；从旧目录迁移时把旧的启动行路径换成新路径）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
 17. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
 
 18. **模型管理**（internal/models、app/models.go）：接口和模型只存在 `data/models.json`（0600，API key 加密；网页只返回 `has_key`）。旧版 `[llm]` 的单模型在第一次启动时由 `models.Open` 一次性导入成普通接口 + 模型（接口 ID 仍是 `config`，只为兼容已有会话的 `config/模型名` 引用，没有特殊行为），并写 `seeded: true`；删掉后重启不会复活。没有模型时网关正常启动，聊天直接提示去模型节点添加，不启动 run，也不隐式兜底。会话的 `Settings.Model` 是模型 ID，空表示默认模型；默认模型只来自 models.json。`clientFor` 按模型建客户端并按 `LLMConfig` 指纹缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填按上下文窗口一半，窗口没填兜底 128000）。`[llm]` 只保留 timeout / temperature / extra / send_reasoning / trim_to 这些全局默认，模型相关字段不再从网页设置里改。

@@ -999,3 +999,13 @@ func TestGatewayModelsQueryDoesNotLeakKey(t *testing.T) {
 		t.Fatalf("没显示 has_key：%s", out)
 	}
 }
+
+func TestGatewayAdminErrorRedacted(t *testing.T) {
+	e := setup(t)
+	var ok bool
+	var text string
+	e.a.gatewayAdminCall(mainSID, "fake:u1", `{"action":"sk-12345678901234567890"}`, func(o bool, s string) { ok, text = o, s })
+	if ok || strings.Contains(text, "sk-12345678901234567890") {
+		t.Fatalf("错误里泄露了密钥：%v %q", ok, text)
+	}
+}

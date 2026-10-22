@@ -146,3 +146,28 @@ func TestEncryptedConfigWithoutKey(t *testing.T) {
 		t.Fatalf("密钥丢失的错误不清楚：%v", err)
 	}
 }
+
+func TestRewriteTomlSecretsQuotedHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.toml")
+	in := `[web]
+password = "demo#secret-tail"  # 用户注释
+[kernel]
+token = "a#b"
+`
+	if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := rewriteTomlSecrets(path, map[string]string{"web.password": `demo#secret-tail`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "demo#secret-tail") {
+		t.Fatalf("明文还在：%s", out)
+	}
+	if !strings.Contains(out, `password = ""  # 用户注释`) || !strings.Contains(out, "# 已加密") {
+		t.Fatalf("注释或空值不对：%s", out)
+	}
+	if !strings.Contains(out, `token = "a#b"`) {
+		t.Fatalf("不该动别的行：%s", out)
+	}
+}

@@ -81,6 +81,8 @@ func startLocalKernel(ctx context.Context, cfg *config.Config, exe host.Executor
 			if err != nil {
 				log.Warn("打不开内核日志", "err", err)
 				lf = nil
+			} else if err := lf.Chmod(0o600); err != nil {
+				log.Warn("收紧内核日志权限失败", "err", err)
 			}
 			cmd := exec.Command(bin, "-c", conf)
 			if lf != nil {

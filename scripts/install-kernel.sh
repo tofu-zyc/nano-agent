@@ -207,6 +207,23 @@ if [ "$OLD_DIR" != "$DIR" ] && [ -d "$OLD_DIR" ] && [ ! -f "$DIR/kernel.conf" ];
 	rm -rf "$OLD_DIR"
 	say "已把旧内核目录 $OLD_DIR 迁移到 $DIR"
 fi
+if [ "$OLD_DIR" != "$DIR" ]; then
+	changed=0
+	for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+		[ -f "$f" ] || continue
+		grep -qF "$PROFILE_MARK" "$f" || continue
+		tmp="$f.nano-tmp"
+		sed -e "s|$OLD_DIR/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" \
+			-e "s|$HOME/.local/bin/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" \
+			-e "s|~/.local/bin/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" "$f" >"$tmp"
+		if ! cmp -s "$f" "$tmp"; then
+			cat "$tmp" >"$f"
+			changed=1
+		fi
+		rm -f "$tmp"
+	done
+	[ "$changed" = 0 ] || say "已把登录启动行里的旧内核路径换成 $DIR"
+fi
 
 # ---- 配置 ----
 
@@ -293,6 +310,7 @@ rm -f "$DIR/check.log"
 cat >"$DIR/nano-kernel-ctl" <<'EOF'
 #!/bin/sh
 # nano-agent 内核：nano-kernel-ctl start|stop|restart|status|log
+umask 077
 DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 UNIT=nano-kernel.service
 use_systemd() {
@@ -307,6 +325,8 @@ case "${1:-status}" in
 start)
 	if use_systemd; then exec systemctl --user start "$UNIT"; fi
 	pid >/dev/null && { [ "${2:-}" = --quiet ] || echo "内核已经在运行"; exit 0; }
+	: >>"$DIR/kernel.log"
+	chmod 600 "$DIR/kernel.log"
 	nohup "$DIR/nano-kernel" -c "$DIR/kernel.conf" </dev/null >/dev/null 2>>"$DIR/kernel.log" &
 	echo $! >"$DIR/kernel.pid"
 	[ "${2:-}" = --quiet ] || echo "内核已在后台启动，日志：$DIR/kernel.log"
@@ -340,6 +360,7 @@ fi
 
 LOG="$DIR/kernel.log"
 : >>"$LOG"
+chmod 600 "$LOG"
 LOG_START=$(wc -c <"$LOG")
 
 if has_systemd; then
@@ -355,6 +376,7 @@ Wants=network-online.target
 ExecStart=$DIR/nano-kernel -c $DIR/kernel.conf
 Restart=always
 RestartSec=5
+UMask=0077
 StandardOutput=append:$LOG
 StandardError=append:$LOG
 
