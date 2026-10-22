@@ -171,3 +171,24 @@ token = "a#b"
 		t.Fatalf("不该动别的行：%s", out)
 	}
 }
+
+func TestLongUnixListenFallsBackToShortSocket(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("很深的目录", 8))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	path := filepath.Join(dir, "gateway.toml")
+	os.WriteFile(path, []byte("[kernel]\nlisten = \"unix:run/gateway.sock\"\ntoken = \"x\"\n[llm]\nprovider = \"mock\"\n"), 0o600)
+	c, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := strings.TrimPrefix(c.Kernel.Listen, "unix:")
+	if len(p) > 100 || !strings.HasPrefix(p, os.Getenv("XDG_RUNTIME_DIR")) {
+		t.Fatalf("socket 路径：%s", p)
+	}
+	if c2, _, _ := Load(path); c2.Kernel.Listen != c.Kernel.Listen {
+		t.Fatal("同一个配置要算出同一个 socket")
+	}
+}

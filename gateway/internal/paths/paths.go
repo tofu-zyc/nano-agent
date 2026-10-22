@@ -46,6 +46,21 @@ func Socket(name, key string) string {
 	return filepath.Join(dir, fmt.Sprintf("nano-%x.sock", sum[:6]))
 }
 
+// ShortSocket 保证 unix socket 路径不超过上限（Linux 108、macOS 104 字节）：太长时换成
+// $XDG_RUNTIME_DIR 或 /tmp 下的私有目录里、用原路径哈希命名的 socket（同一个路径总是算出同一个结果）。
+func ShortSocket(p string) string {
+	if len(p) <= 100 {
+		return p
+	}
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("nano-agent-%d", os.Getuid()))
+	}
+	os.MkdirAll(dir, 0o700)
+	sum := sha256.Sum256([]byte(p))
+	return filepath.Join(dir, fmt.Sprintf("nano-%x.sock", sum[:6]))
+}
+
 // ShortRunDir 是 SSH 控制 socket 用的短目录；run/nano-ssh 太长时退回 XDG_RUNTIME_DIR 或 /tmp。
 func ShortRunDir(name string) string {
 	p := filepath.Join(RunDir(), name)

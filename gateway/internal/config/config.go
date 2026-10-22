@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"nano-agent/gateway/internal/paths"
 )
 
 type Config struct {
@@ -230,7 +232,8 @@ func finish(c *Config, md toml.MetaData, overlay []byte, path string, check bool
 	c.Skills.Dir = resolve(base, c.Skills.Dir)
 	c.Session.DataDir = resolve(base, c.Session.DataDir)
 	if strings.HasPrefix(c.Kernel.Listen, "unix:") {
-		c.Kernel.Listen = "unix:" + resolve(base, strings.TrimPrefix(c.Kernel.Listen, "unix:"))
+		// 目录很深时（比如导入到较长的 NANO_HOME）换成短路径，否则 bind 失败、网关起不来
+		c.Kernel.Listen = "unix:" + paths.ShortSocket(resolve(base, strings.TrimPrefix(c.Kernel.Listen, "unix:")))
 	}
 	if check {
 		if err := c.validate(); err != nil {
