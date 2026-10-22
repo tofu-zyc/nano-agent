@@ -166,6 +166,8 @@ if [ "$UNINSTALL" = 1 ]; then
     has_systemd && systemctl --user daemon-reload || true
   fi
   if [ -x "$BIN/nano-gateway-ctl" ]; then "$BIN/nano-gateway-ctl" stop >/dev/null 2>&1 || true; fi
+  # 后台进程模式（没有 systemd）：连同看护进程一起停掉，不然删了程序它还在跑
+  if [ -x "$BIN/nano-gateway" ]; then NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" stop >/dev/null 2>&1 || true; fi
   for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ -f "$f" ]; then
       { grep -vF "$PROFILE_START" "$f" || true; } >"$f.nano-tmp"

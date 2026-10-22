@@ -200,6 +200,8 @@ try:
         r = subprocess.run(["bash", os.path.join(script, f"nano-gateway-{VER}-linux-{ARCH}", "install-gateway.sh"),
                             "--uninstall", "--yes"], env=ENV, capture_output=True)
         assert r.returncode == 0 and not os.path.exists(NANO), out(r)
+        left = subprocess.run(["pgrep", "-f", NANO + "/bin/nano-gateway"], capture_output=True, text=True).stdout.split()
+        assert not left, f"卸载后网关进程还在：{left}"
         for rc in (".profile", ".bashrc"):
             assert "nano-agent" not in open(os.path.join(HOME, rc)).read(), rc
         assert not os.path.lexists(os.path.join(LOCALBIN, "nano-gateway"))
