@@ -25,9 +25,9 @@ PROBE = json.loads(subprocess.run([EXEC, "--probe"], capture_output=True, text=T
 SANDBOX = PROBE["landlock"] > 0
 
 
-def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), max_output=65536, timeout=30):
+def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
-           "ro": list(ro), "rw": list(rw), "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
+           "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
     p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
     p.stdin.write((json.dumps(req) + "\n").encode())
     p.stdin.flush()
@@ -345,13 +345,31 @@ def setup():
     os.symlink(OTHER, os.path.join(WORK, "link_dir"))
 
 
+@case("提权：rw=/ 能写工作目录外，不带只能读")
+def t_elevated_write():
+    target = os.path.join(OTHER, "elevated.txt")
+    c = bad(run("Write", {"path": target, "content": "x"}, rw=()), "elevated")
+    assert not os.path.exists(target)
+    ok(run("Write", {"path": target, "content": "x"}, rw=("/",)), "已创建")
+    with open(target, encoding="utf-8") as f:
+        assert f.read() == "x"
+    os.unlink(target)
+
+@case("没有工作目录：Shell 在 HOME，能读，只能写临时目录")
+def t_home_mode():
+    ok(run("Shell", {"command": "pwd"}, dirs=(), home=True, write=False), HOME)
+    ok(run("Shell", {"command": "cat ~/.gitconfig"}, dirs=(), ro=("/",), home=True, write=False), "tester")
+    bad(run("Shell", {"command": "echo x > ~/nope"}, dirs=(), home=True, write=False), "Permission denied")
+    ok(run("Shell", {"command": "echo hi > \"$TMPDIR/t\" && cat \"$TMPDIR/t\""}, dirs=(), home=True, write=False), "hi")
+
+
 def main():
     try:
         setup()
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_read_escape, t_read_ro, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs):
+                  t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

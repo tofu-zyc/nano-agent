@@ -90,9 +90,9 @@ func (a *App) runMode(w workspace, from string) string {
 const noToolsNote = "[系统] 这个会话没有挂载工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
 	"用户需要这些的话，请他让管理员挂一个工作目录（/dir，或者在网页里设置）。"
 
-// readOnlyNote 是没有工作目录的管理员：可以读，但不能写、不能执行。
-const readOnlyNote = "[系统] 这个会话没有挂载工作目录，现在是只读模式：可以用 Read 和 Grep 读这台机器上当前用户能读的文件" +
-	"（路径写绝对路径或 ~ 开头），不能写文件、不能执行命令。需要改文件或执行命令时，请用户挂一个工作目录。"
+// homeNote 是没有工作目录的管理员：在 HOME 下工作，读不限，只能写临时目录；写外面要提权。
+const homeNote = "[系统] 这个会话没有挂载工作目录，工作目录是 HOME：可以读这台机器上当前用户能读的文件，Shell 在这里运行，" +
+	"但只能写临时目录和缓存。要写工作目录外的文件或让命令写外面，给 Write / Edit / Shell 加 elevated: true，会请用户批准。"
 
 // machineDesc 是给模型看的机器说明
 func (a *App) machineDesc(name string) string {
@@ -109,13 +109,17 @@ func (a *App) machineDesc(name string) string {
 func (a *App) envNote(w workspace, rt route, admin bool) string {
 	if len(w.wss) == 0 {
 		if admin {
-			return readOnlyNote
+			return homeNote
 		}
 		return noToolsNote
 	}
 	if len(rt.mounts) == 0 {
+		if admin && a.localKernel() != "" {
+			return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手，在 HOME 下工作：可以读文件、运行命令，只能写临时目录；写工作目录外要 elevated。",
+				strings.Join(rt.down, "；"), rt.kernel)
+		}
 		if admin {
-			return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手，只读：可以读文件，不能写、不能执行命令。",
+			return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手：没有可用的工作目录，只能聊天。",
 				strings.Join(rt.down, "；"), rt.kernel)
 		}
 		return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。",
@@ -212,9 +216,10 @@ func expandHome(p string) string {
 	return p
 }
 
-// readOnlySpec 是没有工作目录的管理员用的空工作目录：Read/Grep 可以读整台机器，没有可写目录。
-func readOnlySpec() proto.WorkspaceSpec {
-	return proto.WorkspaceSpec{Name: "只读", RO: []string{"/"}, Local: true}
+// homeSpec 是没有工作目录的管理员用的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME；
+// ro 是整台机器，只有提权时才会加 rw "/"。
+func homeSpec() proto.WorkspaceSpec {
+	return proto.WorkspaceSpec{Name: "HOME", RO: []string{"/"}, Home: true, Local: true}
 }
 
 // ---- 审批提示 ----
@@ -232,19 +237,24 @@ func callCard(name string, raw json.RawMessage) (title, body string) {
 		return "工具 " + name, prettyArgs(raw)
 	}
 	str := func(k string) string { v, _ := args[k].(string); return v }
+	elevated, _ := args["elevated"].(bool)
 	where := ""
 	if w := str("workspace"); w != "" {
 		where = "（在 " + w + " 上）"
 	}
+	prefix := "提权 · "
+	if !elevated {
+		prefix = ""
+	}
 	switch name {
 	case "Shell":
-		return "执行命令" + where, clip(str("command"), 1500)
+		return prefix + "执行命令" + where, clip(str("command"), 1500)
 	case "Write":
-		return fmt.Sprintf("写入文件%s：%s（%d 字节）", where, str("path"), len(str("content"))), clip(str("content"), 300)
+		return fmt.Sprintf("%s写入文件%s：%s（%d 字节）", prefix, where, str("path"), len(str("content"))), clip(str("content"), 300)
 	case "Edit":
-		return "修改文件" + where + "：" + str("path"), fmt.Sprintf("原文：\n%s\n改为：\n%s", clip(str("old_string"), 400), clip(str("new_string"), 400))
+		return prefix + "修改文件" + where + "：" + str("path"), fmt.Sprintf("原文：\n%s\n改为：\n%s", clip(str("old_string"), 400), clip(str("new_string"), 400))
 	}
-	return "工具 " + name + where, prettyArgs(raw)
+	return prefix + "工具 " + name + where, prettyArgs(raw)
 }
 
 func clip(s string, n int) string {

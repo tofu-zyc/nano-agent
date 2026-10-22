@@ -27,7 +27,7 @@
 | `done` | `sid` `status` `detail?` | 这一轮处理结束，`status` 见下表 |
 | `ping` | | 心跳 |
 | `ls_result` | `id` `ok` `path` `home` `blocked` `entries[]` `truncated?` `detail?` | `ls` 的结果：`path` 是解析过符号链接的绝对路径，`entries` 每项是 `{name, blocked?}`（只有子目录）；`blocked` 表示这个目录包含内核自己，不能当工作目录 |
-| `exec` | `sid` `id` `name` `args` `workspace?` `timeout_ms` `max_output` | 请网关执行一次已经放行（审批过）的工具调用：工作目录 `workspace` 不在这个内核的机器上，或者 `Skill`（没有 `workspace`）。`args` 里已经去掉了 `workspace` |
+| `exec` | `sid` `id` `name` `args` `workspace?` `elevated?` `timeout_ms` `max_output` | 请网关执行一次已经放行（审批过）的工具调用：工作目录 `workspace` 不在这个内核的机器上，或者 `Skill`（没有 `workspace`）。`args` 里已经去掉了 `workspace`；`elevated` 表示这次是提权写工作目录外 |
 | `exec_cancel` | `sid` `id` | 这次调用超时了，或者这一轮被停止，请网关停下（之后到的 `exec_result` 内核直接丢弃） |
 | `run_result` | `id` `ok` `content` | `run` 的结果（工具输出），或者 `skill_put` 的结果（`ok` 时 `content` 是放好的目录） |
 
@@ -39,7 +39,7 @@
 | `error` | `detail` `reason?` | 握手失败的原因，随后断开。`reason` 为 `auth` 表示口令不对（配对得到的口令失效了就重新配对），`denied` 表示管理员拒绝了配对（内核退出） |
 | `pairing` | `code` | 收到配对请求，等管理员在网页上确认；`code` 是确认码 |
 | `paired` | `token` | 管理员同意了配对：`token` 是这台电脑专用的口令，内核保存后断开重连 |
-| `input` | `sid` `from` `mode` `workspaces[]` | 会话收到新消息，开始一轮处理。`mode` 是这一轮的权限模式（见下表）；`workspaces` 每项是 `{name, dirs, ro, rw, local, landlock}`：`name` 是给模型看的名字（机器:路径），工具参数 `workspace` 用它（也可以写序号、只写机器或只写路径，唯一时）；`dirs` 第一个是这个工作目录，后面是同一台机器上挂的别的工作目录（都能读写）；`ro` / `rw` 是额外的只读 / 读写路径（包括技能缓存目录）；`local` 表示在这个内核的机器上；`landlock` 是那台机器的沙箱版本（0 表示没有，自动模式下的 Shell 也要审批）。没有能用的工作目录时 `workspaces` 为空、`mode` 为 `none` |
+| `input` | `sid` `from` `mode` `elevate?` `workspaces[]` | 会话收到新消息，开始一轮处理。`mode` 是这一轮的权限模式（见下表）；`elevate` 表示这个身份能不能提权（访客为 false）。`workspaces` 每项是 `{name, dirs, ro, rw, home?, local, landlock}`：`name` 是给模型看的名字（机器:路径），工具参数 `workspace` 用它（也可以写序号、只写机器或只写路径，唯一时）；`dirs` 第一个是这个工作目录，后面是同一台机器上挂的别的工作目录（都能读写）；`ro` / `rw` 是额外的只读 / 读写路径（包括技能缓存目录）；`home` 是没有工作目录时的 HOME 模式（dirs 为空，相对路径和 Shell 用 HOME）；`local` 表示在这个内核的机器上；`landlock` 是那台机器的沙箱版本（0 表示没有，自动模式下的 Shell 也要审批）。没有工作目录的管理员拿到一个 HOME 工作目录；访客没有工具时 `workspaces` 为空、`mode` 为 `none` |
 | `turn` | `sid` `reason` `calls[]?` `detail?` | 模型完成了一轮，`reason` 见下表；`calls` 每项是 `{id, name, args}` |
 | `approve` | `sid` `id` `ok` `from` | 审批结果。`from` 是审批人身份；网关只会转发管理员的审批 |
 | `cancel` | `sid` | 用户要求停止 |
@@ -72,12 +72,12 @@
 | `ask` | 执行 | 先审批 | 先审批 |
 | `auto` | 执行 | 执行 | 执行（没有沙箱时先审批） |
 
-谁用什么模式由网关决定（管理员用会话设置的模式，其他人用 `access.guest`）；内核负责按模式放行，执行器负责把工具关在工作目录里。
+谁用什么模式由网关决定（管理员用会话设置的模式，其他人用 `access.guest`）；内核负责按模式放行，执行器负责把工具关在工作目录里。`Write` / `Edit` / `Shell` 带 `elevated: true` 时，不管 mode 是什么都要审批（readonly / none 和访客直接拒绝）；批准后这一次调用的 `rw` 加 `/`。
 
 ## 一次完整的处理
 
 ```
-K→G {"t":"hello","v":5,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
+K→G {"t":"hello","v":6,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
 G→K {"t":"welcome","v":5}
 G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","workspaces":[{"name":"本机:~/projects/foo","dirs":["~/projects/foo"],"ro":["~/.gitconfig","~/.nano-agent/skills"],"rw":[],"local":true}]}
 K→G {"t":"model","sid":"tg:-1001234"}

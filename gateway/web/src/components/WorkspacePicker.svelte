@@ -139,7 +139,7 @@
     </div>
     {#if mounting}
       <footer>
-        <span class="sum">{mounted!.length ? `挂了 ${mounted!.length} 个` : '没有挂载：只读，不能写文件、执行命令'}</span>
+        <span class="sum">{mounted!.length ? `挂了 ${mounted!.length} 个` : '没有挂载：在 HOME 下工作，只能写临时目录'}</span>
         {#if mounted!.length}<button class="btn sm ghost" onclick={() => onchange?.([])}>全部取下</button>{/if}
         <button class="btn sm primary" onclick={onclose}>完成</button>
       </footer>

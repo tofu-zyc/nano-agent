@@ -408,6 +408,46 @@ static void test_long_args_preview_keeps_utf8(void)
     na_core_free(c);
 }
 
+
+static void test_elevated_always_needs_approval(void)
+{
+    na_core *c = mk(16);
+    na_event ev = { .type = NA_EV_INPUT, .sid = "s1", .from = "tg:1", .mode = NA_MODE_AUTO,
+                    .elevate = true, .policy = "{\"dirs\":[\"/w\"]}" };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    na_call calls[] = { { "w1", "Write", "{}", true, NA_SB_DEFAULT, NULL, true } };
+    CHECK(turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1) == 0);
+    EXPECT(c, "APPROVE_REQ(w1,Write,tg:1)");
+    CHECK(approve(c, 20, "s1", "w1", true) == 0);
+    EXPECT(c, "NOTICE(已批准，开始执行 Write) EXEC(w1,Write,10000)");
+    tool_done(c, 30, "s1", "w1", true, "ok");
+    drain(c);
+    na_core_free(c);
+
+    /* 访客不能提权 */
+    c = mk(16);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s2", .from = "tg:2", .mode = NA_MODE_AUTO,
+                     .elevate = false, .policy = "{\"dirs\":[\"/w\"]}" };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    na_call guest[] = { { "w2", "Write", "{}", true, NA_SB_DEFAULT, NULL, true } };
+    CHECK(turn(c, 10, "s2", NA_TURN_TOOL_USE, guest, 1) == 0);
+    EXPECT(c, "RESULT(w2,err,当前身份不能提权写工作目录外) MODEL(s2)");
+    na_core_free(c);
+
+    /* 只读模式不能提权 */
+    c = mk(16);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s3", .from = "tg:3", .mode = NA_MODE_READONLY,
+                     .elevate = true, .policy = "{\"dirs\":[\"/w\"]}" };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    na_call ro[] = { { "w3", "Write", "{}", true, NA_SB_DEFAULT, NULL, true } };
+    CHECK(turn(c, 10, "s3", NA_TURN_TOOL_USE, ro, 1) == 0);
+    EXPECT(c, "RESULT(w3,err,当前是只读模式，不能提权写工作目录外) MODEL(s3)");
+    na_core_free(c);
+}
+
 int main(void)
 {
     test_final_answer();
@@ -427,6 +467,7 @@ int main(void)
     test_protocol_mismatches_are_ignored();
     test_turn_error_and_refusal();
     test_long_args_preview_keeps_utf8();
+    test_elevated_always_needs_approval();
     printf("core: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

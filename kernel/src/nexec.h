@@ -25,6 +25,7 @@
 typedef struct {
     char **dirs;  size_t ndirs;   /* 工作目录（已解析符号链接），第一个是默认目录 */
     bool   write;                 /* 工作目录是否可写（只读模式下为 false） */
+    bool   home_only;             /* 没有挂工作目录：相对路径和 Shell 的当前目录用 HOME */
     char **ro;    size_t nro;     /* 额外的只读路径 */
     char **rw;    size_t nrw;     /* 额外的读写路径 */
     char  *home;

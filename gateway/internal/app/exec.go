@@ -44,12 +44,22 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		return
 	}
 	spec := r.rt.spec(*mt, a.isAdmin(r.from))
+	write := r.write
+	rw := spec.RW
+	if m.Elevated {
+		if !a.isAdmin(r.from) {
+			reply(false, "当前身份不能提权写工作目录外")
+			return
+		}
+		write = true
+		rw = append(append([]string{}, rw...), "/")
+	}
 	args := m.Args
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
 	req, _ := json.Marshal(map[string]any{
-		"tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": spec.RW, "write": r.write,
+		"tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
 		"tmp_key": s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,
 	})
 	timeout := time.Duration(m.TimeoutMs) * time.Millisecond

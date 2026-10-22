@@ -355,7 +355,7 @@ func (a *App) setSessionWorkspaces(sid string, ids []string) error {
 func (a *App) describeMounts(sid string) string {
 	w := a.workspaceOf(sid)
 	if len(w.wss) == 0 {
-		return "这个会话没有挂载工作目录，现在是只读模式（可以读文件，不能写、不能执行命令）。"
+		return "这个会话没有挂载工作目录，工具在 HOME 下工作（可以读文件；写工作目录外要提权）。"
 	}
 	var labels []string
 	for _, x := range w.wss {
@@ -458,7 +458,7 @@ func (a *App) cmdDir(c in, arg string) {
 	switch sub {
 	case "none":
 		err := a.setSessionWorkspaces(c.s.sid, nil)
-		a.reply(c, "工作目录全部取下了，这个会话现在是只读（可以读文件，不能写、不能执行命令）。", err)
+		a.reply(c, "工作目录全部取下了，这个会话在 HOME 下工作（可以读文件；写工作目录外要提权）。", err)
 	case "add":
 		if rest == "" {
 			a.answer(c, dirUsage)

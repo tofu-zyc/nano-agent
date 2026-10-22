@@ -90,12 +90,14 @@ type Msg struct {
 	Reason string `json:"reason,omitempty"`
 	Calls  []Call `json:"calls,omitempty"`
 
-	// input：这一轮的权限模式和挂载的工作目录
+	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权
 	Mode       string          `json:"mode,omitempty"`
+	Elevate    bool            `json:"elevate,omitempty"`
 	Workspaces []WorkspaceSpec `json:"workspaces,omitempty"`
 
 	// exec：在哪个工作目录上执行（Skill 没有）、工具的时限和输出上限
 	Workspace string `json:"workspace,omitempty"`
+	Elevated  bool   `json:"elevated,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
 	MaxOutput int    `json:"max_output,omitempty"`
 	// run：交给执行器的完整请求；skill_put：技能名和文件
@@ -141,6 +143,7 @@ type WorkspaceSpec struct {
 	Dirs     []string `json:"dirs"`
 	RO       []string `json:"ro"`
 	RW       []string `json:"rw"`
+	Home     bool     `json:"home,omitempty"` // 没有工作目录时的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME
 	Local    bool     `json:"local,omitempty"`
 	Landlock int      `json:"landlock,omitempty"`
 }

@@ -80,13 +80,13 @@ char *path_resolve(const xctx *x, const char *p, buf_t *out)
         buf_puts(out, "缺少路径");
         return NULL;
     }
-    if (p[0] != '/' && p[0] != '~' && !x->ndirs) {
+    if (p[0] != '/' && p[0] != '~' && !x->ndirs && !x->home_only) {
         buf_puts(out, "还没有设置工作目录，没法解析相对路径。请让用户先用 /dir add <路径> 添加工作目录");
         return NULL;
     }
     char *full = p[0] == '/' ? xstrdup(p)
                : p[0] == '~' ? expand_home(x->home, p)
-               : xasprintf("%s/%s", x->dirs[0], p);
+               : xasprintf("%s/%s", x->ndirs ? x->dirs[0] : x->home, p);
     char *abs = normalize(full);
     free(full);
 
@@ -153,7 +153,7 @@ bool path_can_write(const xctx *x, const char *real, buf_t *out)
     buf_puts(out, real);
     buf_puts(out, "（工作目录：");
     put_dirs(x, out);
-    buf_puts(out, "）。需要的话，请让用户用 /dir add 把它加为工作目录");
+    buf_puts(out, "）。写工作目录外需要 elevated: true，会请用户批准");
     return false;
 }
 

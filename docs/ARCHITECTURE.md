@@ -51,7 +51,7 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 
 ## 协议要点
 
-- 网关 → 内核 `input` 带 `workspaces[{name, dirs, ro, rw, local, landlock}]`：这一轮挂上的工作目录，`local` 表示在这个内核的机器上。没有工作目录的管理员会拿到一个空的“只读”工作目录（`dirs` 为空、`ro` 为 `/`），用来跑 Read/Grep。
+- 网关 → 内核 `input` 带 `workspaces[{name, dirs, ro, rw, local, landlock}]`：这一轮挂上的工作目录，`local` 表示在这个内核的机器上。没有工作目录的管理员会拿到一个 HOME 工作目录（`dirs` 为空、`ro` 为 `/`、`home` 为 true）：相对路径和 Shell 用 HOME，默认只能写临时目录；带 `elevated` 的调用批准后 `rw` 加 `/`。
 - 内核 → 网关 `exec {sid, id, name, args, workspace}`：请网关执行一次工具（工作目录不在这台机器上，或者 `Skill`）；网关回 `exec_result {sid, id, ok, content}`。
 - 网关 → 内核 `run {id, req}` / `skill_put {id, skill, files}`：请这台电脑的内核代为执行、放技能文件，回 `run_result`。
 - 内核 → 网关 `exec_cancel {sid, id}`：工具超时或这一轮被停止时取消；网关停止执行器（SSH 关掉通道，服务器上的执行器收到 EOF 后退出）。
@@ -71,6 +71,6 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
   - 配对得到的专用口令，绑定内核名字，网关只存 SHA-256。
 - SSH 凭据只在网关（`data/connections.json`，0600，密码加密），密码经 `SSH_ASKPASS` 传递，不进命令行参数和日志。
 - 模型 API key、SSH 密码、机器人 token、网页密码用 `~/.nano-agent/secret.key` 做 AES-256-GCM，存成 `enc:v1:...`；旧明文启动时自动加密重写。工具结果可以按 `[security] redact` 脱敏。
-- 读：管理员会话能读当前用户能读的文件（访客仍然只读工作目录和系统目录）；写：只有工作目录、临时目录和缓存目录。管理员没有工作目录时是只读（Read/Grep）。
+- 读：管理员会话能读当前用户能读的文件（访客仍然只读工作目录和系统目录）；写：默认只有工作目录、临时目录和缓存目录。写工作目录外要给 `Write` / `Edit` / `Shell` 加 `elevated: true`，任何模式都要审批，批准后这一次调用 `rw` 放开到 `/`；访客和 readonly 模式不能提权。没有工作目录的管理员在 HOME 下工作。
 - 工作目录不能包含网关的运行时、配置和数据目录（用 `make install` 后它们在用户目录，源码目录和项目目录不受影响），网关、内核和执行器各自把关。
 - 内核连不上、被拒（名字冲突之类）时重连间隔逐渐拉长（最长 30 秒），网关接受之后才重置。

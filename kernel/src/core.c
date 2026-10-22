@@ -11,6 +11,7 @@ typedef enum { CALL_WAIT_APPROVAL, CALL_RUNNING, CALL_DONE } call_state;
 typedef struct {
     char *id, *name, *args;
     const na_tool_policy *tool;
+    bool elevated;
     call_state st;
     int64_t deadline;
 } call_t;
@@ -20,6 +21,7 @@ typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
 typedef struct run {
     char *sid, *from, *policy;
     na_mode mode;
+    bool elevate;        /* 这个身份能不能提权 */
     bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
     int steps;            /* 已请求模型的次数 */
@@ -149,8 +151,19 @@ static const na_tool_policy *find_tool(na_core *c, const char *name)
 typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
 
 /* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
-static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, const char **why)
+static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, bool elevated, bool allowElevate, const char **why)
 {
+    if (elevated) {
+        if (!allowElevate) {
+            *why = "当前身份不能提权写工作目录外";
+            return DECIDE_DENY;
+        }
+        if (mode == NA_MODE_NONE || mode == NA_MODE_READONLY) {
+            *why = "当前是只读模式，不能提权写工作目录外";
+            return DECIDE_DENY;
+        }
+        return DECIDE_ASK;   /* auto 也要每次审批 */
+    }
     switch (mode) {
     case NA_MODE_NONE:
         *why = "当前身份没有使用工具的权限";
@@ -240,6 +253,7 @@ static void exec_call(na_core *c, int64_t now, run_t *r, call_t *k)
     m->from = dupstr(r->from);
     m->policy = dupstr(r->policy);
     m->timeout_ms = k->tool->timeout_ms;
+    m->elevated = k->elevated;
     k->st = CALL_RUNNING;
     k->deadline = now + k->tool->timeout_ms;
 }
@@ -279,6 +293,7 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->from = dupstr(ev->from ? ev->from : "");
     r->policy = dupstr(ev->policy ? ev->policy : "{}");
     r->mode = ev->mode;
+    r->elevate = ev->elevate;
     r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
     r->deadline = now + c->cfg.run_timeout_ms;
     r->next = c->runs;
@@ -315,7 +330,8 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->tool = find_tool(c, k->name);
         const char *why = NULL;
         bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
-        decision d = k->tool ? decide(sandbox, r->mode, k->tool->kind, &why) : DECIDE_DENY;
+        k->elevated = in->elevated;
+        decision d = k->tool ? decide(sandbox, r->mode, k->tool->kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);

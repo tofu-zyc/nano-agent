@@ -133,7 +133,7 @@ send '!call Skill {"name":"demo"}';                   expect "加载技能说明
 send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt"}'; expect "技能附带文件放到执行的机器上" "skill-e2e-data"
 send '!call Read {"path":"~/.profile"}';                expect "工作目录外也能读 HOME" "secret-profile"
 send '!call Shell {"command":"cat ~/.profile"}';        expect "Shell 也能读 HOME" "secret-profile"
-send '!call Write {"path":"/tmp/nano-e2e-outside.txt","content":"x"}'; expect "工作目录外不能写" "不能写入"
+send '!call Write {"path":"/tmp/nano-e2e-outside.txt","content":"x"}'; expect "工作目录外不能写" "elevated"
 send '!call nope {}';                                 expect "未知工具变成错误结果" "未知工具：nope"
 send '!call Read {oops';                              expect "非法参数变成错误结果" "不是合法的 JSON 对象"
 send "/whoami";                                       expect "查身份" "你的身份：cli:local"
@@ -142,12 +142,17 @@ send "/reset";                                        expect "清空上下文" "
 send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
 send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
 send "回到主会话";                                    expect "在主会话里说话" "（mock）收到：回到主会话"
-# 没有工作目录的管理员：只读，能读 HOME，不能写、不能执行
-send "/session new 只读测试";                           expect "新建只读会话" "已切换到会话「只读测试」"
-send "/dir none";                                     expect "只读会话没有工作目录" "只读"
-send '!call Read {"path":"~/.profile"}';               expect "只读会话能读 HOME" "secret-profile"
-send '!call Write {"path":"~/.nano-e2e-readonly","content":"x"}'; expect "只读会话不能写" "不能"
-send '!call Shell {"command":"echo should-not-run"}';  expect "只读会话不能执行" "只读模式"
+# 没有工作目录的管理员：HOME 模式，能读、能执行，写工作目录外要提权
+send "/session new HOME测试";                          expect "新建 HOME 会话" "已切换到会话「HOME测试」"
+send "/dir none";                                     expect "HOME 会话没有工作目录" "在 HOME 下工作"
+send "/mode auto";                                    expect "HOME 会话自动模式" "已切换为自动"
+send '!call Read {"path":"~/.profile"}';               expect "HOME 会话能读 HOME" "secret-profile"
+send '!call Shell {"command":"cat ~/.profile"}';       expect "HOME 会话 Shell 能读" "secret-profile"
+send '!call Write {"path":"~/.nano-e2e-readonly","content":"x"}'; expect "HOME 会话写外面要提权" "elevated"
+send '!call Shell {"command":"echo x > ~/.nano-e2e-readonly"}'; expect "HOME 会话 Shell 不能写 HOME" "Permission denied"
+send '!call Write {"path":"~/.nano-e2e-elevated.txt","content":"elevated-ok","elevated":true}'; expect "提权要审批" "需要审批 #4"
+send "/approve 4";                                    expect "批准提权后写入" "elevated-ok"
+send '!call Read {"path":"~/.nano-e2e-elevated.txt"}'; expect "提权写到了工作目录外" "elevated-ok"
 send "/session 1";                                    expect "回到主会话" "已切换到会话「主会话」"
 send "撤回";                                          expect "撤回最近一轮" "已撤回：「回到主会话」"
 if ! grep -qF "回到主会话" "$TMP/data/sessions/main.jsonl"; then echo "  ok   撤回的一轮从历史文件里删掉"; pass=$((pass + 1)); else echo "  FAIL 撤回的一轮从历史文件里删掉"; fail=$((fail + 1)); fi
@@ -172,7 +177,9 @@ for _ in $(seq 100); do grep -q '服务器已就绪.*server=box' "$TMP/gateway.l
 send "/dir add box:~/proj";                           expect "挂上服务器上的目录" "挂上了 box:~/proj"
 send '!call Write {"path":"r.txt","content":"x"}';    expect "挂了两个要写明在哪个上执行" "用 workspace 参数指明"
 send '!call Write {"path":"r.txt","content":"remote-e2e","workspace":"box:~/proj"}'; expect "在服务器上写文件" "已创建"
-if [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上"; fail=$((fail + 1)); fi
+for _ in $(seq 50); do [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ] && break; sleep 0.1; done
+got=$(cat "$TMP/remote/box/proj/r.txt" 2>&1 || true)
+if [ "$got" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上（$got）"; fail=$((fail + 1)); fi
 if ls "$TMP"/remote/box/.nano-agent/nano-exec-* >/dev/null 2>&1 && ! ls "$TMP"/remote/box/.nano-agent/ | grep -q kernel; then
   echo "  ok   服务器上只有执行器，没有内核"; pass=$((pass + 1))
 else

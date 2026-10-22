@@ -322,6 +322,7 @@ static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *wor
     cJSON_AddStringToObject(m, "name", c->name);
     cJSON_AddItemToObject(m, "args", args ? args : cJSON_CreateString(c->args ? c->args : ""));
     if (workspace) cJSON_AddStringToObject(m, "workspace", workspace);
+    if (c->elevated) cJSON_AddBoolToObject(m, "elevated", true);
     cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
     cJSON_AddNumberToObject(m, "max_output", (double)k->conf.max_output);
     link_send(&k->link, m);
@@ -334,8 +335,8 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
                          char *err, size_t errlen)
 {
     bool ok = true;
-    /* 只检查可写目录：ro 是只读放行（管理员可能拿到整个 /），不会改写执行器 */
-    for (const char *const *key = (const char *const[]){ "dirs", "rw", NULL }; *key && ok; key++)
+    /* 只检查工作目录：ro 只读放行；rw 只有提权时才会出现 /，已经过用户审批 */
+    for (const char *const *key = (const char *const[]){ "dirs", NULL }; *key && ok; key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
     job_t *j = NULL;
     if (ok) {
@@ -377,7 +378,14 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
             const cJSON *v = cJSON_GetObjectItemCaseSensitive(ws, *key);
             cJSON_AddItemToObject(req, *key, cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
         }
-        cJSON_AddBoolToObject(req, "write", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(pol, "write")));
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "home"))) cJSON_AddBoolToObject(req, "home", true);
+        bool write = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(pol, "write"));
+        if (c->elevated) {
+            write = true;
+            cJSON *rw = cJSON_GetObjectItemCaseSensitive(req, "rw");
+            cJSON_AddItemToArray(rw, cJSON_CreateString("/"));
+        }
+        cJSON_AddBoolToObject(req, "write", write);
         cJSON_AddStringToObject(req, "tool", c->name);
         cJSON_AddItemToObject(req, "args", args);
         args = NULL;
@@ -632,7 +640,12 @@ static char *build_policy(const cJSON *m, na_mode mode)
     cJSON *p = cJSON_CreateObject();
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
     cJSON_AddItemToObject(p, "workspaces", cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
-    cJSON_AddBoolToObject(p, "write", mode == NA_MODE_ASK || mode == NA_MODE_AUTO);
+    bool home = false;
+    const cJSON *it;
+    if (cJSON_IsArray(v))
+        cJSON_ArrayForEach(it, v) if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "home"))) home = true;
+    cJSON_AddBoolToObject(p, "write", !home && (mode == NA_MODE_ASK || mode == NA_MODE_AUTO));
+    cJSON_AddBoolToObject(p, "elevate", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate")));
     char *s = cJSON_PrintUnformatted(p);
     cJSON_Delete(p);
     return s;
@@ -727,6 +740,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
+        ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
         policy = build_policy(m, ev.mode);
         ev.policy = policy;
         const cJSON *ws = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
@@ -759,6 +773,8 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                 calls[i].args = owned[i];
                 calls[i].args_ok = cJSON_IsObject(args);
             }
+            if (calls[i].args_ok && cJSON_IsObject(args))
+                calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
             if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") && run_pol) {
                 char err[1024];

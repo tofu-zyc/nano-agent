@@ -219,6 +219,7 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
     x->max_output = cJSON_IsNumber(v) && v->valuedouble >= 1024 && v->valuedouble <= (64 << 20)
                   ? (size_t)v->valuedouble : 64 * 1024;
     x->write = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "write"));
+    x->home_only = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "home"));
     x->watch_stdin = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "watch_stdin"));
 
     if (load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "dirs"), true, &x->dirs, &x->ndirs, err) < 0 ||
@@ -228,9 +229,9 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
     /* 可写的目录不能包含执行器自己：改写了它，下一次调用就不在沙箱里了。
      * 本机由内核把关；远程时执行器放在服务器的 ~/.nano-agent 里，工作目录是 ~ 的话会被包含进来 */
     char *self = realpath("/proc/self/exe", NULL);
-    for (size_t i = 0; self && i < x->ndirs + x->nrw; i++) {
-        const char *d = i < x->ndirs ? x->dirs[i] : x->rw[i - x->ndirs];
-        if ((i >= x->ndirs || x->write) && path_inside(self, d)) {
+    for (size_t i = 0; self && i < x->ndirs; i++) {
+        const char *d = x->dirs[i];
+        if (x->write && path_inside(self, d)) {
             buf_puts(err, "工作目录 ");
             buf_puts(err, d);
             buf_puts(err, " 包含执行器自己（");

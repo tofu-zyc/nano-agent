@@ -376,7 +376,7 @@
               <Icon name="right" size={13} />
             </button>
           {:else}
-            <p class="note">还没有工作目录，会话都只能聊天。</p>
+            <p class="note">还没有工作目录，会话在 HOME 下工作；写工作目录外要提权。</p>
           {/each}
           <button class="btn sm" onclick={() => (addingWs = true)}><Icon name="plus" size={13} />添加工作目录</button>
         </div>
@@ -516,7 +516,7 @@
               <button class="x" title="取下" aria-label="取下 {mt.host}:{mt.path}" onclick={() => mountWorkspaces(sess.workspaces.filter((x) => x.id !== mt.id).map((x) => x.id))}><Icon name="x" size={12} /></button>
             </div>
           {:else}
-            <div class="mount empty"><Icon name="chat" size={14} /><span>只读：没有挂载工作目录，只能读文件，不能写、不能执行命令</span></div>
+            <div class="mount empty"><Icon name="chat" size={14} /><span>在 HOME 下工作：能读、能执行，只能写临时目录；写外面要提权</span></div>
           {/each}
           <button class="btn sm" onclick={() => (picking = true)}><Icon name="plus" size={13} />{sess.workspaces.length ? '挂载 / 取下…' : '挂载工作目录…'}</button>
         </div>

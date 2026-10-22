@@ -123,15 +123,15 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 		t.Fatalf("info: %+v", info)
 	}
 
-	// 本机的执行器也用不了时，只读并说明原因
+	// 本机的执行器也用不了时，没有可用的工作目录，只能聊天
 	e.hosts.set(host.LocalName, "local", false, 0, "执行器运行不了")
 	e.say("现在呢")
-	if in := phone.expect(proto.TInput); in.Mode != proto.ModeReadonly || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "只读" {
+	if in := phone.expect(proto.TInput); in.Mode != proto.ModeNone || len(in.Workspaces) != 0 {
 		t.Fatalf("input: %+v", in)
 	}
 	phone.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	phone.expect(proto.TTurn)
-	want := "[系统] 挂载的工作目录所在的机器现在都用不了（本机:" + work + "：本机 执行器运行不了），这一轮由 phone 接手，只读"
+	want := "[系统] 挂载的工作目录所在的机器现在都用不了（本机:" + work + "：本机 执行器运行不了），这一轮由 phone 接手：没有可用的工作目录，只能聊天"
 	if got := lastUser(e.llm.lastReq().Messages); !strings.HasPrefix(got, want) {
 		t.Fatalf("note: %q", got)
 	}
@@ -194,11 +194,11 @@ func TestSSHWorkspace(t *testing.T) {
 	// 服务器连不上：只读，说明原因
 	e.hosts.set("gpu", "ssh", false, 0, "连不上：timeout")
 	e.say("还能用吗")
-	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeReadonly || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "只读" {
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || !in.Elevate || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "HOME" || !in.Workspaces[0].Home {
 		t.Fatalf("input: %+v", in)
 	}
 	msgs := e.roundTrip(t)
-	if got := lastUser(msgs); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（gpu:"+remote+"：gpu 连不上：timeout），这一轮由 test 接手，只读") {
+	if got := lastUser(msgs); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（gpu:"+remote+"：gpu 连不上：timeout），这一轮由 test 接手，在 HOME 下工作：") {
 		t.Fatalf("note: %q", got)
 	}
 	e.say("/node")
@@ -248,10 +248,10 @@ func TestKernelMachineWorkspace(t *testing.T) {
 	laptop.conn.Close()
 	waitNode(e.a, "laptop", false)
 	e.say("电脑关了")
-	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeReadonly || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "只读" {
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || !in.Elevate || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "HOME" || !in.Workspaces[0].Home {
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（laptop:/data：laptop 不在线），这一轮由 test 接手，只读") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（laptop:/data：laptop 不在线），这一轮由 test 接手，在 HOME 下工作：") {
 		t.Fatalf("note: %q", got)
 	}
 	if ms := e.a.Snapshot().Machines; len(ms) != 2 || ms[1].Name != "laptop" || ms[1].Online {

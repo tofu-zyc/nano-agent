@@ -442,7 +442,7 @@
     if (ph === 'writing') return '正在回复…';
     if (ph === 'tool') return '正在执行工具…';
     if (s.running) return '处理中…';
-    const mode = s.workspaces.length ? (modeMeta[s.mode]?.label ?? s.mode) + (s.workspaces.length > 1 ? ` · ${s.workspaces.length} 个目录` : '') : '只读';
+    const mode = s.workspaces.length ? (modeMeta[s.mode]?.label ?? s.mode) + (s.workspaces.length > 1 ? ` · ${s.workspaces.length} 个目录` : '') : '未挂目录';
     return `${mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
   }
 

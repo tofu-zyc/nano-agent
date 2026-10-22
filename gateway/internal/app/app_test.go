@@ -224,8 +224,8 @@ func TestFinalAnswer(t *testing.T) {
 		t.Fatalf("turn: %+v", turn)
 	}
 	req := e.llm.lastReq()
-	// 没有工作目录：只聊天，不给模型工具
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 0 {
+	// 没有工作目录：HOME 模式，工具仍然给（echo 是内核报的工具）
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 1 || req.Tools[0].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -278,9 +278,9 @@ func TestGroupIgnored(t *testing.T) {
 	}
 }
 
-func TestReadOnlyWithoutWorkspace(t *testing.T) {
+func TestHomeWithoutWorkspace(t *testing.T) {
 	e := setup(t)
-	// 换一套带读写工具的真实工具列表；没有工作目录时只应该留下 Read/Grep
+	// 换一套带读写工具的真实工具列表；没有工作目录时工具都给，写入靠 elevated 审批
 	e.k.send(proto.Msg{T: proto.TTools, Tools: []proto.ToolSpec{
 		{Name: "Read", Description: "读", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "Grep", Description: "搜", InputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -290,7 +290,7 @@ func TestReadOnlyWithoutWorkspace(t *testing.T) {
 	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Tools) == 4 })
 	e.say("看看")
 	in := e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeReadonly || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "只读" {
+	if in.Mode != proto.ModeAsk || !in.Elevate || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "HOME" || !in.Workspaces[0].Home {
 		t.Fatalf("input: %+v", in)
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
@@ -299,8 +299,10 @@ func TestReadOnlyWithoutWorkspace(t *testing.T) {
 	for _, tool := range e.llm.lastReq().Tools {
 		names = append(names, tool.Function.Name)
 	}
-	if len(names) != 2 || names[0] != "Grep" || names[1] != "Read" { // toolsFor 按名字排序
-		t.Fatalf("只读工具：%v", names)
+	for _, want := range []string{"Grep", "Read", "Shell", "Write"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("HOME 模式缺工具 %s：%v", want, names)
+		}
 	}
 }
 
@@ -543,14 +545,14 @@ func TestWorkspaceAndModes(t *testing.T) {
 	work := filepath.Join(e.dir, "work")
 	os.MkdirAll(work, 0o755)
 
-	// 没挂工作目录的管理员：只读模式，给一个空的只读工作目录
+	// 没挂工作目录的管理员：HOME 模式，工具都给，写外面要 elevated
 	e.say("你好")
 	in := e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeReadonly || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "只读" || in.Workspaces[0].Local != true ||
+	if in.Mode != proto.ModeAsk || !in.Elevate || len(in.Workspaces) != 1 || in.Workspaces[0].Name != "HOME" || !in.Workspaces[0].Home || in.Workspaces[0].Local != true ||
 		len(in.Workspaces[0].Dirs) != 0 || len(in.Workspaces[0].RO) != 1 || in.Workspaces[0].RO[0] != "/" {
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有挂载工作目录，现在是只读模式") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有挂载工作目录，工作目录是 HOME") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
 		t.Fatalf("user content: %q", got)
 	}
 

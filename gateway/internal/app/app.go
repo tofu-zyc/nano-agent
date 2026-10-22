@@ -163,7 +163,8 @@ type run struct {
 	calls      int       // 这一轮请求了几次模型
 	usage      llm.Usage // 这一轮的累计用量
 	noTools    bool      // 访客没有工作目录：不给模型工具，只聊天
-	readOnly   bool      // 管理员没有工作目录：给 Read/Grep，只读
+	readOnly   bool      // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
+	elevate    bool      // 这个身份可以提权写工作目录外（管理员）
 	withImages bool      // 这一轮的模型能接收图片
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
@@ -519,6 +520,11 @@ func (a *App) startRun(s *sess) {
 	w := a.workspaceOf(s.sid)
 	rt := a.route(w)
 	node := rt.kernel
+	if a.isAdmin(head.who) && len(rt.mounts) == 0 {
+		if k := a.localKernel(); k != "" {
+			node = k // HOME 模式必须在网关本机执行
+		}
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
@@ -586,7 +592,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
-		rt: rt, w: w, withImages: a.modelSupportsImages(s.sid)}
+		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
@@ -620,15 +626,19 @@ func (a *App) startRun(s *sess) {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
 	r.write = admin && (mode == proto.ModeAuto || mode == proto.ModeAsk)
+	in.Elevate = admin
 	if len(rt.mounts) == 0 {
-		if admin && mode != proto.ModeNone {
-			// 没有工作目录：只读。Read/Grep 可以读这台机器上当前用户能读的文件，
-			// 不能写、不能执行命令。给内核一个空的“只读”工作目录，让工具能跑起来。
-			r.readOnly = true
-			in.Mode = proto.ModeReadonly
-			in.Workspaces = []proto.WorkspaceSpec{readOnlySpec()}
+		if admin && mode != proto.ModeNone && node != "" && a.nodes[node] != nil && a.nodes[node].info.Local {
+			// 没有工作目录：在网关本机的 HOME 下工作。读不限，写只到临时目录；写外面要 elevated。
+			r.write = false
+			in.Mode = mode
+			in.Workspaces = []proto.WorkspaceSpec{homeSpec()}
+		} else if admin && mode != proto.ModeNone {
+			// 本机内核不在线：没法在网关自己的 HOME 上执行
+			r.noTools = true
+			in.Mode = proto.ModeNone
 		} else {
-			// 访客没有工作目录：不给工具，只聊天
+			// 访客没有工作目录：不给模型工具，只聊天
 			r.noTools = true
 			in.Mode = proto.ModeNone
 		}

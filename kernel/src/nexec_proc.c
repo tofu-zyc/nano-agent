@@ -240,7 +240,7 @@ bool tool_shell(const xctx *x, const cJSON *a, buf_t *out)
         buf_puts(out, "缺少 command（字符串）");
         return false;
     }
-    if (!x->ndirs) {
+    if (!x->ndirs && !x->home_only) {
         buf_puts(out, "还没有设置工作目录，Shell 没有地方运行。请让用户先用 /dir add <路径> 添加工作目录");
         return false;
     }
@@ -250,7 +250,7 @@ bool tool_shell(const xctx *x, const cJSON *a, buf_t *out)
 
     char *argv[] = { "/bin/sh", "-c", cmd->valuestring, NULL };
     proc_status st;
-    if (run_proc(x, argv, x->dirs[0], timeout, out, &st) < 0) return false;
+    if (run_proc(x, argv, x->ndirs ? x->dirs[0] : x->home, timeout, out, &st) < 0) return false;
     if (!out->len) buf_puts(out, "（无输出）");
     put_status(out, &st, timeout);
     return !st.timed_out && WIFEXITED(st.status) && WEXITSTATUS(st.status) == 0;
@@ -285,7 +285,7 @@ bool tool_grep(const xctx *x, const cJSON *a, buf_t *out)
         goto done;
     }
     /* 在默认工作目录下执行，结果里的路径尽量是相对路径，短一些 */
-    const char *cwd = x->dirs[0];
+    const char *cwd = x->ndirs ? x->dirs[0] : x->home;
     const char *target = real;
     if (path_inside(real, cwd)) target = real[strlen(cwd)] ? real + strlen(cwd) + 1 : ".";
 

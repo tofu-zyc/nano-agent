@@ -78,6 +78,7 @@ typedef struct {
     bool args_ok;       /* 参数是否为合法的 JSON 对象 */
     na_sandbox sandbox; /* 这个调用在哪台机器上执行，那里有没有沙箱（宿主按参数里的工作目录判断） */
     const char *error;  /* 宿主预先检查出的问题（比如工作目录写错了）：非空时直接以此失败，不执行 */
+    bool elevated;      /* 模型要求提权写工作目录外（每次都要审批） */
 } na_call;
 
 typedef struct {
@@ -85,6 +86,7 @@ typedef struct {
     const char *sid;
     const char *from;
     na_mode mode;
+    bool elevate;         /* INPUT：这个身份的会话能不能提权（访客不能） */
     na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */
     na_turn_reason reason;
@@ -103,7 +105,7 @@ typedef enum {
     NA_CMD_NOTICE,       /* 给用户看的提示：sid, text */
     NA_CMD_DONE,         /* run 结束：sid, status, text（详情，可为 NULL） */
     /* 发往本地工具执行器 */
-    NA_CMD_EXEC,         /* 执行工具：sid, id, name, args, from, policy, timeout_ms */
+    NA_CMD_EXEC,         /* 执行工具：sid, id, name, args, from, policy, timeout_ms, elevated */
     NA_CMD_KILL,         /* 终止执行：sid, id */
 } na_cmd_type;
 
@@ -112,6 +114,7 @@ typedef struct na_cmd {
     char *sid, *id, *name, *args, *from, *text, *policy;
     const char *status;  /* DONE："ok" "budget" "timeout" "cancelled" "refused" "error" */
     bool ok;
+    bool elevated;
     int  timeout_ms;
     struct na_cmd *next;
 } na_cmd;
