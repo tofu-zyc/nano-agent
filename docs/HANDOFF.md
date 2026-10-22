@@ -100,13 +100,13 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 - `nano-gateway` 子命令：`chat`、`status`、`start`、`stop`、`restart`、`logs [-f] [-n N]`、`url`、`doctor`、`version`；不带子命令仍然前台运行。`status` 通过 `run/control.sock`（0600，只允许同用户）查询正在运行的网关，CLI 渠道关掉也能用；协议是请求 `{"op":"status"}`、响应 `{"ok":true,"status":...}`。
 - 终端/网页/聊天的重启都先过 `config.Check(path)`：按启动顺序重新读 `gateway.toml`、`data/config.json`（含解密）并完整校验；坏配置直接报错，不写 marker、不停网关。成功后写 `data/restart.json`（0600，含发起人 SID/渠道/时间），主循环收到 `restartCh` 后优雅退出并 `syscall.Exec` 自己；新进程启动后读 marker，删除并给发起会话回“网关已重启（用时 N 秒）”。终端客户端会自动重连，CLI 没连上时消息先放在 App 里，等终端重新连上再发。
-- 后台模式：`start` 起一个 `supervise` 看护进程（`run/gateway.supervisor.pid`），看护进程起子进程（`run/gateway.pid`），异常退出 3 秒后拉起；`stop` 给看护进程 SIGTERM，由它转发给子进程。self-reexec 的 pid 不变，不会被当成异常退出。有 systemd unit（`NANO_GATEWAY_MODE=systemd`）时 start/stop/restart 走 `systemctl --user`，没有 unit 才用后台模式；旧 `nano-gateway-ctl` 已从安装脚本移除并在升级/卸载时清理。
+- 后台模式：`start` 起一个 `supervise` 看护进程（`run/gateway.supervisor.pid`），看护进程起子进程（`run/gateway.pid`），异常退出 3 秒后拉起；`stop` 给看护进程 SIGTERM，由它转发给子进程。self-reexec 的 pid 不变，不会被当成异常退出。有 systemd unit（`NANO_GATEWAY_MODE=systemd`）时 start/stop/restart 走 `systemctl --user`，没有 unit 才用后台模式；旧 `nano-gateway-ctl` 已从安装脚本移除并在升级/卸载时清理。systemd 只用临时 `XDG_CONFIG_HOME`、fake `systemctl` 和单元生成检查过，没有对真实 `nano-gateway.service` 做启停 e2e。
 - 网页：`GET /api/overview` 带 `runtime`（版本/启动时间/运行时长/运行方式/待重启数/最近错误），设置页待重启横幅有“重启网关”按钮，重启时显示“重启中”并轮询重连；`POST /api/restart` 先检查配置，失败 400。登录令牌持久化在 `data/web.sessions`（0600），网关重启后网页不用重新登录。
-- 聊天：管理员 `/status`（版本、运行时长、运行方式、内核、默认模型、最近错误）和 `/restart`（不再额外弹审批；聊天命令本身已有管理员判断）；`/help` 自动列出。
-- AI：`Gateway {"what":"logs","lines":N}` 返回最近 N 行脱敏日志（默认 50，最多 500，用 `knownSecrets` 打星）；`GatewayAdmin {"action":"restart"}` 走审批后重启。
+- 聊天：管理员 `/status`（版本、运行时长、运行方式、内核、机器、渠道、默认模型、待重启、最近错误）和 `/restart`（不再额外弹审批；聊天命令本身已有管理员判断）；`/help` 自动列出。
+- AI：`Gateway {"what":"status"}` 返回和 CLI `status` 同一套运行概况（版本/模式/运行时长/内核/机器/渠道/待重启/最近错误，另带工作目录）；`Gateway {"what":"logs","lines":N}` 返回最近 N 行脱敏日志（默认 50，最多 500，用 `knownSecrets` 打星）；`GatewayAdmin {"action":"restart"}` 走审批后重启。
 - `doctor` 检查配置（严格）、`secret.key`/数据目录权限、网页/内核/电脑接入端口、本机执行器和内核（有 `VERSION` 文件时比版本）、systemd enabled/linger 或后台 pid、WSL 保活；有 `[问题]` 时退出码 1。
-- WSL 保活：Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 返回“拒绝访问”（即使是当前用户 ONLOGON 任务），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
-- 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway logs 脱敏、GatewayAdmin restart 的测试。
+- WSL 保活：Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 和 PowerShell `Register-ScheduledTask` 都返回“拒绝访问”（即使是当前用户 ONLOGON 任务），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
+- 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway status 字段、Gateway logs 脱敏、GatewayAdmin restart 的测试。
 
 ## 已经完成的（按提交）
 
@@ -129,7 +129,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 | 4bc5110 | Windows WSL2 / Linux 启动包、网页 SSH 密码 / 密钥 / config 接入与断开、自动部署、stdio 通道、接入技能 |
 | 33bdff6 | 各端都能停（「停」、Ctrl-C、Telegram 按钮、网页输入框旁）；撤回最近一轮（/undo、「撤回」、网页按钮放回输入框、飞书撤回事件）；电脑首次连接配对 |
 | 094effa、c0b8c07 | 重写：SSH 服务器由网关自己连、只放执行器（去掉内核侧 remote 和服务器上的内核、启动包）；工作目录 = 机器 + 目录的列表；同机 / 异机两种执行模式（exec / skill_files 协议）；网页工作目录选择器、拓扑按机器画；内核安装脚本和单文件安装包；协议 v4 |
-| 36d19b9、9b8d8f3 | 网关查看和控制：`status/start/stop/restart/logs/url/doctor/version`、control socket、配置检查后 `syscall.Exec` 自重启和回话、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway logs` 和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项 |
+| 36d19b9、9b8d8f3、902e1af | 网关查看和控制：`status/start/stop/restart/logs/url/doctor/version`、control socket、配置检查后 `syscall.Exec` 自重启和回话、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway status/logs` 和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项 |
 | 多工作目录 | 一个会话挂好几个工作目录（可跨机器），工具参数 workspace；技能移到网关（Skill 由网关处理，附带文件放到各机器的 ~/.nano-agent/skills）；网关代执行别的电脑上的工具（run）；网关启动本机内核；拓扑加内核节点、右键菜单；输入框命令提示；协议 v5 |
 | 多模型 | 网页上管理多个 OpenAI 兼容接口和模型：默认模型、会话单独选（/model、会话设置）、每个模型自己的上下文窗口、历史上限、思考强度；接口只回传“有没有设置 key” |
 | 图片输入 | 网页粘贴/拖拽/上传、Telegram 照片、飞书图片消息；模型能力（modalities）决定发不发给模型；图片存 data/uploads，历史里只存引用，支持图片的模型收到 OpenAI content parts |
