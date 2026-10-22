@@ -45,6 +45,20 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // ---- 总览和事件 ----
 
+// restart 重启网关。先检查配置；配置加载不了时返回 400，网关保持运行。
+func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SID string `json:"sid"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	err := s.app.RequestRestart(app.RestartRequest{By: "web:local", SID: body.SID, Channel: "web", Chat: "local"})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 type modelInfo struct {
 	Provider      string   `json:"provider"`
 	Model         string   `json:"model"`
@@ -61,6 +75,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"gateway": map[string]any{"started": snap.Started, "kernel_listen": cfg.Kernel.Listen, "web_listen": cfg.Web.Listen,
 			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
+		"runtime":    s.app.Status(),
 		"kernels":    snap.Kernels,
 		"model":      defaultModelInfo(s, cfg),
 		"channels":   s.app.Channels(),

@@ -240,4 +240,8 @@ func (a *App) cliConnected() {
 	info := a.sessionInfo(sid)
 	a.introduce(ep, sid, fmt.Sprintf("已连上网关。这个终端接在会话「%s」上（%d 条消息）。/help 查看命令，/session 切换会话，Ctrl-D 退出。",
 		info.Title, info.Messages))
+	if a.pendingRestart != "" {
+		a.tell(sid, ep, a.pendingRestart)
+		a.pendingRestart = ""
+	}
 }

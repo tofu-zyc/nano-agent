@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-22，网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -29,7 +29,7 @@ kernel/                C 内核和执行器
   src/sandbox_win.c    Windows 上沙箱为空（landlock=0，走无沙箱规则）
   tests/               test_core.c（状态机）、test_exec.py（执行器）、test_exec_win.py（Windows 执行器，WSL interop）、test_host.py（假网关驱动真内核，含多工作目录、代执行）
 gateway/               Go 网关
-  cmd/nano-gateway     入口；chat.go 是 `nano-gateway chat` 终端客户端；localkernel.go 启动和看着本机内核
+  cmd/nano-gateway     入口；chat.go 是 `nano-gateway chat` 终端客户端；command.go 是 status/start/stop/restart/logs/url/doctor；service.go 后台看护进程和 pid；restart.go 重启 marker；localkernel.go 启动和看着本机内核
   internal/app         调度：会话、窗口（endpoints）、命令、补聊天记录（recap）
     workspaces.go      工作目录列表（data/workspaces.json）、旧设置迁移、/dir
     nodes.go           内核和机器、route()：这一轮由哪个内核跑、每个挂载的工作目录怎么执行、hostFor()
@@ -52,7 +52,9 @@ gateway/               Go 网关
   internal/llm         OpenAI 兼容接口（流式）、mock
   internal/models      模型列表：接口、模型、默认模型（data/models.json，0600，API key 加密）
   internal/media       图片存储（data/uploads，按内容哈希去重，权限 0600）
-  internal/config      配置：gateway.toml + data/config.json（网页改的，密钥字段加密），schema 驱动设置页
+  internal/config      配置：gateway.toml + data/config.json（网页改的，密钥字段加密），schema 驱动设置页；Check() 给重启前严格校验
+  internal/control     本机控制 socket（run/control.sock，0600）：status 查询
+  internal/version     编译时版本号（make 用 -ldflags 写入）
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
 scripts/               install-gateway.sh（安装到用户目录，支持源码和离线包）、install-kernel.sh（Linux/macOS 内核安装，离线包优先，make installer 打成单文件）、install-kernel.ps1（Windows 离线安装）、run-local.sh（make run）、e2e.sh、e2e-win.py（Windows 内核端到端）、test-install-linux.py / test-install-win.py（离线安装测试）、zipdir.py、fetch-zig.sh、fetch-rg.sh
@@ -93,6 +95,18 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
 - 本机是 Fedora 43（WSL），glibc 2.42，**不能静态链接**（没装 glibc-static），所以 `nano-exec-static` 不会生成。
+
+## 网关查看和控制（2026-10-22）
+
+- `nano-gateway` 子命令：`chat`、`status`、`start`、`stop`、`restart`、`logs [-f] [-n N]`、`url`、`doctor`、`version`；不带子命令仍然前台运行。`status` 通过 `run/control.sock`（0600，只允许同用户）查询正在运行的网关，CLI 渠道关掉也能用；协议是请求 `{"op":"status"}`、响应 `{"ok":true,"status":...}`。
+- 终端/网页/聊天的重启都先过 `config.Check(path)`：按启动顺序重新读 `gateway.toml`、`data/config.json`（含解密）并完整校验；坏配置直接报错，不写 marker、不停网关。成功后写 `data/restart.json`（0600，含发起人 SID/渠道/时间），主循环收到 `restartCh` 后优雅退出并 `syscall.Exec` 自己；新进程启动后读 marker，删除并给发起会话回“网关已重启（用时 N 秒）”。终端客户端会自动重连，CLI 没连上时消息先放在 App 里，等终端重新连上再发。
+- 后台模式：`start` 起一个 `supervise` 看护进程（`run/gateway.supervisor.pid`），看护进程起子进程（`run/gateway.pid`），异常退出 3 秒后拉起；`stop` 给看护进程 SIGTERM，由它转发给子进程。self-reexec 的 pid 不变，不会被当成异常退出。有 systemd unit（`NANO_GATEWAY_MODE=systemd`）时 start/stop/restart 走 `systemctl --user`，没有 unit 才用后台模式；旧 `nano-gateway-ctl` 已从安装脚本移除并在升级/卸载时清理。
+- 网页：`GET /api/overview` 带 `runtime`（版本/启动时间/运行时长/运行方式/待重启数/最近错误），设置页待重启横幅有“重启网关”按钮，重启时显示“重启中”并轮询重连；`POST /api/restart` 先检查配置，失败 400。登录令牌持久化在 `data/web.sessions`（0600），网关重启后网页不用重新登录。
+- 聊天：管理员 `/status`（版本、运行时长、运行方式、内核、默认模型、最近错误）和 `/restart`（不再额外弹审批；聊天命令本身已有管理员判断）；`/help` 自动列出。
+- AI：`Gateway {"what":"logs","lines":N}` 返回最近 N 行脱敏日志（默认 50，最多 500，用 `knownSecrets` 打星）；`GatewayAdmin {"action":"restart"}` 走审批后重启。
+- `doctor` 检查配置（严格）、`secret.key`/数据目录权限、网页/内核/电脑接入端口、本机执行器和内核（有 `VERSION` 文件时比版本）、systemd enabled/linger 或后台 pid、WSL 保活；有 `[问题]` 时退出码 1。
+- WSL 保活：Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 返回“拒绝访问”（即使是当前用户 ONLOGON 任务），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
+- 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway logs 脱敏、GatewayAdmin restart 的测试。
 
 ## 已经完成的（按提交）
 

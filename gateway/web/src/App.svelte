@@ -66,6 +66,9 @@
   {#if store.palette}
     <Palette />
   {/if}
+  {#if store.restarting}
+    <div class="restarting"><div class="orb small"></div><div>网关正在重启，页面会自动重连…</div></div>
+  {/if}
   <Toasts />
 {:else}
   <div class="boot">
@@ -106,5 +109,26 @@
     border: 3px solid var(--accent);
     border-top-color: transparent;
     animation: spin 0.9s linear infinite;
+  }
+  .orb.small {
+    width: 18px;
+    height: 18px;
+    border-width: 2px;
+  }
+  .restarting {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel-solid);
+    color: var(--muted);
+    font-size: 13px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   }
 </style>

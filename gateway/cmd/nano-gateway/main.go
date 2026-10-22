@@ -15,10 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/control"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
@@ -29,6 +31,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/secret"
 	"nano-agent/gateway/internal/session"
+	"nano-agent/gateway/internal/version"
 	"nano-agent/gateway/internal/web"
 )
 
@@ -40,8 +43,35 @@ func newClient(c config.LLM) (llm.Client, error) {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "chat" {
-		os.Exit(runChat(os.Args[2:]))
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+		switch arg {
+		case "chat":
+			os.Exit(runChat(os.Args[2:]))
+		case "status":
+			os.Exit(runStatus(os.Args[2:]))
+		case "start":
+			os.Exit(runStart(os.Args[2:]))
+		case "stop":
+			os.Exit(runStop(os.Args[2:]))
+		case "restart":
+			os.Exit(runRestart(os.Args[2:]))
+		case "logs":
+			os.Exit(runLogs(os.Args[2:]))
+		case "url":
+			os.Exit(runURL(os.Args[2:]))
+		case "doctor":
+			os.Exit(runDoctor(os.Args[2:]))
+		case "version":
+			os.Exit(runVersion())
+		case "supervise":
+			os.Exit(runSupervisor(os.Args[2:]))
+		}
+		if !strings.HasPrefix(arg, "-") {
+			fmt.Fprintf(os.Stderr, "不认识的子命令：%s\n", arg)
+			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|chat")
+			os.Exit(2)
+		}
 	}
 	cfgPath := flag.String("c", "", "配置文件路径（默认 $NANO_HOME/gateway.toml）")
 	verbose := flag.Bool("v", false, "输出调试日志")
@@ -84,11 +114,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	restartCh := make(chan app.RestartRequest, 1)
 
 	personas := persona.New(cfg.Persona.Dir, log)
 	// 模型全部在网页的模型节点里配置；没有模型时网关照样启动，聊天会提示去添加。
 	// 旧版 [llm] 里的模型会在 models.Open 时一次性导入成普通模型。
 	a := app.New(ctx, cfg, nil, store, personas, log)
+	a.SetConfigStore(conf)
+	a.SetRuntime(version.Version, runtimeMode(), "")
+	a.SetRestarter(func(req app.RestartRequest) error {
+		return requestRestart(*cfgPath, cfg.Session.DataDir, req, restartCh)
+	})
+	go func() {
+		if err := control.Serve(ctx, control.Socket(cfg.Session.DataDir), func() any { return a.Status() }, log); err != nil {
+			log.Warn("控制 socket 用不了", "err", err)
+		}
+	}()
 	modelStore, err := models.Open(cfg.Session.DataDir, cfg)
 	if err != nil {
 		log.Error("读取模型列表失败", "err", err)
@@ -155,6 +196,7 @@ func main() {
 		}()
 		url := ws.LoginURL(cfg.Web.Listen)
 		public := publicURL(url)
+		a.SetRuntime(version.Version, runtimeMode(), public)
 		log.Info("网页管理界面", "url", public)
 		fmt.Printf("网页管理界面：%s\n", public)
 		if err := writePrivate(filepath.Join(cfg.Session.DataDir, "web.url"), url+"\n"); err != nil {
@@ -177,6 +219,9 @@ func main() {
 		}
 	})
 	a.ReconcileChannels(cfg)
+	if req, elapsed, ok := readRestartMarker(cfg.Session.DataDir); ok {
+		a.RestartDone(req, elapsed)
+	}
 
 	names := []string{}
 	for _, c := range a.Channels() {
@@ -190,13 +235,28 @@ func main() {
 		fmt.Printf("终端聊天：另开一个终端运行 make chat（或 %s chat -c %s）\n", os.Args[0], *cfgPath)
 	}
 
-	<-ctx.Done()
+	restarting := false
+	var restartReq app.RestartRequest
+	select {
+	case <-ctx.Done():
+	case restartReq = <-restartCh:
+		restarting = true
+		log.Info("重启网关", "by", restartReq.By, "sid", restartReq.SID)
+		time.Sleep(300 * time.Millisecond)
+		stop()
+	}
 	log.Info("退出")
 	if kernelDone != nil {
 		<-kernelDone
 	}
 	if p, ok := strings.CutPrefix(cfg.Kernel.Listen, "unix:"); ok {
 		os.Remove(p)
+	}
+	if restarting {
+		if err := reexec(os.Args); err != nil {
+			log.Error("重启失败", "err", err)
+			os.Exit(1)
+		}
 	}
 }
 

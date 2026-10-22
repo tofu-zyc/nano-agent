@@ -87,6 +87,13 @@ func (c *CLI) OnConnect(f func()) {
 	c.mu.Unlock()
 }
 
+// Connected 表示现在有终端连着。
+func (c *CLI) Connected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil
+}
+
 // SetDisplay 修改显示选项（网页里改了配置时调用）。
 func (c *CLI) SetDisplay(showReasoning, showUsage bool) {
 	c.mu.Lock()

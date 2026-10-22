@@ -111,8 +111,22 @@ export type Totals = {
   reasoning_tokens: number;
 };
 
+export type RuntimeStatus = {
+  running: boolean;
+  pid: number;
+  version: string;
+  started: number;
+  uptime_ms: number;
+  mode: string;
+  web_url?: string;
+  kernel_listen: string;
+  pending_restart: number;
+  recent_errors?: string[];
+};
+
 export type Overview = {
   gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string };
+  runtime?: RuntimeStatus;
   kernels: KernelInfo[];
   model: {
     provider: string;

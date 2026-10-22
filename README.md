@@ -49,6 +49,25 @@ bot> 结果是 1、4、9、16、25。
 
 日志在 `data/kernel.log` 和 `data/gateway.log`（权限 0600），另开一个终端 `tail -f data/*.log` 能看到每次模型调用和工具执行。
 
+### 查看和控制网关
+
+`nano-gateway` 自己带一套管理命令，终端、网页和聊天里都能用：
+
+```sh
+nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置和最近错误
+nano-gateway start               # 启动（有 systemd 用服务，没有用后台进程并看护）
+nano-gateway stop                # 停止
+nano-gateway restart             # 先检查配置，再停止/启动；配置坏了会拒绝，网关保持运行
+nano-gateway logs -f -n 100      # 看日志，-f 跟着滚
+nano-gateway url                 # 打印带密码的网页登录链接
+nano-gateway doctor              # 检查配置、密钥和目录权限、端口、执行器/内核、服务、WSL 保活
+nano-gateway version             # 编译时写进去的版本号
+```
+
+聊天里管理员可以用 `/status` 和 `/restart`；网页设置顶部在改动了需要重启的配置时会出现“重启网关”按钮，重启期间页面显示“重启中”并自动重连；AI 可以在管理员会话里用 `Gateway {"what":"logs"}` 看脱敏日志，用 `GatewayAdmin {"action":"restart"}` 重启（要审批）。重启会先重新加载 `gateway.toml` 和 `data/config.json`，加载失败不会停掉正在运行的网关；成功后会给发起的会话回一句“网关已重启”。
+
+后台进程模式有一个看护进程，网关异常退出（包括被 `kill -9`）后几秒会重新拉起；主动 `stop` 或自重启不会触发它。WSL 关掉所有终端后 Windows 可能停掉发行版，`nano-gateway doctor` 会提示用 Windows 启动文件夹里的隐藏 VBS 保活（安装脚本在 WSL 里会询问，`--wsl-keepalive` 可直接设置；不需要管理员权限，也不改 `.wslconfig`）。
+
 想让它默认写文件、执行命令，先给它挂一个工作目录（网页里点对话顶部的“未挂目录”挂也行，可以同时挂好几个）：
 
 ```
@@ -82,7 +101,7 @@ make install
 - `secret.key`：第一次启动时生成的加密密钥（0600）
 - `run/`：unix socket 和 SSH 控制 socket
 
-安装脚本会问要不要把 `~/.nano-agent/bin` 加进 PATH；有 systemd 时注册用户服务（挂了自动重启），没有就用 `nano-gateway-ctl start|stop|status|log` 在后台跑。源码目录、项目目录和网关自己的文件是分开的，源码目录本身也可以设为工作目录；只有 `~/.nano-agent` 自己不能当工作目录。
+安装脚本会问要不要把 `~/.nano-agent/bin` 加进 PATH；有 systemd 时注册用户服务（挂了自动重启），没有就用 `nano-gateway start|stop|status|logs` 在后台跑（旧的 `nano-gateway-ctl` 会被清理）。源码目录、项目目录和网关自己的文件是分开的，源码目录本身也可以设为工作目录；只有 `~/.nano-agent` 自己不能当工作目录。
 
 想自己管本机的内核（比如调试内核）：在 `gateway.toml` 里设 `[kernel] local = false`，再照 `kernel.example.conf` 写一个 `kernel.conf` 手动启动：
 
@@ -203,10 +222,10 @@ description: 处理某类任务时使用的操作步骤
 
 管理员会话有两个网关工具，不用守着网页：
 
-- `Gateway`：查询网关状态、内核和机器、模型和接口（只有 `has_key`）、SSH 连接（只有 `has_password`）、工作目录、电脑配对、`~/.ssh/config` 里的别名。不审批。
-- `GatewayAdmin`：添加/修改/删除模型接口和模型、从接口拉模型列表、设默认/测试/切换本会话模型；保存/删除/连接/断开 SSH，`ssh_setup` 一步保存、连接、等在线并可添加挂载工作目录；添加/删除/挂载工作目录；允许/拒绝/移除电脑配对。**每次修改都要审批，auto 模式也一样**，审批卡片标题带“提权”，密码和 key 打星。
+- `Gateway`：查询网关状态、内核和机器、模型和接口（只有 `has_key`）、SSH 连接（只有 `has_password`）、工作目录、电脑配对、`~/.ssh/config` 里的别名，或最近几行脱敏日志（`{"what":"logs","lines":50}`）。不审批。
+- `GatewayAdmin`：添加/修改/删除模型接口和模型、从接口拉模型列表、设默认/测试/切换本会话模型；保存/删除/连接/断开 SSH，`ssh_setup` 一步保存、连接、等在线并可添加挂载工作目录；添加/删除/挂载工作目录；允许/拒绝/移除电脑配对；`restart` 检查配置后重启网关。**每次修改都要审批，auto 模式也一样**，审批卡片标题带“提权”，密码和 key 打星。
 
-它直接调用网页接口背后的函数，改完立即生效，不用重启网关。监听地址、网页密码、渠道 token、内核口令这类要重启的配置不开放给 AI。密钥可以就在聊天里给，落盘走上面的加密，工具结果和审计日志不回显。仓库里带了 `device-connections` 和 `model-setup` 两个技能，教模型先查清楚再动手。
+它直接调用网页接口背后的函数，改完立即生效，不用重启网关（`restart` 除外）。监听地址、网页密码、渠道 token、内核口令这类要重启的配置不开放给 AI。密钥可以就在聊天里给，落盘走上面的加密，工具结果和审计日志不回显。仓库里带了 `device-connections` 和 `model-setup` 两个技能，教模型先查清楚再动手。
 
 ## 管理员
 
@@ -394,6 +413,7 @@ make test
 - `gateway/...`：Go 单元测试，`internal/app` 里用假内核走真实 socket 测调度逻辑（`-race`）；`internal/host` 用假的 ssh 测部署、执行、断线和现编，有 `sshd` 时再起一个临时的真 OpenSSH 服务器测一遍。
 - `gateway/internal/web`：网页接口的测试（登录、防跨站请求、Host 检查、改配置、事件流）。
 - `scripts/e2e.sh`：真实的内核、执行器和网关一起跑，模型用 mock，不花钱；包括网关通过（假的）SSH 在服务器目录里执行工具。
+- `scripts/e2e-control.py`：临时 `NANO_HOME`、后台进程模式和 mock 模型，测 `version/start/status/logs/url/restart/stop`、聊天 `/status` `/restart`（含坏配置拒绝重启、重启后回话）、网页重启后登录仍有效、看护进程在 `kill -9` 后拉起，共 12 项；不碰真实 `~/.nano-agent`、仓库里的 `gateway.toml`/`data/` 和真实的 `nano-gateway.service`。
 
 前端代码在 `gateway/web/`（Svelte + Vite），构建结果放在 `gateway/internal/web/dist/` 并提交在仓库里，编译网关只需要 Go。改了前端之后运行 `make web` 重新构建（需要 Node 20 以上）。
 
@@ -427,7 +447,7 @@ gateway/           Go 网关
   internal/events    事件总线（网页实时显示用）
   web/               网页界面的前端源码（Svelte）
 personas/          人格文件
-scripts/           install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装脚本）、run-local.sh、e2e.sh
+scripts/           install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装脚本）、run-local.sh、e2e.sh、e2e-control.py
 docs/ARCHITECTURE.md  机器、工作目录、两种执行模式
 docs/protocol.md   内核 ⇄ 网关协议
 ```

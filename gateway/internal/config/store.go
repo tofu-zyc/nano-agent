@@ -73,6 +73,33 @@ func Open(path string) (*Store, []string, error) {
 	return s, warnings, nil
 }
 
+// Check 按启动时的方式重新加载配置，检查失败时返回错误。重启网关之前用它：
+// 远程重启失败等于失联，配置加载不了就不能停掉正在运行的网关。
+func Check(path string) error {
+	c, _, _, err := parseRaw(path, nil)
+	if err != nil {
+		return err
+	}
+	overlayPath := filepath.Join(c.Session.DataDir, "config.json")
+	b, err := os.ReadFile(overlayPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("读取 %s：%w", overlayPath, err)
+	}
+	if len(b) > 0 {
+		var ov map[string]any
+		if err := json.Unmarshal(b, &ov); err != nil {
+			return fmt.Errorf("%s 不是合法的 JSON：%w", overlayPath, err)
+		}
+		if err := decryptOverlay(ov); err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(ov)
+		_, _, _, err = parse(path, raw)
+		return err
+	}
+	return c.validate()
+}
+
 func (s *Store) build(ov map[string]any) (*Config, toml.MetaData, []string, error) {
 	var b []byte
 	if len(ov) > 0 {

@@ -45,6 +45,8 @@ var Commands = []Command{
 	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
 	{Name: "dir", Args: "[编号 | -编号 | add 机器:路径 | none]", Desc: "查看、挂载、取下工作目录（可以同时挂好几个，在不同的机器上）", Admin: true},
 	{Name: "node", Desc: "查看机器和在线的内核"},
+	{Name: "status", Desc: "查看网关状态：版本、运行时长、内核、渠道、待重启设置", Admin: true},
+	{Name: "restart", Desc: "检查配置后重启网关", Admin: true},
 	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
@@ -82,6 +84,13 @@ type App struct {
 	log     *slog.Logger
 	bus     *events.Bus
 	started time.Time
+
+	version        string
+	mode           string
+	webURL         string
+	confStore      *config.Store
+	restarter      func(RestartRequest) error
+	pendingRestart string
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
 	chMu  sync.Mutex
@@ -384,6 +393,23 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "node":
 		a.cmdNode(c, arg)
+		return
+	case "status":
+		if !a.isAdmin(c.who) {
+			a.answer(c, "只有管理员能查看网关状态")
+			return
+		}
+		a.answer(c, a.statusBriefLocked())
+		return
+	case "restart":
+		if !a.isAdmin(c.who) {
+			a.answer(c, "只有管理员能重启网关")
+			return
+		}
+		req := RestartRequest{By: c.who, SID: c.s.sid, Channel: c.ep.ch, Chat: c.ep.chat, At: time.Now().UnixMilli()}
+		if err := a.restartLocked(req); err != nil {
+			a.answer(c, "没有重启："+err.Error())
+		}
 		return
 	case "stop":
 		a.stop(c)

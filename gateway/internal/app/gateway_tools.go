@@ -24,8 +24,9 @@ import (
 const gatewaySchema = `{
   "type":"object",
   "properties":{
-    "what":{"type":"string","enum":["status","models","ssh","workspaces","pairing","ssh_config"],
-      "description":"要查什么：网关状态、模型接口、SSH 连接、工作目录、电脑配对，或 ~/.ssh/config 里的别名"}
+    "what":{"type":"string","enum":["status","models","ssh","workspaces","pairing","ssh_config","logs"],
+      "description":"要查什么：网关状态、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名，或网关日志"},
+    "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500"}
   }
 }`
 
@@ -36,7 +37,7 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove"
+      "pair_allow","pair_deny","pair_remove","restart"
     ],"description":"要做什么"},
     "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
@@ -77,7 +78,8 @@ func (a *App) gatewayTools() []proto.ToolSpec {
 // gatewayQuery 执行 Gateway 查询。在独立 goroutine 里跑，不持有 App 锁。
 func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 	var args struct {
-		What string `json:"what"`
+		What  string `json:"what"`
+		Lines int    `json:"lines"`
 	}
 	json.Unmarshal([]byte(raw), &args)
 	if args.What == "" {
@@ -95,6 +97,15 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 		}
 		out = map[string]any{"kernels": snap.Kernels, "machines": snap.Machines, "workspaces": snap.Workspaces,
 			"default_model": def, "channels": a.Channels()}
+	case "logs":
+		n := args.Lines
+		if n <= 0 {
+			n = 50
+		}
+		if n > 500 {
+			n = 500
+		}
+		out = map[string]any{"lines": logTail(a.cfg.Session.DataDir, n, a.knownSecrets())}
 	case "models":
 		st := a.ModelStore()
 		if st == nil {
@@ -185,6 +196,7 @@ type gatewayArgs struct {
 	BaseURL, APIKey, Proxy, Kind, Endpoint, Model, Label, Thinking, Path string
 	ThinkingLevels, Modalities                                           []string
 	What                                                                 string
+	Lines                                                                int
 }
 
 func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
@@ -402,6 +414,11 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 			return "", err
 		}
 		return "已移除配对：" + args.Node, nil
+	case "restart":
+		if err := a.RequestRestart(RestartRequest{By: "gateway-admin", SID: sid}); err != nil {
+			return "", err
+		}
+		return "网关正在重启…", nil
 	}
 	return "", fmt.Errorf("不认识的 action %q", args.Action)
 }

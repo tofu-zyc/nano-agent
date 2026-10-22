@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
-  import { num, pct } from '../lib/format';
+  import { num, pct, since } from '../lib/format';
   import Icon from './Icon.svelte';
 
   const titles: Record<string, string> = { topology: '拓扑', sessions: '会话', personas: '人格', settings: '设置', devices:'设备与服务器' };
@@ -43,6 +43,13 @@
       缓存 {pct(t.cached_tokens, t.prompt_tokens)}
       <span class="muted">· {num(t.prompt_tokens)} tokens</span>
     </button>
+    {#if ov.runtime}
+      <button class="pill" onclick={() => store.go('#/settings')} title="网关版本和运行时长；点开设置查看详情">
+        <Icon name="hub" size={14} />
+        v{ov.runtime.version}
+        <span class="muted">· {since(ov.runtime.started)}</span>
+      </button>
+    {/if}
   </div>
 </header>
 

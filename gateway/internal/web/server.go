@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -46,13 +47,14 @@ type Server struct {
 	log     *slog.Logger
 	newLLM  func(config.LLM) (llm.Client, error)
 
-	mu        sync.Mutex
-	password  string
-	sessions  map[string]time.Time // 登录令牌 → 过期时间
-	loopback  bool                 // 只监听本机：要检查 Host 头
-	regCancel context.CancelFunc   // 进行中的飞书扫码注册
-	devices   *host.Manager
-	media     *media.Store // 网页上传的图片
+	mu           sync.Mutex
+	password     string
+	sessions     map[string]time.Time // 登录令牌 → 过期时间
+	sessionsPath string
+	loopback     bool               // 只监听本机：要检查 Host 头
+	regCancel    context.CancelFunc // 进行中的飞书扫码注册
+	devices      *host.Manager
+	media        *media.Store // 网页上传的图片
 }
 
 func (s *Server) SetDevices(m *host.Manager) { s.devices = m }
@@ -62,11 +64,47 @@ func (s *Server) SetMedia(m *media.Store) { s.media = m }
 
 // New 创建网页服务。密码来自 web.password，没配置就用数据目录里的 web.secret（没有就生成一个）。
 func New(a *app.App, conf *config.Store, p *persona.Loader, newLLM func(config.LLM) (llm.Client, error), log *slog.Logger) (*Server, error) {
-	s := &Server{app: a, conf: conf, persona: p, log: log, newLLM: newLLM, sessions: map[string]time.Time{}}
+	s := &Server{app: a, conf: conf, persona: p, log: log, newLLM: newLLM, sessions: map[string]time.Time{},
+		sessionsPath: filepath.Join(conf.Current().Session.DataDir, "web.sessions")}
 	if err := s.loadPassword(conf.Current()); err != nil {
 		return nil, err
 	}
+	s.loadSessions()
 	return s, nil
+}
+
+// 登录令牌存到 data/web.sessions（0600），网关重启后网页不用重新登录。
+func (s *Server) loadSessions() {
+	b, err := os.ReadFile(s.sessionsPath)
+	if err != nil {
+		return
+	}
+	var disk map[string]int64
+	if json.Unmarshal(b, &disk) != nil {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, ms := range disk {
+		if exp := time.UnixMilli(ms); exp.After(now) {
+			s.sessions[token] = exp
+		}
+	}
+}
+
+func (s *Server) saveSessionsLocked() {
+	disk := map[string]int64{}
+	for t, exp := range s.sessions {
+		disk[t] = exp.UnixMilli()
+	}
+	b, _ := json.Marshal(disk)
+	_ = os.MkdirAll(filepath.Dir(s.sessionsPath), 0o700)
+	tmp := s.sessionsPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, s.sessionsPath)
 }
 
 func (s *Server) loadPassword(cfg *config.Config) error {
@@ -118,6 +156,7 @@ func (s *Server) ConfigChanged(old, cur *config.Config) {
 	}
 	s.mu.Lock()
 	s.sessions = map[string]time.Time{}
+	s.saveSessionsLocked()
 	s.mu.Unlock()
 }
 
@@ -125,6 +164,7 @@ func (s *Server) ConfigChanged(old, cur *config.Config) {
 func (s *Server) LoginURL(addr string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	addr = strings.TrimPrefix(addr, "tcp:")
 	host := addr
 	if h, p, err := net.SplitHostPort(addr); err == nil && (h == "" || h == "0.0.0.0" || h == "::") {
 		host = net.JoinHostPort("127.0.0.1", p)
@@ -134,6 +174,7 @@ func (s *Server) LoginURL(addr string) string {
 
 // Serve 监听 addr，直到 ctx 结束。
 func (s *Server) Serve(ctx context.Context, addr string) error {
+	addr = strings.TrimPrefix(addr, "tcp:")
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -172,6 +213,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.auth(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]bool{"ok": true}) }))
 	mux.HandleFunc("GET /api/overview", s.auth(s.overview))
+	mux.HandleFunc("POST /api/restart", s.auth(s.restart))
 	mux.HandleFunc("GET /api/devices", s.auth(s.getDevices))
 	mux.HandleFunc("POST /api/devices", s.auth(s.saveDevice))
 	mux.HandleFunc("PUT /api/devices/listener", s.auth(s.deviceListener))
@@ -286,6 +328,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.sessions[token] = now.Add(sessionTTL)
+	s.saveSessionsLocked()
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds()), Secure: r.TLS != nil})
@@ -296,6 +339,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		s.mu.Lock()
 		delete(s.sessions, c.Value)
+		s.saveSessionsLocked()
 		s.mu.Unlock()
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})

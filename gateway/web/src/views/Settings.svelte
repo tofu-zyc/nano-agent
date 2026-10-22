@@ -77,7 +77,14 @@
     </div>
 
     {#if pending}
-      <div class="banner"><Icon name="refresh" size={14} />有 {pending} 项改动要重启网关才生效（重启时用同一个配置文件即可，网页里的修改会保留）。</div>
+      <div class="banner"><Icon name="refresh" size={14} />有 {pending} 项改动要重启网关才生效（重启时用同一个配置文件即可，网页里的修改会保留）。
+        <button class="btn sm" disabled={store.restarting} onclick={() => store.restartGateway()}>
+          <Icon name="refresh" size={13} />{store.restarting ? '重启中…' : '重启网关'}
+        </button>
+      </div>
+    {/if}
+    {#if store.restarting}
+      <div class="banner restarting"><Icon name="refresh" size={14} />网关正在重启，页面会自动重连…</div>
     {/if}
 
     <div class="scroll">

@@ -41,11 +41,13 @@ PROFILE_START="# nano-agent gateway"
 MIGRATE=0
 YES=0
 UNINSTALL=0
+WSL_KEEPALIVE=0
 for a in "$@"; do
   case "$a" in
   --migrate) MIGRATE=1 ;;
   --yes) YES=1 ;;
   --uninstall) UNINSTALL=1 ;;
+  --wsl-keepalive) WSL_KEEPALIVE=1 ;;
   *) echo "不认识的选项：$a"; exit 2 ;;
   esac
 done
@@ -65,8 +67,46 @@ has_systemd() {
     systemctl --user show-environment >/dev/null 2>&1
 }
 
+# ---- WSL 保活：在 Windows 启动文件夹放一个隐藏的 VBS，登录后让 wsl.exe 启动网关并留一个 sleep ----
+# 启动文件夹不需要管理员权限；卸载时删除，不改 .wslconfig。
+
+wsl_startup_vbs() {
+  cmd_exe=$(command -v cmd.exe 2>/dev/null || true)
+  [ -n "$cmd_exe" ] || cmd_exe=/mnt/c/Windows/System32/cmd.exe
+  [ -x "$cmd_exe" ] || return 1
+  appdata=$(cd /mnt/c 2>/dev/null && "$cmd_exe" /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r')
+  [ -n "$appdata" ] || return 1
+  wslpath -u "$appdata\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" 2>/dev/null
+}
+
+wsl_install_keepalive() {
+  is_wsl || return 0
+  distro=${WSL_DISTRO_NAME:-}
+  [ -n "$distro" ] || { say "认不出 WSL 发行版名字，跳过保活设置"; return 0; }
+  startup=$(wsl_startup_vbs) || { say "找不到 Windows 启动文件夹，跳过保活设置"; return 0; }
+  mkdir -p "$startup"
+  vbs="$startup/nano-agent-wsl-keepalive.vbs"
+  cmd="NANO_HOME='$NANO_HOME' '$BIN/nano-gateway' start --quiet -c '$CONFIG'; exec /bin/sleep 2147483647"
+  {
+    printf 'Set sh = CreateObject("WScript.Shell")\r\n'
+    printf 'sh.Run "C:\\Windows\\System32\\wsl.exe -d %s --exec /bin/sh -c ""%s""", 0, False\r\n' "$distro" "$cmd"
+  } >"$vbs"
+  say "已设置 WSL 保活：$vbs"
+}
+
+wsl_remove_keepalive() {
+  is_wsl || return 0
+  startup=$(wsl_startup_vbs) || return 0
+  rm -f "$startup/nano-agent-wsl-keepalive.vbs"
+}
+
+is_wsl() {
+  grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
+}
+
 # ---- 卸载 ----
 if [ "$UNINSTALL" = 1 ]; then
+  wsl_remove_keepalive
   if [ -f "$UNIT_DIR/$UNIT" ]; then
     has_systemd && systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
     has_systemd && systemctl --user disable "$UNIT" >/dev/null 2>&1 || true
@@ -99,6 +139,12 @@ install -d -m700 "$NANO_HOME/run"
 install -m755 "$GW" "$BIN/nano-gateway"
 install -m755 "$KERNEL" "$LIB/nano-kernel"
 install -m755 "$EXEC" "$LIB/nano-exec"
+if [ -f "$ROOT/VERSION" ]; then
+  install -m644 "$ROOT/VERSION" "$LIB/VERSION"
+elif [ -d "$ROOT/.git" ]; then
+  (cd "$ROOT" && git describe --always --dirty 2>/dev/null) >"$LIB/VERSION" || echo dev >"$LIB/VERSION"
+fi
+rm -f "$BIN/nano-gateway-ctl"
 for f in nano-exec-static nano-exec-src.tar.gz; do
   [ -f "$LIBDIR/$f" ] && install -m755 "$LIBDIR/$f" "$LIB/$f"
 done
@@ -164,6 +210,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$NANO_HOME
 Environment=NANO_HOME=$NANO_HOME
+Environment=NANO_GATEWAY_MODE=systemd
 ExecStart=$BIN/nano-gateway -c $CONFIG
 Restart=always
 RestartSec=3
@@ -183,42 +230,21 @@ EOF
   fi
 else
   step "没有 systemd，用后台进程运行"
-  cat >"$BIN/nano-gateway-ctl" <<'CTL'
-#!/bin/sh
-umask 077
-# nano-agent 网关：nano-gateway-ctl start|stop|restart|status|log
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PID="$ROOT/run/gateway.pid"
-running() {
-  p=$(cat "$PID" 2>/dev/null) || return 1
-  [ -n "$p" ] && kill -0 "$p" 2>/dev/null &&
-    case "$(readlink "/proc/$p/exe" 2>/dev/null)" in "$ROOT/bin/nano-gateway"*) echo "$p" ;; *) return 1 ;; esac
-}
-case "${1:-status}" in
-start)
-  running >/dev/null && { [ "${2:-}" = --quiet ] || echo "网关已经在运行"; exit 0; }
-  nohup "$ROOT/bin/nano-gateway" -c "$ROOT/gateway.toml" </dev/null >>"$ROOT/data/gateway.log" 2>&1 &
-  echo $! >"$PID"
-  [ "${2:-}" = --quiet ] || echo "网关已在后台启动，日志：$ROOT/data/gateway.log"
-  ;;
-stop)
-  if p=$(running); then kill "$p"; echo "已停止"; else echo "网关没有在运行"; fi
-  rm -f "$PID"
-  ;;
-restart) "$0" stop >/dev/null; sleep 0.3; exec "$0" start ;;
-status)
-  if p=$(running); then echo "运行中（pid $p）"; else echo "没有运行"; exit 3; fi
-  ;;
-log) exec tail -n 50 -F "$ROOT/data/gateway.log" ;;
-*) echo "用法：nano-gateway-ctl start|stop|restart|status|log"; exit 2 ;;
-esac
-CTL
-  chmod 755 "$BIN/nano-gateway-ctl"
-  "$BIN/nano-gateway-ctl" start
+  "$BIN/nano-gateway" start -c "$CONFIG"
   if ! grep -qsF "$PROFILE_START" "$HOME/.profile" 2>/dev/null; then
     if confirm "每次登录自动启动网关（写 ~/.profile）？"; then
-      printf '"%s" start --quiet  %s\n' "$BIN/nano-gateway-ctl" "$PROFILE_START" >>"$HOME/.profile"
+      printf 'NANO_HOME="%s" "%s" start --quiet -c "%s"  %s\n' "$NANO_HOME" "$BIN/nano-gateway" "$CONFIG" "$PROFILE_START" >>"$HOME/.profile"
     fi
+  fi
+fi
+
+if is_wsl; then
+  if [ "$WSL_KEEPALIVE" = 1 ]; then
+    wsl_install_keepalive
+  elif [ "$YES" = 0 ] && [ -r /dev/tty ] && confirm "设置 WSL 保活？会在 Windows 启动文件夹放一个隐藏脚本，关掉所有终端后网关也能被叫醒"; then
+    wsl_install_keepalive
+  else
+    say "提示：WSL 在关掉所有终端后可能被 Windows 停掉。需要保活时运行：$0 --wsl-keepalive"
   fi
 fi
 

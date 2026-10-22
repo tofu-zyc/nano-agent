@@ -6,7 +6,7 @@ kernel:
 	$(MAKE) -C kernel
 
 gateway: kernel
-	cd gateway && go build -o nano-gateway ./cmd/nano-gateway
+	cd gateway && go build -ldflags "-X nano-agent/gateway/internal/version.Version=$(VERSION)" -o nano-gateway ./cmd/nano-gateway
 
 # 重新构建网页界面（改了 gateway/web 下的前端代码之后；构建结果提交在仓库里，平时不需要 Node）
 web:
@@ -17,6 +17,7 @@ test: all
 	$(MAKE) -C kernel test
 	cd gateway && go test -race ./...
 	./scripts/e2e.sh
+	python3 scripts/e2e-control.py
 	@if [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  python3 scripts/e2e-win.py; \
 	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
@@ -137,7 +138,7 @@ release-gateway: $(ZIG) $(RG)/linux-x86_64
 	  goarch=$${pair%%:*}; karch=$${pair##*:}; \
 	  dir=$(RELEASE)/nano-gateway-$(VERSION)-linux-$$karch; \
 	  rm -rf $$dir; mkdir -p $$dir/lib $$dir/personas $$dir/skills; \
-	  (cd gateway && GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ../$$dir/nano-gateway ./cmd/nano-gateway); \
+	  (cd gateway && GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nano-agent/gateway/internal/version.Version=$(VERSION)" -o ../$$dir/nano-gateway ./cmd/nano-gateway); \
 	  cp kernel/build/cross/linux-$$karch/nano-kernel $$dir/lib/; \
 	  cp kernel/build/cross/linux-$$karch/nano-exec $$dir/lib/; \
 	  cp $(RG)/linux-$$karch $$dir/lib/rg; \

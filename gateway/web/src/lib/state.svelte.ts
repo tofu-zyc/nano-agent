@@ -59,6 +59,7 @@ class Store {
   historyTick = $state<Record<string, number>>({});
   personaTick = $state(0);
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
+  restarting = $state(false);
 
   private es: EventSource | null = null;
   private listeners = new Set<(e: Ev) => void>();
@@ -141,6 +142,32 @@ class Store {
 
   async refresh() {
     this.ov = await api.get<Overview>('/api/overview');
+  }
+
+  /** 重启网关。成功后页面等它回来，自动刷新；配置有问题时 API 会直接报错，网关保持运行。 */
+  async restartGateway(sid = '') {
+    this.restarting = true;
+    try {
+      await api.post('/api/restart', { sid });
+    } catch (err) {
+      this.restarting = false;
+      this.toast({ kind: 'err', text: err instanceof Error ? err.message : String(err) }, 8000);
+      return;
+    }
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        await api.get('/api/me');
+        await this.start();
+        this.restarting = false;
+        this.toast({ kind: 'ok', text: '网关已重启' }, 3000);
+        return;
+      } catch {
+        /* 还在重启 */
+      }
+    }
+    this.restarting = false;
+    location.reload();
   }
 
   async loadFields() {
