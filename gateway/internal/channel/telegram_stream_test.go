@@ -148,6 +148,9 @@ func TestTelegramStopButton(t *testing.T) {
 			next++
 			p.ID = next
 		case "editMessageText", "editMessageReplyMarkup":
+		case "answerCallbackQuery": // 点按钮后的提示，和按钮状态无关
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+			return
 		default:
 			t.Errorf("未知方法 %s", r.URL.Path)
 		}

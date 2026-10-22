@@ -58,11 +58,14 @@ def leftover(tag):
     return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
 
 
-def case(name, need_sandbox=False):
+def case(name, need_sandbox=False, linux_only=False):
     def wrap(fn):
         def go():
             if need_sandbox and not SANDBOX:
                 print(f"  skip {name}（本机没有 Landlock）")
+                return
+            if linux_only and not sys.platform.startswith("linux"):
+                print(f"  skip {name}（seccomp 只有 Linux 有）")
                 return
             t0 = time.time()
             try:
@@ -255,7 +258,7 @@ def t_sandbox_env():
     assert "sk-should-not-leak" not in c and "SECRET_TOKEN" not in c, c
 
 
-@case("沙箱：不能连 unix socket（D-Bus、systemd、docker 之类）", need_sandbox=False)
+@case("沙箱：不能连 unix socket（D-Bus、systemd、docker 之类）", linux_only=True)
 def t_sandbox_unix():
     path = os.path.join(T, "s.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -355,7 +358,7 @@ def t_elevated_write():
         assert f.read() == "x"
     os.unlink(target)
 
-@case("没有工作目录：Shell 在 HOME，能读，只能写临时目录")
+@case("没有工作目录：Shell 在 HOME，能读，只能写临时目录", need_sandbox=True)
 def t_home_mode():
     ok(run("Shell", {"command": "pwd"}, dirs=(), home=True, write=False), HOME)
     ok(run("Shell", {"command": "cat ~/.gitconfig"}, dirs=(), ro=("/",), home=True, write=False), "tester")
