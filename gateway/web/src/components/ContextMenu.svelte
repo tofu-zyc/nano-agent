@@ -3,13 +3,14 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Icon from './Icon.svelte';
 
   // 右键菜单：在 (x, y) 处弹出，点菜单项或者点别处就收起
   let { x, y, title = '', items, onclose }: { x: number; y: number; title?: string; items: MenuItem[]; onclose: () => void } = $props();
 
   let el = $state<HTMLDivElement>();
-  let pos = $state({ left: 0, top: 0 });
+  let pos = $state(untrack(() => ({ left: x, top: y })));
   $effect(() => {
     const w = el?.offsetWidth ?? 230;
     const h = el?.offsetHeight ?? 200;
@@ -20,15 +21,26 @@
   });
 
   function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape') onclose();
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault(); // 让 Esc 只关菜单，不再顺手关掉下层的设置面板
+      onclose();
+    }
   }
 </script>
 
-<svelte:window onkeydown={onkey} onblur={onclose} />
+<svelte:window onkeydown={onkey} onblur={onclose} onresize={onclose} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="back" onclick={onclose} oncontextmenu={(e) => { e.preventDefault(); onclose(); }}>
+<div
+  class="back"
+  onclick={onclose}
+  onpointerdown={(e) => e.stopPropagation()}
+  onpointerup={(e) => e.stopPropagation()}
+  onwheel={(e) => e.stopPropagation()}
+  oncontextmenu={(e) => { e.preventDefault(); onclose(); }}
+>
   <div class="menu" bind:this={el} style="left: {pos.left}px; top: {pos.top}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
     {#if title}<div class="title">{title}</div>{/if}
     {#each items as it, i (i)}

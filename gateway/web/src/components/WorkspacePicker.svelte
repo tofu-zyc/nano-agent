@@ -69,7 +69,15 @@
       store.fail(err);
     }
   }
+
+  function onkey(e: KeyboardEvent) {
+    if (e.isComposing || e.key !== 'Escape' || browsing) return; // 目录选择器盖在上面时，由它自己关
+    e.preventDefault();
+    onclose();
+  }
 </script>
+
+<svelte:window onkeydown={onkey} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->

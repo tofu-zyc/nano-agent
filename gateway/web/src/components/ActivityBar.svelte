@@ -15,7 +15,17 @@
   );
   const latest = $derived(lines[0]);
   const busy = $derived(Object.keys(store.phase).length);
+
+  function onkey(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === 'Escape' && open) {
+      e.preventDefault();
+      open = false;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onkey} />
 
 {#if open}
   <div class="panel">
@@ -38,7 +48,7 @@
   </div>
 {/if}
 
-<button class="bar" onclick={() => (open = !open)}>
+<button class="bar" aria-label="实时活动" title="实时活动" onclick={() => (open = !open)}>
   <span class="live" class:busy={busy > 0}></span>
   {#if busy}
     <span class="busy-text">{busy} 个会话正在处理</span>

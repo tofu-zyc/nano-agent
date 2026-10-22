@@ -215,6 +215,7 @@
 
   function onDown(e: PointerEvent) {
     const g = (e.target as Element).closest('.node') as SVGGElement | null;
+    swallowClick = false;
     if (g) {
       // 拖节点时不捕获指针：否则松手时的点击事件落到画布上，节点就点不开了
       const id = g.dataset.id!;
@@ -573,10 +574,16 @@
     await act(() => api.post('/api/workspaces', { host: m.name, path }), `已添加 ${m.name}:${path}`);
   }
 
+  // 画布上的浮层（按钮、统计、提示、图例）不是空白，别把它们的右键/双击当成画布操作
+  function isChrome(e: Event) {
+    return !!(e.target as Element).closest('.node, button, .hint, .legend, .tools, .stats');
+  }
+
   // 右键画布空白：新建。节点自己的右键菜单会 stopPropagation，不会走到这里。
   function openBlankMenu(ev: MouseEvent) {
     ev.preventDefault();
-    menu = { x: ev.clientX, y: ev.clientY, title: '新建', items: [
+    if (isChrome(ev)) return;
+    menu = { x: ev.clientX, y: ev.clientY, title: '画布', items: [
       { label: '新增接口（模型服务）', icon: 'plus', run: () => store.openModel('endpoint') },
       { label: '新增工作目录…', icon: 'folder', run: () => {
         const m = store.machines.find((x) => x.online);
@@ -608,7 +615,7 @@
   onpointerup={onUp}
   onpointercancel={onUp}
   onpointerleave={onUp}
-  ondblclick={(e) => !(e.target as Element).closest('.node') && fit()}
+  ondblclick={(e) => !isChrome(e) && fit()}
   oncontextmenu={openBlankMenu}
   role="application"
   aria-label="网关拓扑图"
@@ -799,7 +806,7 @@
     <span style="--c: var(--c-kernel)">机器</span>
     <i>→</i>
     <span style="--c: var(--c-dir)">工作目录</span>
-    <em>点节点查看和修改设置 · 右键节点有常用操作 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处复位</em>
+    <em>点节点查看和修改设置 · 右键节点有常用操作 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处适应窗口</em>
   </div>
 
   <div class="tools">

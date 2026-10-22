@@ -12,6 +12,8 @@
 
   const target = $derived(store.inspector!);
   const ov = $derived(store.ov!);
+  const targetKey = $derived(target.type === 'session' ? `session:${target.sid}` : JSON.stringify(target));
+  let bodyEl = $state<HTMLDivElement>();
 
   const head = $derived.by(() => {
     switch (target.type) {
@@ -63,11 +65,13 @@
   const sess = $derived(target.type === 'session' ? store.session(target.sid) : undefined);
   // 列表里还没有这个会话（比如刚新建）：去网关问一下，确实没有才说不存在
   let gone = $state<string | null>(null);
+  let goneSeq = 0;
   $effect(() => {
     if (target.type !== 'session' || sess) return;
     const sid = target.sid;
+    const seq = ++goneSeq;
     store.refreshSession(sid).then((ok) => {
-      if (!ok) gone = sid;
+      if (seq === goneSeq && !ok) gone = sid;
     });
   });
   // 其他会话上的窗口，可以改接到这个会话
@@ -166,6 +170,16 @@
   const wsSessions = $derived(ws ? (ov.sessions ?? []).filter((s) => s.workspaces.some((m) => m.id === ws.id)) : []);
   let browseOn = $state<MachineInfo | null>(null);
   let addingWs = $state(false);
+  // 切换对象：面板重新从顶部开始，也不保留上一个对象的“正在读取 / 已经删掉”状态
+  $effect(() => {
+    targetKey;
+    goneSeq++;
+    gone = null;
+    picking = false;
+    addingWs = false;
+    browseOn = null;
+    bodyEl?.scrollTo({ top: 0 });
+  });
   async function addOn(path: string) {
     const m = browseOn!;
     browseOn = null;
@@ -212,7 +226,7 @@
     <button class="btn ghost sm" onclick={() => (store.inspector = null)} aria-label="关闭"><Icon name="x" size={15} /></button>
   </header>
 
-  <div class="body">
+  <div class="body" bind:this={bodyEl}>
     {#if target.type === 'gateway'}
       {@const t = ov.totals}
       <div class="grid">
@@ -521,7 +535,7 @@
         <select class="modelpick" value={sess.model} onchange={(ev) => patchSession({ model: ev.currentTarget.value })}>
           <option value="">{sess.model_label ? `默认模型（${sess.model_label}）` : '默认模型（还没有配置）'}</option>
           {#each ov.models?.models ?? [] as m (m.id)}
-            <option value={m.id}>{m.label}{m.config ? '（配置文件）' : ''}</option>
+            <option value={m.id}>{m.label}</option>
           {/each}
         </select>
 

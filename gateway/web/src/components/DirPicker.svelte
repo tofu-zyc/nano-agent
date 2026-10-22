@@ -70,7 +70,17 @@
   function pick() {
     if (cur && !cur.blocked) onpick(toTilde(cur.path, cur.home));
   }
+
+  function onkey(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onclose();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onkey} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->

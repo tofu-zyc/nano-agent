@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, ApiError, sidPath, uploadImage } from '../lib/api';
   import { buildBlocks, type Block } from '../lib/conv';
@@ -21,6 +21,12 @@
   let scroller = $state<HTMLDivElement>();
   let stick = true;
 
+  // 每个会话各自保留没发出去的草稿：切换会话不会把文字和图片带过去
+  const drafts = new Map<string, { text: string; pics: Attachment[] }>();
+  let activeSid = untrack(() => sid);
+  let uploadGen = 0;
+  let loadSeq = 0;
+
   // ---- 图片：选好（或粘贴、拖进来）先上传，发送时只带 ID ----
   const maxPics = 4;
   const noModel = $derived((store.ov?.models?.models?.length ?? 0) === 0);
@@ -30,6 +36,7 @@
   let fileInput = $state<HTMLInputElement>();
 
   async function addFiles(files: FileList | File[]) {
+    const gen = uploadGen;
     for (const f of Array.from(files)) {
       if (!f.type.startsWith('image/')) continue;
       if (pics.length + uploading >= maxPics) {
@@ -38,11 +45,12 @@
       }
       uploading++;
       try {
-        pics = [...pics, await uploadImage(f)];
+        const pic = await uploadImage(f);
+        if (gen === uploadGen) pics = [...pics, pic]; // 上传期间切了会话：不要接到新会话里
       } catch (err) {
         store.fail(err);
       } finally {
-        uploading--;
+        if (gen === uploadGen) uploading--;
       }
     }
   }
@@ -79,11 +87,14 @@
   const eps = $derived(info?.endpoints ?? []);
 
   async function load() {
+    const gen = ++loadSeq;
+    const want = sid;
     try {
-      const r = await api.get<{ info: SessionInfo; history: Msg[]; summary: string }>(sidPath(sid));
+      const r = await api.get<{ info: SessionInfo; history: Msg[]; summary: string }>(sidPath(want));
+      if (gen !== loadSeq) return; // 已经切到别的会话，旧结果不要写进来
       let hist = r.history;
       // 这一轮还在跑：它的内容由实时事件显示，历史只取到这一轮开始之前，免得重复
-      if (r.info.running && (store.live[sid] ?? []).some((x) => x.kind === 'user')) {
+      if (r.info.running && (store.live[want] ?? []).some((x) => x.kind === 'user')) {
         const lastUser = hist.map((m) => m.role).lastIndexOf('user');
         if (lastUser >= 0) hist = hist.slice(0, lastUser);
       }
@@ -91,21 +102,39 @@
       summary = r.summary;
       missing = false;
       store.upsertSession(r.info);
-      if (!r.info.running) delete store.live[sid];
+      if (!r.info.running) delete store.live[want];
     } catch (err) {
+      if (gen !== loadSeq) return;
       if (err instanceof ApiError && err.status === 404) missing = true;
       else store.fail(err);
     } finally {
-      loading = false;
-      await tick();
-      toBottom(true);
+      if (gen === loadSeq) {
+        loading = false;
+        await tick();
+        toBottom(true);
+      }
     }
   }
+
+  // 切换会话：先把当前草稿存回上一个会话，再恢复这个会话的草稿
+  $effect(() => {
+    const next = sid;
+    if (next === activeSid) return;
+    drafts.set(activeSid, untrack(() => ({ text, pics })));
+    const d = drafts.get(next);
+    text = d?.text ?? '';
+    pics = d?.pics ?? [];
+    uploading = 0;
+    sending = false;
+    uploadGen++;
+    activeSid = next;
+  });
 
   $effect(() => {
     sid;
     loading = true;
     blocks = [];
+    missing = false;
     stick = true;
     load();
   });
@@ -143,9 +172,11 @@
       return;
     }
     if ((!msg && !pics.length) || sending || uploading > 0) return;
+    const forSid = sid;
     sending = true;
     try {
-      await api.post('/api/chat', { sid, text: msg, images: pics.map((p) => ({ id: p.id, name: p.name })) });
+      await api.post('/api/chat', { sid: forSid, text: msg, images: pics.map((p) => ({ id: p.id, name: p.name })) });
+      if (forSid !== sid) return; // 发送期间切了会话：不要清掉新会话的草稿
       text = '';
       pics = [];
       stick = true;
@@ -196,6 +227,7 @@
         return;
       }
       if (e.key === 'Escape') {
+        e.preventDefault();
         menuHidden = true;
         return;
       }
@@ -215,6 +247,10 @@
   }
   // 挂载、取下工作目录：直接在对话头部操作，不用先打开会话设置
   let picking = $state(false);
+  $effect(() => {
+    sid;
+    picking = false;
+  });
   async function mountWorkspaces(ids: string[]) {
     try {
       store.upsertSession(await api.patch<SessionInfo>(sidPath(sid), { workspaces: ids }));

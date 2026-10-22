@@ -44,10 +44,21 @@
       { id: 'v:personas', icon: 'persona', title: '人格', sub: '编辑系统提示词', kind: '页面', text: '人格 系统提示词 persona prompt', run: go('#/personas') },
       { id: 'v:settings', icon: 'sliders', title: '全部设置', sub: '按对象分组的所有配置项', kind: '页面', text: '设置 配置 settings config', run: go('#/settings') },
       {
-        id: 'a:test', icon: 'zap', title: '测试模型连接', sub: '发一个很小的请求，看通不通、多快', kind: '操作', text: '测试 模型 连接 test model ping',
-        run: () => {
-          store.openOnMap({ type: 'model' });
+        id: 'a:test', icon: 'zap', title: '测试默认模型', sub: '发一个很小的请求，看通不通、多快', kind: '操作', text: '测试 模型 连接 test model ping',
+        run: async () => {
           close();
+          if (!(store.ov?.models?.models?.length)) {
+            store.openOnMap({ type: 'model' });
+            store.toast({ kind: 'err', text: '还没有配置模型，先添加接口和模型' }, 2600);
+            return;
+          }
+          try {
+            const r = await api.post<{ ok: boolean; error?: string; ms?: number }>('/api/test/model', { id: '' });
+            if (!r.ok) throw new Error(r.error || '没通');
+            store.toast({ kind: 'ok', text: `模型连接正常 · ${r.ms ?? '—'} ms` }, 2400);
+          } catch (err) {
+            store.fail(err);
+          }
         },
       },
       {
@@ -104,7 +115,7 @@
     }
     for (const f of store.fields) {
       const g = groupInfo[f.group];
-      if (!g || f.group === 'model') continue; // 模型的设置在「模型」页面
+      if (!g || f.group === 'model') continue; // 模型的设置在模型节点面板
       out.push({
         id: 'f:' + f.key, icon: g.icon, color: g.color, title: f.label, sub: `${g.label}${f.section ? ' · ' + f.section : ''} · ${truncate(valuePreview(f), 40)}`, kind: '设置',
         text: `${f.label} ${f.key} ${g.label} ${f.section ?? ''} ${f.help ?? ''} ${f.keywords ?? ''}`,

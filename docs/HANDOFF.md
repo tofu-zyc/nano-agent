@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，模型管理重做（模型只来自 models.json、没有“配置文件模型”、没有模型就是空状态、旧配置一次性迁移、拓扑模型节点面板）、图片输入（网页 / Telegram / 飞书）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)。
+最后更新：2026-10-22，模型管理重做（模型只来自 models.json、没有“配置文件模型”、没有模型就是空状态、旧配置一次性迁移、拓扑模型节点面板）、图片输入（网页 / Telegram / 飞书）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成；界面细节操作（右键菜单点空白关闭、Esc 分层关闭、会话设置跟随切换、会话草稿隔离）见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)。
 
 ## 一句话
 

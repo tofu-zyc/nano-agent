@@ -17,12 +17,19 @@
   onMount(() => {
     store.boot();
     const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return; // 输入法正在选字，Esc 是取消候选，不是关面板
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         store.palette = !store.palette;
       } else if (e.key === 'Escape') {
-        if (store.palette) store.palette = false;
-        else if (store.inspector) store.inspector = null;
+        // 先让当前打开的菜单/弹窗处理 Esc；它们都不处理时，才收起右侧设置面板。
+        // 必须等这一轮 keydown 的所有监听器都跑完（用 setTimeout，不能用微任务：
+        // 微任务会在两个监听器之间执行），再看有没有人 preventDefault。
+        setTimeout(() => {
+          if (e.defaultPrevented) return;
+          if (store.palette) store.palette = false;
+          else if (store.inspector) store.inspector = null;
+        }, 0);
       }
     };
     window.addEventListener('keydown', onKey);

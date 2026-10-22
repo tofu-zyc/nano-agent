@@ -61,9 +61,6 @@
       }))
       .filter((g) => !term || g.list.length > 0 || `${g.ep.name} ${g.ep.base_url}`.toLowerCase().includes(term));
   });
-  const defaultModel = $derived(models.find((m) => m.default));
-
-  let seenIntent = false;
   $effect(() => {
     const intent = store.modelIntent;
     if (!intent) return;
@@ -79,8 +76,6 @@
         store.modelIntent = null;
         if (intent === 'endpoint') startEndpoint();
         else addModelFlow();
-      } else {
-        seenIntent = true;
       }
     });
   });

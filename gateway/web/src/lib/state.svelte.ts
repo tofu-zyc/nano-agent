@@ -66,12 +66,16 @@ class Store {
 
   constructor() {
     window.addEventListener('hashchange', () => {
-      const prev = this.route.view;
+      const prev = this.route;
       this.route = parseRoute();
       // 换了页面：右侧的设置面板关掉，除非是“去某个页面并打开某个对象”
-      if (this.route.view !== prev) {
+      if (this.route.view !== prev.view) {
         this.inspector = this.pendingOpen?.t ?? null;
         this.focus = this.pendingOpen?.focus ?? null;
+      } else if (this.route.view === 'sessions' && this.route.arg !== prev.arg && this.inspector?.type === 'session') {
+        // 在会话列表里切换会话：设置面板跟着换成当前会话；没选会话就收起
+        this.inspector = this.route.arg ? { type: 'session', sid: this.route.arg } : null;
+        this.focus = null;
       }
       this.pendingOpen = null;
     });
