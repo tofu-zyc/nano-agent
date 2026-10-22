@@ -127,6 +127,10 @@ cd gateway && go test -race ./...
 - 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），地址在 gateway.toml。
 - 杀进程前确认 /proc/PID/cwd 是演示目录，用户自己可能开着网关（cwd 是项目目录）。
 
+## 正在设计
+
+- 模型配置交互重做：撤掉独立模型页，模型和接口全部回到拓扑的模型节点面板（列表 + 详情），画布右键负责新增/删除。设计稿见 [DESIGN-model-node.md](DESIGN-model-node.md)，评审确认后实施。
+
 ## 接下来要做的（用户要求先把主体功能做齐）
 
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
