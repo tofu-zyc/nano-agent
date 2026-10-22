@@ -26,6 +26,7 @@ import (
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/persona"
 )
 
@@ -50,9 +51,13 @@ type Server struct {
 	loopback  bool                 // 只监听本机：要检查 Host 头
 	regCancel context.CancelFunc   // 进行中的飞书扫码注册
 	devices   *host.Manager
+	media     *media.Store // 网页上传的图片
 }
 
 func (s *Server) SetDevices(m *host.Manager) { s.devices = m }
+
+// SetMedia 接上图片存储（网页上传图片、历史里显示图片用）。
+func (s *Server) SetMedia(m *media.Store) { s.media = m }
 
 // New 创建网页服务。密码来自 web.password，没配置就用数据目录里的 web.secret（没有就生成一个）。
 func New(a *app.App, conf *config.Store, p *persona.Loader, newLLM func(config.LLM) (llm.Client, error), log *slog.Logger) (*Server, error) {
@@ -176,6 +181,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/endpoints/{key}", s.auth(s.setEndpoint))
 	mux.HandleFunc("POST /api/endpoints/{key}/admin", s.auth(s.makeAdmin))
 	mux.HandleFunc("POST /api/approvals/{n}", s.auth(s.approve))
+	mux.HandleFunc("POST /api/uploads", s.auth(s.uploadImage))
+	mux.HandleFunc("GET /api/uploads/{id}", s.auth(s.serveImage))
 	mux.HandleFunc("GET /api/models", s.auth(s.listModels))
 	mux.HandleFunc("POST /api/models/endpoints", s.auth(s.saveEndpoint))
 	mux.HandleFunc("PUT /api/models/endpoints/{id}", s.auth(s.saveEndpoint))

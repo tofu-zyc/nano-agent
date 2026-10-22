@@ -3,7 +3,9 @@ package channel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/httpx"
+	"nano-agent/gateway/internal/media"
 )
 
 // Feishu 通过飞书开放平台的长连接（WebSocket）收事件，不需要公网地址。
@@ -32,14 +35,15 @@ type Feishu struct {
 	groupAll bool
 
 	botOpenID string
-	queue     chan any // *larkim.P2MessageReceiveV1 或 *larkim.P2MessageRecalledV1，按收到的顺序处理
+	media     *media.Store // 用户发来的图片存这里，nil 时不收图片
+	queue     chan any     // *larkim.P2MessageReceiveV1 或 *larkim.P2MessageRecalledV1，按收到的顺序处理
 
 	mu    sync.Mutex
 	names map[string]string // open_id → 姓名
 	seen  map[string]time.Time
 }
 
-func NewFeishu(c config.Feishu, log *slog.Logger) (*Feishu, error) {
+func NewFeishu(c config.Feishu, store *media.Store, log *slog.Logger) (*Feishu, error) {
 	hc, err := httpx.NewClient(c.Proxy, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("feishu.proxy：%w", err)
@@ -53,6 +57,7 @@ func NewFeishu(c config.Feishu, log *slog.Logger) (*Feishu, error) {
 		base:     base,
 		log:      log.With("channel", "feishu"),
 		groupAll: c.GroupReplyAll,
+		media:    store,
 		queue:    make(chan any, 256),
 		names:    map[string]string{},
 		seen:     map[string]time.Time{},
@@ -201,7 +206,8 @@ func (f *Feishu) convert(ctx context.Context, ev *larkim.P2MessageReceiveV1) (Me
 		return Message{}, false
 	}
 	text := extractText(deref(msg.MessageType), deref(msg.Content))
-	if text == "" {
+	images := f.fetchImages(ctx, id, msg)
+	if text == "" && len(images) == 0 {
 		return Message{}, false
 	}
 
@@ -241,7 +247,83 @@ func (f *Feishu) convert(ctx context.Context, ev *larkim.P2MessageReceiveV1) (Me
 		MsgID:      id,
 		Group:      group,
 		Mentioned:  mentioned,
+		Images:     images,
 	}, true
+}
+
+// extractImageKeys 从 image 消息或者富文本 post 里取出图片的 image_key。
+func extractImageKeys(msgType, content string) []string {
+	switch msgType {
+	case "image":
+		var c struct {
+			ImageKey string `json:"image_key"`
+		}
+		if json.Unmarshal([]byte(content), &c) == nil && c.ImageKey != "" {
+			return []string{c.ImageKey}
+		}
+	case "post":
+		var c struct {
+			Content [][]struct {
+				Tag      string `json:"tag"`
+				ImageKey string `json:"image_key"`
+			} `json:"content"`
+		}
+		if json.Unmarshal([]byte(content), &c) == nil {
+			var keys []string
+			for _, para := range c.Content {
+				for _, el := range para {
+					if el.Tag == "img" && el.ImageKey != "" {
+						keys = append(keys, el.ImageKey)
+					}
+				}
+			}
+			return keys
+		}
+	}
+	return nil
+}
+
+// fetchImages 把消息里的图片下载下来存进图片目录。失败只记日志，文字照常处理。
+func (f *Feishu) fetchImages(ctx context.Context, messageID string, msg *larkim.EventMessage) []media.Attachment {
+	if f.media == nil || messageID == "" {
+		return nil
+	}
+	keys := extractImageKeys(deref(msg.MessageType), deref(msg.Content))
+	var out []media.Attachment
+	for _, key := range keys {
+		if len(out) >= media.MaxPerMessage {
+			break
+		}
+		a, err := f.download(ctx, messageID, key)
+		if err != nil {
+			f.log.Warn("下载飞书图片失败", "err", err)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// download 下载消息里的一张图片（im/v1/messages/{id}/resources/{key}?type=image）。
+func (f *Feishu) download(ctx context.Context, messageID, key string) (media.Attachment, error) {
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	resp, err := f.client.Im.MessageResource.Get(cctx, larkim.NewGetMessageResourceReqBuilder().
+		MessageId(messageID).FileKey(key).Type("image").Build())
+	if err != nil {
+		return media.Attachment{}, err
+	}
+	if !resp.Success() {
+		return media.Attachment{}, fmt.Errorf("飞书返回 %d %s", resp.Code, resp.Msg)
+	}
+	if resp.File == nil {
+		return media.Attachment{}, errors.New("飞书没有返回图片内容")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.File, media.MaxImageBytes+1))
+	if err != nil {
+		return media.Attachment{}, err
+	}
+	return f.media.Save(data, "feishu-"+key, "feishu")
 }
 
 // extractText 从消息内容里取出纯文本。目前支持 text 和 post（富文本）。

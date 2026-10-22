@@ -24,6 +24,8 @@ var Fields = []Field{
 		Help: "到 /v1 为止，比如 https://api.deepseek.com/v1", Keywords: "url endpoint 地址 服务器"},
 	{Key: "llm.api_key", Group: "model", Section: "接口", Label: "API Key", Type: "secret", Keywords: "密钥 key token"},
 	{Key: "llm.model", Group: "model", Section: "接口", Label: "模型名", Type: "string"},
+	{Key: "llm.modalities", Group: "model", Section: "接口", Label: "输入类型", Type: "list",
+		Help: "这个模型能接收什么：text 文字、image 图片。默认只有 text；多模态的模型才加 image，网页上的模型也可以单独设", Keywords: "多模态 图片 视觉 image vision"},
 	{Key: "llm.proxy", Group: "model", Section: "接口", Label: "代理", Type: "proxy",
 		Help: "访问模型接口用的代理。内网地址的模型建议直连", Keywords: "proxy 网络"},
 	{Key: "llm.timeout", Group: "model", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true},

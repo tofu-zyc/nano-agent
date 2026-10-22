@@ -19,7 +19,7 @@ func (a *App) compact(s *sess, high, low int) {
 	r := s.run
 	h := a.store.History(s.sid)
 	cut := session.CutPoint(h, low)
-	req := llm.SummaryRequest(a.store.Settings(s.sid).Summary, session.BuildMessages("", "", h[:cut], false))
+	req := llm.SummaryRequest(a.store.Settings(s.sid).Summary, session.BuildMessages("", "", h[:cut], false, nil))
 	if slices.Contains(a.levelsOf(s.sid), "none") {
 		req.Thinking = "none"
 	}

@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
@@ -49,12 +50,18 @@ func setup(t *testing.T) (*httptest.Server, *Server, *config.Store) {
 		t.Fatal(err)
 	}
 	a.SetModels(ms, func(config.LLM) (llm.Client, error) { return &llm.Mock{}, nil })
+	mediaStore, err := media.Open(filepath.Join(dir, "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetMedia(mediaStore)
 	conf.OnChange(func(old, cur *config.Config) { a.SetConfig(cur) })
 	a.ReconcileChannels(cfg)
 	s, err := New(a, conf, p, func(config.LLM) (llm.Client, error) { return &llm.Mock{}, nil }, log)
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.SetMedia(mediaStore)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv, s, conf

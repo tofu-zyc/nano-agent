@@ -32,6 +32,7 @@ type modelView struct {
 	MaxHistory     int      `json:"max_history_tokens"`
 	Thinking       string   `json:"thinking"`
 	ThinkingLevels []string `json:"thinking_levels"`
+	Modalities     []string `json:"modalities"`
 	Owner          string   `json:"owned_by,omitempty"`
 	Default        bool     `json:"default"`
 	Config         bool     `json:"config"` // 配置文件里的模型，只能在设置里改
@@ -57,7 +58,7 @@ func (s *Server) modelsView() modelsView {
 	for _, m := range st.Models() {
 		v.Models = append(v.Models, modelView{ID: m.ID, Endpoint: m.Endpoint, Name: m.Name, Label: modelLabel(m),
 			ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, MaxHistory: m.MaxHistory,
-			Thinking: m.Thinking, ThinkingLevels: m.ThinkingLevels, Owner: m.Owner,
+			Thinking: m.Thinking, ThinkingLevels: m.ThinkingLevels, Modalities: m.Modalities, Owner: m.Owner,
 			Default: m.ID == v.Default, Config: m.Endpoint == models.ConfigEndpoint})
 	}
 	return v
@@ -139,6 +140,7 @@ type modelReq struct {
 	MaxHistory     int      `json:"max_history_tokens"`
 	Thinking       string   `json:"thinking"`
 	ThinkingLevels []string `json:"thinking_levels"`
+	Modalities     []string `json:"modalities"` // 能接收什么：text、image
 }
 
 // saveModel 新建或修改一个模型（ID 是 端点/模型名，由网关算）。
@@ -153,7 +155,7 @@ func (s *Server) saveModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := st.SaveModel(models.Model{Endpoint: req.Endpoint, Name: req.Name, Label: req.Label,
 		ContextWindow: req.ContextWindow, MaxTokens: req.MaxTokens, MaxHistory: req.MaxHistory,
-		Thinking: req.Thinking, ThinkingLevels: req.ThinkingLevels})
+		Thinking: req.Thinking, ThinkingLevels: req.ThinkingLevels, Modalities: req.Modalities})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

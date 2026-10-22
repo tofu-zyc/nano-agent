@@ -64,10 +64,10 @@ func (a *App) ReconcileChannels(cfg *config.Config) {
 		a.cli.SetDisplay(config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage))
 	}
 	a.reconcile("telegram", cfg.Telegram.Enabled, cfg.TelegramConfig(), func() (channel.Channel, error) {
-		return channel.NewTelegram(cfg.TelegramConfig(), a.log)
+		return channel.NewTelegram(cfg.TelegramConfig(), a.MediaStore(), a.log)
 	})
 	a.reconcile("feishu", cfg.Feishu.Enabled, cfg.FeishuConfig(), func() (channel.Channel, error) {
-		return channel.NewFeishu(cfg.FeishuConfig(), a.log)
+		return channel.NewFeishu(cfg.FeishuConfig(), a.MediaStore(), a.log)
 	})
 }
 

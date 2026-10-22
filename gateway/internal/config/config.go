@@ -60,6 +60,9 @@ type LLM struct {
 	// （空表示不传，用模型自己的默认），每个会话可以用 /think 改；thinking_levels 是可选的值。
 	Thinking       string   `toml:"thinking" json:"thinking"`
 	ThinkingLevels []string `toml:"thinking_levels" json:"thinking_levels"`
+
+	// 这个模型能接收什么：text（文字）、image（图片）。默认只有 text；不是多模态的模型别加 image。
+	Modalities []string `toml:"modalities" json:"modalities"`
 }
 
 // Network 是网关的网络设置。
@@ -253,6 +256,9 @@ func (c *Config) applyDefaults() {
 	if len(c.LLM.ThinkingLevels) == 0 {
 		c.LLM.ThinkingLevels = []string{"none", "low", "medium", "high"}
 	}
+	if len(c.LLM.Modalities) == 0 {
+		c.LLM.Modalities = []string{"text"}
+	}
 }
 
 func (c *Config) validate() error {
@@ -290,6 +296,13 @@ func (c *Config) validate() error {
 	}
 	if c.Access.Guest != "none" && c.Access.Guest != "readonly" {
 		errs = append(errs, fmt.Errorf("access.guest 只能是 none 或 readonly，现在是 %q", c.Access.Guest))
+	}
+	for _, m := range c.LLM.Modalities {
+		switch m {
+		case "text", "image", "audio", "video":
+		default:
+			errs = append(errs, fmt.Errorf("llm.modalities 里的 %q 不认识（只有 text、image、audio、video）", m))
+		}
 	}
 	for _, d := range c.Workspace.Dirs {
 		if !strings.HasPrefix(d, "/") && !strings.HasPrefix(d, "~") {

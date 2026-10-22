@@ -37,6 +37,10 @@ thinking       = ""
 # /think 可选的值，none 表示关闭思考。不同模型支持的值不一样，比如有的不支持 medium。
 # thinking_levels = ["none", "low", "medium", "high"]
 
+# 这个模型能接收什么：text 文字、image 图片。默认只有 text；多模态模型才加 image
+# （网页里加的模型在模型面板里单独勾选）
+# modalities = ["text", "image"]
+
 # 原样合并进请求体的额外参数：
 # [llm.extra]
 # top_p = 0.9

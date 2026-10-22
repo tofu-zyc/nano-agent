@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"unicode/utf8"
+
+	"nano-agent/gateway/internal/media"
 )
 
 // Message 是一条收到的用户消息。
@@ -16,9 +18,10 @@ type Message struct {
 	Text       string // 已去掉 @机器人 的部分
 	MsgID      string // 用于引用回复
 	Group      bool
-	Mentioned  bool   // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
-	Session    string // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
-	Action     string // 不是说话，而是界面上的操作：ActionStop、ActionRecall、ActionApprove、ActionDeny
+	Mentioned  bool               // 私聊恒为 true；群聊里 @ 了机器人或回复了机器人的消息
+	Session    string             // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
+	Action     string             // 不是说话，而是界面上的操作：ActionStop、ActionRecall、ActionApprove、ActionDeny
+	Images     []media.Attachment // 这条消息附带的图片（网页上传、Telegram、飞书下载好的）
 }
 
 const (

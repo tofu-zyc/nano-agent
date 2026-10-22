@@ -15,6 +15,7 @@ import (
 
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/httpx"
+	"nano-agent/gateway/internal/media"
 )
 
 // Telegram 通过 Bot API 长轮询收消息，不需要公网地址。
@@ -28,9 +29,10 @@ type Telegram struct {
 
 	botID   int64
 	botUser string
+	media   *media.Store // 用户发来的图片存这里，nil 时不收图片
 }
 
-func NewTelegram(c config.Telegram, log *slog.Logger) (*Telegram, error) {
+func NewTelegram(c config.Telegram, store *media.Store, log *slog.Logger) (*Telegram, error) {
 	hc, err := httpx.NewClient(c.Proxy, 0) // 每个请求自己带超时
 	if err != nil {
 		return nil, fmt.Errorf("telegram.proxy：%w", err)
@@ -60,13 +62,29 @@ type tgChat struct {
 	Title string `json:"title"`
 }
 
+type tgPhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+
+type tgDocument struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
+}
+
 type tgMessage struct {
-	MessageID int64      `json:"message_id"`
-	From      *tgUser    `json:"from"`
-	Chat      tgChat     `json:"chat"`
-	Text      string     `json:"text"`
-	Caption   string     `json:"caption"`
-	ReplyTo   *tgMessage `json:"reply_to_message"`
+	MessageID int64         `json:"message_id"`
+	From      *tgUser       `json:"from"`
+	Chat      tgChat        `json:"chat"`
+	Text      string        `json:"text"`
+	Caption   string        `json:"caption"`
+	ReplyTo   *tgMessage    `json:"reply_to_message"`
+	Photo     []tgPhotoSize `json:"photo"`    // 同一个图片的几个尺寸，最后一个是最大的
+	Document  *tgDocument   `json:"document"` // 以文件发的图片
 }
 
 type tgUpdate struct {
@@ -242,6 +260,7 @@ func (t *Telegram) Run(ctx context.Context, h Handler) error {
 			}
 			if u.Message != nil {
 				if m, ok := t.convert(u.Message); ok {
+					m.Images = t.fetchImages(ctx, u.Message)
 					h(t, m)
 				}
 			}
@@ -258,7 +277,7 @@ func (t *Telegram) convert(m *tgMessage) (Message, bool) {
 	if text == "" {
 		text = m.Caption
 	}
-	if text == "" || m.From == nil || m.From.IsBot {
+	if (text == "" && !hasImage(m)) || m.From == nil || m.From.IsBot {
 		return Message{}, false
 	}
 	group := m.Chat.Type == "group" || m.Chat.Type == "supergroup"
@@ -292,6 +311,80 @@ func (t *Telegram) convert(m *tgMessage) (Message, bool) {
 		Group:      group,
 		Mentioned:  mentioned,
 	}, true
+}
+
+// hasImage 判断这条消息是不是带了图片（照片，或者以文件发的图片）。
+func hasImage(m *tgMessage) bool {
+	if len(m.Photo) > 0 {
+		return true
+	}
+	return m.Document != nil && strings.HasPrefix(m.Document.MimeType, "image/")
+}
+
+// fetchImages 把消息里的图片下载下来存进图片目录。失败只记日志，文字照常处理。
+func (t *Telegram) fetchImages(ctx context.Context, m *tgMessage) []media.Attachment {
+	if t.media == nil {
+		return nil
+	}
+	type job struct{ id, name string }
+	var jobs []job
+	if len(m.Photo) > 0 {
+		p := m.Photo[len(m.Photo)-1] // 最大的一张
+		jobs = append(jobs, job{p.FileID, fmt.Sprintf("telegram-%d.jpg", m.MessageID)})
+	}
+	if d := m.Document; d != nil && strings.HasPrefix(d.MimeType, "image/") {
+		jobs = append(jobs, job{d.FileID, d.FileName})
+	}
+	var out []media.Attachment
+	for _, j := range jobs {
+		if len(out) >= media.MaxPerMessage {
+			break
+		}
+		a, err := t.download(ctx, j.id, j.name)
+		if err != nil {
+			t.log.Warn("下载 Telegram 图片失败", "err", err)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// download 用 getFile 拿到文件路径，再从文件接口下载一张图片。
+func (t *Telegram) download(ctx context.Context, fileID, name string) (media.Attachment, error) {
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	var f struct {
+		FilePath string `json:"file_path"`
+		FileSize int64  `json:"file_size"`
+	}
+	if err := t.call(cctx, "getFile", map[string]any{"file_id": fileID}, &f); err != nil {
+		return media.Attachment{}, err
+	}
+	if f.FilePath == "" {
+		return media.Attachment{}, errors.New("没有拿到文件路径")
+	}
+	if f.FileSize > media.MaxImageBytes {
+		return media.Attachment{}, fmt.Errorf("图片太大（%d 字节）", f.FileSize)
+	}
+	u := t.base + "/file/bot" + t.token + "/" + f.FilePath
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+	if err != nil {
+		return media.Attachment{}, t.redact(err)
+	}
+	resp, err := t.hc.Do(req)
+	if err != nil {
+		return media.Attachment{}, t.redact(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return media.Attachment{}, fmt.Errorf("下载图片失败：HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	if err != nil {
+		return media.Attachment{}, err
+	}
+	return t.media.Save(data, name, "telegram")
 }
 
 // onButton：点了消息下面的按钮（停止、批准、拒绝）。先回应按钮（不然客户端一直转圈），再交给网关。

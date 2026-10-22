@@ -146,7 +146,7 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 	}))
 	t.Cleanup(srv.Close)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := NewFeishu(config.Feishu{Proxy: "none"}, log)
+	f, err := NewFeishu(config.Feishu{Proxy: "none"}, nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}

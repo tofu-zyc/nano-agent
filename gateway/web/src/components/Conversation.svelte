@@ -1,11 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { store } from '../lib/state.svelte';
-  import { api, ApiError, sidPath } from '../lib/api';
+  import { api, ApiError, sidPath, uploadImage } from '../lib/api';
   import { buildBlocks, type Block } from '../lib/conv';
   import { markdown } from '../lib/markdown';
   import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
-  import type { CommandInfo, Msg, SessionInfo } from '../lib/types';
+  import type { Attachment, CommandInfo, Msg, SessionInfo } from '../lib/types';
   import ToolCard from './ToolCard.svelte';
   import WorkspacePicker from './WorkspacePicker.svelte';
   import Icon from './Icon.svelte';
@@ -20,6 +20,54 @@
   let sending = $state(false);
   let scroller = $state<HTMLDivElement>();
   let stick = true;
+
+  // ---- 图片：选好（或粘贴、拖进来）先上传，发送时只带 ID ----
+  const maxPics = 4;
+  let pics = $state<Attachment[]>([]);
+  let uploading = $state(0);
+  let dragging = $state(false);
+  let fileInput = $state<HTMLInputElement>();
+
+  async function addFiles(files: FileList | File[]) {
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith('image/')) continue;
+      if (pics.length + uploading >= maxPics) {
+        store.toast({ kind: 'err', text: `一条消息最多 ${maxPics} 张图片` }, 2400);
+        break;
+      }
+      uploading++;
+      try {
+        pics = [...pics, await uploadImage(f)];
+      } catch (err) {
+        store.fail(err);
+      } finally {
+        uploading--;
+      }
+    }
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  }
+
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
+    dragging = false;
+    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+  }
+
+  function pickFiles(e: Event) {
+    const el = e.currentTarget as HTMLInputElement;
+    if (el.files?.length) addFiles(el.files);
+    el.value = '';
+  }
+
+  function removePic(id: string) {
+    pics = pics.filter((p) => p.id !== id);
+  }
 
   const info = $derived(store.session(sid));
   const live = $derived(store.live[sid] ?? []);
@@ -89,11 +137,12 @@
 
   async function send() {
     const msg = text.trim();
-    if (!msg || sending) return;
+    if ((!msg && !pics.length) || sending || uploading > 0) return;
     sending = true;
     try {
-      await api.post('/api/chat', { sid, text: msg });
+      await api.post('/api/chat', { sid, text: msg, images: pics.map((p) => ({ id: p.id, name: p.name })) });
       text = '';
+      pics = [];
       stick = true;
     } catch (err) {
       store.fail(err);
@@ -262,7 +311,14 @@
               {#if b.via}<i class="via" style="--c: {channelMeta[viaChannel[b.via]]?.color ?? 'var(--muted)'}"></i>{b.sender ?? b.via}{:else}{b.sender ?? '用户'}{/if}
               {#if b.time}<span>{b.time}</span>{/if}
             </div>
-            <div class="bubble">{b.text}</div>
+            {#if b.images?.length}
+              <div class="pics">
+                {#each b.images as p (p.id)}
+                  <a class="pic" href="/api/uploads/{p.id}" target="_blank" rel="noopener"><img src="/api/uploads/{p.id}" alt={p.name ?? '图片'} loading="lazy" /></a>
+                {/each}
+              </div>
+            {/if}
+            {#if b.text}<div class="bubble">{b.text}</div>{/if}
           </div>
         {:else}
           <div class="msg bot">
@@ -302,7 +358,14 @@
               {#if it.via}<i class="via" style="--c: {channelMeta[it.channel ?? '']?.color ?? 'var(--muted)'}"></i>{it.via}{:else}{it.name ?? '用户'}{/if}
               <span>{clock(it.at)}</span>
             </div>
-            <div class="bubble">{raw}</div>
+            {#if it.images?.length}
+              <div class="pics">
+                {#each it.images as p (p.id)}
+                  <a class="pic" href="/api/uploads/{p.id}" target="_blank" rel="noopener"><img src="/api/uploads/{p.id}" alt={p.name ?? '图片'} /></a>
+                {/each}
+              </div>
+            {/if}
+            {#if raw}<div class="bubble">{raw}</div>{/if}
           </div>
         {:else if it.kind === 'reasoning'}
           <div class="msg bot">
@@ -341,7 +404,7 @@
     </div>
   </div>
 
-  <div class="composer">
+  <div class="composer" class:dragging role="group" aria-label="输入区" onpaste={onPaste} ondragover={(e) => { e.preventDefault(); dragging = true; }} ondragleave={() => (dragging = false)} ondrop={onDrop}>
     {#if cmdMatches.length || cmdHint}
       <div class="cmdmenu" role="listbox">
         {#each cmdMatches as c, i (c.name)}
@@ -357,11 +420,28 @@
         {/if}
       </div>
     {/if}
-    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行。打 / 看命令"></textarea>
+    {#if pics.length || uploading}
+      <div class="pending">
+        {#each pics as p (p.id)}
+          <div class="pend">
+            <img src="/api/uploads/{p.id}" alt={p.name ?? '图片'} />
+            <button class="rm" onclick={() => removePic(p.id)} aria-label="去掉这张图片"><Icon name="x" size={11} /></button>
+          </div>
+        {/each}
+        {#each Array(uploading) as _, i (i)}
+          <div class="pend up"><span class="spinner"></span></div>
+        {/each}
+      </div>
+    {/if}
+    <button class="btn ghost attach" onclick={() => fileInput?.click()} title="发图片（也可以粘贴或拖进来）" disabled={pics.length + uploading >= maxPics}>
+      <Icon name="file" size={16} />
+    </button>
+    <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={pickFiles} />
+    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行；可以粘贴或拖入图片。打 / 看命令"></textarea>
     {#if info?.running}
       <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
     {/if}
-    <button class="btn primary" onclick={send} disabled={!text.trim() || sending}><Icon name="send" size={14} />发送</button>
+    <button class="btn primary" onclick={send} disabled={(!text.trim() && !pics.length) || sending || uploading > 0}><Icon name="send" size={14} />发送</button>
   </div>
 </div>
 {/if}
@@ -705,6 +785,84 @@
   .composer .btn {
     height: 44px;
     border-radius: 13px;
+  }
+  .composer.dragging {
+    outline: 2px dashed var(--accent);
+    outline-offset: -6px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .attach {
+    height: 44px;
+    width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+  .pending {
+    position: absolute;
+    bottom: calc(100% - 4px);
+    left: 22px;
+    display: flex;
+    gap: 7px;
+    padding: 6px;
+    border-radius: 12px;
+    background: var(--panel-solid);
+    border: 1px solid var(--line-2);
+    box-shadow: var(--shadow);
+  }
+  .pend {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    border-radius: 9px;
+    overflow: hidden;
+    border: 1px solid var(--line-2);
+    background: var(--bg-2);
+    display: grid;
+    place-items: center;
+  }
+  .pend img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .pend .rm {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: none;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .pend .rm:hover {
+    background: var(--err);
+  }
+  .pics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 2px 0 6px;
+    max-width: min(560px, 100%);
+  }
+  .pic {
+    display: block;
+    border-radius: 11px;
+    overflow: hidden;
+    border: 1px solid var(--line-2);
+    line-height: 0;
+    background: var(--bg-2);
+  }
+  .pic img {
+    max-width: 220px;
+    max-height: 220px;
+    object-fit: contain;
+    display: block;
   }
   .cmdmenu {
     position: absolute;

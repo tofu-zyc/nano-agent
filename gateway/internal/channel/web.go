@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"nano-agent/gateway/internal/media"
 )
 
 // Web 是网页聊天渠道：网页可以往任何一个会话里发消息，网页用户都是登录过的管理员。
@@ -27,14 +29,14 @@ func (w *Web) Run(ctx context.Context, h Handler) error {
 }
 
 // Post 把网页上输入的一条消息发到会话 sid。
-func (w *Web) Post(sid, text string) error {
+func (w *Web) Post(sid, text string, images []media.Attachment) error {
 	w.mu.Lock()
 	h := w.h
 	w.mu.Unlock()
 	if h == nil {
 		return errors.New("网页渠道还没启动")
 	}
-	h(w, Message{ChatID: "browser", SenderID: "admin", SenderName: "我", Session: sid, Text: text, Mentioned: true})
+	h(w, Message{ChatID: "browser", SenderID: "admin", SenderName: "我", Session: sid, Text: text, Images: images, Mentioned: true})
 	return nil
 }
 

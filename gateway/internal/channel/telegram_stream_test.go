@@ -49,7 +49,7 @@ func TestTelegramStreamsEditsAndPreservesLongUnicodeReply(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r := tg.OpenRun("123", "").(*streamRun)
 	r.Content("开始")
 	select {
@@ -82,7 +82,7 @@ func TestTelegramStreamHonorsRateLimit(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s := &telegramStream{t: tg, chat: "123"}
 	if err := s.Write(context.Background(), streamSnapshot{Content: "你好"}); err != nil || calls != 2 {
 		t.Fatalf("calls=%d err=%v", calls, err)
@@ -110,7 +110,7 @@ func TestTelegramSeparatesCollapsedProcessFromReply(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]int{"message_id": p.ID}})
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r := tg.OpenMirror("123", "网页", "看看目录").(*streamRun)
 	r.Reasoning("思考中的 <标签> & 说明")
 	for range 100 {
@@ -155,7 +155,7 @@ func TestTelegramStopButton(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]int{"message_id": p.ID}})
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r := tg.OpenRun("123", "").(*streamRun)
 	r.Tool("Shell", "ls")
 	deadline := time.Now().Add(3 * time.Second)
@@ -208,7 +208,7 @@ func TestTelegramRendersMarkdownAndFallsBackToPlainText(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s := &telegramStream{t: tg, chat: "123"}
 	if err := s.Write(context.Background(), streamSnapshot{Content: "**粗体** 和 `代码`", Closed: true}); err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestTelegramApprovalButtons(t *testing.T) {
 		io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
 	}))
 	defer srv.Close()
-	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	card := ApprovalCard{N: 3, Title: "执行命令", Detail: "rm -rf <build>", From: "tg:1"}
 	ref, err := tg.SendApproval(context.Background(), "123", card)
 	if err != nil || ref != "42" {

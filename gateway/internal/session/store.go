@@ -19,17 +19,19 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 )
 
 // Msg 是历史里的一条消息。Reasoning 和 Usage 只保存备查，默认不回传给模型。
 type Msg struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	Reasoning  string         `json:"reasoning,omitempty"`
-	Usage      *llm.Usage     `json:"usage,omitempty"`
-	TS         int64          `json:"ts,omitempty"`
+	Role       string             `json:"role"`
+	Content    string             `json:"content,omitempty"`
+	Images     []media.Attachment `json:"images,omitempty"` // 用户消息附带的图片，文件在 data/uploads
+	ToolCalls  []llm.ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	Reasoning  string             `json:"reasoning,omitempty"`
+	Usage      *llm.Usage         `json:"usage,omitempty"`
+	TS         int64              `json:"ts,omitempty"`
 }
 
 type Store struct {

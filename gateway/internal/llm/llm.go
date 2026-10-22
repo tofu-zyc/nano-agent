@@ -6,13 +6,51 @@ import (
 	"encoding/json"
 )
 
-// Message 是发给模型的一条消息（OpenAI chat 格式）。
+// Message 是发给模型的一条消息（OpenAI chat 格式）。有 Parts 时按多模态格式发 content 数组，
+// 否则 Content 还是一个字符串。
 type Message struct {
 	Role             string     `json:"role"`
 	Content          string     `json:"content"`
+	Parts            []Part     `json:"-"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
+}
+
+// Part 是 content 数组里的一项：文字或图片。
+type Part struct {
+	Type     string    `json:"type"` // text | image_url
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// ImageURL 是一张图片（data: URL，或者 http 地址）。
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"` // low | high | auto
+}
+
+// TextPart、ImagePart 构造 content 的一部分。
+func TextPart(text string) Part { return Part{Type: "text", Text: text} }
+
+func ImagePart(url string) Part { return Part{Type: "image_url", ImageURL: &ImageURL{URL: url}} }
+
+// MarshalJSON 让只有文字的消息还是发 "content": "..."（各家兼容接口都认），
+// 有图片时发 OpenAI 的 content 数组。
+func (m Message) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Role             string     `json:"role"`
+		Content          any        `json:"content"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+	}
+	content := any(m.Content)
+	if len(m.Parts) > 0 {
+		content = m.Parts
+	}
+	return json.Marshal(wire{Role: m.Role, Content: content, ToolCalls: m.ToolCalls,
+		ToolCallID: m.ToolCallID, ReasoningContent: m.ReasoningContent})
 }
 
 type ToolCall struct {

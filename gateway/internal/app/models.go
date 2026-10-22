@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -174,6 +175,9 @@ func (a *App) cmdModel(c in, arg string) {
 			}
 			if m.ID == def {
 				tags = append(tags, "默认")
+			}
+			if slices.Contains(m.Modalities, "image") {
+				tags = append(tags, "图片")
 			}
 			fmt.Fprintf(&b, "%d. %s（%s）", i+1, modelLabel(m), m.ID)
 			if len(tags) > 0 {

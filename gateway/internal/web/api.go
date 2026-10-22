@@ -19,6 +19,7 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -194,11 +195,15 @@ func (s *Server) undoSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"text": text})
 }
 
-// chat 以网页管理员的身份往会话里发一条消息。
+// chat 以网页管理员的身份往会话里发一条消息（可以带已经上传好的图片）。
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SID  string `json:"sid"`
-		Text string `json:"text"`
+		SID    string `json:"sid"`
+		Text   string `json:"text"`
+		Images []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"images"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -207,11 +212,29 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "没有这个会话")
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" {
+	if strings.TrimSpace(req.Text) == "" && len(req.Images) == 0 {
 		writeErr(w, http.StatusBadRequest, "消息是空的")
 		return
 	}
-	if err := s.app.Web().Post(req.SID, req.Text); err != nil {
+	if len(req.Images) > 0 && s.media == nil {
+		writeErr(w, http.StatusServiceUnavailable, "图片存储没有启用")
+		return
+	}
+	if len(req.Images) > media.MaxPerMessage {
+		writeErr(w, http.StatusBadRequest, "一条消息最多 "+strconv.Itoa(media.MaxPerMessage)+" 张图片")
+		return
+	}
+	var images []media.Attachment
+	for _, it := range req.Images {
+		att, err := s.media.Info(it.ID) // 类型和大小以服务器上的文件为准
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "图片已经不在服务器上了，请重新上传")
+			return
+		}
+		att.Name, att.Source = it.Name, "web"
+		images = append(images, att)
+	}
+	if err := s.app.Web().Post(req.SID, strings.TrimSpace(req.Text), images); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}

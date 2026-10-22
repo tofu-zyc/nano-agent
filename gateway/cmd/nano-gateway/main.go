@@ -24,6 +24,7 @@ import (
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
@@ -87,6 +88,13 @@ func main() {
 		os.Exit(1)
 	}
 	a.SetModels(modelStore, newClient)
+	// 用户发来的图片（网页上传、Telegram、飞书下载）存在数据目录的 uploads 下
+	mediaStore, err := media.Open(filepath.Join(cfg.Session.DataDir, "uploads"))
+	if err != nil {
+		log.Error("打开图片目录失败", "err", err)
+		os.Exit(1)
+	}
+	a.SetMedia(mediaStore)
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)
@@ -132,6 +140,7 @@ func main() {
 			os.Exit(1)
 		}
 		ws.SetDevices(devices)
+		ws.SetMedia(mediaStore)
 		go func() {
 			if err := ws.Serve(ctx, cfg.Web.Listen); err != nil {
 				log.Error("网页管理界面启动失败", "listen", cfg.Web.Listen, "err", err)

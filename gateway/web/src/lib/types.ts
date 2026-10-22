@@ -1,5 +1,8 @@
 // 和网关接口对应的类型
 
+// 一张用户发来的图片（存在网关的数据目录里，历史里只留引用）
+export type Attachment = { id: string; name?: string; mime: string; size: number; source?: string };
+
 export type Usage = {
   prompt_tokens: number;
   completion_tokens: number;
@@ -55,6 +58,7 @@ export type ModelItem = {
   max_history_tokens: number;
   thinking: string;
   thinking_levels: string[] | null;
+  modalities?: string[] | null; // 能接收什么：text、image
   owned_by?: string;
   default: boolean;
   config: boolean;
@@ -63,7 +67,7 @@ export type ModelItem = {
 export type ModelsView = { endpoints: ModelEndpoint[]; models: ModelItem[]; default: string };
 
 // 端点 /models 拉回来的一个模型
-export type RemoteModel = { id: string; owned_by?: string; context_window?: number; added: boolean };
+export type RemoteModel = { id: string; owned_by?: string; context_window?: number; modalities?: string[] | null; added: boolean };
 
 // 会话挂载的一个工作目录。how：local（跑这一轮的内核在同一台机器上，自己执行）、
 // gateway（交给网关在那台机器上执行）、down（那台机器现在用不了）
@@ -156,6 +160,7 @@ export type ToolCall = { id: string; type: string; function: { name: string; arg
 export type Msg = {
   role: 'user' | 'assistant' | 'tool' | 'system';
   content?: string;
+  images?: Attachment[]; // 用户消息附带的图片
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   reasoning?: string;
@@ -178,7 +183,7 @@ export type Ev = {
 
 // 一轮处理过程中实时收到的内容（结束后换成从历史里读的完整记录）
 export type LiveItem =
-  | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; at: number }
+  | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; images?: Attachment[]; at: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'content'; text: string }
   | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string }

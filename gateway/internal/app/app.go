@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
@@ -100,6 +101,7 @@ type App struct {
 	models        *models.Store    // 可以用的模型（models.go），nil 时都用 llm
 	newClient     func(config.LLM) (llm.Client, error)
 	clients       map[string]modelClient
+	media         *media.Store               // 用户发来的图片（data/uploads），nil 时不接图片
 	chans         map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
 	outboxes      map[string]chan outItem
 	eps           map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
@@ -155,11 +157,12 @@ type run struct {
 	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
 	stopTyping func()
 
-	streamed bool // 回复正文已经通过 RunView 显示过了
-	start    time.Time
-	calls    int       // 这一轮请求了几次模型
-	usage    llm.Usage // 这一轮的累计用量
-	noTools  bool      // 没有能用的工作目录：不给模型工具，只聊天
+	streamed   bool // 回复正文已经通过 RunView 显示过了
+	start      time.Time
+	calls      int       // 这一轮请求了几次模型
+	usage      llm.Usage // 这一轮的累计用量
+	noTools    bool      // 没有能用的工作目录：不给模型工具，只聊天
+	withImages bool      // 这一轮的模型能接收图片
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
 	rt    route
@@ -392,12 +395,15 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.cmdModel(c, arg)
 		return
 	}
-	if m.Text == "" {
+	if m.Text == "" && len(m.Images) == 0 {
 		return
 	}
 	s := c.s
-	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text,
-		Data: map[string]any{"from": who, "via": sourceOf(ep.ch), "channel": chanName(ep.ch)}})
+	data := map[string]any{"from": who, "via": sourceOf(ep.ch), "channel": chanName(ep.ch)}
+	if len(m.Images) > 0 {
+		data["images"] = m.Images
+	}
+	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
 	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
 	if s.run == nil {
 		a.startRun(s)
@@ -510,9 +516,20 @@ func (a *App) startRun(s *sess) {
 		texts[i] = q.m.Text
 	}
 	text := strings.Join(texts, "\n")
+	var images []media.Attachment
+	for _, q := range batch {
+		images = append(images, q.m.Images...)
+	}
+	if len(images) > media.MaxPerMessage {
+		images = images[:media.MaxPerMessage]
+	}
 	content := text
 	if config.On(a.cfg.Session.Timestamps) {
-		content = a.stamp(sourceOf(head.ep.ch)) + " " + content
+		if content == "" {
+			content = a.stamp(sourceOf(head.ep.ch))
+		} else {
+			content = a.stamp(sourceOf(head.ep.ch)) + " " + content
+		}
 	}
 	// 工作目录、权限、机器变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	st := a.store.Settings(s.sid)
@@ -533,14 +550,14 @@ func (a *App) startRun(s *sess) {
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
 	a.catchUp(head.ep, s.sid)
 	a.remember(s, batch, a.histEnd(s.sid))
-	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content}); err != nil {
+	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
 	}
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
 	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
-		rt: rt, w: w}
+		rt: rt, w: w, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
@@ -557,8 +574,15 @@ func (a *App) startRun(s *sess) {
 		}
 		if wt, ok := a.chans[ep.ch].(channel.Watcher); ok {
 			a.catchUp(ep, s.sid)
-			r.outs = append(r.outs, out{ep: ep, view: wt.OpenMirror(ep.chat, via, text)})
+			mirrorText := text
+			if mirrorText == "" && len(images) > 0 {
+				mirrorText = fmt.Sprintf("（%d 张图片）", len(images))
+			}
+			r.outs = append(r.outs, out{ep: ep, view: wt.OpenMirror(ep.chat, via, mirrorText)})
 		}
+	}
+	if len(images) > 0 && !r.withImages {
+		a.notify(s, "（这个模型不能接收图片：图片已保存在历史里，但没有发给它。需要的话用 /model 换一个支持图片的模型）")
 	}
 	r.stopTyping = a.startTyping(head.ep)
 	mode := a.runMode(w, r.from)
@@ -574,8 +598,11 @@ func (a *App) startRun(s *sess) {
 	}
 	a.log.Info("开始处理", "sid", s.sid, "node", node, "workspaces", len(rt.mounts), "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
-	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content,
-		Data: map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}})
+	runData := map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}
+	if len(images) > 0 {
+		runData["images"] = images
+	}
+	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content, Data: runData})
 	if !a.hub.Send(node, in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
@@ -803,8 +830,12 @@ func (a *App) generateModel(s *sess) {
 	r := s.run
 	system, _ := a.persona.For(s.sid)
 	st := a.store.Settings(s.sid)
+	var images session.ImageLoader
+	if r.withImages {
+		images = a.imageLoader()
+	}
 	req := llm.Request{
-		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning),
+		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {

@@ -1,6 +1,12 @@
 package session
 
-import "nano-agent/gateway/internal/llm"
+import (
+	"fmt"
+	"strings"
+
+	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
+)
 
 // Estimate 粗略估算 token 数：按字节数 / 3（中文 UTF-8 三字节约合一个 token 左右，
 // 英文偏保守），每条消息再加一点固定开销。只用来决定裁剪，不需要精确。
@@ -91,10 +97,14 @@ func Sanitize(h []Msg) []Msg {
 	return out
 }
 
+// ImageLoader 把一张图片变成发给模型的 data: URL；返回 false 表示读不出来。
+type ImageLoader func(media.Attachment) (string, bool)
+
 // BuildMessages 生成发给模型的消息：系统提示 + 修补过的历史。summary 是被 Compact 丢掉的
 // 那部分历史的摘要，放在第一条用户消息前面。
 // sendReasoning 为 true 时，当前这一轮（最后一条用户消息之后）的推理内容会回传给模型。
-func BuildMessages(system, summary string, h []Msg, sendReasoning bool) []llm.Message {
+// images 为 nil 时（模型不支持图片，或者生成摘要）图片只留一个文字说明。
+func BuildMessages(system, summary string, h []Msg, sendReasoning bool, images ImageLoader) []llm.Message {
 	h = Sanitize(h)
 	last := -1
 	for i := len(h) - 1; i >= 0; i-- {
@@ -109,15 +119,48 @@ func BuildMessages(system, summary string, h []Msg, sendReasoning bool) []llm.Me
 	}
 	first := true
 	for i, m := range h {
-		lm := llm.Message{Role: m.Role, Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+		content := m.Content
 		if first && summary != "" && m.Role == "user" {
-			lm.Content = summary + "\n" + lm.Content
+			content = summary + "\n" + content
 			first = false
 		}
+		lm := llm.Message{Role: m.Role, Content: content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
 		if sendReasoning && i > last && m.Role == "assistant" {
 			lm.ReasoningContent = m.Reasoning
+		}
+		if m.Role == "user" && len(m.Images) > 0 {
+			if images == nil {
+				// 模型不支持图片（或者正在生成摘要）：保留文字内容的格式，只在后面说明有几张图片
+				note := fmt.Sprintf("[图片×%d]", len(m.Images))
+				if strings.TrimSpace(content) == "" {
+					lm.Content = note
+				} else {
+					lm.Content = strings.TrimRight(content, "\n") + "\n" + note
+				}
+			} else {
+				lm.Parts = imageParts(content, m.Images, images)
+			}
 		}
 		msgs = append(msgs, lm)
 	}
 	return msgs
+}
+
+// imageParts 把一条带图片的用户消息做成 content 数组（模型支持图片时才会走到这里）。
+func imageParts(text string, imgs []media.Attachment, images ImageLoader) []llm.Part {
+	var parts []llm.Part
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, llm.TextPart(text))
+	}
+	for _, a := range imgs {
+		if url, ok := images(a); ok {
+			parts = append(parts, llm.ImagePart(url))
+		} else {
+			parts = append(parts, llm.TextPart("[一张图片读不出来]"))
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, llm.TextPart("[图片]"))
+	}
+	return parts
 }

@@ -291,7 +291,7 @@ class Store {
         break;
       case 'message':
         if (!this.session(sid)) this.refreshSession(sid);
-        this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, via: e.data?.via, channel: e.data?.channel, at: e.at });
+        this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, via: e.data?.via, channel: e.data?.channel, images: e.data?.images, at: e.at });
         break;
       case 'pairing':
         this.checkPairing();

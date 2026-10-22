@@ -59,7 +59,7 @@ func TestModelsAPI(t *testing.T) {
 	// 添加模型、设成默认
 	code, body = c.do("POST", "/api/models/items", map[string]any{
 		"endpoint": epID, "name": "m1", "label": "模型一", "context_window": 200000,
-		"thinking_levels": []string{"low", "high"}}, true)
+		"modalities": []string{"text", "image"}, "thinking_levels": []string{"low", "high"}}, true)
 	if code != 200 {
 		t.Fatalf("添加模型：%d %v", code, body)
 	}
@@ -82,6 +82,20 @@ func TestModelsAPI(t *testing.T) {
 	levels, _ := sess["thinking_levels"].([]any)
 	if len(levels) != 2 {
 		t.Fatalf("思考强度可选值：%v", sess["thinking_levels"])
+	}
+	// 模型能接收图片也要存下来、读出来
+	_, list := c.do("GET", "/api/models", nil, false)
+	mods, _ := list["models"].([]any)
+	foundMods := false
+	for _, it := range mods {
+		m, _ := it.(map[string]any)
+		if m["id"] == mID {
+			mm, _ := m["modalities"].([]any)
+			foundMods = len(mm) == 2
+		}
+	}
+	if !foundMods {
+		t.Fatalf("模型的 modalities 没存下来：%v", list["models"])
 	}
 
 	// 测试连接用的就是这个模型（测试里工厂返回 mock，不会真的发请求）

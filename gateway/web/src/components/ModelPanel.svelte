@@ -37,6 +37,7 @@
   let mHist = $state('');
   let mThink = $state('');
   let mLevels = $state('');
+  let mImage = $state(false); // 这个模型能不能接收图片
   let remote = $state<RemoteModel[] | null>(null);
   let remoteErr = $state('');
 
@@ -109,6 +110,7 @@
     mHist = '';
     mThink = '';
     mLevels = '';
+    mImage = false;
     remote = null;
     remoteErr = '';
     err = '';
@@ -125,6 +127,7 @@
     mHist = m.max_history_tokens ? String(m.max_history_tokens) : '';
     mThink = m.thinking;
     mLevels = (m.thinking_levels ?? []).join(', ');
+    mImage = (m.modalities ?? []).includes('image');
     remote = null;
     remoteErr = '';
     err = '';
@@ -150,6 +153,7 @@
         max_tokens: intOf(mMax),
         max_history_tokens: intOf(mHist),
         thinking: mThink.trim(),
+        modalities: mImage ? ['text', 'image'] : ['text'],
         thinking_levels: mLevels
           .split(/[,，\s]+/)
           .map((s) => s.trim())
@@ -219,7 +223,7 @@
   function pickRemote(r: RemoteModel) {
     mName = r.id;
     if (r.context_window) mCtx = String(r.context_window);
-    if (!mLabel) mLabel = '';
+    if (r.modalities?.includes('image')) mImage = true;
     remote = null;
   }
 
@@ -330,6 +334,7 @@
       <label>默认思考强度<input class="input" bind:value={mThink} placeholder="比如 high，留空不传" /></label>
       <label>可选值<input class="input" bind:value={mLevels} placeholder="none, low, high" /></label>
     </div>
+    <label class="check"><input type="checkbox" bind:checked={mImage} /> 能接收图片（多模态模型）</label>
     {#if err}<div class="errbox">{err}</div>{/if}
     <div class="row">
       <span class="grow"></span>
@@ -369,6 +374,7 @@
         <div class="grow min">
           <div class="mt">
             <strong>{m.label}</strong>
+            {#if m.modalities?.includes('image')}<span class="tag accent">图片</span>{/if}
             {#if m.config}<span class="tag">配置文件</span>{/if}
           </div>
           <div class="muted small msub">
@@ -463,6 +469,14 @@
     gap: 5px;
     font-size: 12px;
     color: var(--text-2);
+  }
+  .form label.check {
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+  }
+  .form label.check input {
+    accent-color: var(--accent);
   }
   .two {
     display: grid;

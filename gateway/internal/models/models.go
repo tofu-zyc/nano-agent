@@ -50,6 +50,7 @@ type Model struct {
 	MaxHistory     int      `json:"max_history_tokens,omitempty"` // 历史上限，0 表示按上下文窗口算
 	Thinking       string   `json:"thinking,omitempty"`           // 默认的思考强度（reasoning_effort），空表示不传
 	ThinkingLevels []string `json:"thinking_levels,omitempty"`
+	Modalities     []string `json:"modalities,omitempty"` // 能接收什么：text、image；空表示只有 text
 	Owner          string   `json:"owned_by,omitempty"`
 }
 
@@ -76,6 +77,14 @@ func Open(dataDir string, cfg *config.Config) (*Store, error) {
 	if err == nil {
 		if err := json.Unmarshal(b, &s.f); err != nil {
 			return nil, fmt.Errorf("%s 读不了：%w", s.path, err)
+		}
+	}
+	// 旧版本没有 modalities：按纯文本处理；写坏的也按纯文本，不挡住启动
+	for i := range s.f.Models {
+		if mods, err := normalizeModalities(s.f.Models[i].Modalities); err == nil {
+			s.f.Models[i].Modalities = mods
+		} else {
+			s.f.Models[i].Modalities = []string{"text"}
 		}
 	}
 	return s, nil
@@ -116,7 +125,8 @@ func (s *Store) configModel() (Model, bool) {
 		name = "mock"
 	}
 	return Model{ID: ConfigEndpoint + "/" + name, Endpoint: ConfigEndpoint, Name: name, ContextWindow: l.ContextWindow,
-		MaxTokens: l.MaxTokens, MaxHistory: l.MaxHistoryTokens, Thinking: l.Thinking, ThinkingLevels: l.ThinkingLevels}, true
+		MaxTokens: l.MaxTokens, MaxHistory: l.MaxHistoryTokens, Thinking: l.Thinking, ThinkingLevels: l.ThinkingLevels,
+		Modalities: l.Modalities}, true
 }
 
 // Endpoints 返回所有端点（配置文件的在最前面）
@@ -246,6 +256,11 @@ func (s *Store) SaveModel(m Model) (Model, error) {
 	if m.Name == "" {
 		return m, errors.New("模型名不能为空")
 	}
+	mods, err := normalizeModalities(m.Modalities)
+	if err != nil {
+		return m, err
+	}
+	m.Modalities = mods
 	if m.Endpoint == ConfigEndpoint {
 		return m, errors.New("配置文件里的模型在设置里改")
 	}
@@ -286,10 +301,11 @@ func (s *Store) SetDefault(id string) error {
 
 // Remote 是端点的 /models 列出来的一个模型
 type Remote struct {
-	ID            string `json:"id"`
-	Owner         string `json:"owned_by,omitempty"`
-	ContextWindow int    `json:"context_window,omitempty"`
-	Added         bool   `json:"added"` // 已经在列表里了
+	ID            string   `json:"id"`
+	Owner         string   `json:"owned_by,omitempty"`
+	ContextWindow int      `json:"context_window,omitempty"`
+	Modalities    []string `json:"modalities,omitempty"` // 接口报的输入类型（OpenRouter 之类才有）
+	Added         bool     `json:"added"`                // 已经在列表里了
 }
 
 // Fetch 从端点的 /models 拉取模型列表。上下文长度各家放的字段不一样，能认出来的都填上。
@@ -346,11 +362,50 @@ func (s *Store) Fetch(ctx context.Context, endpoint string) ([]Remote, error) {
 			continue
 		}
 		owner, _ := d["owned_by"].(string)
-		x := Remote{ID: id, Owner: owner, ContextWindow: contextOf(d), Added: have[e.ID+"/"+id]}
+		x := Remote{ID: id, Owner: owner, ContextWindow: contextOf(d), Modalities: modalitiesOf(d), Added: have[e.ID+"/"+id]}
 		out = append(out, x)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// normalizeModalities 检查并整理输入类型：去重、小写，文字总是有（text），空表示只有 text。
+func normalizeModalities(in []string) ([]string, error) {
+	out := []string{}
+	for _, x := range in {
+		switch x = strings.ToLower(strings.TrimSpace(x)); x {
+		case "text", "image", "audio", "video":
+			if !slices.Contains(out, x) {
+				out = append(out, x)
+			}
+		case "":
+		default:
+			return nil, fmt.Errorf("不认识的输入类型 %q（只有 text、image、audio、video）", x)
+		}
+	}
+	if !slices.Contains(out, "text") {
+		out = append([]string{"text"}, out...)
+	}
+	return out, nil
+}
+
+// modalitiesOf 读接口报的输入类型：OpenRouter 的 architecture.input_modalities，或者 input_modalities
+func modalitiesOf(d map[string]any) []string {
+	var raw []any
+	if arch, ok := d["architecture"].(map[string]any); ok {
+		raw, _ = arch["input_modalities"].([]any)
+	}
+	if raw == nil {
+		raw, _ = d["input_modalities"].([]any)
+	}
+	var out []string
+	for _, v := range raw {
+		s, _ := v.(string)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // contextOf 认出上下文长度：vLLM 的 max_model_len、OpenRouter 的 context_length，以及别的常见写法

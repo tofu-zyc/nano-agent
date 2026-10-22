@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/media"
 )
 
 func call(id string) llm.ToolCall {
@@ -79,14 +80,14 @@ func TestBuildMessagesSendsReasoningOnlyForCurrentTurn(t *testing.T) {
 		{Role: "assistant", ToolCalls: []llm.ToolCall{call("c")}, Reasoning: "new"},
 		{Role: "tool", ToolCallID: "c", Content: "r"},
 	}
-	msgs := BuildMessages("SYS", "", h, true)
+	msgs := BuildMessages("SYS", "", h, true, nil)
 	if msgs[0].Role != "system" || msgs[0].Content != "SYS" {
 		t.Fatalf("system: %+v", msgs[0])
 	}
 	if msgs[2].ReasoningContent != "" || msgs[4].ReasoningContent != "new" {
 		t.Fatalf("reasoning: %q %q", msgs[2].ReasoningContent, msgs[4].ReasoningContent)
 	}
-	if got := BuildMessages("", "", h, false); got[3].ReasoningContent != "" || got[0].Role != "user" {
+	if got := BuildMessages("", "", h, false, nil); got[3].ReasoningContent != "" || got[0].Role != "user" {
 		t.Fatalf("no reasoning / no system: %+v", got)
 	}
 }
@@ -130,7 +131,7 @@ func TestRequestsOnlyGrow(t *testing.T) {
 			t.Fatalf("不该裁剪")
 		}
 		st := s.Settings(sid)
-		msgs := BuildMessages("SYS", st.Summary, s.History(sid), false)
+		msgs := BuildMessages("SYS", st.Summary, s.History(sid), false, nil)
 		if len(prev) > 0 && !reflect.DeepEqual(msgs[:len(prev)], prev) {
 			t.Fatalf("第 %d 轮的请求不是上一轮的延续", i)
 		}
@@ -167,7 +168,7 @@ func TestCompactOnceThenAppendOnly(t *testing.T) {
 	if st.Base != 22-kept || !strings.Contains(st.Summary, "已经省略") || !strings.Contains(st.Summary, "工作目录：/w") {
 		t.Fatalf("settings: %+v", st)
 	}
-	msgs := BuildMessages("SYS", st.Summary, s.History(sid), false)
+	msgs := BuildMessages("SYS", st.Summary, s.History(sid), false, nil)
 	if !strings.HasPrefix(msgs[1].Content, st.Summary+"\n") {
 		t.Fatalf("summary 应该放在第一条用户消息前面：%q", msgs[1].Content[:80])
 	}
@@ -236,5 +237,29 @@ func TestCompactSaveFailureLeavesContextIntact(t *testing.T) {
 	}
 	if st := s.Settings(sid); st.Base != 0 || st.Summary != "" || len(s.History(sid)) != 2 {
 		t.Fatalf("保存失败却改变了上下文: %+v", st)
+	}
+}
+
+// 带图片的用户消息：模型支持图片时做成 content 数组，不支持（或者生成摘要）时只留文字说明。
+func TestBuildMessagesWithImages(t *testing.T) {
+	img := media.Attachment{ID: strings.Repeat("a", 64), MIME: "image/png", Size: 10}
+	h := []Msg{{Role: "user", Content: "看图", Images: []media.Attachment{img}}}
+	loader := func(a media.Attachment) (string, bool) { return "data:" + a.MIME + ";base64,AAAA", true }
+	msgs := BuildMessages("", "", h, false, loader)
+	if len(msgs) != 1 || len(msgs[0].Parts) != 2 || msgs[0].Parts[1].ImageURL == nil {
+		t.Fatalf("parts: %+v", msgs)
+	}
+	if msgs[0].Parts[0].Text != "看图" {
+		t.Fatalf("文字部分：%+v", msgs[0].Parts[0])
+	}
+	// 图片读不出来：留一句说明
+	msgs = BuildMessages("", "", h, false, func(media.Attachment) (string, bool) { return "", false })
+	if len(msgs[0].Parts) != 2 || !strings.Contains(msgs[0].Parts[1].Text, "读不出来") {
+		t.Fatalf("读不出的图片：%+v", msgs[0].Parts)
+	}
+	// 模型不支持图片（或者生成摘要）：只发文字说明
+	msgs = BuildMessages("", "", h, false, nil)
+	if len(msgs[0].Parts) != 0 || !strings.Contains(msgs[0].Content, "[图片×1]") {
+		t.Fatalf("纯文字模型：%+v", msgs[0])
 	}
 }
