@@ -1,0 +1,7 @@
+# gitleaks 配置：默认规则 + 测试里故意写的假密钥
+[extend]
+useDefault = true
+
+[allowlist]
+description = "脱敏测试里的假密钥"
+paths = ['''gateway/internal/redact/redact_test\.go''']
