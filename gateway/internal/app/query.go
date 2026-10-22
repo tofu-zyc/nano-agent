@@ -41,7 +41,7 @@ type SessionInfo struct {
 	Channel        string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints      []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title          string         `json:"title"`
-	Workspaces     []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只聊天
+	Workspaces     []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只读
 	Kernel         string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
 	RunNode        string         `json:"run_node"`   // 正在跑这一轮的内核
 	Running        bool           `json:"running"`
@@ -197,7 +197,7 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。
 type SessionPatch struct {
 	Title      *string   `json:"title"`
-	Workspaces *[]string `json:"workspaces"` // 挂载的工作目录（ID），空列表表示只聊天
+	Workspaces *[]string `json:"workspaces"` // 挂载的工作目录（ID），空列表表示只读
 	Mode       *string   `json:"mode"`
 	Thinking   *string   `json:"thinking"` // 空字符串表示用默认值
 	Model      *string   `json:"model"`    // 空字符串表示用默认模型

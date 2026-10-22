@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test run chat clean installer install-kernel
+.PHONY: all kernel gateway web test run chat clean install installer install-kernel
 
 all: kernel gateway
 
@@ -26,6 +26,10 @@ run: all
 chat:
 	@test -x gateway/nano-gateway || $(MAKE) -s gateway
 	@./gateway/nano-gateway chat -c gateway.toml
+
+# 安装网关到 ~/.local（程序、配置、数据分开；不再放在源码目录里）
+install: all
+	./scripts/install-gateway.sh
 
 # 在这台机器上安装内核（开机自启，连到网关）。别的电脑用 make installer 生成的单文件安装包
 install-kernel:

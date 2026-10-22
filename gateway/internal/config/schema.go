@@ -68,11 +68,6 @@ var Fields = []Field{
 	// ---- 工作目录 ----
 	{Key: "workspace.mode", Group: "workspace", Section: "默认值", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},
 		Help: "auto：工作目录内全部直接执行；ask：写文件、执行命令前要批准；readonly：只读", Keywords: "yolo 审批 权限"},
-	{Key: "workspace.extra_ro", Group: "workspace", Section: "沙箱", Label: "额外只读路径", Type: "list",
-		Help: "沙箱里额外能读的路径，比如 ~/.gitconfig", Keywords: "沙箱 sandbox"},
-	{Key: "workspace.extra_rw", Group: "workspace", Section: "沙箱", Label: "额外可写路径", Type: "list",
-		Help: "沙箱里额外能写的路径，比如 npm、cargo 的缓存目录", Keywords: "沙箱 sandbox 缓存"},
-
 	// ---- 渠道 ----
 	{Key: "cli.enabled", Group: "cli", Label: "启用终端聊天", Type: "bool", Restart: true,
 		Help: "另开一个终端运行 make chat 连进来聊天；网关在数据目录里开一个只有自己能连的 socket"},

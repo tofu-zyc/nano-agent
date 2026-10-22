@@ -516,7 +516,7 @@
               <button class="x" title="取下" aria-label="取下 {mt.host}:{mt.path}" onclick={() => mountWorkspaces(sess.workspaces.filter((x) => x.id !== mt.id).map((x) => x.id))}><Icon name="x" size={12} /></button>
             </div>
           {:else}
-            <div class="mount empty"><Icon name="chat" size={14} /><span>只聊天：没有挂载工作目录，不能读写文件、执行命令</span></div>
+            <div class="mount empty"><Icon name="chat" size={14} /><span>只读：没有挂载工作目录，只能读文件，不能写、不能执行命令</span></div>
           {/each}
           <button class="btn sm" onclick={() => (picking = true)}><Icon name="plus" size={13} />{sess.workspaces.length ? '挂载 / 取下…' : '挂载工作目录…'}</button>
         </div>

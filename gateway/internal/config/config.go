@@ -120,11 +120,9 @@ type Access struct {
 // 这里是默认值，每个会话可以用 /dir、/mode 单独改。
 type Workspace struct {
 	// 旧版本的默认机器和默认工作目录：第一次启动时迁移到工作目录列表（data/workspaces.json），之后不再使用
-	Node    string   `toml:"node" json:"node"`
-	Dirs    []string `toml:"dirs" json:"dirs"`
-	Mode    string   `toml:"mode" json:"mode"`         // auto | ask（默认）| readonly
-	ExtraRO []string `toml:"extra_ro" json:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
-	ExtraRW []string `toml:"extra_rw" json:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
+	Node string   `toml:"node" json:"node"`
+	Dirs []string `toml:"dirs" json:"dirs"`
+	Mode string   `toml:"mode" json:"mode"` // auto | ask（默认）| readonly
 }
 
 // Skills：技能放在网关上，每个技能一个目录（SKILL.md 和附带文件）
@@ -193,9 +191,6 @@ func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error
 		}
 	}
 	c.applyDefaults()
-	if !md.IsDefined("workspace", "extra_ro") && !strings.Contains(string(overlay), `"extra_ro"`) {
-		c.Workspace.ExtraRO = []string{"~/.gitconfig", "~/.config/git"} // git 要读用户名和邮箱
-	}
 	base := filepath.Dir(path)
 	if abs, err := filepath.Abs(base); err == nil {
 		base = abs

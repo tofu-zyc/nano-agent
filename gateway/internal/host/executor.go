@@ -33,10 +33,16 @@ type Executor struct {
 	Arch   string // 本机架构（uname -m）
 }
 
-// FindExecutor 在网关程序旁边的 ../kernel、配置目录下的 kernel/ 里找执行器。
+// FindExecutor 在安装布局的 ../lib/nano-agent、网关程序旁边、../kernel、
+// 配置目录下的 kernel/ 里找执行器。
 func FindExecutor(configDir string) (Executor, error) {
 	exe, _ := os.Executable()
-	for _, d := range []string{filepath.Dir(exe), filepath.Join(filepath.Dir(exe), "../kernel"), filepath.Join(configDir, "kernel")} {
+	for _, d := range []string{
+		filepath.Join(filepath.Dir(exe), "../lib/nano-agent"),
+		filepath.Dir(exe),
+		filepath.Join(filepath.Dir(exe), "../kernel"),
+		filepath.Join(configDir, "kernel"),
+	} {
 		p := filepath.Join(d, "nano-exec")
 		if st, err := os.Stat(p); err != nil || st.IsDir() {
 			continue

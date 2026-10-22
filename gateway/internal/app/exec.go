@@ -43,7 +43,7 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		reply(false, fmt.Sprintf("工作目录 %s 所在的 %s 现在用不了：%s", mt.ws.Label(), mt.ws.Host, why))
 		return
 	}
-	spec := r.rt.spec(*mt, r.w)
+	spec := r.rt.spec(*mt, a.isAdmin(r.from))
 	args := m.Args
 	if len(args) == 0 {
 		args = json.RawMessage("{}")

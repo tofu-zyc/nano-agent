@@ -92,13 +92,19 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 }
 
 // toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill），按名字排序（顺序固定，方便前缀缓存）。
+// 没有工作目录的管理员只给 Read/Grep 和 Skill；访客没有工具（调用方跳过）。
 // 调用方持有锁。
-func (a *App) toolsFor(n *node) []llm.Tool {
+func (a *App) toolsFor(n *node, readOnly bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
+	if readOnly {
+		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
+			return t.Function.Name != "Read" && t.Function.Name != "Grep"
+		})
+	}
 	if spec, ok := a.skills.ToolSpec(); ok {
 		tools = append(tools, toolOf(spec))
-		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	}
+	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	return tools
 }
 
@@ -315,17 +321,20 @@ func (rt route) find(name string) *mount {
 	return nil
 }
 
-// spec 是交给内核的工作目录：同一台机器上挂的别的工作目录也能读写（方便在它们之间拷文件），
-// 技能文件的缓存目录只读。
-func (rt route) spec(m mount, w workspace) proto.WorkspaceSpec {
+// spec 是交给内核的工作目录：同一台机器上挂的别的工作目录也能读写（方便在它们之间拷文件）。
+// 管理员可以读整个文件系统（RO "/"），但只能写工作目录；访客仍然只能读工作目录和技能缓存。
+func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
 	dirs := []string{m.ws.Path}
 	for _, o := range rt.mounts {
 		if o.ws.Host == m.ws.Host && o.ws.ID != m.ws.ID {
 			dirs = append(dirs, o.ws.Path)
 		}
 	}
-	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: append(slices.Clone(w.ro), skills.CacheDir),
-		RW: slices.Clone(w.rw), Local: m.local, Landlock: m.landlock}
+	ro := []string{skills.CacheDir}
+	if readAll {
+		ro = []string{"/"}
+	}
+	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock}
 }
 
 // hostUsable：机器 name 上的工作目录现在能用（有内核，或者网关能在上面执行）
@@ -403,7 +412,7 @@ func (a *App) describeMachines(sid string) string {
 	case rt.kernel == "":
 		b.WriteString("现在没有在线的内核，没法处理消息。\n")
 	case len(w.wss) == 0:
-		fmt.Fprintf(&b, "这个会话没有挂载工作目录，只聊天，由内核 %s 跑。\n", rt.kernel)
+		fmt.Fprintf(&b, "这个会话没有挂载工作目录，只读，由内核 %s 跑。\n", rt.kernel)
 	default:
 		fmt.Fprintf(&b, "这个会话由内核 %s 跑，挂载的工作目录：\n", rt.kernel)
 		for _, m := range rt.mounts {

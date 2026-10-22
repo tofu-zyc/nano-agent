@@ -23,7 +23,7 @@ import (
 //
 // 工作目录是“机器 + 路径”：网关所在的本机、SSH 服务器（host 包）或者装了内核的电脑（内核的名字）
 // 上的一个目录。网关维护一张列表（data/workspaces.json），拓扑里挂在各自的机器下。每个会话从列表里
-// 挂载任意几个（可以在不同的机器上，工具调用时用 workspace 参数指定；一个都不挂就只聊天）。
+// 挂载任意几个（可以在不同的机器上，工具调用时用 workspace 参数指定；一个都不挂就是只读）。
 // 标了默认的工作目录，新会话第一次说话时都挂上。工作目录在哪台机器上，决定工具怎么执行（nodes.go 的 route）。
 
 type Workspace struct {
@@ -330,7 +330,7 @@ func (a *App) SetDefaultWorkspace(id string, on bool) error {
 	return nil
 }
 
-// setSessionWorkspaces 设置会话挂载的工作目录（按顺序，空表示只聊天）。调用方持有锁。
+// setSessionWorkspaces 设置会话挂载的工作目录（按顺序，空表示只读）。调用方持有锁。
 func (a *App) setSessionWorkspaces(sid string, ids []string) error {
 	var clean []string
 	for _, id := range ids {
@@ -355,7 +355,7 @@ func (a *App) setSessionWorkspaces(sid string, ids []string) error {
 func (a *App) describeMounts(sid string) string {
 	w := a.workspaceOf(sid)
 	if len(w.wss) == 0 {
-		return "这个会话没有挂载工作目录，只聊天（不能读写文件、执行命令）。"
+		return "这个会话没有挂载工作目录，现在是只读模式（可以读文件，不能写、不能执行命令）。"
 	}
 	var labels []string
 	for _, x := range w.wss {
@@ -458,7 +458,7 @@ func (a *App) cmdDir(c in, arg string) {
 	switch sub {
 	case "none":
 		err := a.setSessionWorkspaces(c.s.sid, nil)
-		a.reply(c, "工作目录全部取下了，这个会话只聊天（不能读写文件、执行命令）。", err)
+		a.reply(c, "工作目录全部取下了，这个会话现在是只读（可以读文件，不能写、不能执行命令）。", err)
 	case "add":
 		if rest == "" {
 			a.answer(c, dirUsage)

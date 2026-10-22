@@ -334,7 +334,8 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
                          char *err, size_t errlen)
 {
     bool ok = true;
-    for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok; key++)
+    /* 只检查可写目录：ro 是只读放行（管理员可能拿到整个 /），不会改写执行器 */
+    for (const char *const *key = (const char *const[]){ "dirs", "rw", NULL }; *key && ok; key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
     job_t *j = NULL;
     if (ok) {

@@ -161,7 +161,8 @@ type run struct {
 	start      time.Time
 	calls      int       // 这一轮请求了几次模型
 	usage      llm.Usage // 这一轮的累计用量
-	noTools    bool      // 没有能用的工作目录：不给模型工具，只聊天
+	noTools    bool      // 访客没有工作目录：不给模型工具，只聊天
+	readOnly   bool      // 管理员没有工作目录：给 Read/Grep，只读
 	withImages bool      // 这一轮的模型能接收图片
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
@@ -551,7 +552,8 @@ func (a *App) startRun(s *sess) {
 	if !st.WorkspacesSet && len(w.wss) > 0 {
 		st.Workspaces, st.WorkspacesSet, dirty = w.ids(), true, true // 新会话第一次说话：定下默认挂载的工作目录
 	}
-	note := a.envNote(w, rt)
+	admin := a.isAdmin(head.who)
+	note := a.envNote(w, rt, admin)
 	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
 		st.EnvNote, dirty = note, true
@@ -602,13 +604,21 @@ func (a *App) startRun(s *sess) {
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	for _, m := range rt.mounts {
-		in.Workspaces = append(in.Workspaces, rt.spec(m, w))
+		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
-	r.write = mode == proto.ModeAuto || mode == proto.ModeAsk
+	r.write = admin && (mode == proto.ModeAuto || mode == proto.ModeAsk)
 	if len(rt.mounts) == 0 {
-		// 没有挂载工作目录，或者都在用不了的机器上：不给模型工具，只聊天
-		r.noTools = true
-		in.Mode = proto.ModeNone
+		if admin && mode != proto.ModeNone {
+			// 没有工作目录：只读。Read/Grep 可以读这台机器上当前用户能读的文件，
+			// 不能写、不能执行命令。给内核一个空的“只读”工作目录，让工具能跑起来。
+			r.readOnly = true
+			in.Mode = proto.ModeReadonly
+			in.Workspaces = []proto.WorkspaceSpec{readOnlySpec()}
+		} else {
+			// 访客没有工作目录：不给工具，只聊天
+			r.noTools = true
+			in.Mode = proto.ModeNone
+		}
 	}
 	a.log.Info("开始处理", "sid", s.sid, "node", node, "workspaces", len(rt.mounts), "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
@@ -853,7 +863,7 @@ func (a *App) generateModel(s *sess) {
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = a.toolsFor(n)
+		req.Tools = a.toolsFor(n, r.readOnly)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel

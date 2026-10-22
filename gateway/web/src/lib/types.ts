@@ -80,7 +80,7 @@ export type SessionInfo = {
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
   endpoints: EndpointInfo[] | null;
   title: string;
-  workspaces: MountInfo[]; // 挂载的工作目录，空表示只聊天
+  workspaces: MountInfo[]; // 挂载的工作目录，空表示只读
   kernel: string; // 跑这一轮的内核（没在跑时是下一轮会用的）
   run_node: string; // 正在跑这一轮的内核
   running: boolean;

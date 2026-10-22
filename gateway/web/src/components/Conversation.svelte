@@ -313,7 +313,7 @@
               <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击挂载 / 取下" onclick={() => (picking = true)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
             {/each}
           {:else}
-            <button class="tag" onclick={() => (picking = true)} title="没有挂载工作目录，不能用工具。点这里挂一个">只聊天</button>
+            <button class="tag" onclick={() => (picking = true)} title="没有挂载工作目录：只能读，不能写、不能执行命令。点这里挂一个">只读</button>
           {/if}
           {#if info.thinking}<span class="tag">思考 {info.thinking === 'none' ? '关闭' : info.thinking}</span>{/if}
           {#if info.usage.prompt_tokens}<span class="tag accent">缓存命中 {pct(info.usage.cached_tokens, info.usage.prompt_tokens)}</span>{/if}

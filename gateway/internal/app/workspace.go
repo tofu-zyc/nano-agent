@@ -30,9 +30,8 @@ var modeDesc = map[string]string{
 
 // workspace 是一个会话实际生效的设置。
 type workspace struct {
-	wss    []*Workspace // 挂载的工作目录（workspaces.go），空表示只聊天
-	ro, rw []string     // 配置里额外的只读和读写路径，每台机器上都一样
-	mode   string
+	wss  []*Workspace // 挂载的工作目录（workspaces.go），空表示只读
+	mode string
 }
 
 func (a *App) workspaceOf(sid string) workspace {
@@ -50,8 +49,6 @@ func (a *App) workspaceOf(sid string) workspace {
 	} else {
 		w.wss = a.defaultWorkspaces()
 	}
-	w.ro = slices.Clone(a.cfg.Workspace.ExtraRO)
-	w.rw = slices.Clone(a.cfg.Workspace.ExtraRW)
 	return w
 }
 
@@ -88,10 +85,14 @@ func (a *App) runMode(w workspace, from string) string {
 	return proto.ModeNone
 }
 
-// noToolsNote 告诉模型这个会话没有工具。不说的话，模型（尤其是人格里写了“需要时使用工具”）
+// noToolsNote 告诉访客模型这个会话没有工具。不说的话，模型（尤其是人格里写了“需要时使用工具”）
 // 会在回复里编造工具调用的文本。
 const noToolsNote = "[系统] 这个会话没有挂载工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
 	"用户需要这些的话，请他让管理员挂一个工作目录（/dir，或者在网页里设置）。"
+
+// readOnlyNote 是没有工作目录的管理员：可以读，但不能写、不能执行。
+const readOnlyNote = "[系统] 这个会话没有挂载工作目录，现在是只读模式：可以用 Read 和 Grep 读这台机器上当前用户能读的文件" +
+	"（路径写绝对路径或 ~ 开头），不能写文件、不能执行命令。需要改文件或执行命令时，请用户挂一个工作目录。"
 
 // machineDesc 是给模型看的机器说明
 func (a *App) machineDesc(name string) string {
@@ -105,11 +106,18 @@ func (a *App) machineDesc(name string) string {
 }
 
 // envNote 描述这一轮的环境，追加在用户消息前面（变了才追加，不改系统提示词）。
-func (a *App) envNote(w workspace, rt route) string {
+func (a *App) envNote(w workspace, rt route, admin bool) string {
 	if len(w.wss) == 0 {
+		if admin {
+			return readOnlyNote
+		}
 		return noToolsNote
 	}
 	if len(rt.mounts) == 0 {
+		if admin {
+			return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手，只读：可以读文件，不能写、不能执行命令。",
+				strings.Join(rt.down, "；"), rt.kernel)
+		}
 		return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。",
 			strings.Join(rt.down, "；"), rt.kernel)
 	}
@@ -202,6 +210,11 @@ func expandHome(p string) string {
 		}
 	}
 	return p
+}
+
+// readOnlySpec 是没有工作目录的管理员用的空工作目录：Read/Grep 可以读整台机器，没有可写目录。
+func readOnlySpec() proto.WorkspaceSpec {
+	return proto.WorkspaceSpec{Name: "只读", RO: []string{"/"}, Local: true}
 }
 
 // ---- 审批提示 ----

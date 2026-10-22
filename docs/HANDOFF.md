@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，模型管理重做（模型只来自 models.json、没有“配置文件模型”、没有模型就是空状态、旧配置一次性迁移、拓扑模型节点面板）、图片输入（网页 / Telegram / 飞书）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成；界面细节操作（右键菜单点空白关闭、Esc 分层关闭、会话设置跟随切换、会话草稿隔离）见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)。
+最后更新：2026-10-22，模型管理重做（模型只来自 models.json、没有“配置文件模型”、没有模型就是空状态、旧配置一次性迁移、拓扑模型节点面板）、图片输入（网页 / Telegram / 飞书）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成；界面细节操作见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)；权限模型简化为“管理员读全盘、写工作目录，没有工作目录只读”，并加了 `make install` 把程序/配置/数据装到用户目录。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)。
 
 ## 一句话
 
@@ -46,7 +46,7 @@ gateway/               Go 网关
   internal/config      配置：gateway.toml + data/config.json（网页改的），schema 驱动设置页
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
-scripts/               install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh
+scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh
 skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）
 docs/                  ARCHITECTURE.md、protocol.md、本文件
 ```
@@ -54,14 +54,15 @@ docs/                  ARCHITECTURE.md、protocol.md、本文件
 ## 怎么跑、怎么测
 
 ```sh
-make run          # 编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页登录链接
+make install      # 日常使用：装到 ~/.local，配置/数据在 ~/.config、~/.local/share
+make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C 停）；打印网页登录链接
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
 make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）
 make web          # 改了前端后重新构建（npm run check && build），产物要提交
 cd gateway && go test -race ./...
 ```
 
-- e2e（scripts/e2e.sh）现在 50 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，以及超限摘要、保存和继续用工具。
+- e2e（scripts/e2e.sh）现在 57 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，以及超限摘要、保存和继续用工具。
 - host 包：假 ssh 测部署 / 执行 / 断线 / 架构不同时现编，有 sshd 时起一个临时的真 OpenSSH 测一遍。kernel 包测配对。
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
@@ -96,8 +97,8 @@ cd gateway && go test -race ./...
 
 1. **前缀缓存优先**：系统提示词和工具定义固定不变；历史只追加；时间、来源（`[2026-10-21 周三 15:08 · Telegram]`）、环境变化（`[系统] 在 X 上工作。工作目录：…`、替补说明）都追加在用户消息前面，**变了才追加**（Settings.EnvNote 记着上次说的）。历史太长时一次裁掉一大段（滞回），之后又只追加。任何会改动前面字节的改动都是缓存回归。
 2. **网关是唯一有状态的中心，内核无状态**。会话 = 一段对话（上下文、工作目录、模式、思考强度、人格、机器）；窗口（endpoint）= 终端、某个私聊，接在会话上（data/endpoints.json）。管理员的窗口默认接主会话；别人各自一个会话。
-3. **机器、工作目录和执行**（详见 ARCHITECTURE.md）：机器 = 本机（host.LocalName「本机」）、SSH 服务器（host.Manager）、内核所在的电脑（非本机内核，机器名 = 内核名；本机内核都算本机）。工作目录 `{id, host, path, default}` 存 data/workspaces.json；会话的 Settings.Workspaces / WorkspacesSet（挂载的 ID 列表；没设过就在第一轮落到默认挂载的那些，空列表且 WorkspacesSet 表示只聊天；旧的 Workspace 字段启动时迁移）。每一轮 `route()`：挑内核（第一个挂载的机器上的 → 别的挂载机器上的 → preferred），每个工作目录：在内核的机器上 local=true，否则 hostFor() 能用就挂上（网关执行），用不了的进 down。input.workspaces 由 route.spec() 生成（同一台机器上挂的目录一起放进 dirs，ro 带技能缓存目录）。内核按工具参数 workspace 找工作目录（全名 / 序号 / 只写机器 / 只写路径），预检的错误通过 na_call.error 直接作为结果，沙箱按调用（na_call.sandbox）。
-4. **沙箱**：执行器每次调用启动一次，Landlock（工作目录读写、系统目录只读、HOME 其他地方不可见）+ seccomp（禁 AF_UNIX、io_uring 等）+ 清理环境变量。工作目录不能包含 nano-agent 自己（内核、网关、执行器各自把关）。没有沙箱的机器，自动模式下 Shell 也要审批（按每一轮实际执行的机器算）。
+3. **机器、工作目录和执行**（详见 ARCHITECTURE.md）：机器 = 本机（host.LocalName「本机」）、SSH 服务器（host.Manager）、内核所在的电脑（非本机内核，机器名 = 内核名；本机内核都算本机）。工作目录 `{id, host, path, default}` 存 data/workspaces.json；会话的 Settings.Workspaces / WorkspacesSet（挂载的 ID 列表；没设过就在第一轮落到默认挂载的那些，空列表且 WorkspacesSet 表示只读；旧的 Workspace 字段启动时迁移）。每一轮 `route()`：挑内核（第一个挂载的机器上的 → 别的挂载机器上的 → preferred），每个工作目录：在内核的机器上 local=true，否则 hostFor() 能用就挂上（网关执行），用不了的进 down。input.workspaces 由 route.spec() 生成（同一台机器上挂的目录一起放进 dirs；管理员 ro 为 /，访客 ro 只有技能缓存目录）。没有工作目录的管理员会拿到一个空的“只读”工作目录（dirs 空、ro /），配合只读模式跑 Read/Grep。内核按工具参数 workspace 找工作目录（全名 / 序号 / 只写机器 / 只写路径），预检的错误通过 na_call.error 直接作为结果，沙箱按调用（na_call.sandbox）。
+4. **沙箱**：执行器每次调用启动一次，Landlock（管理员读整个文件系统、只写工作目录和临时/缓存目录；访客仍然只读工作目录）+ seccomp（禁 AF_UNIX、io_uring 等）+ 清理环境变量。没有工作目录的管理员是只读模式（Read/Grep），访客没有工具。工作目录不能包含网关的运行时、配置和数据目录（用 `make install` 后它们在用户目录）。没有沙箱的机器，自动模式下 Shell 也要审批（按每一轮实际执行的机器算）。
 5. **SSH 服务器**（internal/host/ssh.go）：网关起一个 `ssh -M -N` 主连接（ControlPersist=no，控制路径在 $XDG_RUNTIME_DIR/nano-ssh 或 /tmp/nano-agent-<uid>/nano-ssh），之后的命令都 `-o ControlMaster=no -o BatchMode=yes` 复用它。连上后探测（uname、有没有执行器）→ 架构相同就上传（有 nano-exec-static 优先）→ 否则传 nano-exec-src.tar.gz 用 cc 现编。执行器在服务器 `~/.cache/nano-agent/nano-exec-<sha256 前 8 位>`。每 5 分钟复查，掉线 5s→60s 退避重连；ssh 退出码 255 视为连接断了。工具调用 stdin 保持打开，关 stdin 就是取消（3 秒后杀）。测试用 NANO_SSH_PROGRAM 换成假 ssh。
 6. **安全**：网页只听本机、密码登录、HttpOnly SameSite=Strict、写操作要 X-Nano 头、本机时查 Host；终端聊天走数据目录里只有自己能连的 unix socket（0600 + SO_PEERCRED）。内核口令两种：共用 token（本机、手写 kernel.conf 的）；配对得到的专用口令（绑定节点名，冒充不了别的节点，网关只存 SHA-256，网页移除即作废）。Hub.Attach 不查口令，只给测试用。TCP 本身不加密，跨网络使用私有网络或隧道。SSH 密码只在 data/connections.json（0600）和 askpass 临时文件里。
 7. **技能**：放在网关上（internal/skills，`[skills] dir` 默认 gateway.toml 旁的 skills/），每一轮开始时 Scan()，名字或简介变了才发 skills 事件；Skill 工具定义由网关加进模型请求（toolsFor，和内核的工具一起按名字排序，内核报的 Skill 忽略）。调用 Skill 时内核用 exec（没有 workspace）交给网关，网关读说明、把附带文件 PutFiles 到这一轮挂载的每台机器的 ~/.cache/nano-agent/skills/<名字>/（本机、SSH 自己放，别的电脑用 skill_put，内核只肯写这个目录），说明里给的就是这个路径，每台机器一样。
@@ -123,7 +124,7 @@ cd gateway && go test -race ./...
 - 思考强度只用 OpenAI 风格的 `reasoning_effort`（用户的模型接受 none/low/high/xhigh/max，不接受 medium/minimal/off）。切换思考强度导致缓存失效是 vLLM 的问题，**不要提示**。
 - 目前只支持私聊，群聊以后做。
 - 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，Co-Authored-By 记录实际参与者。用户说过“提交，然后开始下一步即可”。
-- **密钥**：用户的 API key 只在本地 gateway.toml（gitignore，权限 600）。提交前用 `git grep --cached` 查一遍。不要删用户的 data/。工作目录不能包含 nano-agent 自己。
+- **密钥**：API key 在本地 gateway.toml、data/models.json、data/config.json（网页改过的字段），SSH 密码在 data/connections.json，都是 0600 明文；不要提交，提交前用 `git grep --cached` 查一遍。不要删用户的 data/。工作目录不能包含网关的运行时、配置和数据目录；用 `make install` 后它们在 ~/.local / ~/.config。
 - 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），迁移后地址/模型保存在 data/models.json。
 - 杀进程前确认 /proc/PID/cwd 是演示目录，用户自己可能开着网关（cwd 是项目目录）。
 
@@ -131,7 +132,7 @@ cd gateway && go test -race ./...
 ## 接下来要做的（用户要求先把主体功能做齐）
 
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
-2. 聊天里批准配对（/pair），现在只能在网页上点。让 AI 改网关配置（自举）是用户提的下一批：设计见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)，状态是评审中，先定工具、审批和密码流程再实现。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
+2. 聊天里批准配对（/pair），现在只能在网页上点。让 AI 改网关配置（自举）是用户提的下一批：设计见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。注意设计稿里“没有工作目录就没工具”的前提已经过时：现在管理员没工作目录也能只读（Read/Grep），但还没有 Gateway 管理工具。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。
 3. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
 4. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。

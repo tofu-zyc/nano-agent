@@ -57,10 +57,6 @@ func TestStoreOverlay(t *testing.T) {
 	if f := find(d, "llm.timeout"); f.Value != float64(5000) || f.Source != "web" {
 		t.Fatalf("timeout: %+v", f)
 	}
-	if f := find(d, "workspace.extra_rw"); f.Source != "default" {
-		t.Fatalf("extra_rw: %+v", f)
-	}
-
 	// 重新打开：网页的修改还在
 	s2, _, _ := Open(path)
 	if s2.Current().LLM.Timeout != 5000 {

@@ -108,6 +108,16 @@ def t_read_ro():
     ok(run("Read", {"path": "~/.gitconfig"}, ro=["~/.gitconfig"]), "name = tester")
 
 
+@case("Read：ro=/ 时可以读整个文件系统，写仍只限工作目录")
+def t_read_all():
+    ok(run("Read", {"path": "~/.secret"}, ro=["/"]), "home secret")
+    ok(run("Read", {"path": os.path.join(OTHER, "secret.txt")}, ro=["/"]), "top secret")
+    # 没有工作目录时，用绝对路径只读
+    ok(run("Read", {"path": os.path.join(OTHER, "secret.txt")}, dirs=(), ro=["/"], write=False), "top secret")
+    bad(run("Write", {"path": os.path.join(OTHER, "x.txt"), "content": "x"}, ro=["/"]), "不在工作目录内")
+    assert not os.path.exists(os.path.join(OTHER, "x.txt"))
+
+
 # ---- Write / Edit ----
 
 @case("Write：新建（含上级目录）、覆盖保留权限")
@@ -339,7 +349,7 @@ def main():
     try:
         setup()
         print(f"probe：{PROBE}")
-        for t in (t_read, t_read_misc, t_read_escape, t_read_ro, t_write, t_write_escape, t_edit, t_grep,
+        for t in (t_read, t_read_misc, t_read_escape, t_read_ro, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
                   t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs):
             t()
