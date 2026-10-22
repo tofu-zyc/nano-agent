@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test test-win run chat clean install installer install-kernel
+.PHONY: all kernel gateway web test test-win test-install run chat clean install installer install-kernel release release-kernel release-linux release-windows release-gateway
 
 all: kernel gateway
 
@@ -20,11 +20,19 @@ test: all
 	@if [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  python3 scripts/e2e-win.py; \
 	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
+	$(MAKE) test-install
 
 # 只跑 Windows 执行器和内核的测试（需要 zig、build/tools/rg.exe、WSL interop）
 test-win:
 	$(MAKE) -C kernel test-win
 	python3 scripts/e2e-win.py
+
+# 离线安装测试：make release 的包在临时 HOME / USERPROFILE 里装、配对、升级、卸载
+test-install:
+	@if [ -x $(ZIG) ]; then python3 scripts/test-install-linux.py; \
+	else echo "（没有 zig，跳过 Linux 离线安装测试）"; fi
+	@if [ -x $(ZIG) ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then python3 scripts/test-install-win.py; \
+	else echo "（没有 zig 或 WSL interop，跳过 Windows 离线安装测试）"; fi
 
 # 本机一键运行，在终端里直接聊天
 run: all
@@ -54,6 +62,72 @@ installer:
 	   tar czf - --sort=name --owner=0 --group=0 -C build/installer kernel | base64; } > $(INSTALLER).tmp
 	@chmod 755 $(INSTALLER).tmp && mv $(INSTALLER).tmp $(INSTALLER)
 	@echo "已生成 $(INSTALLER)（$$(du -h $(INSTALLER) | cut -f1)）：拷到要接入的电脑上，运行 sh nano-kernel-install.sh"
+
+# ---- 本地发布包（不创建仓库、不推送；以后接 release 下载） ----
+
+VERSION ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
+DIST := dist
+RELEASE := build/release
+ZIG := build/tools/zig/zig
+RG := build/tools/rg
+
+$(ZIG):
+	scripts/fetch-zig.sh
+
+$(RG)/linux-x86_64:
+	scripts/fetch-rg.sh --all
+
+release: release-kernel release-gateway
+	@cd $(DIST) && sha256sum *.tar.gz *.zip > SHA256SUMS
+	@echo "发布包在 $(DIST)/："
+	@ls -1 $(DIST)
+
+release-kernel: release-linux release-windows
+
+release-linux: $(ZIG) $(RG)/linux-x86_64
+	$(MAKE) -C kernel cross-linux
+	@mkdir -p $(DIST) $(RELEASE)
+	@for arch in x86_64 aarch64; do \
+	  dir=$(RELEASE)/nano-kernel-$(VERSION)-linux-$$arch; \
+	  rm -rf $$dir; mkdir -p $$dir; \
+	  cp kernel/build/cross/linux-$$arch/nano-kernel $$dir/; \
+	  cp kernel/build/cross/linux-$$arch/nano-exec $$dir/; \
+	  cp $(RG)/linux-$$arch $$dir/rg; \
+	  cp scripts/install-kernel.sh $$dir/; \
+	  echo '$(VERSION)' > $$dir/VERSION; \
+	  tar czf $(DIST)/nano-kernel-$(VERSION)-linux-$$arch.tar.gz -C $(RELEASE) nano-kernel-$(VERSION)-linux-$$arch; \
+	done
+
+release-windows: $(ZIG) $(RG)/windows-x86_64.exe
+	$(MAKE) -C kernel windows-exec windows-kernel
+	@mkdir -p $(DIST) $(RELEASE)
+	@dir=$(RELEASE)/nano-kernel-$(VERSION)-windows-x86_64; \
+	  rm -rf $$dir; mkdir -p $$dir; \
+	  cp kernel/build/nano-kernel.exe $$dir/; \
+	  cp kernel/build/nano-exec.exe $$dir/; \
+	  cp $(RG)/windows-x86_64.exe $$dir/rg.exe; \
+	  cp scripts/install-kernel.ps1 $$dir/; \
+	  echo '$(VERSION)' > $$dir/VERSION; \
+	  python3 scripts/zipdir.py $$dir "$(DIST)/nano-kernel-$(VERSION)-windows-x86_64.zip"
+
+release-gateway: $(ZIG) $(RG)/linux-x86_64
+	$(MAKE) -C kernel cross-linux
+	@mkdir -p $(DIST) $(RELEASE)
+	@for pair in amd64:x86_64 arm64:aarch64; do \
+	  goarch=$${pair%%:*}; karch=$${pair##*:}; \
+	  dir=$(RELEASE)/nano-gateway-$(VERSION)-linux-$$karch; \
+	  rm -rf $$dir; mkdir -p $$dir/lib $$dir/personas $$dir/skills; \
+	  (cd gateway && GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ../$$dir/nano-gateway ./cmd/nano-gateway); \
+	  cp kernel/build/cross/linux-$$karch/nano-kernel $$dir/lib/; \
+	  cp kernel/build/cross/linux-$$karch/nano-exec $$dir/lib/; \
+	  cp $(RG)/linux-$$karch $$dir/lib/rg; \
+	  cp gateway.example.toml $$dir/; \
+	  cp -a personas/. $$dir/personas/; \
+	  cp -a skills/. $$dir/skills/; \
+	  cp scripts/install-gateway.sh $$dir/; \
+	  echo '$(VERSION)' > $$dir/VERSION; \
+	  tar czf $(DIST)/nano-gateway-$(VERSION)-linux-$$karch.tar.gz -C $(RELEASE) nano-gateway-$(VERSION)-linux-$$karch; \
+	done
 
 clean:
 	$(MAKE) -C kernel clean

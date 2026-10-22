@@ -16,8 +16,19 @@
 #   ~/.nano-agent/run/            socket
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+HERE=$(cd "$(dirname "$0")" && pwd)
+if [ -x "$HERE/gateway/nano-gateway" ] || [ -x "$HERE/nano-gateway" ]; then
+  ROOT="$HERE"
+else
+  ROOT=$(cd "$HERE/.." && pwd)
+fi
 NANO_HOME=${NANO_HOME:-$HOME/.nano-agent}
+# 源码目录和离线包两种布局：离线包里 nano-gateway 在顶层，lib/ 下是内核和执行器
+if [ -x "$ROOT/gateway/nano-gateway" ]; then
+  GW="$ROOT/gateway/nano-gateway"; KERNEL="$ROOT/kernel/nano-kernel"; EXEC="$ROOT/kernel/nano-exec"; LIBDIR="$ROOT/kernel"
+else
+  GW="$ROOT/nano-gateway"; KERNEL="$ROOT/lib/nano-kernel"; EXEC="$ROOT/lib/nano-exec"; LIBDIR="$ROOT/lib"
+fi
 case "$NANO_HOME" in /*) ;; *) NANO_HOME="$PWD/$NANO_HOME" ;; esac
 BIN="$NANO_HOME/bin"
 LIB="$NANO_HOME/lib"
@@ -77,19 +88,19 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-for f in gateway/nano-gateway kernel/nano-kernel kernel/nano-exec; do
-  [ -x "$ROOT/$f" ] || { echo "缺少 $ROOT/$f，先在源码目录运行 make"; exit 1; }
+for f in "$GW" "$KERNEL" "$EXEC"; do
+  [ -x "$f" ] || { echo "缺少 $f，先在源码目录运行 make，或者用 make release 的离线包"; exit 1; }
 done
 
 # ---- 程序 ----
 step "安装程序到 $NANO_HOME"
 install -d -m755 "$BIN" "$LIB"
 install -d -m700 "$NANO_HOME/run"
-install -m755 "$ROOT/gateway/nano-gateway" "$BIN/nano-gateway"
-install -m755 "$ROOT/kernel/nano-kernel" "$LIB/nano-kernel"
-install -m755 "$ROOT/kernel/nano-exec" "$LIB/nano-exec"
+install -m755 "$GW" "$BIN/nano-gateway"
+install -m755 "$KERNEL" "$LIB/nano-kernel"
+install -m755 "$EXEC" "$LIB/nano-exec"
 for f in nano-exec-static nano-exec-src.tar.gz; do
-  [ -f "$ROOT/kernel/$f" ] && install -m755 "$ROOT/kernel/$f" "$LIB/$f"
+  [ -f "$LIBDIR/$f" ] && install -m755 "$LIBDIR/$f" "$LIB/$f"
 done
 
 # ---- 配置 ----
@@ -216,4 +227,4 @@ say "装好了。"
 say "  网关：   $BIN/nano-gateway -c $CONFIG"
 say "  终端聊： $BIN/nano-gateway chat -c $CONFIG"
 say "  日志：   $CHANNEL"
-say "  卸载：   $ROOT/scripts/install-gateway.sh --uninstall"
+say "  卸载：   $0 --uninstall"

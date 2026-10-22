@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，跨平台阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-22，跨平台阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试；macOS 的 launchd 和交叉编译放到阶段 4）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -55,7 +55,7 @@ gateway/               Go 网关
   internal/config      配置：gateway.toml + data/config.json（网页改的，密钥字段加密），schema 驱动设置页
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
-scripts/               install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装，make installer 打成单文件）、run-local.sh（make run）、e2e.sh、e2e-win.py（Windows 内核端到端）、fetch-zig.sh、fetch-rg.sh
+scripts/               install-gateway.sh（安装到用户目录，支持源码和离线包）、install-kernel.sh（Linux/macOS 内核安装，离线包优先，make installer 打成单文件）、install-kernel.ps1（Windows 离线安装）、run-local.sh（make run）、e2e.sh、e2e-win.py（Windows 内核端到端）、test-install-linux.py / test-install-win.py（离线安装测试）、zipdir.py、fetch-zig.sh、fetch-rg.sh
 skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）
 docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-gateway-admin.md
 ```
@@ -68,12 +68,16 @@ make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
 make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）；有 Windows 内核和 WSL interop 时还跑 Windows 内核 e2e；装了 zig 和 build/tools/rg.exe 时还跑 Windows 执行器测试
 make test-win     # 只跑 Windows 执行器测试和 Windows 内核 e2e
+make test-install # 离线安装测试（临时 HOME / USERPROFILE；Linux 和 Windows）
+make release VERSION=x.y.z  # 本地交叉编译到 dist/：Linux/Windows 内核包、Linux 网关包、SHA256SUMS（不联网发布）
 make web          # 改了前端后重新构建（npm run check && build），产物要提交
 cd gateway && go test -race ./...
 scripts/fetch-zig.sh   # 下载固定版本的 zig 到 build/tools/zig（只用它的 cc，不需要 sudo）
-scripts/fetch-rg.sh    # 下载固定版本的 rg.exe 到 build/tools/（Windows 测试和发布包用）
+scripts/fetch-rg.sh    # 下载 Windows 的 rg.exe（WSL 里测 Windows 执行器用）
+scripts/fetch-rg.sh --all  # 发布包要的 Linux/macOS/Windows rg
 make -C kernel windows-exec   # 只交叉编译 Windows 执行器（build/nano-exec.exe）
 make -C kernel windows-kernel # 只交叉编译 Windows 内核（build/nano-kernel.exe）
+make -C kernel cross-linux    # 交叉编译 Linux 静态内核/执行器（x86_64、arm64）
 python3 kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg.exe   # 单独跑 Windows 执行器测试
 python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关、Windows 内核、WSL interop）
 ```
@@ -81,6 +85,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - e2e（scripts/e2e.sh）现在 67 项（测试里 `[kernel] local = false`，自己起 pc、phone 两个内核）：终端聊天、工具、审批、模式、沙箱、发「停」和 Ctrl-C 停下任务、撤回（含历史文件截断）、会话切换、本机内核掉线后别的内核顶上（照样能用工具）、同时挂本机和 SSH 服务器上的目录（假 ssh：没写 workspace 报错、写文件、服务器上只有执行器、技能文件两台机器都放好、同一轮用两边的目录）、终端重连，Gateway 查询 / GatewayAdmin 审批添加工作目录，以及超限摘要、保存和继续用工具。SSH 工作目录的 `~/proj` 现在会存成服务器给的规范绝对路径。
 - Windows 内核 e2e（scripts/e2e-win.py）现在 17 项：WSL 里的网关监听 TCP，网关自己启动的本机内核（AllowToken，local）和通过 interop 启动的 Windows 内核（127.0.0.1 TCP，必须是远程）同时在线；添加 `C:\…\工作 目录` 后路径按 Windows 内核 `--ls` 的规范形式保存；Linux 内核这一轮通过 `run` 在 Windows 内核上执行 Read；只挂 Windows 目录时由 Windows 内核本地执行 Read、Shell（无沙箱要审批）、CRLF Edit、用 `/` 的 Write、Grep、Skill 文件下发；中文路径、空格、PowerShell 输出和工作目录都覆盖。临时 `USERPROFILE`、临时 Windows 目录，结束后清理。
 - Windows 执行器（test_exec_win.py）现在 13 项，在 WSL 里通过 interop 跑 `nano-exec.exe`，测试目录和 USERPROFILE 都放在 Windows 临时目录：probe、中文路径和内容、Read/Write/Edit、CRLF 保留、工作目录外拒绝、ro=/ 读所有盘、PowerShell 中文输出和退出码、密钥不泄漏、超时连同子进程杀掉、取消、自带 rg、根目录盘符和 `--ls`、错误请求。没有 zig 时 `make test` 会跳过这一组并提示。
+- 离线安装（scripts/test-install-linux.py / test-install-win.py）各 4 项：Linux 用 `make release` 的包在临时 HOME 里装、启动后配对、升级保留 `paired.token`、卸载；Windows 用临时 USERPROFILE 和真实 `nano-kernel.exe` 做同样四步（`-NoService`）。Windows 的“注册任务计划程序”在 WSL interop 下被系统拒绝（Access is denied），安装脚本有 `schtasks` 兜底，但这一步没有在真实桌面会话里实测；`-NoService` 的安装/配对/升级/卸载是实测的。
 - host 包：假 ssh 测部署 / 执行 / 断线 / 架构不同时现编，有 sshd 时起一个临时的真 OpenSSH 测一遍。kernel 包测配对。
 - 安装脚本没有自动测试，改了之后手动测：临时 HOME + PATH 里放一个总是失败的假 systemctl（走后台进程分支，不碰真的 systemd），装 → 配对 → 再装（升级）→ --uninstall。
 - 网页的界面检查用 headless Chromium + CDP 脚本截图（在会话的 scratchpad 里，不在仓库里）。演示环境用 mock 模型，别连真模型、别动用户的 data/。
@@ -111,7 +116,8 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 | 多模型 | 网页上管理多个 OpenAI 兼容接口和模型：默认模型、会话单独选（/model、会话设置）、每个模型自己的上下文窗口、历史上限、思考强度；接口只回传“有没有设置 key” |
 | 图片输入 | 网页粘贴/拖拽/上传、Telegram 照片、飞书图片消息；模型能力（modalities）决定发不发给模型；图片存 data/uploads，历史里只存引用，支持图片的模型收到 OpenAI content parts |
 | 3048b68 | 跨平台阶段 1：平台层（POSIX 一份、Windows 一份）+ Windows 执行器 `nano-exec.exe`；宽字符路径、符号链接/junction 解析、CRLF Edit、PowerShell UTF-8、Job Object 超时/取消、自带 rg；zig 交叉编译，WSL interop 实测 |
-| 本轮提交 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
+| 530bbd6 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
+| 本轮提交 | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
 
 ## 关键设计（改之前先理解）
 
@@ -134,7 +140,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 14. **网页管理 SSH**：host.Manager 保存 data/connections.json，密码加密，写入后才更新内存，列表只返回 has_password。OpenSSH 处理别名、密钥、跳板机；密码经 SSH_ASKPASS 和 0600 文件传递，不进参数。自动连接在启动和掉线后重试，修改 / 删除前先断开。状态变化 OnChange → app.HostsChanged 推 machines / workspaces 事件。
 15. **本机内核**（cmd/nano-gateway/localkernel.go）：`[kernel] local` 默认开，网关找到 nano-exec 旁边的 nano-kernel，生成 data/local-kernel.conf（随机口令，hub.AllowToken 接受它），起子进程，stderr 追加到 data/kernel.log，退出了退避重启（1s→30s，跑满一分钟重置），网关退出时 SIGTERM 等 4 秒。名字默认 gateway（不用主机名：同一台机器上 WSL 里装的电脑内核多半叫主机名，同名会互相顶掉）。make run 只起网关。
-16. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log，UMask=0077），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删；从旧目录迁移时把旧的启动行路径换成新路径）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
+16. **内核安装**（scripts/install-kernel.sh，POSIX sh；Windows 用 scripts/install-kernel.ps1）：优先用离线包里的 `nano-kernel` / `nano-exec` / `rg`（`make release` 生成），没有才用源码：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），再没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.nano-agent/kernel/，升级只改 gateway / node 两行；从旧 `~/.local/share/nano-agent/kernel` 升级时把 kernel.conf 和 paired.token 搬过来，不用重新配对；systemd 用户服务（StandardError=append:kernel.log，UMask=0077），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删；从旧目录迁移时把旧的启动行路径换成新路径）。Windows 装到 `%USERPROFILE%\.nano-agent\kernel`，任务计划程序登录时启动，`install-kernel.ps1 -NoService` 只装不启动，`-Uninstall` 卸载。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
 17. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
 
 18. **模型管理**（internal/models、app/models.go）：接口和模型只存在 `data/models.json`（0600，API key 加密；网页只返回 `has_key`）。旧版 `[llm]` 的单模型在第一次启动时由 `models.Open` 一次性导入成普通接口 + 模型（接口 ID 仍是 `config`，只为兼容已有会话的 `config/模型名` 引用，没有特殊行为），并写 `seeded: true`；删掉后重启不会复活。没有模型时网关正常启动，聊天直接提示去模型节点添加，不启动 run，也不隐式兜底。会话的 `Settings.Model` 是模型 ID，空表示默认模型；默认模型只来自 models.json。`clientFor` 按模型建客户端并按 `LLMConfig` 指纹缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填按上下文窗口一半，窗口没填兜底 128000）。`[llm]` 只保留 timeout / temperature / extra / send_reasoning / trim_to 这些全局默认，模型相关字段不再从网页设置里改。
@@ -161,7 +167,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。
 4. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
-5. 长期记忆、群聊。跨平台按 [PLAN-cross-platform.md](PLAN-cross-platform.md) 做：阶段 1 Windows 执行器已完成；阶段 2 Windows 内核 + 网关路径/回环修复；阶段 3 本地离线安装包；阶段 4 macOS。移动端暂不做，将来要求在手机本机执行工具。
+5. 长期记忆、群聊。跨平台按 [PLAN-cross-platform.md](PLAN-cross-platform.md) 做：阶段 1 Windows 执行器已完成；阶段 2 Windows 内核 + 网关路径/回环修复已完成；阶段 3 本地离线安装包已完成（Linux/Windows）；阶段 4 macOS 还差交叉编译和 launchd 的收尾（本机没有 Mac，实际运行测试交给 macOS runner）。移动端暂不做，将来要求在手机本机执行工具。
 
 ## 坑
 

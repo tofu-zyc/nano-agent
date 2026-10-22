@@ -33,6 +33,10 @@ WIN_KERNEL := build/nano-kernel.exe
 WIN_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Wshadow -Isrc -Ithird_party/cjson
 WIN_LIBS   := -lws2_32 -lshell32
 
+# 发布包用：Linux 静态链接（musl），不挑发行版的 glibc
+CROSS_CFLAGS := -O2 -std=c11 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson
+CROSS_DIR    := build/cross
+
 # 测试用 ASan/UBSan 构建，内存问题直接报出来
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -41,7 +45,7 @@ SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 SRCTAR := nano-exec-src.tar.gz
 XHDRS  := src/nexec.h src/sandbox.h src/util.h src/plat.h third_party/cjson/cJSON.h
 
-.PHONY: all test test-win windows-exec windows-kernel clean static
+.PHONY: all test test-win windows-exec windows-kernel cross-linux clean static
 
 all: $(BIN) $(EXEC) $(SRCTAR) static
 
@@ -77,6 +81,15 @@ build/test_core: tests/test_core.c src/core.c src/core.h
 
 windows-exec: $(WIN_EXEC)
 windows-kernel: $(WIN_KERNEL)
+
+# 本地交叉编译 Linux 发布包（x86_64 和 arm64），只用 zig，不需要 sudo
+cross-linux:
+	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
+	@mkdir -p $(CROSS_DIR)/linux-x86_64 $(CROSS_DIR)/linux-aarch64
+	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
 
 $(WIN_EXEC): $(XWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }

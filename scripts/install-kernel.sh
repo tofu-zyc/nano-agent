@@ -1,9 +1,10 @@
 #!/bin/sh
 # nano-agent 内核一键安装：检查编译工具、编译、安装、写配置、注册开机自启、等网关确认接入。
 #
-# 两种用法：
+# 三种用法：
 #   在源码目录里：      ./scripts/install-kernel.sh
 #   单文件安装包：      sh nano-kernel-install.sh      （在网关那台机器上 make installer 生成，拷过来就能用）
+#   离线包（make release）：解压后运行里面的 install-kernel.sh，不用编译器
 #
 # 再运行一次就是升级（保留配置和配对口令）。选项：
 #   --gateway 地址   网关的地址，例如 192.168.1.2:7700（不写会问）
@@ -31,7 +32,7 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31m错误：%s\033[0m\n' "$*" >&2; exit 1; }
 
 usage() {
-	sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-0}"
 }
 
@@ -130,31 +131,40 @@ fi
 
 [ "$(uname -s)" = Linux ] || die "内核只支持 Linux（Windows 上请在 WSL2 里运行这个脚本）"
 
-# ---- 源码：单文件安装包里带着，否则用脚本所在的源码目录 ----
+# ---- 源码或离线包 ----
 
 WORK=""
 cleanup() { [ -z "$WORK" ] || rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
-if grep -q '^__NANO_PAYLOAD__$' "$0" 2>/dev/null; then
+HERE=$(cd "$(dirname "$0")" && pwd)
+PACKAGE=0
+if [ -f "$HERE/nano-kernel" ] && [ -f "$HERE/nano-exec" ]; then
+	# 离线包：程序就在脚本旁边，不用编译
+	BUILD="$HERE"
+	SRC="$HERE"
+	PACKAGE=1
+elif grep -q '^__NANO_PAYLOAD__$' "$0" 2>/dev/null; then
 	WORK=$(mktemp -d)
 	sed '1,/^__NANO_PAYLOAD__$/d' "$0" | base64 -d | tar xzf - -C "$WORK" || die "安装包损坏，重新拷一份"
 	SRC="$WORK"
 else
 	SRC=$(cd "$(dirname "$0")/.." && pwd)
-	[ -f "$SRC/kernel/Makefile" ] || die "找不到内核源码（$SRC/kernel）。在源码目录里运行，或者用 make installer 生成的单文件安装包"
+	[ -f "$SRC/kernel/Makefile" ] || die "找不到内核源码或离线包（$SRC）。在源码目录里运行，或者解压 make release 生成的包再运行"
 fi
-VERSION=$(cat "$SRC/kernel/VERSION" 2>/dev/null || (cd "$SRC" && git describe --always --dirty 2>/dev/null) || echo dev)
+VERSION=$(cat "$SRC/VERSION" 2>/dev/null || cat "$SRC/kernel/VERSION" 2>/dev/null || (cd "$SRC" && git describe --always --dirty 2>/dev/null) || echo dev)
 
 # ---- 编译工具 ----
 
 CC_BIN=""
-for c in "${CC:-}" cc gcc clang; do
-	if [ -n "$c" ] && command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
-done
+if [ "$PACKAGE" = 0 ]; then
+	for c in "${CC:-}" cc gcc clang; do
+		if [ -n "$c" ] && command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
+	done
+fi
 MISSING=""
-[ -n "$CC_BIN" ] || MISSING="C 编译器"
-command -v make >/dev/null 2>&1 || MISSING="$MISSING make"
+[ "$PACKAGE" = 1 ] || [ -n "$CC_BIN" ] || MISSING="C 编译器"
+[ "$PACKAGE" = 1 ] || command -v make >/dev/null 2>&1 || MISSING="$MISSING make"
 
 if [ -n "$MISSING" ]; then
 	step "缺少编译工具：$MISSING"
@@ -175,22 +185,28 @@ if [ -n "$MISSING" ]; then
 	command -v cc >/dev/null 2>&1 || CC_BIN=gcc
 fi
 
-# ---- 编译 ----
+# ---- 编译（离线包跳过） ----
 
-step "编译内核（$VERSION）"
-BUILD="$SRC/kernel"
-if [ -z "$WORK" ]; then
-	# 源码目录里编译不弄脏源码树：拷一份到临时目录
-	WORK=$(mktemp -d)
-	mkdir -p "$WORK/kernel"
-	(cd "$SRC/kernel" && tar cf - Makefile src third_party) | tar xf - -C "$WORK/kernel"
-	BUILD="$WORK/kernel"
+if [ "$PACKAGE" = 1 ]; then
+	step "使用离线包里的程序（$VERSION）"
+	[ -x "$BUILD/nano-kernel" ] || die "离线包里的 nano-kernel 不能运行（架构不对？）"
+	[ -x "$BUILD/nano-exec" ] || die "离线包里的 nano-exec 不能运行（架构不对？）"
+else
+	step "编译内核（$VERSION）"
+	BUILD="$SRC/kernel"
+	if [ -z "$WORK" ]; then
+		# 源码目录里编译不弄脏源码树：拷一份到临时目录
+		WORK=$(mktemp -d)
+		mkdir -p "$WORK/kernel"
+		(cd "$SRC/kernel" && tar cf - Makefile src third_party) | tar xf - -C "$WORK/kernel"
+		BUILD="$WORK/kernel"
+	fi
+	make -s -C "$BUILD" CC="$CC_BIN" nano-kernel nano-exec >"$BUILD/build.log" 2>&1 || {
+		tail -n 20 "$BUILD/build.log"
+		die "编译失败（上面是最后的输出）"
+	}
+	say "完成"
 fi
-make -s -C "$BUILD" CC="$CC_BIN" nano-kernel nano-exec >"$BUILD/build.log" 2>&1 || {
-	tail -n 20 "$BUILD/build.log"
-	die "编译失败（上面是最后的输出）"
-}
-say "完成"
 
 # ---- 旧布局迁移 ----
 # e5a3632 及以前把内核装在 ~/.local/share/nano-agent/kernel；把配置和配对口令搬过来，
@@ -268,6 +284,10 @@ install -m 755 "$BUILD/nano-kernel" "$DIR/nano-kernel.new"
 install -m 755 "$BUILD/nano-exec" "$DIR/nano-exec.new"
 mv -f "$DIR/nano-kernel.new" "$DIR/nano-kernel"
 mv -f "$DIR/nano-exec.new" "$DIR/nano-exec"
+if [ -f "$BUILD/rg" ]; then
+	install -m 755 "$BUILD/rg" "$DIR/rg.new"
+	mv -f "$DIR/rg.new" "$DIR/rg"
+fi
 echo "$VERSION" >"$DIR/VERSION"
 
 if [ "$UPGRADE" = 1 ]; then
