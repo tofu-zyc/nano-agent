@@ -79,7 +79,7 @@ func (k kernelHost) Ls(ctx context.Context, path string) (*host.Listing, error) 
 	return &host.Listing{OK: true, Path: r.Path, Home: r.Home, Blocked: r.Blocked, Entries: r.Entries, Truncated: r.Truncated}, nil
 }
 
-// PutFiles 只用来放技能文件：内核只肯写 ~/.cache/nano-agent/skills/<技能名>/
+// PutFiles 只用来放技能文件：内核只肯写 ~/.nano-agent/skills/<技能名>/
 func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File) error {
 	name, ok := strings.CutPrefix(dir, skills.CacheDir+"/")
 	if !ok || name == "" || strings.Contains(name, "/") {

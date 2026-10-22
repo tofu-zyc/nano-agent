@@ -8,7 +8,7 @@
 # 再运行一次就是升级（保留配置和配对口令）。选项：
 #   --gateway 地址   网关的地址，例如 192.168.1.2:7700（不写会问）
 #   --name 名字      这台电脑的名字，默认是主机名
-#   --dir 目录       安装到哪里，默认 ~/.local/share/nano-agent/kernel
+#   --dir 目录       安装到哪里，默认 ~/.nano-agent/kernel
 #   --no-service     不注册开机自启，也不启动
 #   --yes            不提问，全部用默认值（缺编译工具时直接用 sudo 安装）
 #   --uninstall      停止并删除
@@ -16,7 +16,9 @@ set -eu
 
 GATEWAY=""
 NAME=""
-DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nano-agent/kernel"
+NANO_HOME="${NANO_HOME:-$HOME/.nano-agent}"
+DIR="$NANO_HOME/kernel"
+OLD_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nano-agent/kernel"
 SERVICE=1
 YES=0
 UNINSTALL=0
@@ -119,8 +121,9 @@ if [ "$UNINSTALL" = 1 ]; then
 			cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
 		fi
 	done
-	rm -f "$HOME/.local/bin/nano-kernel-ctl"
+	rm -f "$HOME/.local/bin/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
 	rm -rf "$DIR"
+	[ "$OLD_DIR" = "$DIR" ] || rm -rf "$OLD_DIR"
 	say "已卸载。网关网页「设备」里配对过的这台电脑可以一并移除。"
 	exit 0
 fi
@@ -188,6 +191,22 @@ make -s -C "$BUILD" CC="$CC_BIN" nano-kernel nano-exec >"$BUILD/build.log" 2>&1 
 	die "编译失败（上面是最后的输出）"
 }
 say "完成"
+
+# ---- 旧布局迁移 ----
+# e5a3632 及以前把内核装在 ~/.local/share/nano-agent/kernel；把配置和配对口令搬过来，
+# 电脑不用重新配对。
+if [ "$OLD_DIR" != "$DIR" ] && [ -d "$OLD_DIR" ] && [ ! -f "$DIR/kernel.conf" ]; then
+	stop_kernel
+	if [ -f "$OLD_DIR/kernel.pid" ]; then
+		p=$(cat "$OLD_DIR/kernel.pid" 2>/dev/null) || true
+		if [ -n "${p:-}" ] && kill -0 "$p" 2>/dev/null; then kill "$p" 2>/dev/null || true; sleep 0.2; fi
+	fi
+	mkdir -p "$DIR"
+	[ -f "$OLD_DIR/kernel.conf" ] && mv "$OLD_DIR/kernel.conf" "$DIR/kernel.conf"
+	[ -f "$OLD_DIR/paired.token" ] && mv "$OLD_DIR/paired.token" "$DIR/paired.token"
+	rm -rf "$OLD_DIR"
+	say "已把旧内核目录 $OLD_DIR 迁移到 $DIR"
+fi
 
 # ---- 配置 ----
 
@@ -307,13 +326,13 @@ log) exec tail -n 50 -F "$DIR/kernel.log" ;;
 esac
 EOF
 chmod 755 "$DIR/nano-kernel-ctl"
-if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
-	ln -sf "$DIR/nano-kernel-ctl" "$HOME/.local/bin/nano-kernel-ctl"
-fi
+mkdir -p "$NANO_HOME/bin"
+ln -sf "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
+rm -f "$HOME/.local/bin/nano-kernel-ctl"
 
 if [ "$SERVICE" = 0 ]; then
 	say ""
-	say "装好了，没有启动。启动：$DIR/nano-kernel-ctl start"
+	say "装好了，没有启动。启动：$NANO_HOME/bin/nano-kernel-ctl start"
 	exit 0
 fi
 

@@ -3,13 +3,17 @@
 # 聊天另开一个终端运行 make chat，或者用网页。日志在 data/gateway.log 和 data/kernel.log。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[ -f gateway.toml ] || { echo "缺少 gateway.toml，先从 gateway.example.toml 复制一份改好"; exit 1; }
+CFG=${NANO_HOME:+$NANO_HOME/gateway.toml}
+CFG=${CFG:-gateway.toml}
+LOGDIR=${NANO_HOME:+$NANO_HOME/data}
+LOGDIR=${LOGDIR:-data}
+[ -f "$CFG" ] || { echo "缺少 $CFG，先从 gateway.example.toml 复制一份改好"; exit 1; }
 make -s all
-mkdir -p data
+mkdir -p "$LOGDIR"
 
-echo "nano-agent 已启动，Ctrl-C 停止。日志在 data/gateway.log 和 data/kernel.log。"
-if ! ./gateway/nano-gateway -c gateway.toml </dev/null 2>>data/gateway.log; then
-  echo "网关异常退出，最近的日志（data/gateway.log）："
-  tail -n 5 data/gateway.log
+echo "nano-agent 已启动，Ctrl-C 停止。日志在 $LOGDIR/gateway.log 和 $LOGDIR/kernel.log。"
+if ! ./gateway/nano-gateway -c "$CFG" </dev/null 2>>"$LOGDIR/gateway.log"; then
+  echo "网关异常退出，最近的日志（$LOGDIR/gateway.log）："
+  tail -n 5 "$LOGDIR/gateway.log"
   exit 1
 fi

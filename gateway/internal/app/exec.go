@@ -73,7 +73,7 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	}()
 }
 
-// skillTool 加载一个技能：返回说明，把附带文件放到这一轮挂载的每台机器上（~/.cache/nano-agent/skills/<名字>/）。
+// skillTool 加载一个技能：返回说明，把附带文件放到这一轮挂载的每台机器上（~/.nano-agent/skills/<名字>/）。
 // 调用方持有锁。
 func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, string)) {
 	var args struct {

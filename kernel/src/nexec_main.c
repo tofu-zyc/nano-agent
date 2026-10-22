@@ -28,7 +28,7 @@ static const char *const SYSTEM_RO[] = {
 static const char *const SYSTEM_RW[] = { "/dev/null", "/dev/full" };
 
 /* 从外面带进沙箱的环境变量；其余（比如 shell 配置里 export 的各种密钥）一律不带 */
-static const char *const ENV_KEEP[] = { "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ" };
+static const char *const ENV_KEEP[] = { "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "NANO_HOME" };
 
 typedef struct {
     const char *name;
@@ -226,7 +226,7 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
         load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "rw"), false, &x->rw, &x->nrw, err) < 0)
         return -1;
     /* 可写的目录不能包含执行器自己：改写了它，下一次调用就不在沙箱里了。
-     * 本机由内核把关；远程时执行器放在服务器的 ~/.cache 里，工作目录是 ~ 的话会被包含进来 */
+     * 本机由内核把关；远程时执行器放在服务器的 ~/.nano-agent 里，工作目录是 ~ 的话会被包含进来 */
     char *self = realpath("/proc/self/exe", NULL);
     for (size_t i = 0; self && i < x->ndirs + x->nrw; i++) {
         const char *d = i < x->ndirs ? x->dirs[i] : x->rw[i - x->ndirs];
@@ -242,8 +242,8 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
     }
     free(self);
 
-    const char *xdg = getenv("XDG_CACHE_HOME");
-    char *base = xdg && *xdg == '/' ? xasprintf("%s/nano-agent", xdg) : xasprintf("%s/.cache/nano-agent", x->home);
+    const char *nh = getenv("NANO_HOME");
+    char *base = nh && *nh == '/' ? xstrdup(nh) : xasprintf("%s/.nano-agent", x->home);
     char *key = safe_key(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "tmp_key")));
     x->tmp = xasprintf("%s/tmp/%s", base, key);
     x->cache = xasprintf("%s/cache", base);

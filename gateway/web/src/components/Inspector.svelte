@@ -277,7 +277,7 @@
         {:else}
           <p class="note">还没有技能。</p>
         {/each}
-        <p class="note small">技能目录：<code>{homeShort(ov.skills?.dir ?? '')}</code>。每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料；改动下一轮自动生效。调用时附带文件放到每台用到的机器的 <code>~/.cache/nano-agent/skills/</code> 下。</p>
+        <p class="note small">技能目录：<code>{homeShort(ov.skills?.dir ?? '')}</code>。每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料；改动下一轮自动生效。调用时附带文件放到每台用到的机器的 <code>~/.nano-agent/skills/</code> 下。</p>
       </div>
       <button class="btn link" onclick={() => store.open({ type: 'machine' })}><Icon name="hub" size={14} />机器和工作目录</button>
       <FieldGroup group="kernel" title="连接" focus={store.focus} />

@@ -28,7 +28,7 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 - **工作目录**：机器 + 路径（`本机:/mnt/d/Agent-Workspace`、`gpu-server:~/proj`）。网关维护工作目录列表，拓扑里挂在各自的机器下。每个会话从列表里挂任意几个（可以在不同的机器上，一个都不挂就是只读），标了默认的新会话自动挂上。
 - **模型**：接口和模型只存在数据目录的 `models.json`，在网页拓扑的模型节点里管理；没有模型时就是空状态，聊天会提示先添加接口和模型，不会自动造模型。旧版 `[llm]` 的单模型在升级后第一次启动时一次性迁移成普通模型（`seeded` 标记防止复活），`[llm]` 之后只保留超时、温度等全局默认。新会话、没单独选模型的会话用默认模型，每个会话也可以单独选（`/model`、会话设置）。每个模型有输入类型（text / image），决定用户发的图片发不发给它。
 - **图片**：用户发来的图片存在数据目录的 `uploads`（按内容哈希去重），历史里只存引用；发给支持图片的模型时做成 OpenAI 的 content parts。
-- **技能**：放在网关上（`skills/`），所有内核共用。`Skill` 由网关处理，附带文件按需放到执行工具的机器的 `~/.cache/nano-agent/skills/`。
+- **技能**：放在网关上（`skills/`），所有内核共用。`Skill` 由网关处理，附带文件按需放到执行工具的机器的 `~/.nano-agent/skills/`。
 
 **内核**
 - 对话循环：要模型回复 → 拿到工具调用 → 按权限模式决定直接执行、等审批还是拒绝 → 执行 → 汇总结果 → 下一轮；预算、超时、审批等待。
@@ -59,8 +59,8 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 
 ## 安装
 
-- **网关那台机器**：日常使用 `make install`（程序、配置、数据分到 `~/.local`、`~/.config`）；开发时源码目录里 `make run`（编译，前台起网关；网关自己启动本机内核）。
-- **别的电脑**：`make installer` 生成单文件安装包 `dist/nano-kernel-install.sh`（脚本 + 内核源码），拷过去 `sh nano-kernel-install.sh --gateway 地址`。脚本装编译工具、编译、装到 `~/.local/share/nano-agent/kernel/`、写 `kernel.conf`、注册 systemd 用户服务（没有 systemd 就用后台进程），然后等网页上核对确认码。再运行一次是升级，`--uninstall` 卸载。源码目录里也能直接 `scripts/install-kernel.sh`。
+- **网关那台机器**：日常使用 `make install`（程序、配置、数据都在 `~/.nano-agent`，注册后台服务）；开发时源码目录里 `make run`（编译，前台起网关；网关自己启动本机内核）。
+- **别的电脑**：`make installer` 生成单文件安装包 `dist/nano-kernel-install.sh`（脚本 + 内核源码），拷过去 `sh nano-kernel-install.sh --gateway 地址`。脚本装编译工具、编译、装到 `~/.nano-agent/kernel/`、写 `kernel.conf`、注册 systemd 用户服务（没有 systemd 就用后台进程），然后等网页上核对确认码。再运行一次是升级，`--uninstall` 卸载。源码目录里也能直接 `scripts/install-kernel.sh`。
 - **SSH 服务器**：什么都不用装，在网页“设备”里添加。
 
 ## 安全

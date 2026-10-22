@@ -94,7 +94,7 @@ func (h *sshConn) check(ctx context.Context) bool {
 }
 
 func (h *sshConn) exe() string {
-	return `"$HOME/.cache/nano-agent/nano-exec-` + h.m.exec.Ver + `"`
+	return `"$HOME/.nano-agent/nano-exec-` + h.m.exec.Ver + `"`
 }
 
 func (h *sshConn) state() (ready bool, landlock int) {
@@ -219,6 +219,11 @@ func parseProbe(line string) (int, error) {
 	return *p.Landlock, nil
 }
 
+// dropOldCache 删掉旧版本放在 ~/.cache/nano-agent 的执行器和技能文件；失败不影响使用。
+func (h *sshConn) dropOldCache(ctx context.Context) {
+	_, _ = h.step(ctx, `rm -rf "$HOME/.cache/nano-agent"`, nil)
+}
+
 // prepare 确保服务器上有能用的执行器：检查 → 架构相同就上传 → 跑不了或者架构不同就传源码现编。
 func (h *sshConn) prepare(ctx context.Context) (int, error) {
 	e := h.m.exec
@@ -228,6 +233,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	if strings.HasPrefix(line, "OK ") {
+		h.dropOldCache(ctx)
 		return parseProbe(line)
 	}
 	f := strings.Fields(strings.TrimPrefix(line, "NEED"))
@@ -244,7 +250,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		line, err = h.step(ctx, `d="$HOME/.cache/nano-agent"; f=`+h.exe()+`; `+
+		line, err = h.step(ctx, `d="$HOME/.nano-agent"; f=`+h.exe()+`; `+
 			`mkdir -p "$d" && chmod 700 "$d" && cat > "$f.tmp" && chmod 700 "$f.tmp" && mv -f "$f.tmp" "$f" || exit 1; `+
 			`if o=$("$f" --probe 2>&1); then echo "OK $o"; else rm -f "$f"; echo "FAIL $o"; fi`, bin)
 		if err != nil {
@@ -265,7 +271,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	line, err = h.step(ctx, `d="$HOME/.cache/nano-agent"; s="$d/src-`+e.Ver+`"; f=`+h.exe()+`; `+
+	line, err = h.step(ctx, `d="$HOME/.nano-agent"; s="$d/src-`+e.Ver+`"; f=`+h.exe()+`; `+
 		`mkdir -p "$s" && chmod 700 "$d" && cd "$s" && tar xzf - || exit 1; `+
 		`if `+shellQuote(cc)+` -std=c11 -O2 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ithird_party/cjson -o "$f.tmp" `+
 		`src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c third_party/cjson/cJSON.c -lm > build.log 2>&1 `+
@@ -275,6 +281,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	if strings.HasPrefix(line, "OK ") {
+		h.dropOldCache(ctx)
 		return parseProbe(line)
 	}
 	return 0, fmt.Errorf("在服务器上编译执行器失败：%s", clip(strings.TrimPrefix(line, "FAIL "), 300))

@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"nano-agent/gateway/internal/paths"
 	"nano-agent/gateway/internal/proto"
 )
 
@@ -33,12 +34,13 @@ type Executor struct {
 	Arch   string // 本机架构（uname -m）
 }
 
-// FindExecutor 在安装布局的 ../lib/nano-agent、网关程序旁边、../kernel、
+// FindExecutor 在安装布局的 $NANO_HOME/lib、网关程序旁边的 ../lib、../kernel、
 // 配置目录下的 kernel/ 里找执行器。
 func FindExecutor(configDir string) (Executor, error) {
 	exe, _ := os.Executable()
 	for _, d := range []string{
-		filepath.Join(filepath.Dir(exe), "../lib/nano-agent"),
+		filepath.Join(paths.Home(), "lib"),
+		filepath.Join(filepath.Dir(exe), "../lib"),
 		filepath.Dir(exe),
 		filepath.Join(filepath.Dir(exe), "../kernel"),
 		filepath.Join(configDir, "kernel"),

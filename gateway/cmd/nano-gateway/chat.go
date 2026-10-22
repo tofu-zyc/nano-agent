@@ -13,6 +13,7 @@ import (
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/paths"
 )
 
 // runChat 是 `nano-gateway chat`：在终端里和正在运行的网关聊天。只负责收发文字，
@@ -20,8 +21,11 @@ import (
 // Ctrl-D 退出。退出后网关照常运行。
 func runChat(args []string) int {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
-	cfgPath := fs.String("c", "gateway.toml", "配置文件路径")
+	cfgPath := fs.String("c", "", "配置文件路径（默认 $NANO_HOME/gateway.toml）")
 	fs.Parse(args)
+	if *cfgPath == "" {
+		*cfgPath = paths.Config()
+	}
 
 	conf, _, err := config.Open(*cfgPath)
 	if err != nil {

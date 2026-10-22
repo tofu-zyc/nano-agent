@@ -178,7 +178,7 @@ def t_host_run(gw):
             files=[{"path": "SKILL.md", "data": base64.b64encode(b"# demo").decode()},
                    {"path": "scripts/run.sh", "data": data, "exec": True}])
     r = gw.expect("run_result", id="p1", ok=True)
-    d = os.path.join(T, "home", ".cache", "nano-agent", "skills", "demo")
+    d = os.path.join(T, "home", ".nano-agent", "skills", "demo")
     assert r["content"] == d and os.access(os.path.join(d, "scripts", "run.sh"), os.X_OK), r
     gw.send(t="skill_put", id="p2", skill="demo", files=[{"path": "../escape", "data": data}])
     gw.expect("run_result", id="p2", ok=False, content=lambda c: "路径不能用" in c)
@@ -443,7 +443,7 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 5, hello
+            assert hello["token"] == "t0k" and hello["v"] == 6, hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names   # Skill 由网关提供
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
             assert all("workspace" in t["input_schema"]["properties"] for t in hello["tools"]), hello["tools"]

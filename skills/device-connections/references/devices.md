@@ -6,7 +6,7 @@
 - **工作目录 = 机器 + 目录**，比如 `本机:~/proj`、`gpu-server:~/train`、`laptop:/mnt/d/work`。列表存在网关的 `data/workspaces.json`，★ 的是新会话的默认。
 - **机器**：
   - 本机：网关所在的机器。
-  - SSH 服务器：网关通过 SSH 连，上面只放执行器 `nano-exec`（在 `~/.cache/nano-agent/`），不跑内核。
+  - SSH 服务器：网关通过 SSH 连，上面只放执行器 `nano-exec`（在 `~/.nano-agent/`），不跑内核。
   - 电脑：装了内核、自己连到网关的 Linux 电脑或 Windows 的 WSL2。
 - **怎么执行**：每一轮网关挑一个内核来跑（第一个挂载的工作目录那台机器上的优先）。每个工具调用：
   - 工作目录在这个内核的机器上：内核在本地执行。
@@ -20,7 +20,7 @@
 - 网页：点对话顶部的工作目录（或会话设置里的“工作目录”），列表按机器分组，点一下挂上、再点取下；没有的先选机器，浏览目录添加。拓扑图上右键会话、机器、工作目录也有对应的操作。
 - 聊天：`/dir` 看挂了哪些和整个列表，`/dir 2` 挂上，`/dir -2` 取下，`/dir add gpu-server:~/proj` 添加并挂上（只写路径就是本机），`/dir none` 全部取下，`/dir default 2` 设为 / 取消新会话默认挂载，`/dir rm 2` 从列表删掉（不动机器上的文件）。
 - 挂了好几个时，调用工具要用 `workspace` 参数写明在哪个上执行；同一台机器上挂的几个目录互相都能读写。
-- 不能用的目录：包含 nano-agent 自己的（网关数据目录、内核目录、执行器）。SSH 服务器上的 `~` 本身也不行（执行器在 `~/.cache` 里），用 `~/proj` 这样的子目录。
+- 不能用的目录：包含 nano-agent 自己的（`~/.nano-agent` 里的网关数据、配置和内核/执行器）。`~` 本身包含 `~/.nano-agent`，不能挂；用 `~/proj` 这样的子目录。
 
 ## SSH 服务器
 
@@ -41,7 +41,7 @@
 sh nano-kernel-install.sh --gateway 192.168.1.2:7700
 ```
 
-- 脚本会：检查并安装 cc / make（用 sudo 前先问）→ 编译 → 装到 `~/.local/share/nano-agent/kernel/` → 写 `kernel.conf` → 注册 systemd 用户服务（没有 systemd 时后台运行）→ 连网关，显示 6 位确认码。
+- 脚本会：检查并安装 cc / make（用 sudo 前先问）→ 编译 → 装到 `~/.nano-agent/kernel/` → 写 `kernel.conf` → 注册 systemd 用户服务（没有 systemd 时后台运行）→ 连网关，显示 6 位确认码。
 - 在网关网页“设备”里核对确认码一致后点“允许接入”。口令存在那台电脑的 `paired.token`，之后自动重连。
 - 再运行一次是升级；`--name 新名字` 改名；`--uninstall` 卸载；`nano-kernel-ctl status|log|restart` 管理。
 - 网关那边要先在“设备”里启用电脑接入（默认端口 7700）。Windows 在 WSL2 里装，工作目录用 `/mnt/c/...`、`/mnt/d/...`。

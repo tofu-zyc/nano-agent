@@ -26,7 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      5
+#define PROTO_VERSION      6
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -420,7 +420,7 @@ static void handle_run(kernel_t *k, const cJSON *m)
     log_info("代网关执行 %s（%s）", tool, id);
 }
 
-/* 技能文件放在这台机器的 ~/.cache/nano-agent/skills/<技能名>/ 下，工具执行时只读可见 */
+/* 技能文件放在这台机器的 ~/.nano-agent/skills/<技能名>/ 下，工具执行时只读可见 */
 static bool safe_rel(const char *p)
 {
     if (!p || !*p || p[0] == '/') return false;
@@ -491,7 +491,10 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
         snprintf(err, errlen, "技能名字不能用：%s", name ? name : "");
         return false;
     }
-    char *root = xasprintf("%s/.cache/nano-agent/skills", home);
+    const char *nh = getenv("NANO_HOME");
+    char *base = nh && nh[0] == '/' ? xstrdup(nh) : xasprintf("%s/.nano-agent", home);
+    char *root = xasprintf("%s/skills", base);
+    free(base);
     char *dir = xasprintf("%s/%s", root, name);
     char *tmp = xasprintf("%s/.%s.tmp", root, name);
     bool ok = mkdirs(root);

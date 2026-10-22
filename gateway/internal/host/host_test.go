@@ -81,10 +81,10 @@ func TestLocalExecLsAndFiles(t *testing.T) {
 	}
 
 	files := []File{{Path: "SKILL.md", Data: []byte("说明")}, {Path: "scripts/run.sh", Data: []byte("echo hi"), Exec: true}}
-	if err := l.PutFiles(ctx, "~/.cache/nano-agent/skills/pc/demo", files); err != nil {
+	if err := l.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", files); err != nil {
 		t.Fatal(err)
 	}
-	st, err := os.Stat(filepath.Join(home, ".cache/nano-agent/skills/pc/demo/scripts/run.sh"))
+	st, err := os.Stat(filepath.Join(home, ".nano-agent/skills/pc/demo/scripts/run.sh"))
 	if err != nil || st.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("附带的脚本：%v %v", st, err)
 	}
@@ -175,7 +175,7 @@ func TestSSHPreparesExecutorAndRunsTools(t *testing.T) {
 	if !info.Ready || info.Landlock == 0 {
 		t.Fatalf("info: %+v", info)
 	}
-	if _, err := os.Stat(filepath.Join(root, "box/.cache/nano-agent/nano-exec-"+m.exec.Ver)); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "box/.nano-agent/nano-exec-"+m.exec.Ver)); err != nil {
 		t.Fatal("执行器没有传到服务器上", err)
 	}
 	h, _, _ := m.Host("box")
@@ -192,10 +192,10 @@ func TestSSHPreparesExecutorAndRunsTools(t *testing.T) {
 	if err != nil || ls.Path != filepath.Join(root, "box") {
 		t.Fatalf("ls: %+v %v", ls, err)
 	}
-	if err := h.PutFiles(ctx, "~/.cache/nano-agent/skills/pc/demo", []File{{Path: "data.txt", Data: []byte("技能")}}); err != nil {
+	if err := h.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", []File{{Path: "data.txt", Data: []byte("技能")}}); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(root, "box/.cache/nano-agent/skills/pc/demo/data.txt")); string(b) != "技能" {
+	if b, _ := os.ReadFile(filepath.Join(root, "box/.nano-agent/skills/pc/demo/data.txt")); string(b) != "技能" {
 		t.Fatalf("技能文件：%q", b)
 	}
 
@@ -238,7 +238,7 @@ func TestSSHUnreachableAndBuildFromSource(t *testing.T) {
 	id, _ := m.Save(Connection{Name: "rv", Host: "rv"})
 	m.Connect(id)
 	waitState(t, m, id, "online", 2*time.Minute)
-	if _, err := os.Stat(filepath.Join(root, "rv/.cache/nano-agent/src-"+m.exec.Ver+"/build.log")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "rv/.nano-agent/src-"+m.exec.Ver+"/build.log")); err != nil {
 		t.Fatal("应该在服务器上现编", err)
 	}
 	h, _, _ := m.Host("rv")

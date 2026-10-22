@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/kernel"
+	"nano-agent/gateway/internal/paths"
 )
 
 // Connection 是一个 SSH 服务器的设置，存在 data/connections.json（0600）。
@@ -100,14 +101,10 @@ func New(ctx context.Context, dir string, e Executor, guard []string, hub *kerne
 	return m, nil
 }
 
-// controlDir 是 ssh 控制 socket 所在的目录：运行时目录下只有自己能进的 nano-ssh（路径要短）
+// controlDir 是 ssh 控制 socket 所在的目录：$NANO_HOME/run/nano-ssh；
+// 路径太长时退回 $XDG_RUNTIME_DIR 或 /tmp（unix socket 最长 107 字节）。
 func controlDir() (string, error) {
-	base := os.Getenv("XDG_RUNTIME_DIR")
-	if !strings.HasPrefix(base, "/") {
-		base = fmt.Sprintf("/tmp/nano-agent-%d", os.Getuid())
-	}
-	dir := filepath.Join(base, "nano-ssh")
-	os.MkdirAll(dir, 0o700)
+	dir := paths.ShortRunDir("nano-ssh")
 	st, err := os.Lstat(dir)
 	if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("没法使用 SSH 连接复用的目录 %s（要求是只有自己能进的目录）", dir)

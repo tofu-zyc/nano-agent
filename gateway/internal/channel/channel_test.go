@@ -249,12 +249,17 @@ func TestCLISocket(t *testing.T) {
 }
 
 func TestCLISocketPath(t *testing.T) {
-	if p, err := CLISocket("/srv/nano/data"); err != nil || p != "/srv/nano/data/cli.sock" {
+	home := t.TempDir()
+	os.Chmod(home, 0o700)
+	t.Setenv("NANO_HOME", home)
+	if p, err := CLISocket("/srv/nano/data"); err != nil || p != filepath.Join(home, "run", "cli.sock") {
 		t.Fatalf("%q %v", p, err)
 	}
 	run := t.TempDir()
 	os.Chmod(run, 0o700)
 	t.Setenv("XDG_RUNTIME_DIR", run)
+	longHome := "/" + strings.Repeat("很长的目录/", 12) + "nano"
+	t.Setenv("NANO_HOME", longHome)
 	long := "/" + strings.Repeat("很长的目录/", 12) + "data"
 	p, err := CLISocket(long)
 	if err != nil || filepath.Dir(p) != run || len(p) > 100 {

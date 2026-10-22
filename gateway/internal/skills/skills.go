@@ -1,6 +1,6 @@
 // Package skills 管理网关上的技能：每个技能一个目录，里面是带 name / description 的 SKILL.md，
 // 以及可选的脚本、资料。模型平时只看到名字和简介（Skill 工具的说明），调用 Skill 时才读正文；
-// 附带文件由网关放到执行工具的机器上（~/.cache/nano-agent/skills/<名字>/，只读可见）。
+// 附带文件由网关放到执行工具的机器上（~/.nano-agent/skills/<名字>/，只读可见）。
 package skills
 
 import (
@@ -29,7 +29,7 @@ const (
 	maxBytes   = 4 << 20 // 附带文件最多传这么多
 	maxFiles   = 500
 	maxDepth   = 2
-	CacheDir   = "~/.cache/nano-agent/skills" // 执行工具的机器上放技能文件的地方
+	CacheDir   = "~/.nano-agent/skills" // 执行工具的机器上放技能文件的地方
 	toolPrompt = "使用一个技能（skill）。技能是事先写好的、做某一类事情的方法和配套脚本：调用后返回它的说明，照着做。" +
 		"说明里提到的附带文件在每台机器的 " + CacheDir + "/<技能名>/ 下（只读），用 Read 读、用 Shell 运行，" +
 		"在哪个工作目录上执行就用那台机器上的这个目录。遇到下面这些事情时，先调用对应的技能再动手。可用的技能："

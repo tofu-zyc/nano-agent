@@ -1,7 +1,7 @@
-# 内核 ⇄ 网关协议（v5）
+# 内核 ⇄ 网关协议（v6）
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
-- **版本**：v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
+- **版本**：v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -48,7 +48,7 @@
 | `exec_result` | `sid` `id` `ok` `content` | `exec` 的结果：工具输出，或者 `Skill` 的说明 |
 | `run` | `id` `req` | 请这个内核在它的机器上执行一次工具（工作目录在这台机器上，但这一轮由别的内核跑）。`req` 是交给执行器的完整请求（见[执行器](#执行器)），内核照样检查路径不包含自己 |
 | `run_cancel` | `id` | 停下 `run`（不再回结果） |
-| `skill_put` | `id` `skill` `files[]` | 把技能文件放到这台机器的 `~/.cache/nano-agent/skills/<skill>/`（先清空）。`files` 每项是 `{path, data, exec?}`，`path` 是相对路径（不能有 `..`），`data` 是 base64。内核只肯写这个目录 |
+| `skill_put` | `id` `skill` `files[]` | 把技能文件放到这台机器的 `~/.nano-agent/skills/<skill>/`（先清空）。`files` 每项是 `{path, data, exec?}`，`path` 是相对路径（不能有 `..`），`data` 是 base64。内核只肯写这个目录 |
 
 `turn.reason`：
 
@@ -79,7 +79,7 @@
 ```
 K→G {"t":"hello","v":5,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
 G→K {"t":"welcome","v":5}
-G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","workspaces":[{"name":"本机:~/projects/foo","dirs":["~/projects/foo"],"ro":["~/.gitconfig","~/.cache/nano-agent/skills"],"rw":[],"local":true}]}
+G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","workspaces":[{"name":"本机:~/projects/foo","dirs":["~/projects/foo"],"ro":["~/.gitconfig","~/.nano-agent/skills"],"rw":[],"local":true}]}
 K→G {"t":"model","sid":"tg:-1001234"}
 G→K {"t":"turn","sid":"tg:-1001234","reason":"tool_use","calls":[{"id":"call_1","name":"Shell","args":{"command":"date"}}]}
 K→G {"t":"result","sid":"tg:-1001234","id":"call_1","ok":true,"content":"Tue Oct 20 21:15:03 CST 2026\n"}
@@ -120,7 +120,7 @@ K→G {"t":"result","sid":"main","id":"c2","ok":true,"content":"GPU 0: …"}
 
 ## 执行器
 
-执行基础工具时每次启动一次 `nano-exec`，一问一答。工作目录在跑这一轮的内核的机器上时由内核启动；否则由网关安排：本机直接运行，SSH 服务器上复用网关的 SSH 主连接运行（执行器放在服务器的 `~/.cache/nano-agent/nano-exec-<版本>`），别的电脑请它的内核运行（`run`）：
+执行基础工具时每次启动一次 `nano-exec`，一问一答。工作目录在跑这一轮的内核的机器上时由内核启动；否则由网关安排：本机直接运行，SSH 服务器上复用网关的 SSH 主连接运行（执行器放在服务器的 `~/.nano-agent/nano-exec-<版本>`），别的电脑请它的内核运行（`run`）：
 
 ```
 stdin  {"tool":"Shell","args":{"command":"ls"},"dirs":["/home/u/foo"],"write":true,"ro":[],"rw":[],
@@ -133,4 +133,4 @@ stdout {"ok":true,"content":"a.txt\nb.txt\n"}
 - 工作目录不能包含内核的配置目录和执行器本身，内核会在启动执行器之前检查；执行器自己也拒绝包含它自己的目录。
 - `nano-exec --probe` 输出本机的沙箱能力：`{"v":1,"landlock":7,"os":"Linux","arch":"x86_64","rg":true}`。
 
-`Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到这一轮挂载的每台机器的 `~/.cache/nano-agent/skills/<技能名>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。每台机器上都是同一个路径，每次执行的 `ro` 都包含 `~/.cache/nano-agent/skills`。
+`Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到这一轮挂载的每台机器的 `~/.nano-agent/skills/<技能名>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。每台机器上都是同一个路径，每次执行的 `ro` 都包含 `~/.nano-agent/skills`。

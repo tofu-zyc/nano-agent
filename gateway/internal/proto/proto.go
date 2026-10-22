@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 5
+const Version = 6
 
 // 权限模式，随 input 传给内核。
 const (
@@ -42,7 +42,7 @@ const (
 	TExecResult = "exec_result" // exec 的结果
 	TRun        = "run"         // 请内核在它的机器上执行一次工具（工作目录在那台机器上，这一轮由别的内核跑）
 	TRunCancel  = "run_cancel"  // 停下 run
-	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.cache/nano-agent/skills/<技能名>/
+	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.nano-agent/skills/<技能名>/
 	TPairing    = "pairing"     // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired     = "paired"      // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
 )

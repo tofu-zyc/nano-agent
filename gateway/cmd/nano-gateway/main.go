@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
+	"nano-agent/gateway/internal/paths"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/web"
@@ -41,9 +42,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "chat" {
 		os.Exit(runChat(os.Args[2:]))
 	}
-	cfgPath := flag.String("c", "gateway.toml", "配置文件路径")
+	cfgPath := flag.String("c", "", "配置文件路径（默认 $NANO_HOME/gateway.toml）")
 	verbose := flag.Bool("v", false, "输出调试日志")
 	flag.Parse()
+	if *cfgPath == "" {
+		*cfgPath = paths.Config()
+	}
 
 	level := slog.LevelInfo
 	if *verbose {

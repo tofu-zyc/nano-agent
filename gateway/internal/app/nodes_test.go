@@ -166,11 +166,11 @@ func TestSSHWorkspace(t *testing.T) {
 
 	// 技能在网关上：Skill 返回说明，附带文件放到服务器上
 	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Skill", Args: json.RawMessage(`{"name":"demo"}`)})
-	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || !strings.Contains(r.Content, "技能目录：~/.cache/nano-agent/skills/demo") ||
+	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || !strings.Contains(r.Content, "技能目录：~/.nano-agent/skills/demo") ||
 		!strings.Contains(r.Content, "附带文件：scripts/run.sh") || !strings.HasSuffix(r.Content, "照着做") {
 		t.Fatalf("skill: %+v", r)
 	}
-	if f := gpu.put["~/.cache/nano-agent/skills/demo"]; len(f) != 2 || f[1].Path != "scripts/run.sh" || !f[1].Exec {
+	if f := gpu.put["~/.nano-agent/skills/demo"]; len(f) != 2 || f[1].Path != "scripts/run.sh" || !f[1].Exec {
 		t.Fatalf("put: %+v", gpu.put)
 	}
 	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c3", Name: "Skill", Args: json.RawMessage(`{"name":"../evil"}`)})
@@ -314,7 +314,7 @@ func TestMountsOnSeveralMachines(t *testing.T) {
 	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || strings.Contains(r.Content, "没能放到") {
 		t.Fatalf("skill: %+v", r)
 	}
-	if len(gpu.put["~/.cache/nano-agent/skills/demo"]) != 2 || len(e.hosts.hosts[host.LocalName].put["~/.cache/nano-agent/skills/demo"]) != 2 {
+	if len(gpu.put["~/.nano-agent/skills/demo"]) != 2 || len(e.hosts.hosts[host.LocalName].put["~/.nano-agent/skills/demo"]) != 2 {
 		t.Fatalf("put: %+v %+v", gpu.put, e.hosts.hosts[host.LocalName].put)
 	}
 	if info, _ := e.a.Session(mainSID); info.Workspaces[0].How != "local" || info.Workspaces[1].How != "gateway" || info.Workspaces[2].How != "gateway" {

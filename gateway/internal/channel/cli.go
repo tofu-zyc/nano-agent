@@ -3,8 +3,6 @@ package channel
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nano-agent/gateway/internal/paths"
 )
 
 // CLI 是终端聊天渠道。网关在数据目录里开一个 unix socket（只有自己能连），
@@ -51,29 +51,19 @@ const (
 	reset = "\x1b[0m"
 )
 
-// CLISocket 是终端聊天用的 unix socket 路径，一般就是数据目录里的 cli.sock。数据目录的路径太长时
-// （unix socket 的路径最多 107 字节），改放到自己的运行时目录（$XDG_RUNTIME_DIR，没有就用临时目录下
-// 只有自己能进的 nano-agent-<uid>），按数据目录取一个短名字。网关和 chat 按同样的规则算，结果一样。
+// CLISocket 是终端聊天用的 unix socket 路径：$NANO_HOME/run/cli.sock；路径太长时
+// 退回 $XDG_RUNTIME_DIR 或 /tmp 下的私有目录（见 paths.Socket）。网关和 chat 按同样的规则算。
 func CLISocket(dataDir string) (string, error) {
-	if abs, err := filepath.Abs(dataDir); err == nil {
-		dataDir = abs
-	}
-	p := filepath.Join(dataDir, "cli.sock")
-	if len(p) <= 100 {
-		return p, nil
-	}
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		dir = filepath.Join(os.TempDir(), fmt.Sprintf("nano-agent-%d", os.Getuid()))
-		os.Mkdir(dir, 0o700)
+	p := paths.Socket("cli.sock", dataDir)
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
 	}
 	if err := privateDir(dir); err != nil {
-		return "", fmt.Errorf("数据目录的路径太长，终端聊天的 socket 要放到 %s，但是：%w", dir, err)
+		return "", err
 	}
-	sum := sha256.Sum256([]byte(dataDir))
-	p = filepath.Join(dir, "nano-"+hex.EncodeToString(sum[:6])+".sock")
 	if len(p) > 100 {
-		return "", fmt.Errorf("数据目录和 %s 的路径都太长，放不下终端聊天的 socket", dir)
+		return "", fmt.Errorf("socket 路径太长：%s", p)
 	}
 	return p, nil
 }

@@ -51,7 +51,7 @@ guest = "none"
 
 [skills]
 # 技能目录：每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料。放在网关上，所有内核共用；
-# 调用时附带文件放到执行工具的机器的 ~/.cache/nano-agent/skills/<技能名>/ 下。改动下一轮自动生效
+# 调用时附带文件放到执行工具的机器的 ~/.nano-agent/skills/<技能名>/ 下。改动下一轮自动生效
 # dir = "skills"
 
 [workspace]
