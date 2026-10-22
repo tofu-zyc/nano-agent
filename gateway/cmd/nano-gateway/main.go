@@ -24,6 +24,7 @@ import (
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/web"
@@ -79,6 +80,13 @@ func main() {
 
 	personas := persona.New(cfg.Persona.Dir, log)
 	a := app.New(ctx, cfg, client, store, personas, log)
+	// 可以用的模型：配置文件里的 [llm] 是内置端点，网页里加的端点和模型存在数据目录的 models.json
+	modelStore, err := models.Open(cfg.Session.DataDir, cfg)
+	if err != nil {
+		log.Error("读取模型列表失败", "err", err)
+		os.Exit(1)
+	}
+	a.SetModels(modelStore, newClient)
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)
@@ -138,6 +146,7 @@ func main() {
 	// 网页里改了配置：能立即生效的立即生效，其余的等重启
 	conf.OnChange(func(old, cur *config.Config) {
 		a.SetConfig(cur)
+		modelStore.SetConfig(cur)
 		if old.Kernel.DeviceListen != cur.Kernel.DeviceListen {
 			if err := devices.SetListener(cur.Kernel.DeviceListen); err != nil {
 				log.Warn("更新电脑接入地址失败", "err", err)
@@ -152,6 +161,7 @@ func main() {
 			}
 		}
 		a.ReconcileChannels(cur)
+		a.ModelsChanged() // 配置文件里的模型可能变了，网页上的模型列表跟着刷新
 		if ws != nil {
 			ws.ConfigChanged(old, cur)
 		}

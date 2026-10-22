@@ -14,6 +14,9 @@ func (a *App) thinkingOf(sid string) string {
 	if t := a.store.Settings(sid).Thinking; t != "" {
 		return t
 	}
+	if m, _, ok := a.modelOf(sid); ok {
+		return m.Thinking
+	}
 	return a.cfg.LLM.Thinking
 }
 
@@ -25,7 +28,7 @@ func thinkingName(level string) string {
 }
 
 func (a *App) cmdThink(c in, arg string) {
-	levels := a.cfg.LLM.ThinkingLevels
+	levels := a.levelsOf(c.s.sid)
 	cur := a.thinkingOf(c.s.sid)
 	if arg == "" {
 		a.answer(c, fmt.Sprintf("思考强度：%s\n可选：%s（none 表示关闭），用 /think <强度> 切换，/think default 恢复默认", thinkingName(cur), strings.Join(levels, "、")))

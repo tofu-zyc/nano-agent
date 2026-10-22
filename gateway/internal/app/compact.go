@@ -20,7 +20,7 @@ func (a *App) compact(s *sess, high, low int) {
 	h := a.store.History(s.sid)
 	cut := session.CutPoint(h, low)
 	req := llm.SummaryRequest(a.store.Settings(s.sid).Summary, session.BuildMessages("", "", h[:cut], false))
-	if slices.Contains(a.cfg.LLM.ThinkingLevels, "none") {
+	if slices.Contains(a.levelsOf(s.sid), "none") {
 		req.Thinking = "none"
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
@@ -33,10 +33,14 @@ func (a *App) compact(s *sess, high, low int) {
 	}
 	a.publish(events.Event{T: "say", SID: s.sid, Text: note})
 	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start", Data: map[string]any{"purpose": "summary"}})
-	client := a.llm
+	client, cerr := a.clientFor(s.sid)
 	go func() {
 		start := time.Now()
-		res, err := client.Chat(ctx, req, nil)
+		var res *llm.Result
+		err := cerr
+		if err == nil {
+			res, err = client.Chat(ctx, req, nil)
+		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		stale := s.run != r || ctx.Err() == context.Canceled

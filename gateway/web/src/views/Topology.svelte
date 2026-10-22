@@ -691,12 +691,15 @@
               <text y="94" class="gw-stat">{t.runs} 轮 · 缓存 {pct(t.cached_tokens, t.prompt_tokens)}</text>
             </g>
           {:else if n.kind === 'model'}
+            {@const dm = ov.models?.models?.find((m) => m.default)}
+            {@const de = ov.models?.endpoints?.find((e) => e.id === dm?.endpoint)}
+            {@const mn = ov.models?.models?.length ?? 0}
             <rect class="card" class:active={modelBusy} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
             <g class="ico"><Icon name="sparkles" x={24} y={28} size={24} /></g>
-            <text x="66" y="28" class="t3">模型 · {ov.model.provider}</text>
-            <text x="66" y="48" class="t1">{truncate(ov.model.model || '未配置', 19)}</text>
-            <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '默认'}</text>
+            <text x="66" y="28" class="t3">模型 · {de?.kind ?? ov.model.provider}{mn > 1 ? ` · ${mn} 个` : ''}</text>
+            <text x="66" y="48" class="t1">{truncate(dm?.label || ov.model.model || '未配置', 19)}</text>
+            <text x="66" y="66" class="t2">{truncate(hostOf(de?.base_url || ov.model.base_url) || '—', 16)} · 思考 {(dm?.thinking ?? ov.model.thinking) === 'none' ? '关闭' : dm?.thinking || ov.model.thinking || '默认'}</text>
           {:else if n.kind === 'kernel'}
             {@const k = n.data as KernelInfo | null}
             <rect class="card" class:active={!!k && busyKernels.has(k.node)} class:bad={!k} width={n.w} height={n.h} rx="16" />

@@ -69,6 +69,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"totals":     snap.Totals,
 		"machines":   snap.Machines,
 		"workspaces": snap.Workspaces,
+		"models":     s.modelsView(),
 		"workspace":  map[string]any{"mode": cfg.Workspace.Mode},
 		"skills":     map[string]any{"dir": cfg.Skills.Dir, "list": s.app.Skills()},
 		"commands":   app.Commands,
@@ -319,13 +320,21 @@ func (s *Server) reloadConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"fields": s.conf.Describe()})
 }
 
-// testModel 用当前配置发一个很小的请求，看接口通不通、多快
+// testModel 用一个模型发一个很小的请求，看接口通不通、多快。body 里的 id 为空表示默认模型。
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req) // 可以没有正文
 	cfg := s.conf.Current()
-	client, err := s.newLLM(cfg.LLMConfig())
+	client, m, err := s.app.ClientFor(req.ID)
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+	thinking := m.Thinking
+	if thinking == "" {
+		thinking = cfg.LLM.Thinking
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -333,7 +342,7 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 	var first time.Duration
 	res, err := client.Chat(ctx, llm.Request{
 		Messages: []llm.Message{{Role: "user", Content: "用一句话介绍你自己。"}},
-		Thinking: cfg.LLM.Thinking,
+		Thinking: thinking,
 	}, func(llm.Delta) {
 		if first == 0 {
 			first = time.Since(start)
@@ -344,7 +353,8 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "reply": res.Content, "usage": res.Usage,
-		"ms": time.Since(start).Milliseconds(), "first_ms": first.Milliseconds()})
+		"ms": time.Since(start).Milliseconds(), "first_ms": first.Milliseconds(),
+		"model": m.ID, "label": modelLabel(m)})
 }
 
 // ---- 人格 ----

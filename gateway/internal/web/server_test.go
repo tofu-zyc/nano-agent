@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
 )
@@ -43,6 +44,11 @@ func setup(t *testing.T) (*httptest.Server, *Server, *config.Store) {
 	p := persona.New(cfg.Persona.Dir, log)
 	a := app.New(ctx, cfg, &llm.Mock{}, store, p, log)
 	a.SetHub(kernel.NewHub("k", a, log))
+	ms, err := models.Open(cfg.Session.DataDir, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetModels(ms, func(config.LLM) (llm.Client, error) { return &llm.Mock{}, nil })
 	conf.OnChange(func(old, cur *config.Config) { a.SetConfig(cur) })
 	a.ReconcileChannels(cfg)
 	s, err := New(a, conf, p, func(config.LLM) (llm.Client, error) { return &llm.Mock{}, nil }, log)

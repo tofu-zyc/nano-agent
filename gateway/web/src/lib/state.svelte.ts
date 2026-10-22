@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Ev, FieldState, LiveItem, MachineInfo, Overview, SessionInfo, Target, WorkspaceInfo } from './types';
+import type { Approval, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, SessionInfo, Target, WorkspaceInfo } from './types';
 
 export type Toast = {
   id: number;
@@ -137,6 +137,16 @@ class Store {
     this.fields = r.fields;
   }
 
+  /** 重新读模型列表（端点、模型、默认模型） */
+  async reloadModels() {
+    try {
+      const m = await api.get<ModelsView>('/api/models');
+      if (this.ov) this.ov.models = m;
+    } catch {
+      /* 下次刷新再说 */
+    }
+  }
+
   private connect() {
     this.es?.close();
     const es = new EventSource('/api/events');
@@ -257,6 +267,9 @@ class Store {
         break;
       case 'skills':
         if (ov && e.data) ov.skills = { ...ov.skills, list: e.data };
+        break;
+      case 'models':
+        this.reloadModels();
         break;
       case 'workspaces':
         if (ov && e.data) ov.workspaces = e.data;

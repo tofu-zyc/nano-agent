@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -47,6 +48,7 @@ var Commands = []Command{
 	{Name: "reset", Desc: "清空本会话的上下文"},
 	{Name: "mode", Args: "[auto | ask | readonly]", Desc: "查看、切换权限模式：自动、审批、只读", Admin: true},
 	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
+	{Name: "model", Args: "[编号 | default]", Desc: "查看、切换这个会话用的模型", Admin: true},
 	{Name: "approve", Args: "<编号>", Desc: "批准一次工具执行", Admin: true},
 	{Name: "deny", Args: "<编号>", Desc: "拒绝一次工具执行", Admin: true},
 }
@@ -93,8 +95,11 @@ type App struct {
 	groupNoticed  map[string]bool     // 已经提醒过“只支持私聊”的群
 	hostWaits     map[string]hostWait // 等内核回复的列目录、代执行请求（kernelhost.go）
 	hostSeq       int
-	skills        *skills.Registry           // 技能（放在网关上）
-	managedKernel string                     // 网关自己启动的本机内核的名字（localkernel.go）
+	skills        *skills.Registry // 技能（放在网关上）
+	managedKernel string           // 网关自己启动的本机内核的名字（localkernel.go）
+	models        *models.Store    // 可以用的模型（models.go），nil 时都用 llm
+	newClient     func(config.LLM) (llm.Client, error)
+	clients       map[string]modelClient
 	chans         map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
 	outboxes      map[string]chan outItem
 	eps           map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
@@ -204,6 +209,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		chans:        map[string]channel.Channel{},
 		groupNoticed: map[string]bool{},
 		hostWaits:    map[string]hostWait{},
+		clients:      map[string]modelClient{},
 		skills:       skills.New(cfg.Skills.Dir),
 		outboxes:     map[string]chan outItem{},
 		sessions:     map[string]*sess{},
@@ -381,6 +387,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "think":
 		a.cmdThink(c, strings.ToLower(arg))
+		return
+	case "model":
+		a.cmdModel(c, arg)
 		return
 	}
 	if m.Text == "" {
@@ -779,7 +788,7 @@ func (a *App) callModel(s *sess) {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
 	}
-	high := a.cfg.LLM.MaxHistoryTokens
+	high := a.historyLimit(s.sid)
 	low := int(float64(high) * a.cfg.LLM.TrimTo)
 	h := a.store.History(s.sid)
 	if session.Estimate(h) > high && session.CutPoint(h, low) > 0 {
@@ -825,11 +834,15 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 	}
-	client := a.llm
+	client, cerr := a.clientFor(s.sid)
 
 	go func() {
 		start := time.Now()
-		res, err := client.Chat(ctx, req, onDelta)
+		var res *llm.Result
+		err := cerr
+		if err == nil {
+			res, err = client.Chat(ctx, req, onDelta)
+		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		stale := s.run != r || ctx.Err() != nil // run 已经结束（停止、超时、断线），结果作废

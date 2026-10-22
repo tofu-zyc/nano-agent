@@ -37,23 +37,28 @@ func (t *Totals) add(u llm.Usage) {
 }
 
 type SessionInfo struct {
-	SID         string         `json:"sid"`
-	Channel     string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
-	Endpoints   []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
-	Title       string         `json:"title"`
-	Workspaces  []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只聊天
-	Kernel      string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
-	RunNode     string         `json:"run_node"`   // 正在跑这一轮的内核
-	Running     bool           `json:"running"`
-	Pending     int            `json:"pending"` // 待审批的工具调用
-	LastAt      int64          `json:"last_at"` // 最后一条消息的时间（秒）
-	Messages    int            `json:"messages"`
-	Mode        string         `json:"mode"`
-	Thinking    string         `json:"thinking"`
-	Persona     string         `json:"persona"`      // 用的人格文件名
-	PersonaFile string         `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
-	Usage       llm.Usage      `json:"usage"`        // 历史里记下的累计用量
-	Compacted   int            `json:"compacted"`
+	SID            string         `json:"sid"`
+	Channel        string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
+	Endpoints      []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
+	Title          string         `json:"title"`
+	Workspaces     []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只聊天
+	Kernel         string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
+	RunNode        string         `json:"run_node"`   // 正在跑这一轮的内核
+	Running        bool           `json:"running"`
+	Pending        int            `json:"pending"` // 待审批的工具调用
+	LastAt         int64          `json:"last_at"` // 最后一条消息的时间（秒）
+	Messages       int            `json:"messages"`
+	Mode           string         `json:"mode"`
+	Thinking       string         `json:"thinking"`
+	ThinkingLevels []string       `json:"thinking_levels"` // 这个模型的思考强度可选值
+	Model          string         `json:"model"`           // 这个会话选的模型 ID，空表示用默认模型
+	ModelUsed      string         `json:"model_used"`      // 实际用的模型 ID
+	ModelLabel     string         `json:"model_label"`     // 实际用的模型的名字
+
+	Persona     string    `json:"persona"`      // 用的人格文件名
+	PersonaFile string    `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
+	Usage       llm.Usage `json:"usage"`        // 历史里记下的累计用量
+	Compacted   int       `json:"compacted"`
 }
 
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
@@ -111,7 +116,13 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
 	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
-		Mode: w.mode, Thinking: a.thinkingOf(sid), Compacted: st.Base}
+		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
+		Model: st.Model, Compacted: st.Base}
+	if m, _, ok := a.modelOf(sid); ok {
+		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
+	} else {
+		info.ModelLabel = a.cfg.LLM.Model
+	}
 	rt := a.route(w)
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		rt = s.run.rt
@@ -191,6 +202,7 @@ type SessionPatch struct {
 	Workspaces *[]string `json:"workspaces"` // 挂载的工作目录（ID），空列表表示只聊天
 	Mode       *string   `json:"mode"`
 	Thinking   *string   `json:"thinking"` // 空字符串表示用默认值
+	Model      *string   `json:"model"`    // 空字符串表示用默认模型
 }
 
 func (a *App) UpdateSession(sid string, p SessionPatch) error {
@@ -218,14 +230,26 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 		}
 		st.Mode = *p.Mode
 	}
+	if p.Model != nil {
+		if *p.Model != "" && !a.modelExists(*p.Model) {
+			errs = append(errs, fmt.Errorf("没有模型 %s", *p.Model))
+		} else {
+			st.Model = *p.Model
+		}
+	}
+	levels := a.levelsForModel(st.Model)
 	if p.Thinking != nil {
-		if *p.Thinking != "" && !slices.Contains(a.cfg.LLM.ThinkingLevels, *p.Thinking) {
-			errs = append(errs, fmt.Errorf("思考强度只能是 %s", strings.Join(a.cfg.LLM.ThinkingLevels, "、")))
+		if *p.Thinking != "" && !slices.Contains(levels, *p.Thinking) {
+			errs = append(errs, fmt.Errorf("思考强度只能是 %s", strings.Join(levels, "、")))
 		}
 		st.Thinking = *p.Thinking
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	// 换了模型：原来的思考强度可能不在新模型的可选值里，恢复成模型的默认值
+	if p.Model != nil && st.Thinking != "" && !slices.Contains(levels, st.Thinking) {
+		st.Thinking = ""
 	}
 	if err := a.store.SaveSettings(sid, st); err != nil {
 		return err

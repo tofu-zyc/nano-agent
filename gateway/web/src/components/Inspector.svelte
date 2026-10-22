@@ -2,8 +2,9 @@
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
   import { ago, channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath, since, stateLabel } from '../lib/format';
-  import type { EndpointInfo, MachineInfo, SessionInfo, Usage, WorkspaceInfo } from '../lib/types';
+  import type { EndpointInfo, MachineInfo, SessionInfo, WorkspaceInfo } from '../lib/types';
   import FieldGroup from './FieldGroup.svelte';
+  import ModelPanel from './ModelPanel.svelte';
   import DirPicker from './DirPicker.svelte';
   import WorkspacePicker from './WorkspacePicker.svelte';
   import FeishuQR from './FeishuQR.svelte';
@@ -16,8 +17,13 @@
     switch (target.type) {
       case 'gateway':
         return { icon: 'hub', color: 'var(--c-gateway)', title: '网关', sub: `已运行 ${since(ov.gateway.started)}` };
-      case 'model':
-        return { icon: 'sparkles', color: 'var(--c-model)', title: ov.model.model || '模型', sub: ov.model.base_url || '还没配置接口' };
+      case 'model': {
+        const dm = ov.models?.models?.find((m) => m.default);
+        const de = ov.models?.endpoints?.find((e) => e.id === dm?.endpoint);
+        const n = ov.models?.models?.length ?? 0;
+        return { icon: 'sparkles', color: 'var(--c-model)', title: dm?.label || ov.model.model || '模型',
+          sub: `${n || 1} 个模型 · ${de?.name || '配置文件'}${dm ? ' · 默认 ' + dm.label : ''}` };
+      }
       case 'kernel': {
         if (target.node) {
           const k = ov.kernels.find((x) => x.node === target.node);
@@ -51,20 +57,6 @@
     }
   });
 
-  // ---- 模型测试 ----
-  let testing = $state(false);
-  let testResult = $state<{ ok: boolean; reply?: string; error?: string; ms?: number; first_ms?: number; usage?: Usage } | null>(null);
-  async function testModel() {
-    testing = true;
-    testResult = null;
-    try {
-      testResult = await api.post('/api/test/model');
-    } catch (err) {
-      testResult = { ok: false, error: err instanceof Error ? err.message : String(err) };
-    } finally {
-      testing = false;
-    }
-  }
 
   // ---- 会话 ----
   const sess = $derived(target.type === 'session' ? store.session(target.sid) : undefined);
@@ -237,39 +229,8 @@
       </div>
       <FieldGroup group="gateway" focus={store.focus} />
     {:else if target.type === 'model'}
-      <div class="card">
-        <div class="row">
-          <span class="muted">接口</span>
-          <code class="grow">{ov.model.base_url || '—'}</code>
-        </div>
-        <div class="row">
-          <span class="muted">思考</span>
-          <span class="grow">{ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '模型默认'} · 作为 reasoning_effort 传给模型</span>
-        </div>
-        <div class="row">
-          <span class="muted">上下文</span>
-          <span class="grow">窗口 {num(ov.model.context_window)} · 历史上限 {num(ov.model.max_history)}</span>
-        </div>
-        <button class="btn primary" onclick={testModel} disabled={testing}>
-          <Icon name={testing ? 'refresh' : 'zap'} size={14} class={testing ? 'spin' : ''} />
-          {testing ? '正在测试…' : '测试连接'}
-        </button>
-        {#if testResult}
-          <div class="result" class:bad={!testResult.ok}>
-            {#if testResult.ok}
-              <div class="rt"><Icon name="check" size={14} /> 通了 · 首字 {testResult.first_ms} ms · 总共 {testResult.ms} ms</div>
-              <p>{testResult.reply}</p>
-              {#if testResult.usage}
-                <div class="muted small">输入 {testResult.usage.prompt_tokens} · 缓存 {testResult.usage.cached_tokens ?? 0} · 输出 {testResult.usage.completion_tokens}</div>
-              {/if}
-            {:else}
-              <div class="rt"><Icon name="alert" size={14} /> 没通</div>
-              <p>{testResult.error}</p>
-            {/if}
-          </div>
-        {/if}
-      </div>
-      <FieldGroup group="model" focus={store.focus} />
+      <ModelPanel />
+      <FieldGroup group="model" title="配置文件里的接口" focus={store.focus} />
     {:else if target.type === 'kernel'}
       {@const list = target.node ? ov.kernels.filter((k) => k.node === target.node) : ov.kernels}
       {#if !target.node}
@@ -555,12 +516,21 @@
           {/each}
         </div>
 
-        {#if ov.model.levels?.length}
-          <h5>思考强度</h5>
+        {@const levels = sess.thinking_levels ?? ov.model.levels ?? []}
+        <h5>模型 <span class="muted small">{sess.model ? '这个会话单独选的' : `默认：${sess.model_label}`}</span></h5>
+        <select class="modelpick" value={sess.model} onchange={(ev) => patchSession({ model: ev.currentTarget.value })}>
+          <option value="">默认模型（{sess.model_label}）</option>
+          {#each ov.models?.models ?? [] as m (m.id)}
+            <option value={m.id}>{m.label}{m.config ? '（配置文件）' : ''}</option>
+          {/each}
+        </select>
+
+        {#if levels.length}
+          <h5>思考强度 <span class="muted small">{sess.thinking ? sess.thinking : '模型默认'}</span></h5>
           <div class="seg">
-            <button class:active={!sess.thinking || sess.thinking === ov.model.thinking} onclick={() => patchSession({ thinking: '' })}>默认</button>
-            {#each ov.model.levels as l}
-              <button class:active={sess.thinking === l && l !== ov.model.thinking} onclick={() => patchSession({ thinking: l })}>{l === 'none' ? '关闭' : l}</button>
+            <button class:active={!sess.thinking} onclick={() => patchSession({ thinking: '' })}>默认</button>
+            {#each levels as l}
+              <button class:active={sess.thinking === l} onclick={() => patchSession({ thinking: l })}>{l === 'none' ? '关闭' : l}</button>
             {/each}
           </div>
         {/if}
@@ -760,33 +730,7 @@
   .small {
     font-size: 11.5px;
   }
-  .result {
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--ok) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
-    animation: rise 0.2s ease;
-  }
-  .result.bad {
-    background: color-mix(in srgb, var(--err) 8%, transparent);
-    border-color: color-mix(in srgb, var(--err) 30%, transparent);
-  }
-  .rt {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-weight: 600;
-    font-size: 13px;
-    color: var(--ok);
-  }
-  .result.bad .rt {
-    color: var(--err);
-  }
-  .result p {
-    margin: 6px 0;
-    font-size: 13px;
-    word-break: break-word;
-  }
+
   .errbox {
     padding: 8px 10px;
     border-radius: 9px;
@@ -1105,6 +1049,18 @@
     border-radius: 10px;
     background: var(--bg-2);
     border: 1px solid var(--line);
+  }
+  .modelpick {
+    width: 100%;
+    height: 34px;
+    padding: 0 9px;
+    border-radius: 9px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    outline: none;
+  }
+  .modelpick:focus {
+    border-color: var(--accent);
   }
   .seg button {
     height: 28px;

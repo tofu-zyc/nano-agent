@@ -25,7 +25,8 @@ type Settings struct {
 	Dirs    []string `json:"dirs,omitempty"`
 	RO      []string `json:"ro,omitempty"`
 
-	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用配置里的默认值
+	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用模型的默认值
+	Model    string `json:"model,omitempty"`    // 用哪个模型（models 包里的 ID），空表示用默认模型
 	Title    string `json:"title,omitempty"`    // 会话的名字，网页里显示
 	Web      bool   `json:"web,omitempty"`      // 网页接着这个会话：在网页里新建的，或者在网页里说过话
 

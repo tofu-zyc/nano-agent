@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-21，多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+最后更新：2026-10-22，多模型（网页管理接口和模型、默认模型、每个会话单独选）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 一句话
 
@@ -30,15 +30,17 @@ gateway/               Go 网关
     workspace.go       会话挂载的工作目录和环境说明（EnvNote）
     compact.go         超限后异步生成摘要，取消、失败裁剪和用量统计
     undo.go            撤回（/undo、「撤回」、平台撤回事件）和不带斜杠的「停」
+    models.go          可用的模型：/model、按会话选模型、按模型建客户端、思考强度和历史上限
   internal/host        网关能直接执行工具的机器：本机（local.go）、SSH 服务器（ssh.go：主连接、
                        探测、上传 / 现编执行器、重连）、连接管理（manager.go，data/connections.json）
   internal/channel     聊天渠道：cli（unix socket）、web、telegram、feishu（含扫码创建）
     stream.go          平台流式显示：后台合并、限频、结束补齐、失败时发送完整文本
   internal/kernel      内核连接（hub，多内核；AllowToken 给网关启动的本机内核）
-  internal/skills      技能（放在网关上）：扫描、Skill 工具定义、加载说明和附带文件
     pair.go            电脑配对：待确认请求、专用口令（只存 SHA-256）、移除
+  internal/skills      技能（放在网关上）：扫描、Skill 工具定义、加载说明和附带文件
   internal/session     历史（JSONL 只追加）、会话设置、裁剪
   internal/llm         OpenAI 兼容接口（流式）、mock
+  internal/models      模型列表：接口、模型、默认模型（data/models.json，0600）
   internal/config      配置：gateway.toml + data/config.json（网页改的），schema 驱动设置页
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
@@ -85,6 +87,7 @@ cd gateway && go test -race ./...
 | 33bdff6 | 各端都能停（「停」、Ctrl-C、Telegram 按钮、网页输入框旁）；撤回最近一轮（/undo、「撤回」、网页按钮放回输入框、飞书撤回事件）；电脑首次连接配对 |
 | 094effa、c0b8c07 | 重写：SSH 服务器由网关自己连、只放执行器（去掉内核侧 remote 和服务器上的内核、启动包）；工作目录 = 机器 + 目录的列表；同机 / 异机两种执行模式（exec / skill_files 协议）；网页工作目录选择器、拓扑按机器画；内核安装脚本和单文件安装包；协议 v4 |
 | 多工作目录 | 一个会话挂好几个工作目录（可跨机器），工具参数 workspace；技能移到网关（Skill 由网关处理，附带文件放到各机器的 ~/.cache/nano-agent/skills）；网关代执行别的电脑上的工具（run）；网关启动本机内核；拓扑加内核节点、右键菜单；输入框命令提示；协议 v5 |
+| 多模型 | 网页上管理多个 OpenAI 兼容接口和模型：默认模型、会话单独选（/model、会话设置）、每个模型自己的上下文窗口、历史上限、思考强度；接口只回传“有没有设置 key” |
 
 ## 关键设计（改之前先理解）
 
@@ -106,6 +109,8 @@ cd gateway && go test -race ./...
 14. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.local/share/nano-agent/kernel/，升级只改 gateway / node 两行；systemd 用户服务（StandardError=append:kernel.log），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
 15. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
 
+16. **多模型**（internal/models、app/models.go）：配置文件里的 `[llm]` 是内置端点 `config`，网页里加的接口和模型存 `data/models.json`（0600）。会话的 `Settings.Model` 是模型 ID（端点/模型名），空表示默认模型。`clientFor` 找到模型后，config 端点直接用 `a.llm`（配置热更新由 SetLLM 换），别的端点按需建客户端并按配置指纹（reflect.DeepEqual）缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填时用上下文窗口的一半）。`ModelsChanged` 在模型列表变化后把指向已删模型的会话改回默认，并刷新所有会话（默认模型可能变了）。网页接口只返回 `has_key`，不回传 API key。
+
 ## 用户的偏好和约定（重要）
 
 - 中文交流；界面、日志、文档都是中文。用户喜欢“有创意、好看、好用”的网页，不要填表式的设置；拓扑图节点能拖动。
@@ -120,7 +125,7 @@ cd gateway && go test -race ./...
 ## 接下来要做的（用户要求先把主体功能做齐）
 
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
-2. 聊天里批准配对（/pair），现在只能在网页上点。多模型、让 AI 改网关配置（自举，要先定设计）是用户提的下一批。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
+2. 聊天里批准配对（/pair），现在只能在网页上点。让 AI 改网关配置（自举，要先定设计）是用户提的下一批。飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。
 3. 同名冲突：远程内核和 SSH 服务器同名时 route 优先按 SSH 服务器算，没有拦；内核起名叫「本机」也没拦（安装脚本拦了）。
 4. 长期记忆、群聊。Windows 原生内核没做（在 WSL2 里装）。移动端暂不做，将来要求在手机本机执行工具。
 
@@ -135,4 +140,7 @@ cd gateway && go test -race ./...
 - 起演示网关时别用 `cd X && cmd &` 记 `$!`：那是子 shell 的 pid，杀了它网关还在跑。
 - 协议 v4（异机模式）。旧启动包装的 v3 内核连上来会被拒（错误里说要重装），否则它会无视 exec=gateway、拿网关机器上的路径在自己机器上执行。以前 SSH 服务器上部署的内核文件（~/.local/share/nano-agent/managed/）不再使用，可以删。
 - 内核日志用 `%.*s` + `utf8_cut` 截断，别用 `%.200s`（会切坏中文）。
+- 模型列表在网关内存里也有一份（models.Store）：直接改 `data/models.json` 要重启网关才生效，平时用网页或 `/model`。
+- 模型 ID 是「端点/模型名」，带斜杠：网页里删除模型用查询参数 `/api/models/items?id=…`，别改成路径参数（`{id}` 匹配不了斜杠）。
+- 网页改名/admins 等配置变化会触发 `ModelsChanged`（配置文件里的端点/模型可能变了）；它会给所有会话发 session 事件，别以为是重复推送。
 - `make` 每次都会尝试静态链接执行器，失败只提示一次（build/.static-tried）。

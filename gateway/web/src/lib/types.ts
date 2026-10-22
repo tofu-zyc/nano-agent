@@ -33,6 +33,38 @@ export type MachineInfo = {
 // 工作目录：机器 + 路径。会话可以同时挂好几个；default 表示新会话默认挂上
 export type WorkspaceInfo = { id: string; host: string; path: string; default?: boolean; sessions: number; online: boolean };
 
+// 模型接口（端点）：配置文件里的 [llm] 是 id 为 config 的那个，只能在设置里改；网页里可以再加别的
+export type ModelEndpoint = {
+  id: string;
+  name: string;
+  kind: 'openai' | 'mock';
+  base_url: string;
+  proxy?: string;
+  has_key: boolean; // 有没有设置 API key（值不返回）
+  config: boolean;
+};
+
+// 一个可以选的模型。ID 是 端点/模型名
+export type ModelItem = {
+  id: string;
+  endpoint: string;
+  name: string;
+  label: string;
+  context_window: number;
+  max_tokens: number;
+  max_history_tokens: number;
+  thinking: string;
+  thinking_levels: string[] | null;
+  owned_by?: string;
+  default: boolean;
+  config: boolean;
+};
+
+export type ModelsView = { endpoints: ModelEndpoint[]; models: ModelItem[]; default: string };
+
+// 端点 /models 拉回来的一个模型
+export type RemoteModel = { id: string; owned_by?: string; context_window?: number; added: boolean };
+
 // 会话挂载的一个工作目录。how：local（跑这一轮的内核在同一台机器上，自己执行）、
 // gateway（交给网关在那台机器上执行）、down（那台机器现在用不了）
 export type MountInfo = { id: string; host: string; path: string; how: 'local' | 'gateway' | 'down' };
@@ -55,6 +87,10 @@ export type SessionInfo = {
   messages: number;
   mode: string;
   thinking: string;
+  thinking_levels: string[] | null; // 这个模型的思考强度可选值
+  model: string; // 这个会话选的模型 ID，空表示默认模型
+  model_used: string; // 实际用的模型 ID
+  model_label: string; // 实际用的模型的名字
   persona: string;
   persona_file: string;
   usage: Usage;
@@ -90,6 +126,7 @@ export type Overview = {
   totals: Totals;
   machines: MachineInfo[];
   workspaces: WorkspaceInfo[];
+  models: ModelsView;
   workspace: { mode: string };
   skills: { dir: string; list: SkillInfo[] };
   commands: CommandInfo[];
