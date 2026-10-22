@@ -5,8 +5,8 @@
   import Field from '../components/Field.svelte';
   import Icon from '../components/Icon.svelte';
 
-  const groups: { id: string; label: string; icon: string; color: string; desc: string; target: Target }[] = [
-    { id: 'model', label: '模型', icon: 'sparkles', color: 'var(--c-model)', desc: '接口、思考强度、上下文长度', target: { type: 'model' } },
+  const groups: { id: string; label: string; icon: string; color: string; desc: string; target?: Target }[] = [
+    { id: 'context', label: '上下文与采样', icon: 'layers', color: 'var(--c-model)', desc: '历史压缩、默认温度、额外请求参数（模型和接口在「模型」页面）' },
     { id: 'workspace', label: '工作目录与沙箱', icon: 'folder', color: 'var(--c-dir)', desc: '工具能碰到的范围、默认权限模式', target: { type: 'workspace' } },
     { id: 'gateway', label: '网关', icon: 'hub', color: 'var(--c-gateway)', desc: '管理员、访客权限、消息时间、网页登录', target: { type: 'gateway' } },
     { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理', target: { type: 'channel', name: 'telegram' } },
@@ -18,7 +18,7 @@
   let q = $state('');
   let onlyChanged = $state(false);
   let showAdvanced = $state(false);
-  let selected = $state('model');
+  let selected = $state('context');
 
   const focus = $derived(store.route.focus ?? null);
   $effect(() => {
@@ -90,21 +90,13 @@
               <h3>{g.label}</h3>
               <p>{g.desc}</p>
             </div>
-            <button class="btn sm" onclick={() => store.openOnMap(g.target)}>
-              <Icon name="graph" size={13} />在拓扑图里看
-            </button>
+            {#if g.target}
+              <button class="btn sm" onclick={() => store.openOnMap(g.target!)}>
+                <Icon name="graph" size={13} />在拓扑图里看
+              </button>
+            {/if}
           </div>
           <div class="fields">
-            {#if g.id === 'model'}
-              <div class="callout">
-                <Icon name="sparkles" size={16} />
-                <div class="grow">
-                  <strong>可以加多个接口和模型</strong>
-                  <p>配置文件里的 [llm] 是内置的接口和模型。别的 OpenAI 兼容接口、多模态模型在模型面板里添加，每个会话可以用 <code>/model</code> 单独选。</p>
-                </div>
-                <button class="btn sm primary" onclick={() => store.addModel()}><Icon name="plus" size={13} />添加模型</button>
-              </div>
-            {/if}
             {#each fs as f (f.key)}
               <Field {f} highlight={focus === f.key} />
             {:else}
@@ -305,33 +297,7 @@
     font-size: 12.5px;
     color: var(--muted);
   }
-  .callout {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    margin: 4px 0 10px;
-    padding: 12px 14px;
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--c) 8%, var(--panel-2));
-    border: 1px solid color-mix(in srgb, var(--c) 30%, var(--line));
-  }
-  .callout > :global(svg) {
-    color: var(--c);
-    margin-top: 1px;
-  }
-  .callout strong {
-    font-size: 13px;
-  }
-  .callout p {
-    margin: 3px 0 0;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--text-2);
-  }
-  .callout .grow {
-    flex: 1;
-    min-width: 0;
-  }
+
   .fields {
     border-radius: 14px;
     background: var(--panel);

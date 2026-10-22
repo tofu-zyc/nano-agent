@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"syscall"
 
@@ -62,11 +61,6 @@ func main() {
 	}
 	cfg := conf.Current()
 
-	client, err := newClient(cfg.LLMConfig())
-	if err != nil {
-		log.Error("初始化模型客户端失败", "err", err)
-		os.Exit(1)
-	}
 	store, err := session.New(cfg.Session.DataDir)
 	if err != nil {
 		log.Error("打开数据目录失败", "dir", cfg.Session.DataDir, "err", err)
@@ -80,8 +74,9 @@ func main() {
 	defer stop()
 
 	personas := persona.New(cfg.Persona.Dir, log)
-	a := app.New(ctx, cfg, client, store, personas, log)
-	// 可以用的模型：配置文件里的 [llm] 是内置端点，网页里加的端点和模型存在数据目录的 models.json
+	// 模型全部在网页的模型节点里配置；没有模型时网关照样启动，聊天会提示去添加。
+	// 旧版 [llm] 里的模型会在 models.Open 时一次性导入成普通模型。
+	a := app.New(ctx, cfg, nil, store, personas, log)
 	modelStore, err := models.Open(cfg.Session.DataDir, cfg)
 	if err != nil {
 		log.Error("读取模型列表失败", "err", err)
@@ -161,16 +156,7 @@ func main() {
 				log.Warn("更新电脑接入地址失败", "err", err)
 			}
 		}
-		if !reflect.DeepEqual(old.LLMConfig(), cur.LLMConfig()) {
-			if c, err := newClient(cur.LLMConfig()); err != nil {
-				log.Warn("新的模型配置有误，继续用原来的", "err", err)
-			} else {
-				a.SetLLM(c)
-				log.Info("模型配置已更新", "model", cur.LLM.Model)
-			}
-		}
 		a.ReconcileChannels(cur)
-		a.ModelsChanged() // 配置文件里的模型可能变了，网页上的模型列表跟着刷新
 		if ws != nil {
 			ws.ConfigChanged(old, cur)
 		}

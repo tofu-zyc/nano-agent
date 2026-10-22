@@ -270,12 +270,10 @@ func (c *Config) validate() error {
 	if c.Kernel.Token == "" {
 		errs = append(errs, errors.New("kernel.token 不能为空"))
 	}
+	// [llm] 里的 provider/base_url/model 是旧版单模型配置，只在升级时迁移用；
+	// 新装用户不需要写，模型全部在网页的模型节点里配置。
 	switch c.LLM.Provider {
-	case "openai":
-		if c.LLM.BaseURL == "" || c.LLM.Model == "" {
-			errs = append(errs, errors.New("llm.base_url 和 llm.model 不能为空"))
-		}
-	case "mock":
+	case "", "openai", "mock":
 	default:
 		errs = append(errs, fmt.Errorf("llm.provider 只能是 openai 或 mock，现在是 %q", c.LLM.Provider))
 	}

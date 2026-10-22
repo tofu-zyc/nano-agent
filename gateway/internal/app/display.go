@@ -17,7 +17,10 @@ func (a *App) thinkingOf(sid string) string {
 	if m, _, ok := a.modelOf(sid); ok {
 		return m.Thinking
 	}
-	return a.cfg.LLM.Thinking
+	if a.models == nil { // 测试/嵌入式的旧单模型模式
+		return a.cfg.LLM.Thinking
+	}
+	return ""
 }
 
 func thinkingName(level string) string {

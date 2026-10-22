@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/app"
+	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
@@ -60,10 +61,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"gateway": map[string]any{"started": snap.Started, "kernel_listen": cfg.Kernel.Listen, "web_listen": cfg.Web.Listen,
 			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
-		"kernels": snap.Kernels,
-		"model": modelInfo{Provider: cfg.LLM.Provider, Model: cfg.LLM.Model, BaseURL: cfg.LLM.BaseURL, Thinking: cfg.LLM.Thinking,
-			Levels: cfg.LLM.ThinkingLevels, ContextWindow: cfg.LLM.ContextWindow,
-			MaxHistory: cfg.LLM.MaxHistoryTokens},
+		"kernels":    snap.Kernels,
+		"model":      defaultModelInfo(s, cfg),
 		"channels":   s.app.Channels(),
 		"sessions":   snap.Sessions,
 		"approvals":  snap.Approvals,
@@ -483,4 +482,22 @@ func (s *Server) deletePersona(w http.ResponseWriter, r *http.Request) {
 	}
 	s.app.Bus().Publish(events.Event{T: "persona", Name: name})
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// defaultModelInfo 是顶栏/拓扑上显示的默认模型；没有模型时字段为空。
+func defaultModelInfo(s *Server, cfg *config.Config) modelInfo {
+	st := s.app.ModelStore()
+	if st == nil {
+		return modelInfo{Provider: cfg.LLM.Provider, Model: cfg.LLM.Model}
+	}
+	id := st.Default()
+	if id == "" {
+		return modelInfo{}
+	}
+	m, e, ok := st.Find(id)
+	if !ok {
+		return modelInfo{}
+	}
+	return modelInfo{Provider: e.Kind, Model: m.Name, BaseURL: e.BaseURL, Thinking: m.Thinking,
+		Levels: m.ThinkingLevels, ContextWindow: m.ContextWindow, MaxHistory: m.MaxHistory}
 }

@@ -47,18 +47,18 @@ func TestModelSwitchPerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 没选模型时用配置文件里的（a.llm），不另建客户端
+	// 没选模型时用默认模型（旧配置导入的那个 mock，已经是普通模型）
 	e.say("先聊一句")
 	e.k.expect(proto.TInput)
 	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	e.k.expect(proto.TTurn)
 	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
 	e.ch.wait(t, "（mock）收到：先聊一句")
-	if clientCount() != 0 {
-		t.Fatalf("没选模型时不该建别的客户端：%d", clientCount())
+	if clientCount() != 1 {
+		t.Fatalf("默认模型应该建一个客户端：%d", clientCount())
 	}
 	if got := e.a.historyLimit(mainSID); got != e.a.cfg.LLM.MaxHistoryTokens {
-		t.Fatalf("配置文件模型的历史上限：%d", got)
+		t.Fatalf("默认模型的历史上限：%d", got)
 	}
 
 	// /model 能列出两个模型
@@ -168,5 +168,20 @@ func TestUpdateSessionModel(t *testing.T) {
 	}
 	if info, _ := e.a.Session(mainSID); info.Model != "" {
 		t.Fatalf("切回默认以后 model=%q", info.Model)
+	}
+}
+
+// 没有配置模型时：不进 run，直接提示去添加接口和模型。
+func TestNoModelsNotice(t *testing.T) {
+	e := setup(t)
+	empty, err := models.Open(t.TempDir(), &config.Config{LLM: config.LLM{Provider: "openai"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.SetModels(empty, func(config.LLM) (llm.Client, error) { return &recLLM{}, nil })
+	e.say("你好")
+	e.ch.wait(t, "还没有配置模型")
+	if h := e.a.store.History(mainSID); len(h) != 0 {
+		t.Fatalf("没有模型时不该写历史：%+v", h)
 	}
 }

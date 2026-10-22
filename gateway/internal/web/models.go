@@ -8,9 +8,8 @@ import (
 	"nano-agent/gateway/internal/models"
 )
 
-// 可以用的模型：配置文件里的 [llm] 是一个端点（ID 是 config），网页里还可以加别的 OpenAI 兼容端点，
-// 每个端点上可以有多个模型，一个默认模型，每个会话也能单独选（/model、会话设置）。
-// 接口不返回 API key，只告诉有没有设置。
+// 可以用的模型：接口（OpenAI 兼容）和模型都只来自 models.json，每个接口上可以有多个模型，
+// 一个默认模型，每个会话也能单独选（/model、会话设置）。接口不返回 API key，只告诉有没有设置。
 
 type endpointView struct {
 	ID      string `json:"id"`
@@ -19,7 +18,6 @@ type endpointView struct {
 	BaseURL string `json:"base_url"`
 	Proxy   string `json:"proxy,omitempty"`
 	HasKey  bool   `json:"has_key"` // 有没有设置 API key（值不返回）
-	Config  bool   `json:"config"`  // 配置文件里的端点，只能在设置里改
 }
 
 type modelView struct {
@@ -35,7 +33,6 @@ type modelView struct {
 	Modalities     []string `json:"modalities"`
 	Owner          string   `json:"owned_by,omitempty"`
 	Default        bool     `json:"default"`
-	Config         bool     `json:"config"` // 配置文件里的模型，只能在设置里改
 }
 
 type modelsView struct {
@@ -53,13 +50,13 @@ func (s *Server) modelsView() modelsView {
 	v.Default = st.Default()
 	for _, e := range st.Endpoints() {
 		v.Endpoints = append(v.Endpoints, endpointView{ID: e.ID, Name: e.Name, Kind: e.Kind, BaseURL: e.BaseURL,
-			Proxy: e.Proxy, HasKey: e.APIKey != "", Config: e.ID == models.ConfigEndpoint})
+			Proxy: e.Proxy, HasKey: e.APIKey != ""})
 	}
 	for _, m := range st.Models() {
 		v.Models = append(v.Models, modelView{ID: m.ID, Endpoint: m.Endpoint, Name: m.Name, Label: modelLabel(m),
 			ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, MaxHistory: m.MaxHistory,
 			Thinking: m.Thinking, ThinkingLevels: m.ThinkingLevels, Modalities: m.Modalities, Owner: m.Owner,
-			Default: m.ID == v.Default, Config: m.Endpoint == models.ConfigEndpoint})
+			Default: m.ID == v.Default})
 	}
 	return v
 }

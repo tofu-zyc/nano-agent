@@ -55,7 +55,7 @@ func setup(t *testing.T) (*httptest.Server, *Server, *config.Store) {
 		t.Fatal(err)
 	}
 	a.SetMedia(mediaStore)
-	conf.OnChange(func(old, cur *config.Config) { a.SetConfig(cur) })
+	conf.OnChange(func(old, cur *config.Config) { a.SetConfig(cur); ms.SetConfig(cur) })
 	a.ReconcileChannels(cfg)
 	s, err := New(a, conf, p, func(config.LLM) (llm.Client, error) { return &llm.Mock{}, nil }, log)
 	if err != nil {
@@ -149,13 +149,10 @@ func TestConfigAndChatEvents(t *testing.T) {
 	c := newClient(t, srv)
 	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
 
-	// 改配置：立即生效，来源变成网页；密钥不回传
-	code, out := c.do("PATCH", "/api/config", map[string]any{"values": map[string]any{"workspace.mode": "auto", "llm.api_key": "sk-x"}}, true)
-	if code != 200 || conf.Current().Workspace.Mode != "auto" || conf.Current().LLM.APIKey != "sk-x" {
+	// 改配置：立即生效，来源变成网页
+	code, out := c.do("PATCH", "/api/config", map[string]any{"values": map[string]any{"workspace.mode": "auto", "llm.timeout": 900}}, true)
+	if code != 200 || conf.Current().Workspace.Mode != "auto" || conf.Current().LLM.Timeout != 900 {
 		t.Fatalf("patch config：%d %v", code, out)
-	}
-	if strings.Contains(mustJSON(out), "sk-x") {
-		t.Fatalf("密钥被返回了")
 	}
 	if code, _ := c.do("PATCH", "/api/config", map[string]any{"values": map[string]any{"workspace.mode": "yolo"}}, true); code != 400 {
 		t.Fatalf("非法值应该 400：%d", code)

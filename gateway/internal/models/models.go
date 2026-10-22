@@ -1,8 +1,8 @@
-// Package models 管理可以用的模型：好几个端点（OpenAI 兼容接口），每个端点上若干个模型，
-// 一个默认模型，每个会话可以单独选。
+// Package models 管理可以用的模型：好几个接口（OpenAI 兼容），每个接口上若干个模型，
+// 一个默认模型，每个会话可以单独选。所有接口和模型都只存在数据目录的 models.json。
 //
-// 配置文件里的 [llm] 是内置的端点 config 和它上面的一个模型（改它用原来的设置项）；
-// 在网页里加的端点和模型存在数据目录的 models.json（只有自己能读，里面有 API key）。
+// 旧版本只有一个模型，写在 gateway.toml 的 [llm] 里；升级后第一次启动会把它一次性
+// 导入成普通接口和普通模型（见 importLegacy），之后 [llm] 不再参与模型列表。
 package models
 
 import (
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,7 +27,8 @@ import (
 	"nano-agent/gateway/internal/httpx"
 )
 
-// ConfigEndpoint 是配置文件里 [llm] 那个端点的 ID
+// ConfigEndpoint 是旧配置模型迁移后的接口 ID。只为了兼容已经引用 config/模型名 的会话设置，
+// 没有任何特殊行为，界面上也不显示它。
 const ConfigEndpoint = "config"
 
 // Endpoint 是一个模型服务的接口。
@@ -58,6 +60,7 @@ type file struct {
 	Endpoints []Endpoint `json:"endpoints"`
 	Models    []Model    `json:"models"`
 	Default   string     `json:"default,omitempty"`
+	Seeded    bool       `json:"seeded,omitempty"` // 已经处理过旧配置（或确认没有旧模型），不再导入
 }
 
 // Store 是模型列表。并发安全。
@@ -87,7 +90,59 @@ func Open(dataDir string, cfg *config.Config) (*Store, error) {
 			s.f.Models[i].Modalities = []string{"text"}
 		}
 	}
+	// 旧配置里的那一个模型只导入一次。导入后它和别的模型完全一样，可以改、可以删；
+	// seeded 防止删掉以后重启又冒出来。
+	if !s.f.Seeded {
+		s.importLegacy()
+		s.f.Seeded = true
+		if err := s.save(); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// importLegacy 把旧版 [llm] 里的单个模型导入成普通接口 + 普通模型。只在第一次启动时调用。
+func (s *Store) importLegacy() {
+	l := s.cfg.LLM
+	name := strings.TrimSpace(l.Model)
+	if name == "" && l.Provider == "mock" {
+		name = "mock"
+	}
+	if name == "" {
+		return
+	}
+	if !slices.ContainsFunc(s.f.Endpoints, func(e Endpoint) bool { return e.ID == ConfigEndpoint }) {
+		s.f.Endpoints = append(s.f.Endpoints, Endpoint{
+			ID: ConfigEndpoint, Name: legacyEndpointName(l), Kind: l.Provider,
+			BaseURL: l.BaseURL, APIKey: l.APIKey, Proxy: l.Proxy,
+		})
+	}
+	id := ConfigEndpoint + "/" + name
+	if !slices.ContainsFunc(s.f.Models, func(m Model) bool { return m.ID == id }) {
+		mods, err := normalizeModalities(l.Modalities)
+		if err != nil {
+			mods = []string{"text"}
+		}
+		s.f.Models = append(s.f.Models, Model{
+			ID: id, Endpoint: ConfigEndpoint, Name: name, ContextWindow: l.ContextWindow, MaxTokens: l.MaxTokens,
+			MaxHistory: l.MaxHistoryTokens, Thinking: l.Thinking, ThinkingLevels: l.ThinkingLevels, Modalities: mods,
+		})
+	}
+	if s.f.Default == "" || !slices.ContainsFunc(s.f.Models, func(m Model) bool { return m.ID == s.f.Default }) {
+		s.f.Default = id
+	}
+}
+
+// legacyEndpointName 给导入的接口起一个像样的名字（地址里的主机名），不叫“配置文件”。
+func legacyEndpointName(l config.LLM) string {
+	if l.Provider == "mock" {
+		return "假模型"
+	}
+	if u, err := url.Parse(l.BaseURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "模型接口"
 }
 
 // SetConfig 换上新的配置（[llm] 改了的时候）
@@ -109,69 +164,46 @@ func (s *Store) save() error {
 	return os.Rename(tmp, s.path)
 }
 
-// configEndpoint 和 configModel 是配置文件里 [llm] 的那个端点和模型
-func (s *Store) configEndpoint() Endpoint {
-	l := s.cfg.LLM
-	return Endpoint{ID: ConfigEndpoint, Name: "配置文件", Kind: l.Provider, BaseURL: l.BaseURL, APIKey: l.APIKey, Proxy: l.Proxy}
-}
-
-func (s *Store) configModel() (Model, bool) {
-	l := s.cfg.LLM
-	if l.Model == "" && l.Provider != "mock" {
-		return Model{}, false
-	}
-	name := l.Model
-	if name == "" {
-		name = "mock"
-	}
-	return Model{ID: ConfigEndpoint + "/" + name, Endpoint: ConfigEndpoint, Name: name, ContextWindow: l.ContextWindow,
-		MaxTokens: l.MaxTokens, MaxHistory: l.MaxHistoryTokens, Thinking: l.Thinking, ThinkingLevels: l.ThinkingLevels,
-		Modalities: l.Modalities}, true
-}
-
-// Endpoints 返回所有端点（配置文件的在最前面）
+// Endpoints 返回所有接口
 func (s *Store) Endpoints() []Endpoint {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]Endpoint{s.configEndpoint()}, s.f.Endpoints...)
+	return append([]Endpoint{}, s.f.Endpoints...)
 }
 
-// Models 返回所有模型（配置文件的在最前面）
+// Models 返回所有模型
 func (s *Store) Models() []Model {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []Model
-	if m, ok := s.configModel(); ok {
-		out = append(out, m)
-	}
-	return append(out, s.f.Models...)
+	return append([]Model{}, s.f.Models...)
 }
 
-// Default 是默认模型的 ID：设过的，否则配置文件里的，再否则第一个
+// Default 是默认模型的 ID：设过的，否则第一个；没有模型时为空
 func (s *Store) Default() string {
-	list := s.Models()
 	s.mu.Lock()
-	def := s.f.Default
-	s.mu.Unlock()
-	for _, m := range list {
-		if m.ID == def {
-			return def
+	defer s.mu.Unlock()
+	for _, m := range s.f.Models {
+		if m.ID == s.f.Default {
+			return s.f.Default
 		}
 	}
-	if len(list) > 0 {
-		return list[0].ID
+	if len(s.f.Models) > 0 {
+		return s.f.Models[0].ID
 	}
 	return ""
 }
 
-// Find 按 ID 找模型和它的端点
+// Find 按 ID 找模型和它的接口
 func (s *Store) Find(id string) (Model, Endpoint, bool) {
-	for _, m := range s.Models() {
-		if m.ID == id {
-			for _, e := range s.Endpoints() {
-				if e.ID == m.Endpoint {
-					return m, e, true
-				}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.f.Models {
+		if m.ID != id {
+			continue
+		}
+		for _, e := range s.f.Endpoints {
+			if e.ID == m.Endpoint {
+				return m, e, true
 			}
 		}
 	}
@@ -186,12 +218,7 @@ func (s *Store) LLMConfig(m Model, e Endpoint) config.LLM {
 	l := cfg.LLM
 	l.Provider, l.BaseURL, l.APIKey, l.Model = e.Kind, e.BaseURL, e.APIKey, m.Name
 	l.Proxy = cfg.ProxyFor(e.Proxy)
-	if m.MaxTokens > 0 {
-		l.MaxTokens = m.MaxTokens
-	}
-	if e.ID != ConfigEndpoint {
-		l.Extra = nil // [llm.extra] 是给配置文件里那个接口的
-	}
+	l.MaxTokens = m.MaxTokens // 最大输出属于模型；0 表示不限制
 	return l
 }
 
@@ -218,9 +245,6 @@ func (s *Store) SaveEndpoint(e Endpoint) (Endpoint, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e.ID == ConfigEndpoint {
-		return e, errors.New("配置文件里的端点在设置里改")
-	}
 	if e.ID == "" {
 		e.ID = newID()
 		s.f.Endpoints = append(s.f.Endpoints, e)
@@ -261,9 +285,6 @@ func (s *Store) SaveModel(m Model) (Model, error) {
 		return m, err
 	}
 	m.Modalities = mods
-	if m.Endpoint == ConfigEndpoint {
-		return m, errors.New("配置文件里的模型在设置里改")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !slices.ContainsFunc(s.f.Endpoints, func(e Endpoint) bool { return e.ID == m.Endpoint }) {

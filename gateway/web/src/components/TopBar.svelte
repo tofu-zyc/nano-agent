@@ -33,9 +33,9 @@
         内核未连接
       {/if}
     </button>
-    <button class="pill" onclick={() => store.open({ type: 'model' })} title="可以用的模型（接口、默认模型、每个会话单独选）">
+    <button class="pill" onclick={() => store.openOnMap({ type: 'model' })} title="模型和接口：默认模型、输入类型，每个会话可以单独选">
       <Icon name="sparkles" size={14} class="spark" />
-      {ov.models?.models?.find((m) => m.default)?.label || ov.model.model || '未配置模型'}
+      {ov.models?.models?.find((m) => m.default)?.label || '未配置模型'}
       {#if (ov.models?.models?.length ?? 0) > 1}<span class="muted">· {ov.models?.models?.length}</span>{/if}
     </button>
     <button class="pill" onclick={() => store.open({ type: 'gateway' })} title="启动以来的前缀缓存命中率">

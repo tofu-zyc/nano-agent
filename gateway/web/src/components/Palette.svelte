@@ -9,7 +9,7 @@
   type Item = { id: string; icon: string; title: string; sub?: string; kind: string; text: string; color?: string; run: () => void };
 
   const groupInfo: Record<string, { label: string; target: Target; icon: string; color: string }> = {
-    model: { label: '模型', target: { type: 'model' }, icon: 'sparkles', color: 'var(--c-model)' },
+    context: { label: '上下文与采样', target: { type: 'gateway' }, icon: 'layers', color: 'var(--c-model)' },
     gateway: { label: '网关', target: { type: 'gateway' }, icon: 'hub', color: 'var(--c-gateway)' },
     kernel: { label: '内核', target: { type: 'kernel' }, icon: 'shield', color: 'var(--c-kernel)' },
     workspace: { label: '工作目录与沙箱', target: { type: 'workspace' }, icon: 'folder', color: 'var(--c-dir)' },
@@ -46,14 +46,14 @@
       {
         id: 'a:test', icon: 'zap', title: '测试模型连接', sub: '发一个很小的请求，看通不通、多快', kind: '操作', text: '测试 模型 连接 test model ping',
         run: () => {
-          store.open({ type: 'model' });
+          store.openOnMap({ type: 'model' });
           close();
         },
       },
       {
         id: 'a:addmodel', icon: 'plus', title: '添加模型或接口', sub: '加一个 OpenAI 兼容接口；多模态模型勾“能接收图片”', kind: '操作', text: '添加 新建 模型 接口 endpoint vision 多模态 图片',
         run: () => {
-          store.addModel();
+          store.openModel('model');
           close();
         },
       },
@@ -104,11 +104,15 @@
     }
     for (const f of store.fields) {
       const g = groupInfo[f.group];
-      if (!g) continue;
+      if (!g || f.group === 'model') continue; // 模型的设置在「模型」页面
       out.push({
         id: 'f:' + f.key, icon: g.icon, color: g.color, title: f.label, sub: `${g.label}${f.section ? ' · ' + f.section : ''} · ${truncate(valuePreview(f), 40)}`, kind: '设置',
         text: `${f.label} ${f.key} ${g.label} ${f.section ?? ''} ${f.help ?? ''} ${f.keywords ?? ''}`,
-        run: () => { store.open(g.target, f.key); close(); },
+        run: () => {
+          if (f.group === 'context') location.hash = '#/settings?focus=' + encodeURIComponent(f.key);
+          else store.open(g.target, f.key);
+          close();
+        },
       });
     }
     return out;

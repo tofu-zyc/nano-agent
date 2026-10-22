@@ -21,8 +21,9 @@
         const dm = ov.models?.models?.find((m) => m.default);
         const de = ov.models?.endpoints?.find((e) => e.id === dm?.endpoint);
         const n = ov.models?.models?.length ?? 0;
-        return { icon: 'sparkles', color: 'var(--c-model)', title: dm?.label || ov.model.model || '模型',
-          sub: `${n || 1} 个模型 · ${de?.name || '配置文件'}${dm ? ' · 默认 ' + dm.label : ''}` };
+        const en = ov.models?.endpoints?.length ?? 0;
+        return { icon: 'sparkles', color: 'var(--c-model)', title: '模型',
+          sub: n ? `${n} 个模型 · ${en} 个接口${dm ? ' · 默认 ' + dm.label : ''}` : '还没有配置模型' };
       }
       case 'kernel': {
         if (target.node) {
@@ -201,7 +202,7 @@
   }
 </script>
 
-<aside class="insp" style="--c: {head.color}">
+<aside class="insp" class:wide={target.type === 'model'} style="--c: {head.color}">
   <header>
     <div class="disc"><Icon name={head.icon} size={20} /></div>
     <div class="ht">
@@ -230,7 +231,6 @@
       <FieldGroup group="gateway" focus={store.focus} />
     {:else if target.type === 'model'}
       <ModelPanel />
-      <FieldGroup group="model" title="配置文件里的接口" focus={store.focus} />
     {:else if target.type === 'kernel'}
       {@const list = target.node ? ov.kernels.filter((k) => k.node === target.node) : ov.kernels}
       {#if !target.node}
@@ -519,7 +519,7 @@
         {@const levels = sess.thinking_levels ?? ov.model.levels ?? []}
         <h5>模型 <span class="muted small">{sess.model ? '这个会话单独选的' : `默认：${sess.model_label}`}</span></h5>
         <select class="modelpick" value={sess.model} onchange={(ev) => patchSession({ model: ev.currentTarget.value })}>
-          <option value="">默认模型（{sess.model_label}）</option>
+          <option value="">{sess.model_label ? `默认模型（${sess.model_label}）` : '默认模型（还没有配置）'}</option>
           {#each ov.models?.models ?? [] as m (m.id)}
             <option value={m.id}>{m.label}{m.config ? '（配置文件）' : ''}</option>
           {/each}
@@ -584,6 +584,9 @@
     z-index: 10;
     animation: slide 0.22s ease;
   }
+  .insp.wide {
+    width: 780px;
+  }
   /* 窄屏：盖在内容上面 */
   @media (max-width: 1000px) {
     .insp {
@@ -593,6 +596,9 @@
       bottom: 0;
       width: min(430px, 100%);
       box-shadow: -18px 0 50px rgba(0, 0, 0, 0.3);
+    }
+    .insp.wide {
+      width: min(780px, 100%);
     }
   }
   @keyframes slide {

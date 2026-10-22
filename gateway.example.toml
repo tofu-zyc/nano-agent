@@ -18,33 +18,17 @@ token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
 # local_name = "gateway"
 
 [llm]
-provider = "openai"            # openai（任何 OpenAI 兼容接口）| mock（假模型，测试用）
-base_url = "https://api.deepseek.com/v1"
-api_key  = "sk-..."
-model    = "deepseek-chat"
-context_window     = 128000    # 模型的上下文窗口
-max_history_tokens = 64000     # 历史的上限（估算值）。超出时调模型生成旧对话摘要，保留 trim_to 的比例
-trim_to  = 0.5                 # 之后只追加不裁，请求前缀不变，模型的前缀缓存才能一直命中
+# 模型（接口地址、API Key、模型名、输入类型、上下文窗口、思考强度）在网页的「模型」节点里添加和修改。
+# 这里的 [llm] 只放所有模型共用的默认值。
+trim_to  = 0.5                 # 历史超过上限时保留这个比例，其余合并成摘要；之后只追加，前缀缓存稳定
 timeout  = 600                 # 单次请求超时（秒）
-proxy    = ""                  # 空：用网关的默认代理（[network]）；"none" 直连；或 "http://127.0.0.1:7890"
-# temperature = 0.7
-# max_tokens  = 4096
 send_reasoning = false         # 把当前这一轮的推理内容回传给模型（部分推理模型需要）
-
-# 思考强度，作为 reasoning_effort 原样传给模型（vLLM 等兼容接口也认）。
-# thinking 是默认值，空表示不传（用模型自己的默认）；每个会话可以用 /think 改。
-thinking       = ""
-# /think 可选的值，none 表示关闭思考。不同模型支持的值不一样，比如有的不支持 medium。
-# thinking_levels = ["none", "low", "medium", "high"]
-
-# 这个模型能接收什么：text 文字、image 图片。默认只有 text；多模态模型才加 image
-# （网页里加的模型在模型面板里单独勾选）
-# modalities = ["text", "image"]
-
-# 原样合并进请求体的额外参数：
+# temperature = 0.7
 # [llm.extra]
 # top_p = 0.9
 
+# 旧版单模型配置（provider/base_url/api_key/model/context_window/...）会在升级后第一次启动时
+# 一次性导入成普通模型，之后可以像别的模型一样修改、删除；新装用户不用写。
 [persona]
 # 人格（系统提示词）目录：default.md 是默认人格；
 # 放一个 <会话ID>.md（比如 main.md 是主会话，tg:123456789.md 是某个人私聊的会话）就能给某个会话单独设定。

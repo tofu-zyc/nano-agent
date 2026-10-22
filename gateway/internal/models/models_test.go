@@ -20,18 +20,19 @@ func testConfig() *config.Config {
 	}
 }
 
-// 配置文件里的 [llm] 是内置端点和模型，排在列表最前面。
-func TestConfigEndpointAndModel(t *testing.T) {
-	st, err := Open(t.TempDir(), testConfig())
+// 旧配置里的 [llm] 模型只导入一次，变成普通接口和普通模型。
+func TestLegacyImport(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir, testConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	eps := st.Endpoints()
-	if len(eps) != 1 || eps[0].ID != ConfigEndpoint || eps[0].Name != "配置文件" {
+	if len(eps) != 1 || eps[0].ID != ConfigEndpoint || eps[0].Name != "example.com" {
 		t.Fatalf("端点：%+v", eps)
 	}
 	ms := st.Models()
-	if len(ms) != 1 || ms[0].ID != "config/cfg-model" || ms[0].Name != "cfg-model" {
+	if len(ms) != 1 || ms[0].ID != "config/cfg-model" || ms[0].Name != "cfg-model" || ms[0].ContextWindow != 100000 {
 		t.Fatalf("模型：%+v", ms)
 	}
 	if st.Default() != "config/cfg-model" {
@@ -43,6 +44,33 @@ func TestConfigEndpointAndModel(t *testing.T) {
 	}
 	if cfg.ThinkingLevels == nil || cfg.Thinking != "high" {
 		t.Fatalf("思考强度没沿用配置：%+v", cfg)
+	}
+
+	// 删掉导入的模型和接口，重启不会复活
+	if err := st.DeleteModel("config/cfg-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteEndpoint(ConfigEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := Open(dir, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st2.Models()) != 0 || len(st2.Endpoints()) != 0 || st2.Default() != "" {
+		t.Fatalf("删掉后重启又出现了：%+v %+v %q", st2.Endpoints(), st2.Models(), st2.Default())
+	}
+}
+
+// 没有旧模型时就是空的，不自动造一个。
+func TestEmptyStore(t *testing.T) {
+	cfg := &config.Config{LLM: config.LLM{Provider: "openai"}}
+	st, err := Open(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Models()) != 0 || len(st.Endpoints()) != 0 || st.Default() != "" {
+		t.Fatalf("空模型列表：%+v %+v %q", st.Endpoints(), st.Models(), st.Default())
 	}
 }
 
@@ -128,16 +156,8 @@ func TestValidation(t *testing.T) {
 			_, err := st.SaveEndpoint(Endpoint{Name: "x", Kind: "nope", BaseURL: "https://x"})
 			return err
 		}},
-		{"配置文件里的端点不能在这里改", func() error {
-			_, err := st.SaveEndpoint(Endpoint{ID: ConfigEndpoint, Name: "x"})
-			return err
-		}},
 		{"端点不存在", func() error {
 			_, err := st.SaveModel(Model{Endpoint: "missing", Name: "m"})
-			return err
-		}},
-		{"配置文件里的模型不能在这里改", func() error {
-			_, err := st.SaveModel(Model{Endpoint: ConfigEndpoint, Name: "m"})
 			return err
 		}},
 		{"模型名不能为空", func() error {

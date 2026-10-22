@@ -538,8 +538,20 @@
             run: () => confirm(`从列表里删掉 ${w.host}:${w.path}？机器上的文件不会动。`) && act(() => api.del(`/api/workspaces/${w.id}`), '已删掉') },
         ] };
       }
-      case 'model':
-        return { title: '模型', items: [open] };
+      case 'model': {
+        const dm = ov.models?.models?.find((m) => m.default);
+        return { title: '模型', items: [
+          open,
+          { label: '添加模型', icon: 'plus', run: () => store.openModel('model') },
+          { label: '添加接口', icon: 'plus', run: () => store.openModel('endpoint') },
+          { label: '测试默认模型', icon: 'zap', disabled: !dm,
+            run: () => act(async () => {
+              const r = await api.post<{ ok: boolean; error?: string; ms?: number }>('/api/test/model', { id: '' });
+              if (!r.ok) throw new Error(r.error || '没通');
+              store.toast({ kind: 'ok', text: `模型连接正常 · ${r.ms ?? '—'} ms` }, 2200);
+            }) },
+        ] };
+      }
       case 'gateway':
         return { title: '网关', items: [open, { label: '全部设置', icon: 'sliders', run: () => store.go('#/settings') }] };
       case 'more':
@@ -559,6 +571,22 @@
     const m = browseOn!;
     browseOn = null;
     await act(() => api.post('/api/workspaces', { host: m.name, path }), `已添加 ${m.name}:${path}`);
+  }
+
+  // 右键画布空白：新建。节点自己的右键菜单会 stopPropagation，不会走到这里。
+  function openBlankMenu(ev: MouseEvent) {
+    ev.preventDefault();
+    menu = { x: ev.clientX, y: ev.clientY, title: '新建', items: [
+      { label: '新增接口（模型服务）', icon: 'plus', run: () => store.openModel('endpoint') },
+      { label: '新增工作目录…', icon: 'folder', run: () => {
+        const m = store.machines.find((x) => x.online);
+        if (m) browseOn = m;
+        else store.toast({ kind: 'err', text: '还没有可用的机器，先去「设备」接入一台' }, 2600);
+      } },
+      { label: '接入电脑 / SSH 服务器…', icon: 'laptop', run: () => store.go('#/devices') },
+      'sep',
+      { label: '适应窗口', icon: 'fit', run: () => fit() },
+    ] };
   }
 
   function activate(n: N) {
@@ -581,6 +609,7 @@
   onpointercancel={onUp}
   onpointerleave={onUp}
   ondblclick={(e) => !(e.target as Element).closest('.node') && fit()}
+  oncontextmenu={openBlankMenu}
   role="application"
   aria-label="网关拓扑图"
 >
@@ -697,9 +726,15 @@
             <rect class="card" class:active={modelBusy} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
             <g class="ico"><Icon name="sparkles" x={24} y={28} size={24} /></g>
-            <text x="66" y="28" class="t3">模型 · {de?.kind ?? ov.model.provider}{mn > 1 ? ` · ${mn} 个` : ''}</text>
-            <text x="66" y="48" class="t1">{truncate(dm?.label || ov.model.model || '未配置', 19)}</text>
-            <text x="66" y="66" class="t2">{truncate(hostOf(de?.base_url || ov.model.base_url) || '—', 16)} · 思考 {(dm?.thinking ?? ov.model.thinking) === 'none' ? '关闭' : dm?.thinking || ov.model.thinking || '默认'}</text>
+            {#if dm}
+              <text x="66" y="28" class="t3">模型 · {de?.kind ?? ''}{mn > 1 ? ` · ${mn} 个` : ''}</text>
+              <text x="66" y="48" class="t1">{truncate(dm.label, 19)}</text>
+              <text x="66" y="66" class="t2">{truncate(hostOf(de?.base_url || '') || '—', 16)} · 思考 {dm.thinking === 'none' ? '关闭' : dm.thinking || '默认'}</text>
+            {:else}
+              <text x="66" y="28" class="t3">模型 · 还没有配置</text>
+              <text x="66" y="48" class="t1">点开添加接口和模型</text>
+              <text x="66" y="66" class="t2">模型只来自模型列表</text>
+            {/if}
           {:else if n.kind === 'kernel'}
             {@const k = n.data as KernelInfo | null}
             <rect class="card" class:active={!!k && busyKernels.has(k.node)} class:bad={!k} width={n.w} height={n.h} rx="16" />

@@ -15,8 +15,8 @@ import (
 )
 
 // 模型：可以配好几个（models 包），一个默认，每个会话可以单独选（/model、网页）。
-// 思考强度的可选值、历史上限跟着模型走。配置文件里 [llm] 的那个模型用 a.llm（换配置时由 SetLLM 换掉），
-// 别的模型按需建客户端，配置变了重建。
+// 思考强度的可选值、历史上限跟着模型走；模型客户端按需创建并按配置缓存。
+// 没有接模型列表时（测试/嵌入式），退回旧版单模型模式，用构造时传进来的客户端。
 
 // SetModels 接上模型列表。newClient 按设置建模型客户端。没接时（测试）所有会话都用 a.llm。
 func (a *App) SetModels(s *models.Store, newClient func(config.LLM) (llm.Client, error)) {
@@ -30,10 +30,11 @@ type modelClient struct {
 	client llm.Client
 }
 
-// modelOf 是会话用的模型；没有模型列表或者找不到时 ok 为 false（用配置文件里的）
+// modelOf 是会话用的模型；没有模型列表或者找不到时 ok 为 false。
+// 没接模型列表时（测试/嵌入式）用旧的单模型配置凑一个，网关本身总是接 models.Store。
 func (a *App) modelOf(sid string) (models.Model, models.Endpoint, bool) {
 	if a.models == nil {
-		return models.Model{}, models.Endpoint{}, false
+		return legacyModel(a.cfg.LLM)
 	}
 	id := a.store.Settings(sid).Model
 	if id != "" {
@@ -44,10 +45,28 @@ func (a *App) modelOf(sid string) (models.Model, models.Endpoint, bool) {
 	return a.models.Find(a.models.Default())
 }
 
+// legacyModel 是没接模型列表时的单模型模式（只给测试/嵌入式用）。
+func legacyModel(l config.LLM) (models.Model, models.Endpoint, bool) {
+	name := strings.TrimSpace(l.Model)
+	if name == "" && l.Provider == "mock" {
+		name = "mock"
+	}
+	if name == "" {
+		return models.Model{}, models.Endpoint{}, false
+	}
+	return models.Model{ID: models.ConfigEndpoint + "/" + name, Endpoint: models.ConfigEndpoint, Name: name,
+			ContextWindow: l.ContextWindow, MaxTokens: l.MaxTokens, MaxHistory: l.MaxHistoryTokens,
+			Thinking: l.Thinking, ThinkingLevels: l.ThinkingLevels, Modalities: l.Modalities},
+		models.Endpoint{ID: models.ConfigEndpoint, Name: "模型接口", Kind: l.Provider, BaseURL: l.BaseURL, APIKey: l.APIKey, Proxy: l.Proxy}, true
+}
+
 // clientFor 是会话这一轮用的模型客户端。调用方持有锁。
 func (a *App) clientFor(sid string) (llm.Client, error) {
 	m, e, ok := a.modelOf(sid)
-	if !ok || e.ID == models.ConfigEndpoint || a.newClient == nil {
+	if !ok {
+		return nil, errors.New("还没有配置模型")
+	}
+	if a.models == nil || a.newClient == nil {
 		return a.llm, nil
 	}
 	cfg := a.models.LLMConfig(m, e)
@@ -67,19 +86,20 @@ func (a *App) levelsOf(sid string) []string {
 	return a.levelsForModel(a.store.Settings(sid).Model)
 }
 
-// levelsForModel 是模型 id 的可选思考强度：空表示默认模型，找不到时用配置里的
+// levelsForModel 是模型 id 的可选思考强度：空表示默认模型，找不到时用默认模型的
 func (a *App) levelsForModel(id string) []string {
-	if a.models != nil {
-		if id != "" {
-			if m, _, ok := a.models.Find(id); ok {
-				return m.ThinkingLevels
-			}
-		}
-		if m, _, ok := a.models.Find(a.models.Default()); ok {
+	if a.models == nil {
+		return a.cfg.LLM.ThinkingLevels
+	}
+	if id != "" {
+		if m, _, ok := a.models.Find(id); ok {
 			return m.ThinkingLevels
 		}
 	}
-	return a.cfg.LLM.ThinkingLevels
+	if m, _, ok := a.models.Find(a.models.Default()); ok {
+		return m.ThinkingLevels
+	}
+	return nil
 }
 
 // modelExists 判断这个模型在不在列表里
@@ -91,15 +111,29 @@ func (a *App) modelExists(id string) bool {
 	return ok
 }
 
-// historyLimit 是会话的历史上限（估算的 token 数）：模型设了就用模型的，否则用配置里的
+// 模型没填上下文窗口时的兜底历史上限（正常情况下创建模型时必填）。
+const defaultHistoryLimit = 128000
+
+// historyLimit 是会话的历史上限（估算的 token 数）：模型设了就用模型的；
+// 没设时按上下文窗口的一半，留一半给工具输出和回复。
 func (a *App) historyLimit(sid string) int {
-	if m, _, ok := a.modelOf(sid); ok && m.MaxHistory > 0 {
+	if a.models == nil {
+		if a.cfg.LLM.MaxHistoryTokens > 0 {
+			return a.cfg.LLM.MaxHistoryTokens
+		}
+		return defaultHistoryLimit
+	}
+	m, _, ok := a.modelOf(sid)
+	if !ok {
+		return defaultHistoryLimit
+	}
+	if m.MaxHistory > 0 {
 		return m.MaxHistory
 	}
-	if m, _, ok := a.modelOf(sid); ok && m.ContextWindow > 0 && m.Endpoint != models.ConfigEndpoint {
-		return m.ContextWindow / 2 // 留一半给工具输出和回复
+	if m.ContextWindow > 0 {
+		return m.ContextWindow / 2
 	}
-	return a.cfg.LLM.MaxHistoryTokens
+	return defaultHistoryLimit
 }
 
 func modelLabel(m models.Model) string {
@@ -121,16 +155,23 @@ func (a *App) ClientFor(id string) (llm.Client, models.Model, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.models == nil {
-		return a.llm, models.Model{Name: a.cfg.LLM.Model, Thinking: a.cfg.LLM.Thinking}, nil
+		m, _, ok := legacyModel(a.cfg.LLM)
+		if !ok {
+			return nil, m, errors.New("还没有配置模型")
+		}
+		return a.llm, m, nil
 	}
 	if id == "" {
 		id = a.models.Default()
+	}
+	if id == "" {
+		return nil, models.Model{}, errors.New("还没有配置模型")
 	}
 	m, e, ok := a.models.Find(id)
 	if !ok {
 		return nil, m, fmt.Errorf("没有模型 %s", id)
 	}
-	if e.ID == models.ConfigEndpoint || a.newClient == nil {
+	if a.newClient == nil {
 		return a.llm, m, nil
 	}
 	c, err := a.newClient(a.models.LLMConfig(m, e))
@@ -163,6 +204,10 @@ func (a *App) cmdModel(c in, arg string) {
 		return
 	}
 	list := a.models.Models()
+	if len(list) == 0 {
+		a.answer(c, "还没有配置模型，去网页的模型节点里添加接口和模型")
+		return
+	}
 	cur, _, _ := a.modelOf(c.s.sid)
 	if arg == "" {
 		var b strings.Builder

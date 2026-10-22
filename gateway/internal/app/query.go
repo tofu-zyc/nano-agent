@@ -120,8 +120,6 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		Model: st.Model, Compacted: st.Base}
 	if m, _, ok := a.modelOf(sid); ok {
 		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
-	} else {
-		info.ModelLabel = a.cfg.LLM.Model
 	}
 	rt := a.route(w)
 	if s := a.sessions[sid]; s != nil && s.run != nil {

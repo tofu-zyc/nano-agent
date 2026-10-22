@@ -487,6 +487,20 @@ func (a *App) startRun(s *sess) {
 		return
 	}
 	head := s.queue[0]
+	// 没有配置模型：不进 run，直接告诉用户去加接口和模型
+	if a.models != nil && len(a.models.Models()) == 0 {
+		const text = "还没有配置模型。请先在网页的模型节点里添加接口和模型。"
+		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+		var told []endpoint
+		for _, q := range s.queue {
+			if !slices.Contains(told, q.ep) {
+				told = append(told, q.ep)
+				a.deliver(q.ep, text, "")
+			}
+		}
+		s.queue = nil
+		return
+	}
 	a.refreshSkills()
 	w := a.workspaceOf(s.sid)
 	rt := a.route(w)

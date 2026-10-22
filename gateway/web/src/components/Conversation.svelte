@@ -23,6 +23,7 @@
 
   // ---- 图片：选好（或粘贴、拖进来）先上传，发送时只带 ID ----
   const maxPics = 4;
+  const noModel = $derived((store.ov?.models?.models?.length ?? 0) === 0);
   let pics = $state<Attachment[]>([]);
   let uploading = $state(0);
   let dragging = $state(false);
@@ -137,6 +138,10 @@
 
   async function send() {
     const msg = text.trim();
+    if (noModel) {
+      store.toast({ kind: 'err', text: '还没有配置模型，先去模型节点添加接口和模型' }, 2600);
+      return;
+    }
     if ((!msg && !pics.length) || sending || uploading > 0) return;
     sending = true;
     try {
@@ -404,6 +409,13 @@
     </div>
   </div>
 
+  {#if noModel}
+    <div class="nomodel">
+      <Icon name="sparkles" size={14} />
+      <span>还没有配置模型，先去模型节点添加接口和模型。</span>
+      <button class="btn sm primary" onclick={() => store.openOnMap({ type: 'model' })}>去配置模型</button>
+    </div>
+  {/if}
   <div class="composer" class:dragging role="group" aria-label="输入区" onpaste={onPaste} ondragover={(e) => { e.preventDefault(); dragging = true; }} ondragleave={() => (dragging = false)} ondrop={onDrop}>
     {#if cmdMatches.length || cmdHint}
       <div class="cmdmenu" role="listbox">
@@ -441,7 +453,7 @@
     {#if info?.running}
       <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
     {/if}
-    <button class="btn primary" onclick={send} disabled={(!text.trim() && !pics.length) || sending || uploading > 0}><Icon name="send" size={14} />发送</button>
+    <button class="btn primary" onclick={send} disabled={noModel || (!text.trim() && !pics.length) || sending || uploading > 0}><Icon name="send" size={14} />发送</button>
   </div>
 </div>
 {/if}
@@ -754,6 +766,23 @@
     color: var(--accent-2);
     padding: 0;
     text-decoration: underline;
+  }
+  .nomodel {
+    max-width: 900px;
+    width: 100%;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+    background: color-mix(in srgb, var(--warn) 8%, var(--panel-2));
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .nomodel span {
+    flex: 1;
   }
   .composer {
     position: relative;

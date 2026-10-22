@@ -31,7 +31,7 @@ func (a *App) modelSupportsImages(sid string) bool {
 	if m, _, ok := a.modelOf(sid); ok {
 		return slices.Contains(m.Modalities, "image")
 	}
-	return slices.Contains(a.cfg.LLM.Modalities, "image")
+	return false
 }
 
 // imageLoader 把历史里的图片读成 data URL；没有图片存储时返回 nil（只发文字说明）。

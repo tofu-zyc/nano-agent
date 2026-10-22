@@ -47,7 +47,7 @@ func TestModelsAPI(t *testing.T) {
 		e, _ := it.(map[string]any)
 		if e["id"] == epID {
 			found = true
-			if e["has_key"] != true || e["config"] != false {
+			if e["has_key"] != true {
 				t.Fatalf("端点：%v", e)
 			}
 		}

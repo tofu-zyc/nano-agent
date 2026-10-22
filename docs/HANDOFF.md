@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，图片输入（网页 / Telegram / 飞书，模型能力决定发不发）、多模型（网页管理接口和模型、默认模型、每个会话单独选）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+最后更新：2026-10-22，模型管理重做（模型只来自 models.json、没有“配置文件模型”、没有模型就是空状态、旧配置一次性迁移、拓扑模型节点面板）、图片输入（网页 / Telegram / 飞书）、多工作目录挂载、技能移到网关、网关启动本机内核、拓扑内核节点和右键菜单、命令提示完成。设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)。
 
 ## 一句话
 
@@ -112,9 +112,9 @@ cd gateway && go test -race ./...
 14. **内核安装**（scripts/install-kernel.sh，POSIX sh）：源码来自脚本后面的 base64 payload（make installer 生成 dist/nano-kernel-install.sh），没有就用脚本所在的源码目录（拷到临时目录编译，不弄脏源码树）。缺 cc/make 时按包管理器装（sudo 前确认）；装到 ~/.local/share/nano-agent/kernel/，升级只改 gateway / node 两行；systemd 用户服务（StandardError=append:kernel.log），没有就 nano-kernel-ctl 后台跑 + 可选 ~/.profile 一行（带标记，卸载时删）。之后读 kernel.log：确认码、网关已接受连接、网关报错（名字冲突之类，直接告诉用户）。内核的重连退避在 welcome / pairing 之后才重置，被拒时不会每秒重连。
 15. **中断和撤回**（app/undo.go）：任务进行中整条消息是「停」「停止」「stop」等就当 /stop；「撤回」任何时候当 /undo。Message.Action 区分界面操作：ActionStop（终端 Ctrl-C 发 ChatStop 控制行、Telegram 按钮回调；没任务时不回话）、ActionRecall（飞书 im.message.recalled_v1，按 MsgID 找，只撤最近一轮，更早的只说明）。撤回 = Store.Undo 截掉最后一条 user 及之后（JSONL 用 os.Truncate，只动末尾，前缀缓存不受影响），不能越过 Compact 的 Base；排队中的直接从队列删；正在跑的设 undoAfter、cancel，finish/KernelDown 里由 afterRun 统一处理（和 resetAfter 一起）。撤回后：EnvNote 如果在被删的消息里就清空（下一条重新说明环境），各窗口 Seen 截到新末尾，发 undo 事件让网页重读历史。网页撤回按钮只在最后一条用户消息上，撤回的文字放回输入框。
 
-16. **多模型**（internal/models、app/models.go）：配置文件里的 `[llm]` 是内置端点 `config`，网页里加的接口和模型存 `data/models.json`（0600）。会话的 `Settings.Model` 是模型 ID（端点/模型名），空表示默认模型。`clientFor` 找到模型后，config 端点直接用 `a.llm`（配置热更新由 SetLLM 换），别的端点按需建客户端并按配置指纹（reflect.DeepEqual）缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填时用上下文窗口的一半）。`ModelsChanged` 在模型列表变化后把指向已删模型的会话改回默认，并刷新所有会话（默认模型可能变了）。网页接口只返回 `has_key`，不回传 API key。
+16. **模型管理**（internal/models、app/models.go）：接口和模型只存在 `data/models.json`（0600，含 API key；网页只返回 `has_key`）。旧版 `[llm]` 的单模型在第一次启动时由 `models.Open` 一次性导入成普通接口 + 模型（接口 ID 仍是 `config`，只为兼容已有会话的 `config/模型名` 引用，没有特殊行为），并写 `seeded: true`；删掉后重启不会复活。没有模型时网关正常启动，聊天直接提示去模型节点添加，不启动 run，也不隐式兜底。会话的 `Settings.Model` 是模型 ID，空表示默认模型；默认模型只来自 models.json。`clientFor` 按模型建客户端并按 `LLMConfig` 指纹缓存；`levelsOf`/`historyLimit` 跟着模型走（历史上限不填按上下文窗口一半，窗口没填兜底 128000）。`[llm]` 只保留 timeout / temperature / extra / send_reasoning / trim_to 这些全局默认，模型相关字段不再从网页设置里改。
 
-17. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源：配置文件 `[llm] modalities` 或每个模型自己的 `modalities`。设置页的输入类型是配置 schema 的 `multi` 类型（固定选项 + `Fixed` 锁定 text），不要改回手填的 `list`；`store.addModel()` 让设置页和 ⌘K 能直接打开模型面板的“添加模型”流程。
+17. **图片输入**（internal/media、app/images.go）：入口是网页上传（`POST /api/uploads`，multipart）、Telegram（getFile 下载照片或图片文件）、飞书（image 消息和 post 里的 img，走 im/v1/messages/{id}/resources）。图片按 sha256 存 `data/uploads/<id>`（0600，去重），`channel.Message.Images` / `session.Msg.Images` 只存引用。请求模型时 `session.BuildMessages` 看这一轮模型的 `Modalities`：有 image 就把图片读成 `data:` URL，和文字一起做成 OpenAI 的 content 数组（`llm.Message.Parts`，`MarshalJSON` 只在有 Parts 时发数组，纯文字还是字符串）；没有 image 就保持字符串内容，后面加一句 `[图片×N]`，并给用户发一条提醒。图片随历史保留（压缩摘要时只留文字说明），不逐轮改写旧消息，前缀缓存不受影响。能力来源只有模型自己的 `modalities`；在模型节点面板里勾“图片”。`store.openModel(intent)` 让 ⌘K、右键菜单能直接打开模型面板并进入添加模型/接口。
 
 ## 用户的偏好和约定（重要）
 
@@ -124,12 +124,9 @@ cd gateway && go test -race ./...
 - 目前只支持私聊，群聊以后做。
 - 提交：分支 main，作者 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`，每完成一个阶段提交一次，Co-Authored-By 记录实际参与者。用户说过“提交，然后开始下一步即可”。
 - **密钥**：用户的 API key 只在本地 gateway.toml（gitignore，权限 600）。提交前用 `git grep --cached` 查一遍。不要删用户的 data/。工作目录不能包含 nano-agent 自己。
-- 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），地址在 gateway.toml。
+- 用户的模型：自部署的 OpenAI 兼容接口（deepseek-v4.1-flash，1M 上下文），迁移后地址/模型保存在 data/models.json。
 - 杀进程前确认 /proc/PID/cwd 是演示目录，用户自己可能开着网关（cwd 是项目目录）。
 
-## 正在设计
-
-- 模型配置交互重做：撤掉独立模型页；模型只有 `models.json` 一个来源，没有“配置文件模型”、没有等级；没有模型就是空状态，由用户自己添加接口和模型；模型和接口全部回到拓扑的模型节点面板。设计稿见 [DESIGN-model-node.md](DESIGN-model-node.md)，评审确认后实施。
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
@@ -151,8 +148,9 @@ cd gateway && go test -race ./...
 - 协议 v4（异机模式）。旧启动包装的 v3 内核连上来会被拒（错误里说要重装），否则它会无视 exec=gateway、拿网关机器上的路径在自己机器上执行。以前 SSH 服务器上部署的内核文件（~/.local/share/nano-agent/managed/）不再使用，可以删。
 - 内核日志用 `%.*s` + `utf8_cut` 截断，别用 `%.200s`（会切坏中文）。
 - 模型列表在网关内存里也有一份（models.Store）：直接改 `data/models.json` 要重启网关才生效，平时用网页或 `/model`。
-- 模型 ID 是「端点/模型名」，带斜杠：网页里删除模型用查询参数 `/api/models/items?id=…`，别改成路径参数（`{id}` 匹配不了斜杠）。
-- 网页改名/admins 等配置变化会触发 `ModelsChanged`（配置文件里的端点/模型可能变了）；它会给所有会话发 session 事件，别以为是重复推送。
+- 模型 ID 是「接口/模型名」，带斜杠：网页里删除模型用查询参数 `/api/models/items?id=…`，别改成路径参数（`{id}` 匹配不了斜杠）。
+- 迁移只在 `seeded` 为假时跑一次；别在每次启动时重新读 `[llm]`，否则用户删掉的模型会复活。
+- 没有模型时网关必须能启动：不要恢复“启动时创建默认客户端 / 从 [llm] 合成模型”的老逻辑；聊天在 startRun 里直接提示并清空队列。
 - 图片会一直留在历史里（模型每轮都会重看一遍，token 会涨）；`data/uploads` 按内容哈希存、不会自动清理，暂时没有清理策略，删会话也不会删图片。
 - 非多模态模型收到图片时只是发 `[图片×N]` + 提醒，这是“先用着”的行为，正式的降级/换模型策略以后单独设计。
 - 图片只在网关这一侧处理，内核和执行器完全不知道图片的存在（工具结果仍然是文字）。
