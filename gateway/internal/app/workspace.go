@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/proto"
 )
 
@@ -28,27 +29,27 @@ var modeDesc = map[string]string{
 
 // workspace 是一个会话实际生效的设置。
 type workspace struct {
-	node         string // 在哪台机器上工作（nodes.go），空表示不挑
-	dirs, ro, rw []string
+	ws           *Workspace // 工作目录（workspaces.go），nil 表示只聊天
+	dirs, ro, rw []string   // 交给执行器的：工作目录、额外的只读和读写路径
 	mode         string
 }
 
 func (a *App) workspaceOf(sid string) workspace {
 	st := a.store.Settings(sid)
-	w := workspace{node: a.defaultNode(), dirs: a.cfg.Workspace.Dirs, mode: a.cfg.Workspace.Mode}
-	if st.Node != "" {
-		w.node = st.Node
-	}
-	if st.DirsSet {
-		w.dirs = st.Dirs
-	} else if w.node != a.defaultNode() {
-		w.dirs = nil // 默认工作目录是默认机器上的路径，换了机器就没有了
-	}
+	w := workspace{mode: a.cfg.Workspace.Mode}
 	if st.Mode != "" {
 		w.mode = st.Mode
 	}
-	w.ro = append(slices.Clone(a.cfg.Workspace.ExtraRO), st.RO...)
-	w.rw = slices.Clone(a.cfg.Workspace.ExtraRW)
+	if st.WorkspaceSet {
+		w.ws = a.findWorkspace(st.Workspace)
+	} else {
+		w.ws = a.defaultWorkspace()
+	}
+	if w.ws != nil {
+		w.dirs = []string{w.ws.Path}
+		w.ro = slices.Clone(a.cfg.Workspace.ExtraRO)
+		w.rw = slices.Clone(a.cfg.Workspace.ExtraRW)
+	}
 	return w
 }
 
@@ -71,107 +72,22 @@ func (a *App) runMode(w workspace, from string) string {
 // noToolsNote 告诉模型这个会话没有工具。不说的话，模型（尤其是人格里写了“需要时使用工具”）
 // 会在回复里编造工具调用的文本。
 const noToolsNote = "[系统] 这个会话没有工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
-	"用户需要这些的话，请他让管理员添加工作目录（/dir add 路径，或者在网页里设置）。"
+	"用户需要这些的话，请他让管理员选一个工作目录（/dir，或者在网页里设置）。"
 
 // envNote 描述当前环境，追加在用户消息前面（变了才追加，不改系统提示词）。
-func envNote(w workspace, sessionRO []string) string {
-	if len(w.dirs) == 0 {
+func envNote(w workspace) string {
+	if w.ws == nil {
 		return noToolsNote
 	}
-	var b strings.Builder
-	b.WriteString("[系统] ")
-	if w.node != "" {
-		fmt.Fprintf(&b, "在 %s 上工作。", w.node)
+	where := w.ws.Host
+	if where == host.LocalName {
+		where = "本机（网关所在的机器）"
 	}
-	b.WriteString("工作目录：")
-	b.WriteString(w.dirs[0])
-	b.WriteString("（默认，相对路径和命令都从这里开始）")
-	for _, d := range w.dirs[1:] {
-		b.WriteString("、")
-		b.WriteString(d)
-	}
-	if len(sessionRO) > 0 {
-		b.WriteString("；只读目录：")
-		b.WriteString(strings.Join(sessionRO, "、"))
-	}
-	fmt.Fprintf(&b, "。权限模式：%s，%s。", modeNames[w.mode], modeDesc[w.mode])
-	return b.String()
+	return fmt.Sprintf("[系统] 在 %s 上工作。工作目录：%s（相对路径和命令都从这里开始）。权限模式：%s，%s。",
+		where, w.ws.Path, modeNames[w.mode], modeDesc[w.mode])
 }
 
 // ---- 命令 ----
-
-const dirUsage = "用法：/dir 查看；/dir add <路径> [ro] 添加（ro 表示只读）；/dir rm <路径> 移除；/dir default <路径> 设为默认"
-
-func (a *App) cmdDir(c in, arg string) {
-	sub, rest, _ := strings.Cut(arg, " ")
-	rest = strings.TrimSpace(rest)
-	if sub == "" {
-		a.answer(c, a.describeWorkspace(c.s.sid))
-		return
-	}
-	if !a.isAdmin(c.who) {
-		a.answer(c, "只有管理员能修改工作目录")
-		return
-	}
-	st := a.store.Settings(c.s.sid)
-	if !st.DirsSet {
-		// 从现在实际生效的目录开始改（默认工作目录只属于默认机器，换了机器就是空的）
-		st.Dirs, st.DirsSet = slices.Clone(a.workspaceOf(c.s.sid).dirs), true
-	}
-	path, flag, _ := strings.Cut(rest, " ")
-	path = cleanPath(path)
-	var note string
-	switch sub {
-	case "add":
-		if path == "" || (flag != "" && flag != "ro") {
-			a.answer(c, dirUsage)
-			return
-		}
-		if msg := a.checkDir(path); msg != "" {
-			a.answer(c, msg)
-			return
-		}
-		if slices.Contains(st.Dirs, path) || slices.Contains(st.RO, path) {
-			a.answer(c, path+" 已经在列表里了")
-			return
-		}
-		if flag == "ro" {
-			st.RO = append(st.RO, path)
-		} else {
-			st.Dirs = append(st.Dirs, path)
-		}
-		if _, err := os.Stat(expandHome(path)); err != nil {
-			note = "\n（注意：在网关所在的机器上找不到这个目录。内核在别的机器上的话可以忽略）"
-		}
-	case "rm":
-		n := len(st.Dirs) + len(st.RO)
-		st.Dirs = slices.DeleteFunc(st.Dirs, func(d string) bool { return d == path })
-		st.RO = slices.DeleteFunc(st.RO, func(d string) bool { return d == path })
-		if len(st.Dirs)+len(st.RO) == n {
-			a.answer(c, path+" 不在工作目录列表里")
-			return
-		}
-	case "default":
-		if path == "" {
-			a.answer(c, dirUsage)
-			return
-		}
-		if msg := a.checkDir(path); msg != "" {
-			a.answer(c, msg)
-			return
-		}
-		st.Dirs = append([]string{path}, slices.DeleteFunc(st.Dirs, func(d string) bool { return d == path })...)
-		st.RO = slices.DeleteFunc(st.RO, func(d string) bool { return d == path })
-	default:
-		a.answer(c, dirUsage)
-		return
-	}
-	if err := a.store.SaveSettings(c.s.sid, st); err != nil {
-		a.answer(c, "保存设置失败："+err.Error())
-		return
-	}
-	a.answer(c, a.describeWorkspace(c.s.sid)+note)
-}
 
 func (a *App) cmdMode(c in, arg string) {
 	if arg == "" {
@@ -195,26 +111,6 @@ func (a *App) cmdMode(c in, arg string) {
 		return
 	}
 	a.answer(c, fmt.Sprintf("权限模式已切换为%s：%s。下一条消息开始生效", modeNames[arg], modeDesc[arg]))
-}
-
-func (a *App) describeWorkspace(sid string) string {
-	w := a.workspaceOf(sid)
-	st := a.store.Settings(sid)
-	var b strings.Builder
-	if len(w.dirs) == 0 && len(st.RO) == 0 {
-		b.WriteString("还没有设置工作目录，文件和命令类工具暂时用不了。\n")
-	} else {
-		b.WriteString("工作目录（第一个是默认目录）：\n")
-		for i, d := range w.dirs {
-			fmt.Fprintf(&b, "%d. %s\n", i+1, d)
-		}
-		for i, d := range st.RO {
-			fmt.Fprintf(&b, "%d. %s（只读）\n", len(w.dirs)+i+1, d)
-		}
-	}
-	fmt.Fprintf(&b, "权限模式：%s（%s）\n", modeNames[w.mode], modeDesc[w.mode])
-	b.WriteString(dirUsage)
-	return b.String()
 }
 
 // checkDir 拒绝会暴露网关自己的目录：配置里有 API key，数据目录里有所有会话的聊天记录。

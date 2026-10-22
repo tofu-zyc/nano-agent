@@ -117,7 +117,7 @@ func TestGuestHasOwnSession(t *testing.T) {
 	if info, _ := e.a.Session(mainSID); len(info.Endpoints) != 3 || !info.Endpoints[1].Admin || info.Endpoints[1].Key != "fake:c2" {
 		t.Fatalf("main: %+v", info.Endpoints)
 	}
-	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	e.useDir(t, "work")
 	sayFrom(e.a, e.ch, "c2", "u2", "现在呢")
 	if in := e.k.expect(proto.TInput); in.SID != mainSID || in.Mode != proto.ModeAsk {
 		t.Fatalf("input: %+v", in)

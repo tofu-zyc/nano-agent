@@ -22,7 +22,7 @@
   </button>
 
   <div class="pills">
-    <button class="pill" onclick={() => store.open(ov.kernels.length === 1 ? { type: 'kernel', node: ov.kernels[0].node } : { type: 'kernel' })} title="内核（节点）">
+    <button class="pill" onclick={() => store.open({ type: 'kernel' })} title="内核（节点）">
       <span class="dot {ov.kernels.length ? 'online' : 'error'}"></span>
       {#if ov.kernels.length === 1}
         内核 · {ov.kernels[0].node}

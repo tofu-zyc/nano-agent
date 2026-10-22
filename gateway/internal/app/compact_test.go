@@ -73,7 +73,7 @@ func seedCompaction(t *testing.T, e *env) {
 func TestSummaryCompactionMergesOldSummaryAndPreservesRecentTurn(t *testing.T) {
 	e := setup(t)
 	seedCompaction(t, e)
-	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	e.useDir(t, "work")
 	m := &summaryLLM{requests: make(chan llm.Request, 10), summarize: func(context.Context) (*llm.Result, error) {
 		return &llm.Result{Reason: llm.ReasonFinal, Content: "已采用 C 内核和 Go 网关，待继续实现。", Usage: llm.Usage{PromptTokens: 800, CompletionTokens: 30, CachedTokens: 200}}, nil
 	}}

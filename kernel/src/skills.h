@@ -5,7 +5,8 @@
  *   skills/pdf/scripts/…       附带的脚本、资料，说明里会提到
  * 内核把技能的名字和简介写进 Skill 工具的描述（技能不变时描述不变，不破坏前缀缓存）；
  * 模型调用 Skill 时返回 SKILL.md 的正文和附带文件的位置。技能目录在沙箱里只读可见，
- * 附带的文件用 Read 读、用 Shell 运行。
+ * 附带的文件用 Read 读、用 Shell 运行。工具交给网关执行时（工作目录在别的机器上），
+ * 技能目录的文件由网关传到那台机器上。
  */
 #ifndef NA_SKILLS_H
 #define NA_SKILLS_H
@@ -35,9 +36,10 @@ cJSON *skills_tool_spec(const skills_t *s);
 /* [{name, description}]，hello 里报给网关 */
 cJSON *skills_json(const skills_t *s);
 const skill_t *skills_find(const skills_t *s, const char *name);
-/* 服务器上的技能缓存根目录（~ 开头），按内核和技能目录区分 */
-char  *skills_remote_root(const skills_t *s, const char *node);
-/* 技能的内容（工具结果）；dir 非空时使用服务器上的目录。失败时 *ok 为 false */
+/* 技能目录里的文件 [{path, data（base64）, exec?}]：异机模式下交给网关，传到执行的机器上。
+ * 太大时返回 NULL，原因写进 err */
+cJSON *skill_files_json(const skill_t *sk, char *err, size_t errlen);
+/* 技能的内容（工具结果）；dir 非空时用它作技能目录（执行的机器上的路径）。失败时 *ok 为 false */
 char  *skill_load(const skills_t *s, const char *name, const char *dir, bool *ok);
 
 #endif

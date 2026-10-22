@@ -5,10 +5,10 @@
 
   let {
     start = '~',
-    node = '',
+    host = '',
     onpick,
     onclose,
-  }: { start?: string; node?: string; onpick: (path: string) => void; onclose: () => void } = $props();
+  }: { start?: string; host?: string; onpick: (path: string) => void; onclose: () => void } = $props();
 
   let cur = $state<DirListing | null>(null);
   let error = $state('');
@@ -20,7 +20,7 @@
     loading = true;
     error = '';
     try {
-      cur = await listDir(path, node);
+      cur = await listDir(path, host);
       filter = '';
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -79,7 +79,7 @@
     <header>
       <Icon name="folder" size={17} />
       <strong>选择目录</strong>
-      <span class="muted small">{node ? `${node} 上的目录` : '内核所在机器上的目录'}</span>
+      <span class="muted small">{host ? `${host} 上的目录` : '本机（网关所在的机器）上的目录'}</span>
       <span class="grow"></span>
       <button class="btn sm ghost" onclick={onclose} aria-label="关闭"><Icon name="x" size={14} /></button>
     </header>

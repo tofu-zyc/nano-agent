@@ -112,8 +112,9 @@ type Access struct {
 // Workspace 是工具能碰到的范围：工作目录之外的文件一律读写不了（由内核的沙箱保证）。
 // 这里是默认值，每个会话可以用 /dir、/mode 单独改。
 type Workspace struct {
-	Node    string   `toml:"node" json:"node"`         // 默认在哪台机器（内核的名字）上工作，空表示和网关同一台机器上的内核
-	Dirs    []string `toml:"dirs" json:"dirs"`         // 工作目录（默认机器上的路径），第一个是默认目录
+	// 旧版本的默认机器和默认工作目录：第一次启动时迁移到工作目录列表（data/workspaces.json），之后不再使用
+	Node    string   `toml:"node" json:"node"`
+	Dirs    []string `toml:"dirs" json:"dirs"`
 	Mode    string   `toml:"mode" json:"mode"`         // auto | ask（默认）| readonly
 	ExtraRO []string `toml:"extra_ro" json:"extra_ro"` // 沙箱里额外只读的路径，比如 ~/.gitconfig
 	ExtraRW []string `toml:"extra_rw" json:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录

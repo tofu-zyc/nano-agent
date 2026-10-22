@@ -1,9 +1,7 @@
 package web
 
 import (
-	"archive/zip"
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,24 +12,24 @@ import (
 	"testing"
 	"time"
 
-	"nano-agent/gateway/internal/device"
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/proto"
 )
 
-func TestDeviceAPIHidesCredentialsAndDownloadsAuthenticatedPackage(t *testing.T) {
+func TestDeviceAPIHidesCredentials(t *testing.T) {
 	srv, s, conf := setup(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m, err := device.New(ctx, conf.Current().Session.DataDir, device.Bundle{}, kernel.NewHub("kernel-package-token", s.app, log), log)
+	m, err := host.New(ctx, conf.Current().Session.DataDir, host.Executor{}, nil, kernel.NewHub("tok", s.app, log), log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.SetDevices(m)
 	c := newClient(t, srv)
-	if code, _ := c.do("GET", "/api/devices/package?platform=windows&gateway=127.0.0.1:7700", nil, false); code != 401 {
-		t.Fatal("未登录下载了连接包", code)
+	if code, _ := c.do("GET", "/api/devices", nil, false); code != 401 {
+		t.Fatal("未登录看到了服务器列表", code)
 	}
 	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
 	code, out := c.do("POST", "/api/devices", map[string]any{"name": "test-server", "host": "127.0.0.1", "password": "private-device-test-secret"}, true)
@@ -41,8 +39,8 @@ func TestDeviceAPIHidesCredentialsAndDownloadsAuthenticatedPackage(t *testing.T)
 	id := out["id"].(string)
 	code, out = c.do("GET", "/api/devices", nil, false)
 	b, _ := json.Marshal(out)
-	if code != 200 || strings.Contains(string(b), "private-device-test-secret") || strings.Contains(string(b), "kernel-package-token") {
-		t.Fatal("设备列表泄露凭据", code)
+	if code != 200 || strings.Contains(string(b), "private-device-test-secret") || !strings.Contains(string(b), "test-server") {
+		t.Fatal("设备列表泄露凭据", code, string(b))
 	}
 	if code, out = c.do("PUT", "/api/devices/listener", map[string]string{"address": "127.0.0.1:0"}, true); code != 200 || out["listener"] == "" {
 		t.Fatal("不能热启用接入地址", code, out)
@@ -52,34 +50,6 @@ func TestDeviceAPIHidesCredentialsAndDownloadsAuthenticatedPackage(t *testing.T)
 	}
 	if code, _ = c.do("PUT", "/api/devices/listener", map[string]string{"address": ""}, true); code != 200 {
 		t.Fatal("不能关闭监听")
-	}
-	resp, err := c.hc.Get(srv.URL + "/api/devices/package?platform=windows&gateway=127.0.0.1:7700")
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
-		t.Fatalf("下载失败 %d", resp.StatusCode)
-	}
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, f := range zr.File {
-		if f.Name == "kernel.conf" {
-			r, _ := f.Open()
-			b, _ := io.ReadAll(r)
-			r.Close()
-			found = !strings.Contains(string(b), "kernel-package-token") && strings.Contains(string(b), "127.0.0.1:7700")
-		}
-	}
-	if !found {
-		t.Fatal("安装包没有预填网关地址，或者带了口令")
-	}
-	if code, _ := c.do("GET", "/api/devices/package?platform=linux&gateway=host%0Anode=x:7700", nil, false); code != 400 {
-		t.Fatal("接受了带换行的地址")
 	}
 	if code, _ := c.do("DELETE", "/api/devices/"+id, nil, true); code != 200 {
 		t.Fatal("删除连接失败")
@@ -97,7 +67,7 @@ func TestPairingAPI(t *testing.T) {
 	if err := hub.EnablePairing(filepath.Join(dir, "paired.json")); err != nil {
 		t.Fatal(err)
 	}
-	m, err := device.New(ctx, conf.Current().Session.DataDir, device.Bundle{}, hub, log)
+	m, err := host.New(ctx, conf.Current().Session.DataDir, host.Executor{}, nil, hub, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +121,36 @@ func TestPairingAPI(t *testing.T) {
 	}
 	if len(hub.PairedDevices()) != 0 {
 		t.Fatal("没有移除")
+	}
+}
+
+func TestWorkspacesAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
+	code, out := c.do("POST", "/api/workspaces", map[string]any{"host": "本机", "path": "/srv/proj", "default": true}, true)
+	if code != 200 || out["id"] == "" || out["default"] != true {
+		t.Fatal(code, out)
+	}
+	id := out["id"].(string)
+	if code, out := c.do("POST", "/api/workspaces", map[string]any{"host": "nowhere", "path": "/x"}, true); code != 400 {
+		t.Fatal("没有的机器", code, out)
+	}
+	if code, _ := c.do("PATCH", "/api/sessions/main", map[string]any{"workspace": id}, true); code != 200 {
+		t.Fatal("会话选工作目录", code)
+	}
+	_, out = c.do("GET", "/api/sessions/main", nil, false)
+	if info := out["info"].(map[string]any); info["host"] != "本机" || info["path"] != "/srv/proj" {
+		t.Fatalf("info: %v", info)
+	}
+	if code, _ := c.do("PUT", "/api/workspaces/default", map[string]string{"id": ""}, true); code != 200 {
+		t.Fatal("取消默认", code)
+	}
+	if code, _ := c.do("DELETE", "/api/workspaces/"+id, nil, true); code != 200 {
+		t.Fatal("删除", code)
+	}
+	_, out = c.do("GET", "/api/sessions/main", nil, false)
+	if info := out["info"].(map[string]any); info["workspace"] != "" {
+		t.Fatalf("删掉后会话只聊天：%v", info)
 	}
 }

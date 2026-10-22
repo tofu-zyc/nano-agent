@@ -97,22 +97,10 @@ bad:
 int link_connect(link_t *l, const char *addr, int timeout_ms, char *err, size_t errlen)
 {
     int fd;
-    if (!strcmp(addr, "stdio")) {
-        fd = dup(STDIN_FILENO);
-        l->write_fd = dup(STDOUT_FILENO);
-        if (fd < 0 || l->write_fd < 0) {
-            snprintf(err, errlen, "打开标准输入输出失败：%s", strerror(errno));
-            if (fd >= 0) close(fd);
-            if (l->write_fd >= 0) close(l->write_fd);
-            return -1;
-        }
-        set_nonblock(l->write_fd);
-        set_cloexec(l->write_fd);
-    } else if (!strncmp(addr, "unix:", 5)) fd = connect_unix(addr + 5, timeout_ms, err, errlen);
+    if (!strncmp(addr, "unix:", 5)) fd = connect_unix(addr + 5, timeout_ms, err, errlen);
     else if (!strncmp(addr, "tcp:", 4)) fd = connect_tcp(addr + 4, timeout_ms, err, errlen);
     else fd = connect_tcp(addr, timeout_ms, err, errlen);
     if (fd < 0) return -1;
-    if (strcmp(addr, "stdio")) l->write_fd = fd;
     set_nonblock(fd);
     set_cloexec(fd);
     l->fd = fd;
@@ -123,11 +111,8 @@ int link_connect(link_t *l, const char *addr, int timeout_ms, char *err, size_t 
 
 void link_close(link_t *l)
 {
-    if (l->fd >= 0) {
-        close(l->fd);
-        if (l->write_fd != l->fd) close(l->write_fd);
-    }
-    l->fd = l->write_fd = -1;
+    if (l->fd >= 0) close(l->fd);
+    l->fd = -1;
     l->in.len = l->out.len = 0;
 }
 
@@ -146,7 +131,7 @@ void link_send(link_t *l, cJSON *msg)
 int link_flush(link_t *l)
 {
     while (l->fd >= 0 && l->out.len) {
-        ssize_t n = write(l->write_fd, l->out.p, l->out.len);
+        ssize_t n = write(l->fd, l->out.p, l->out.len);
         if (n > 0) { buf_consume(&l->out, (size_t)n); continue; }
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;

@@ -312,10 +312,102 @@ const skill_t *skills_find(const skills_t *s, const char *name)
     return NULL;
 }
 
-char *skills_remote_root(const skills_t *s, const char *node)
+/* ---- 技能文件交给网关 ---- */
+
+#define MAX_SHIP_BYTES (4u << 20)
+#define MAX_SHIP_FILES 500
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char *base64(const unsigned char *p, size_t n)
 {
-    uint64_t h = fnv(fnv(1469598103934665603ULL, node), s->root);
-    return xasprintf("~/.cache/nano-agent/skills/%016llx", (unsigned long long)h);
+    char *out = xmalloc((n + 2) / 3 * 4 + 1), *o = out;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = p[i] << 16 | (i + 1 < n ? p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        *o++ = B64[v >> 18 & 63];
+        *o++ = B64[v >> 12 & 63];
+        *o++ = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        *o++ = i + 2 < n ? B64[v & 63] : '=';
+    }
+    *o = 0;
+    return out;
+}
+
+/* 读整个文件（可以是二进制），最多 max 字节 */
+static char *read_all(const char *path, size_t max, size_t *len)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    buf_t b = {0};
+    char tmp[16384];
+    ssize_t n;
+    while ((n = read(fd, tmp, sizeof tmp)) > 0 && b.len <= max) buf_append(&b, tmp, (size_t)n);
+    close(fd);
+    if (n < 0 || b.len > max) {
+        buf_free(&b);
+        errno = n < 0 ? errno : EFBIG;
+        return NULL;
+    }
+    *len = b.len;
+    return buf_cstr(&b);
+}
+
+/* 把技能目录里的文件（最多两层子目录，不跟符号链接）加进 arr；超出上限返回 -1 */
+static int ship_dir(cJSON *arr, const char *dir, const char *rel, int depth, size_t *bytes, char *err, size_t errlen)
+{
+    char *path = rel[0] ? xasprintf("%s/%s", dir, rel) : xstrdup(dir);
+    DIR *d = opendir(path);
+    free(path);
+    if (!d) return 0;
+    int rc = 0;
+    struct dirent *e;
+    while (rc == 0 && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char *sub = rel[0] ? xasprintf("%s/%s", rel, e->d_name) : xstrdup(e->d_name);
+        char *full = xasprintf("%s/%s", dir, sub);
+        struct stat st;
+        if (lstat(full, &st) == 0 && S_ISDIR(st.st_mode) && depth < 2) {
+            rc = ship_dir(arr, dir, sub, depth + 1, bytes, err, errlen);
+        } else if (lstat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+            *bytes += (size_t)st.st_size;
+            if (*bytes > MAX_SHIP_BYTES || cJSON_GetArraySize(arr) >= MAX_SHIP_FILES) {
+                snprintf(err, errlen, "技能目录太大（最多 %u 个文件、共 %u MB），没法传到执行的机器上",
+                         MAX_SHIP_FILES, MAX_SHIP_BYTES >> 20);
+                rc = -1;
+            } else {
+                size_t len = 0;
+                char *data = read_all(full, MAX_SHIP_BYTES, &len);
+                if (!data) {
+                    snprintf(err, errlen, "读不了技能文件 %s：%s", sub, strerror(errno));
+                    rc = -1;
+                } else {
+                    cJSON *f = cJSON_CreateObject();
+                    cJSON_AddStringToObject(f, "path", sub);
+                    char *b64 = base64((const unsigned char *)data, len);
+                    cJSON_AddStringToObject(f, "data", b64);
+                    free(b64);
+                    if (st.st_mode & 0100) cJSON_AddBoolToObject(f, "exec", true);
+                    cJSON_AddItemToArray(arr, f);
+                    free(data);
+                }
+            }
+        }
+        free(full);
+        free(sub);
+    }
+    closedir(d);
+    return rc;
+}
+
+cJSON *skill_files_json(const skill_t *sk, char *err, size_t errlen)
+{
+    cJSON *arr = cJSON_CreateArray();
+    size_t bytes = 0;
+    if (ship_dir(arr, sk->dir, "", 0, &bytes, err, errlen) < 0) {
+        cJSON_Delete(arr);
+        return NULL;
+    }
+    return arr;
 }
 
 char *skill_load(const skills_t *s, const char *name, const char *dir, bool *ok)

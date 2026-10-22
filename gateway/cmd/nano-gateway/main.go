@@ -20,8 +20,8 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
-	"nano-agent/gateway/internal/device"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
@@ -92,11 +92,18 @@ func main() {
 		os.Exit(1)
 	}
 	hub.OnPairChange(func() { a.Bus().Publish(events.Event{T: "pairing"}) })
-	devices, err := device.New(ctx, cfg.Session.DataDir, device.FindBundle(cfg.Dir), hub, log)
+	// 网关能直接执行工具的机器：本机和 SSH 服务器（工作目录不在内核所在的机器上时用）
+	exe, err := host.FindExecutor(cfg.Dir)
 	if err != nil {
-		log.Error("初始化设备管理失败", "err", err)
+		log.Warn("本机和 SSH 服务器上的工作目录暂时用不了", "err", err)
+	}
+	devices, err := host.New(ctx, cfg.Session.DataDir, exe, []string{cfg.Dir, cfg.Session.DataDir}, hub, log)
+	if err != nil {
+		log.Error("初始化机器管理失败", "err", err)
 		os.Exit(1)
 	}
+	a.SetHosts(devices)
+	devices.OnChange(a.HostsChanged)
 	if err := devices.SetListener(cfg.Kernel.DeviceListen); err != nil {
 		log.Warn("电脑接入地址用不了", "err", err)
 	}

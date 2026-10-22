@@ -30,11 +30,11 @@ const helpText = `可用命令：
 /session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
 /history 查看这个会话最近的对话；/history <轮数> 看更多
 /sync    补上其他窗口的聊天记录（同一会话内也会自动同步）
-/node    查看这个会话在哪台机器上工作；/node <名字> 切换（需管理员）
+/dir     查看和切换工作目录（哪台机器上的哪个目录），切换需管理员
+/node    查看机器和在线的内核
 /stop    停止当前任务（任务进行中直接发「停」也行）
 /undo    撤回最近一条消息：还没处理的直接拿掉，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）
 /reset   清空本会话的上下文
-/dir     查看和修改工作目录（修改需管理员）
 /mode    查看和切换权限模式：auto 自动、ask 审批、readonly 只读（切换需管理员）
 /think   查看和切换思考强度（切换需管理员）
 /approve <编号>  批准一次工具执行（需管理员）
@@ -68,6 +68,8 @@ type App struct {
 	chans        map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
 	outboxes     map[string]chan outItem
 	eps          map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
+	wss          []Workspace       // 工作目录列表（workspaces.go）
+	hosts        Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
 	nodes        map[string]*node  // 在线的内核（nodes.go）
 	localNode    string            // 最近一个和网关在同一台机器上的内核
 	nodeSeq      int
@@ -122,6 +124,13 @@ type run struct {
 	calls    int       // 这一轮请求了几次模型
 	usage    llm.Usage // 这一轮的累计用量
 	noTools  bool      // 没有工作目录：不给模型工具，只聊天
+
+	// 异机模式（exec.go）：工具交给网关在 host 上执行，约束是这一轮开始时定下的
+	gateway      bool
+	host         string
+	dirs, ro, rw []string
+	write        bool
+	execs        map[string]context.CancelFunc // 正在执行的工具调用
 }
 
 // views 是这一轮所有能流式显示的窗口
@@ -177,6 +186,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	}
 	a.migrate()
 	a.loadEndpoints()
+	a.loadWorkspaces()
 	return a
 }
 
@@ -426,7 +436,8 @@ func (a *App) startRun(s *sess) {
 	}
 	head := s.queue[0]
 	w := a.workspaceOf(s.sid)
-	node, tools, failNote := a.pick(w)
+	rt := a.route(w)
+	node := rt.kernel
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
@@ -458,13 +469,19 @@ func (a *App) startRun(s *sess) {
 	}
 	// 工作目录、权限、机器变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	st := a.store.Settings(s.sid)
-	note := envNote(w, st.RO)
-	if failNote != "" {
-		note = failNote // 会话的机器不在线，替补顶上
+	dirty := false
+	if !st.WorkspaceSet && w.ws != nil {
+		st.Workspace, st.WorkspaceSet, dirty = w.ws.ID, true, true // 新会话第一次说话：定下默认的工作目录
+	}
+	note := envNote(w)
+	if rt.note != "" {
+		note = rt.note // 工作目录所在的机器用不了，只聊天
 	}
 	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
-		st.EnvNote = note
+		st.EnvNote, dirty = note, true
+	}
+	if dirty {
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存会话设置失败", "sid", s.sid, "err", err)
 		}
@@ -478,7 +495,7 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}}
+	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{}}
 	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
@@ -501,14 +518,17 @@ func (a *App) startRun(s *sess) {
 	r.stopTyping = a.startTyping(head.ep)
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
-	if len(w.dirs) == 0 || !tools {
-		// 没有工作目录，或者工作目录所在的机器不在线：不给模型工具，只聊天
+	if w.ws == nil || rt.note != "" {
+		// 没有工作目录，或者工作目录所在的机器用不了：不给模型工具，只聊天
 		r.noTools = true
 		in.Mode, in.Dirs, in.RO, in.RW = proto.ModeNone, nil, nil, nil
-	} else if w.node != node {
-		in.Node = w.node // 工具在服务器上执行（这个内核通过 SSH 连过去）
+	} else if rt.gateway {
+		// 异机模式：工具交给网关在工作目录所在的机器上执行
+		in.Exec, in.Landlock = "gateway", rt.landlock
+		r.gateway, r.host, r.dirs, r.ro, r.rw = true, w.ws.Host, w.dirs, w.ro, w.rw
+		r.write = mode == proto.ModeAuto || mode == proto.ModeAsk
 	}
-	a.log.Info("开始处理", "sid", s.sid, "node", node, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
+	a.log.Info("开始处理", "sid", s.sid, "node", node, "gateway", rt.gateway, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content,
 		Data: map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}})
@@ -525,6 +545,9 @@ func (a *App) endRun(s *sess, note string) {
 	}
 	if r.cancelLLM != nil {
 		r.cancelLLM()
+	}
+	for _, cancel := range r.execs {
+		cancel() // 交给网关执行的工具调用
 	}
 	r.stopTyping()
 	for _, v := range r.views() {
@@ -596,10 +619,6 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		return
 	}
-	if m.T == proto.TRemotes {
-		a.remotesChanged(node, m.Remotes)
-		return
-	}
 	if m.T == proto.TTools {
 		a.toolsChanged(node, m)
 		return
@@ -615,6 +634,14 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	switch m.T {
 	case proto.TModel:
 		a.callModel(s)
+	case proto.TExec:
+		a.execTool(node, s, m)
+	case proto.TSkillFiles:
+		a.skillFiles(node, s, m)
+	case proto.TExecCancel:
+		if cancel := s.run.execs[m.ID]; cancel != nil {
+			cancel()
+		}
 	case proto.TResult:
 		content := m.Content
 		if m.OK != nil && !*m.OK {

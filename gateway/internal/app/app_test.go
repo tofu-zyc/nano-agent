@@ -118,12 +118,13 @@ func (k *fakeKernel) none() {
 }
 
 type env struct {
-	a   *App
-	ch  *fakeCh
-	k   *fakeKernel
-	llm *recLLM
-	dir string
-	sid string // 测试用的窗口 fake:c1 接着的会话：管理员默认接在主会话上
+	a     *App
+	ch    *fakeCh
+	k     *fakeKernel
+	llm   *recLLM
+	hosts *fakeHosts
+	dir   string
+	sid   string // 测试用的窗口 fake:c1 接着的会话：管理员默认接在主会话上
 }
 
 func setup(t *testing.T) *env {
@@ -150,6 +151,8 @@ func setup(t *testing.T) *env {
 	a := New(ctx, cfg, rec, store, persona.New(cfg.Persona.Dir, log), log)
 	a.now = func() time.Time { return time.Date(2026, 10, 21, 15, 8, 0, 0, time.UTC) }
 	a.loc = time.UTC
+	hosts := newFakeHosts()
+	a.SetHosts(hosts)
 	hub := kernel.NewHub("tok", a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)
@@ -170,7 +173,7 @@ func setup(t *testing.T) *env {
 	k.expect(proto.TWelcome)
 	waitNode(a, "test", true)
 	t.Cleanup(func() { cancel(); conn.Close() })
-	return &env{a: a, ch: ch, k: k, llm: rec, dir: dir, sid: mainSID}
+	return &env{a: a, ch: ch, k: k, llm: rec, hosts: hosts, dir: dir, sid: mainSID}
 }
 
 // waitNode 等调度层知道内核 name 上线（或下线）了
@@ -276,7 +279,7 @@ func TestGroupIgnored(t *testing.T) {
 
 func TestToolsOnlyWithWorkdir(t *testing.T) {
 	e := setup(t)
-	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	e.useDir(t, "work")
 	e.say("看看目录")
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || len(in.Dirs) != 1 {
 		t.Fatalf("input: %+v", in)
@@ -426,28 +429,27 @@ func TestWorkspaceAndModes(t *testing.T) {
 	work := filepath.Join(e.dir, "work")
 	os.MkdirAll(work, 0o755)
 
-	// 没设置工作目录的纯聊天会话：不加环境说明
+	// 没设置工作目录的纯聊天会话：告诉模型它没有工具
 	e.say("你好")
 	in := e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeNone || len(in.Dirs) != 0 { // 没有工作目录：不能用工具
+	if in.Mode != proto.ModeNone || len(in.Dirs) != 0 {
 		t.Fatalf("input: %+v", in)
 	}
-	// 没有工作目录：告诉模型它没有工具
 	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有工作目录") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
 		t.Fatalf("user content: %q", got)
 	}
 
 	e.say("/dir add " + work)
-	e.ch.wait(t, "1. "+work)
+	e.ch.wait(t, "这个会话改在 本机:"+work+" 上工作了")
 	e.say("/mode auto")
 	e.ch.wait(t, "已切换为自动")
 	e.say("看看目录")
 	in = e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeAuto || len(in.Dirs) != 1 || in.Dirs[0] != work {
-		t.Fatalf("input: %+v", in)
+	if in.Mode != proto.ModeAuto || len(in.Dirs) != 1 || in.Dirs[0] != work || in.Exec != "" {
+		t.Fatalf("本机的目录由本机的内核直接执行：%+v", in)
 	}
 	msgs := e.roundTrip(t)
-	want := "[系统] 在 test 上工作。工作目录：" + work + "（默认，相对路径和命令都从这里开始）。权限模式：自动，"
+	want := "[系统] 在 本机（网关所在的机器） 上工作。工作目录：" + work + "（相对路径和命令都从这里开始）。权限模式：自动，"
 	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n"+stamp+" 看看目录") {
 		t.Fatalf("env note: %q", got)
 	}
@@ -463,27 +465,38 @@ func TestWorkspaceAndModes(t *testing.T) {
 		t.Fatalf("user content: %q", got)
 	}
 
-	// 只读目录、换默认目录
+	// 列表、切换、只聊天、设为默认、删除
 	other := filepath.Join(e.dir, "docs")
-	e.say("/dir add " + other + " ro")
-	e.ch.wait(t, other+"（只读）")
+	os.MkdirAll(other, 0o755)
+	e.say("/dir add " + other)
+	e.ch.wait(t, "本机:"+other)
 	e.say("/dir")
-	e.ch.wait(t, "权限模式：自动")
-	e.say("继续")
-	in = e.k.expect(proto.TInput)
-	if !slices.Contains(in.RO, other) {
-		t.Fatalf("ro: %+v", in.RO)
+	if msg := e.ch.wait(t, "工作目录列表"); !strings.Contains(msg, "1. 本机:"+work+"\n") || !strings.Contains(msg, "2. 本机:"+other+"（当前）") {
+		t.Fatalf("list: %q", msg)
 	}
-	if got := lastUser(e.roundTrip(t)); !strings.Contains(got, "只读目录："+other) {
-		t.Fatalf("env note: %q", got)
+	e.say("/dir 1")
+	e.ch.wait(t, "这个会话改在 本机:"+work)
+	e.say("/dir default 2")
+	e.ch.wait(t, "现在是新会话的默认工作目录")
+	e.say("/dir none")
+	e.ch.wait(t, "只聊天")
+	if info, _ := e.a.Session(mainSID); info.Workspace != "" {
+		t.Fatalf("只聊天：%+v", info)
 	}
+	e.say("/dir rm 2")
+	e.ch.wait(t, "已从列表里删掉 本机:"+other)
+	if ws := e.a.Workspaces(); len(ws) != 1 || ws[0].Path != work || ws[0].Default {
+		t.Fatalf("workspaces: %+v", ws)
+	}
+	e.say("/dir 1")
+	e.ch.wait(t, "这个会话改在")
 
 	// /reset 之后历史是空的，环境说明要重新给一次
 	e.say("/reset")
 	e.ch.wait(t, "上下文已清空")
 	e.say("新的开始")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 在 test 上工作。工作目录：") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 在 本机（网关所在的机器） 上工作。工作目录：") {
 		t.Fatalf("after reset: %q", got)
 	}
 }
@@ -494,20 +507,24 @@ func TestWorkspaceGuards(t *testing.T) {
 	e.ch.wait(t, "绝对路径")
 	e.say("/dir add " + e.dir) // 包含网关的配置和数据目录
 	e.ch.wait(t, "不能把")
+	e.say("/dir add nowhere:/tmp")
+	e.ch.wait(t, "没有叫 nowhere 的机器")
+	e.say("/dir add " + e.dir + "/missing")
+	e.ch.wait(t, "用不了")
 	e.say("/mode yolo")
 	e.ch.wait(t, "模式只能是")
 	e.say("/dir add /tmp", from("u2", "李四"))
 	e.ch.wait(t, "只有管理员能修改工作目录")
 	e.say("/mode auto", from("u2", "李四"))
 	e.ch.wait(t, "只有管理员能切换权限模式")
-	e.say("/dir rm /nope")
-	e.ch.wait(t, "不在工作目录列表里")
+	e.say("/dir 9")
+	e.ch.wait(t, "没有第 9 个工作目录")
 }
 
 func TestGuestMode(t *testing.T) {
 	e := setup(t)
 	e.sid = "fake:c1" // 不是管理员：有自己的会话
-	e.a.cfg.Workspace.Dirs = []string{e.dir}
+	e.useDir(t, "work")
 	e.say("你好", from("u2", "李四"))
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone || in.SID != e.sid {
 		t.Fatalf("guest mode: %+v", in)

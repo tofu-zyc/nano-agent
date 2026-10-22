@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Ev, FieldState, LiveItem, Machine, Overview, SessionInfo, Target } from './types';
+import type { Approval, Ev, FieldState, LiveItem, MachineInfo, Overview, SessionInfo, Target, WorkspaceInfo } from './types';
 
 export type Toast = {
   id: number;
@@ -166,23 +166,14 @@ class Store {
 
   // ---- 会话 ----
 
-  /** 所有机器：在线的内核，加上有会话要在上面工作但不在线的 */
-  get machines(): Machine[] {
-    const ov = this.ov;
-    if (!ov) return [];
-    const def = ov.workspace.node;
-    const out: Machine[] = ov.kernels.map((k) => ({ name: k.node, online: true, info: k, isDefault: k.node === def }));
-    for (const k of ov.kernels) {
-      for (const r of k.remotes ?? []) {
-        const ex = out.find((m) => m.name === r.name);
-        const server = { via: k.node, target: r.target, landlock: r.landlock, detail: r.detail };
-        if (!ex) out.push({ name: r.name, online: r.ok, isDefault: r.name === def, server });
-        else if (ex.server && !ex.online && r.ok) Object.assign(ex, { online: true, server }); // 多个内核都能到：用能用的那个
-      }
-    }
-    const want = [def, ...(ov.sessions ?? []).map((s) => s.node)];
-    for (const n of want) if (n && !out.some((m) => m.name === n)) out.push({ name: n, online: false, isDefault: n === def });
-    return out;
+  /** 所有机器：本机、装了内核的电脑、SSH 服务器 */
+  get machines(): MachineInfo[] {
+    return this.ov?.machines ?? [];
+  }
+
+  /** 机器 name 上的工作目录 */
+  workspacesOn(name: string): WorkspaceInfo[] {
+    return (this.ov?.workspaces ?? []).filter((w) => w.host === name);
   }
 
   session(sid: string | undefined) {
@@ -252,10 +243,20 @@ class Store {
         if (ov) {
           ov.kernels = ov.kernels.filter((k) => k.node !== e.name);
           if (e.data) ov.kernels = [...ov.kernels, e.data].sort((a, b) => a.node.localeCompare(b.node));
-          for (const s of ov.sessions ?? []) if (s.node === e.name) s.node_online = !!e.data;
-          // 默认机器可能跟着变（和网关同一台机器的内核上线了）
-          this.refresh().catch(() => {});
         }
+        break;
+      case 'machines':
+        // 机器能不能用变了：会话里“工作目录能不能用”也跟着变，重新读一遍
+        if (ov && e.data) {
+          ov.machines = e.data;
+          for (const s of ov.sessions ?? []) {
+            const m = ov.machines.find((x) => x.name === s.host);
+            if (s.host) s.host_online = !!m?.online;
+          }
+        }
+        break;
+      case 'workspaces':
+        if (ov && e.data) ov.workspaces = e.data;
         break;
       case 'channel':
         if (ov && e.data) {

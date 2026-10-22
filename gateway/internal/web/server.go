@@ -24,7 +24,7 @@ import (
 
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/config"
-	"nano-agent/gateway/internal/device"
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
 )
@@ -49,10 +49,10 @@ type Server struct {
 	sessions  map[string]time.Time // 登录令牌 → 过期时间
 	loopback  bool                 // 只监听本机：要检查 Host 头
 	regCancel context.CancelFunc   // 进行中的飞书扫码注册
-	devices   *device.Manager
+	devices   *host.Manager
 }
 
-func (s *Server) SetDevices(m *device.Manager) { s.devices = m }
+func (s *Server) SetDevices(m *host.Manager) { s.devices = m }
 
 // New 创建网页服务。密码来自 web.password，没配置就用数据目录里的 web.secret（没有就生成一个）。
 func New(a *app.App, conf *config.Store, p *persona.Loader, newLLM func(config.LLM) (llm.Client, error), log *slog.Logger) (*Server, error) {
@@ -155,12 +155,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices", s.auth(s.getDevices))
 	mux.HandleFunc("POST /api/devices", s.auth(s.saveDevice))
 	mux.HandleFunc("PUT /api/devices/listener", s.auth(s.deviceListener))
-	mux.HandleFunc("GET /api/devices/package", s.auth(s.devicePackage))
 	mux.HandleFunc("POST /api/pairing/{id}", s.auth(s.decidePair))
 	mux.HandleFunc("DELETE /api/paired/{node}", s.auth(s.unpair))
 	mux.HandleFunc("DELETE /api/devices/{id}", s.auth(s.deleteDevice))
 	mux.HandleFunc("POST /api/devices/{id}/connect", s.auth(s.connectDevice))
 	mux.HandleFunc("POST /api/devices/{id}/disconnect", s.auth(s.disconnectDevice))
+	mux.HandleFunc("GET /api/workspaces", s.auth(s.getWorkspaces))
+	mux.HandleFunc("POST /api/workspaces", s.auth(s.addWorkspace))
+	mux.HandleFunc("PUT /api/workspaces/default", s.auth(s.defaultWorkspace))
+	mux.HandleFunc("DELETE /api/workspaces/{id}", s.auth(s.removeWorkspace))
 	mux.HandleFunc("GET /api/events", s.auth(s.events))
 	mux.HandleFunc("POST /api/sessions", s.auth(s.newSession))
 	mux.HandleFunc("GET /api/sessions/{sid}", s.auth(s.getSession))

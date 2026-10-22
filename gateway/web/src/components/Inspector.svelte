@@ -1,10 +1,11 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, endpointLabel, homeShort, modeMeta, num, pct, since, stateLabel } from '../lib/format';
-  import type { EndpointInfo, SessionInfo, Usage } from '../lib/types';
+  import { ago, channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath, since, stateLabel } from '../lib/format';
+  import type { EndpointInfo, MachineInfo, SessionInfo, Usage, WorkspaceInfo } from '../lib/types';
   import FieldGroup from './FieldGroup.svelte';
-  import DirInput from './DirInput.svelte';
+  import DirPicker from './DirPicker.svelte';
+  import WorkspacePicker from './WorkspacePicker.svelte';
   import FeishuQR from './FeishuQR.svelte';
   import Icon from './Icon.svelte';
 
@@ -17,15 +18,20 @@
         return { icon: 'hub', color: 'var(--c-gateway)', title: '网关', sub: `已运行 ${since(ov.gateway.started)}` };
       case 'model':
         return { icon: 'sparkles', color: 'var(--c-model)', title: ov.model.model || '模型', sub: ov.model.base_url || '还没配置接口' };
-      case 'kernel': {
-        if (!target.node) return { icon: 'shield', color: 'var(--c-kernel)', title: '内核', sub: ov.kernels.length ? `${ov.kernels.length} 个在线` : '没有连接' };
-        const k = ov.kernels.find((x) => x.node === target.node);
-        return { icon: 'shield', color: k ? 'var(--c-kernel)' : 'var(--muted)', title: `内核 · ${target.node}`, sub: k ? `已连接 ${since(k.since)}` : '不在线' };
+      case 'kernel':
+        return { icon: 'shield', color: 'var(--c-kernel)', title: '内核', sub: ov.kernels.length ? `${ov.kernels.length} 个在线` : '没有连接' };
+      case 'machine': {
+        if (!target.name) return { icon: 'hub', color: 'var(--c-kernel)', title: '机器', sub: '能放工作目录的地方' };
+        const m = store.machines.find((x) => x.name === target.name);
+        const kind = machineMeta[m?.kind ?? 'kernel'];
+        return { icon: kind.icon, color: m?.online ? 'var(--c-kernel)' : 'var(--muted)', title: target.name,
+          sub: (m?.kind === 'local' ? '网关所在的机器' : kind.label) + (m?.online ? ' · 在线' : ' · 现在用不了') };
       }
-      case 'workspace':
-        return { icon: 'folder', color: 'var(--c-dir)', title: '工作目录与沙箱', sub: '工具能碰到的范围' };
-      case 'dir':
-        return { icon: 'folder', color: 'var(--c-dir)', title: homeShort(target.path), sub: '工作目录' };
+      case 'workspace': {
+        if (!target.id) return { icon: 'folder', color: 'var(--c-dir)', title: '工作目录', sub: '机器 + 目录，会话从这里选' };
+        const w = (ov.workspaces ?? []).find((x) => x.id === target.id);
+        return { icon: 'folder', color: 'var(--c-dir)', title: w ? homeShort(w.path) : '工作目录', sub: w ? `${w.host} 上的工作目录` : '已经删掉了' };
+      }
       case 'channel': {
         const m = channelMeta[target.name];
         const c = ov.channels.find((x) => x.name === target.name);
@@ -101,16 +107,11 @@
       ? (ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === target.name).map((e) => ({ e, s })))
       : [],
   );
-  // 换机器：原来的工作目录是旧机器上的路径，网关会清掉
-  async function setNode(el: HTMLSelectElement) {
-    if (!sess) return;
-    const v = el.value;
-    const to = v || ov.workspace.node || '默认的机器';
-    if (sess.dirs?.length && !confirm(`换到 ${to} 上工作？原来的工作目录是 ${sess.node || '原来那台机器'} 上的路径，会清掉，需要重新选 ${to} 上的目录。`)) {
-      el.value = sess.node_set ? sess.node : '';
-      return;
-    }
-    await patchSession({ node: v });
+  // 换工作目录（也就换了机器）
+  let picking = $state(false);
+  async function chooseWorkspace(id: string) {
+    picking = false;
+    await patchSession({ workspace: id });
   }
   async function rename(title: string) {
     if (!sess || title.trim() === sess.title) return;
@@ -160,11 +161,46 @@
     Skill: '加载技能说明和附带文件',
   };
 
-  const dirSessions = $derived(
-    target.type === 'dir'
-      ? (ov.sessions ?? []).filter((s) => (s.dirs ?? []).includes(target.path) || (s.ro ?? []).includes(target.path))
-      : [],
-  );
+  // ---- 机器和工作目录 ----
+  const machine = $derived(target.type === 'machine' && target.name ? store.machines.find((m) => m.name === target.name) : undefined);
+  const ws = $derived(target.type === 'workspace' && target.id ? (ov.workspaces ?? []).find((w) => w.id === target.id) : undefined);
+  const wsSessions = $derived(ws ? (ov.sessions ?? []).filter((s) => s.workspace === ws.id) : []);
+  let browseOn = $state<MachineInfo | null>(null);
+  let addingWs = $state(false);
+  async function addOn(path: string) {
+    const m = browseOn!;
+    browseOn = null;
+    try {
+      const w = await api.post<WorkspaceInfo>('/api/workspaces', { host: m.name, path });
+      store.open({ type: 'workspace', id: w.id });
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  async function setDefault(w: WorkspaceInfo) {
+    try {
+      await api.put('/api/workspaces/default', { id: w.default ? '' : w.id });
+      store.toast({ kind: 'ok', text: w.default ? '新会话不再默认用它，新会话只聊天' : '新会话默认在这里工作' }, 2400);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  async function removeWorkspace(w: WorkspaceInfo) {
+    if (!confirm(`从列表里删掉 ${w.host}:${w.path}？${w.sessions ? `正在用它的 ${w.sessions} 个会话会改成只聊天。` : ''}机器上的文件不会动。`)) return;
+    try {
+      await api.del(`/api/workspaces/${w.id}`);
+      store.open({ type: 'workspace' });
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+  function machineStatus(m: MachineInfo | undefined) {
+    if (!m) return '不在线';
+    if (!m.online) return m.detail || '现在用不了';
+    if (m.kind === 'local') return m.kernels.length ? `内核 ${m.kernels.join('、')} 在这台机器上，工具由它直接执行` : '这台机器上没有在线的内核，工具由网关直接执行';
+    if (m.kind === 'ssh') return '网关通过 SSH 连着，工具由网关在服务器上执行（服务器上不跑内核）';
+    return `内核 ${m.name} 在这台电脑上，工具由它直接执行`;
+  }
 </script>
 
 <aside class="insp" style="--c: {head.color}">
@@ -229,120 +265,125 @@
       </div>
       <FieldGroup group="model" focus={store.focus} />
     {:else if target.type === 'kernel'}
-      {#if target.node}
-        {@const m = store.machines.find((x) => x.name === target.node)}
-        {#if m?.server}
-          <div class="card" class:warnc={!m.online}>
-            <div class="row"><span class="muted">SSH</span><code class="grow">{m.server.target}</code></div>
-            <div class="row"><span class="muted">经由</span><button class="lnk grow" onclick={() => store.open({ type: 'kernel', node: m.server!.via })}>{m.server.via} 的内核</button></div>
-            {#if m.online}
-              <div class="row">
-                <span class="muted">沙箱</span>
-                {#if m.server.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{m.server.landlock}</span>{:else}<span class="tag warn">没有沙箱</span>{/if}
-              </div>
-            {:else}
-              <div class="errbox">{m.server.detail || '用不了'}</div>
-            {/if}
-            <p class="note">
-              服务器上不跑内核：循环在 {m.server.via} 上，每次调用工具时通过复用的 SSH 连接在服务器上临时运行一次执行器，工作目录是服务器上的路径。
-              {#if m.server.landlock === 0 && m.online}服务器不支持 Landlock，自动模式下的 Shell 也会每次要求审批。{/if}
-            </p>
+      <p class="note lead">内核是 agent 本身：对话循环和权限判断，没有状态，可以装在好几台设备上，哪个在线都能接手。工作目录在哪台机器上，那台机器上的内核就直接执行；不在内核那台机器上的（比如 SSH 服务器），工具交给网关去执行。</p>
+      <div class="card">
+        {#each ov.kernels as k (k.node)}
+          <div class="krow">
+            <div class="row">
+              <span class="dot online"></span>
+              <strong class="grow">{k.node}</strong>
+              <span class="tag">{k.local ? '在本机' : '在别的电脑上'}</span>
+              {#if k.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{k.landlock}</span>{:else}<span class="tag warn">没有沙箱</span>{/if}
+            </div>
+            <div class="muted small">已连接 {since(k.since)} · 工具 {k.tools.join('、')}{k.skills?.length ? ` · 技能 ${k.skills.map((x) => x.name).join('、')}` : ''}</div>
           </div>
-        {:else if m?.info}
-          <div class="card">
+        {:else}
+          <p class="note">还没有内核连上来。本机运行 <code>make run</code>；别的电脑用安装脚本装好后连过来（见“设备”页）。</p>
+        {/each}
+      </div>
+      <button class="btn link" onclick={() => store.open({ type: 'machine' })}><Icon name="hub" size={14} />机器和工作目录</button>
+      <FieldGroup group="kernel" title="连接" focus={store.focus} />
+    {:else if target.type === 'machine'}
+      {#if target.name}
+        {@const m = machine}
+        <div class="card" class:warnc={!m?.online}>
+          <div class="row">
+            <span class="muted">状态</span>
+            <span class="grow">{machineStatus(m)}</span>
+          </div>
+          {#if m?.online}
             <div class="row">
               <span class="muted">沙箱</span>
-              {#if m.info.landlock > 0}
-                <span class="tag ok"><Icon name="shield" size={11} />Landlock v{m.info.landlock}</span>
-              {:else}
-                <span class="tag warn">没有沙箱</span>
-              {/if}
-              {#if m.info.local}<span class="tag">和网关同一台机器</span>{/if}
-              {#if m.isDefault}<span class="tag accent">默认机器</span>{/if}
-            </div>
-            <p class="note">
-              {#if m.info.landlock > 0}
-                每次调用工具都在沙箱里执行：工作目录可读写，系统目录只读，其他地方（包括 HOME）访问不了；不能连 unix socket、不能给沙箱外的进程发信号。
-              {:else}
-                这台机器不支持 Landlock，文件工具仍然只能访问工作目录，但命令没有沙箱，自动模式下也会每次要求审批。
-              {/if}
-            </p>
-          </div>
-          <h5>内置工具</h5>
-          <div class="tools">
-            {#each m.info.tools as name}
-              <div class="tool"><code>{name}</code><span>{toolDesc[name] ?? ''}</span></div>
-            {/each}
-          </div>
-          {#if m.info.skills?.length}
-            <h5>技能</h5>
-            <div class="tools">
-              {#each m.info.skills as skill}
-                <div class="tool skill"><code>{skill.name}</code><span>{skill.description}</span></div>
-              {/each}
+              {#if m.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{m.landlock}</span>{:else}<span class="tag warn">没有沙箱，自动模式下的命令也要审批</span>{/if}
             </div>
           {/if}
-        {:else}
-          <div class="card warnc">
-            <p class="note">{target.node} 现在不在线。它上线之前，在它上面工作的会话由别的内核顶上，只能聊天；它连回来之后自动恢复。</p>
-          </div>
-        {/if}
-        {@const users = (ov.sessions ?? []).filter((s) => s.node === target.node)}
-        {#if users.length}
-          <h5>在这台机器上工作的会话</h5>
-          <div class="card">
-            {#each users as s (s.sid)}
-              <button class="srow" onclick={() => store.open({ type: 'session', sid: s.sid })}>
-                <span class="grow">{s.title}</span>
-                {#if s.run_node && s.run_node !== s.node}<span class="tag warn">由 {s.run_node} 顶着</span>{/if}
-                <Icon name="right" size={13} />
-              </button>
-            {/each}
-          </div>
-        {/if}
-        <button class="btn link" onclick={() => store.open({ type: 'kernel' })}><Icon name="hub" size={14} />所有内核</button>
-      {:else}
-        <p class="note lead">每个内核是一个节点：一台能干活的机器。内核没有状态，上下文都在网关，哪个内核在线都能接手；但文件在具体的机器上，会话的机器不在线时，别的内核顶上只能聊天。</p>
+          {#if m?.kind === 'ssh'}
+            <a class="btn sm" href="#/devices" onclick={() => (store.inspector = null)}><Icon name="server" size={13} />在“设备”里管理这台服务器</a>
+          {/if}
+        </div>
+        <h5>这台机器上的工作目录</h5>
         <div class="card">
-          {#each store.machines as m (m.name)}
-            <button class="srow" onclick={() => store.open({ type: 'kernel', node: m.name })}>
-              <span class="dot {m.online ? 'online' : 'stopped'}"></span>
-              <span class="grow">{m.name}</span>
-              {#if m.isDefault}<span class="tag accent">默认</span>{/if}
-              {#if m.info?.local}<span class="tag">本机</span>{/if}
-              {#if m.server}<span class="tag">服务器 · 经由 {m.server.via}</span>{/if}
-              {#if !m.online}<span class="tag">离线</span>{:else if !m.info?.landlock}<span class="tag warn">没有沙箱</span>{/if}
+          {#each store.workspacesOn(target.name) as w (w.id)}
+            <button class="srow" onclick={() => store.open({ type: 'workspace', id: w.id })}>
+              <Icon name="folder" size={14} />
+              <code class="grow">{homeShort(w.path)}</code>
+              {#if w.default}<span class="tag accent">新会话默认</span>{/if}
+              <span class="muted small">{w.sessions} 个会话</span>
               <Icon name="right" size={13} />
             </button>
           {:else}
-            <p class="note">还没有内核连上来。打开“设备”下载电脑启动包，或通过 SSH 添加服务器。</p>
+            <p class="note">还没有。</p>
+          {/each}
+          <button class="btn sm" disabled={!m?.online} onclick={() => (browseOn = m!)} title={m?.online ? '' : '这台机器现在用不了'}><Icon name="plus" size={13} />浏览这台机器，添加工作目录</button>
+        </div>
+      {:else}
+        <p class="note lead">工作目录可以放在三种机器上：网关所在的本机、装了内核的电脑、网关通过 SSH 连的服务器（服务器上不跑内核）。</p>
+        <div class="card">
+          {#each store.machines as m (m.name)}
+            <button class="srow" onclick={() => store.open({ type: 'machine', name: m.name })}>
+              <span class="dot {m.online ? 'online' : 'stopped'}"></span>
+              <Icon name={machineMeta[m.kind].icon} size={14} />
+              <span class="grow">{m.name}</span>
+              <span class="tag">{m.kind === 'local' ? '网关所在的机器' : machineMeta[m.kind].label}</span>
+              {#if !m.online}<span class="tag warn">用不了</span>{:else if !m.landlock}<span class="tag warn">没有沙箱</span>{/if}
+              <Icon name="right" size={13} />
+            </button>
           {/each}
         </div>
-        <button class="btn primary" onclick={() => {store.inspector=null;store.go('#/devices');}}><Icon name="plus" size={14}/>连接电脑或服务器</button>
-        <p class="note">电脑启动包支持 Linux 和 Windows（WSL2）。SSH 可填写地址、端口、用户和密码，或使用现有别名与密钥，网关自动部署内核并接入。</p>
+        <button class="btn primary" onclick={() => { store.inspector = null; store.go('#/devices'); }}><Icon name="plus" size={14} />连接电脑或 SSH 服务器</button>
       {/if}
-      <button class="btn link" onclick={() => store.open({ type: 'workspace' })}><Icon name="folder" size={14} />工作目录与沙箱的默认设置</button>
-      <FieldGroup group="kernel" title="连接" focus={store.focus} />
     {:else if target.type === 'workspace'}
-      <p class="note lead">工作目录是工具能碰到的范围，目录外的读写和命令一律不允许。这里是新会话的默认值，每个会话可以在它自己的面板里单独改。</p>
-      <FieldGroup group="workspace" focus={store.focus} />
-    {:else if target.type === 'dir'}
-      <div class="card">
-        <code class="path">{target.path}</code>
-        <p class="note">
-          {#if (ov.workspace.dirs ?? []).includes(target.path)}这是默认工作目录之一。{/if}
-          {dirSessions.length ? `${dirSessions.length} 个会话在用它：` : '没有会话单独设置它。'}
-        </p>
-        {#each dirSessions as s}
-          <button class="srow" onclick={() => store.open({ type: 'session', sid: s.sid })}>
-            <span class="dot" style="background: {channelMeta[s.channel]?.color}"></span>
-            <span class="grow">{s.title}</span>
-            {#if (s.ro ?? []).includes(target.path)}<span class="tag">只读</span>{/if}
-            <Icon name="right" size={13} />
-          </button>
-        {/each}
-      </div>
-      <button class="btn link" onclick={() => store.open({ type: 'workspace' })}><Icon name="sliders" size={14} />默认工作目录设置</button>
+      {#if target.id}
+        {#if ws}
+          {@const m = store.machines.find((x) => x.name === ws.host)}
+          <div class="card" class:warnc={!ws.online}>
+            <code class="path">{ws.path}</code>
+            <div class="row">
+              <span class="muted">机器</span>
+              <button class="lnk grow" onclick={() => store.open({ type: 'machine', name: ws.host })}>{ws.host}</button>
+              <span class="dot {ws.online ? 'online' : 'stopped'}"></span>
+            </div>
+            <p class="note">{machineStatus(m)}</p>
+            <div class="actions">
+              <button class="btn sm" onclick={() => setDefault(ws)}><span class="star" class:on={ws.default}>★</span>{ws.default ? '取消新会话默认' : '设为新会话的默认'}</button>
+              <button class="btn sm danger" onclick={() => removeWorkspace(ws)}><Icon name="trash" size={13} />从列表删掉</button>
+            </div>
+          </div>
+          <h5>在这里工作的会话</h5>
+          <div class="card">
+            {#each wsSessions as s (s.sid)}
+              <button class="srow" onclick={() => store.open({ type: 'session', sid: s.sid })}>
+                <span class="dot" style="background: {channelMeta[s.channel]?.color}"></span>
+                <span class="grow">{s.title}</span>
+                {#if s.running}<span class="tag">{s.run_gateway ? `由 ${s.run_node} 跑，网关执行` : `由 ${s.run_node} 跑`}</span>{/if}
+                <Icon name="right" size={13} />
+              </button>
+            {:else}
+              <p class="note">还没有会话在这里工作。</p>
+            {/each}
+          </div>
+        {:else}
+          <p class="note">这个工作目录已经从列表里删掉了。</p>
+        {/if}
+      {:else}
+        <p class="note lead">工作目录是“机器 + 目录”，工具只能碰到它。会话从这个列表里选一个，标了 ★ 的是新会话的默认（没有就只聊天）。</p>
+        <div class="card">
+          {#each ov.workspaces ?? [] as w (w.id)}
+            <button class="srow" onclick={() => store.open({ type: 'workspace', id: w.id })}>
+              <span class="dot {w.online ? 'online' : 'stopped'}"></span>
+              <span class="mname">{w.host}</span>
+              <code class="grow">{homeShort(w.path)}</code>
+              {#if w.default}<span class="star on">★</span>{/if}
+              <span class="muted small">{w.sessions} 个会话</span>
+              <Icon name="right" size={13} />
+            </button>
+          {:else}
+            <p class="note">还没有工作目录，会话都只能聊天。</p>
+          {/each}
+          <button class="btn sm" onclick={() => (addingWs = true)}><Icon name="plus" size={13} />添加工作目录</button>
+        </div>
+        <FieldGroup group="workspace" focus={store.focus} />
+      {/if}
     {:else if target.type === 'channel'}
       {@const c = ov.channels.find((x) => x.name === target.name)}
       {#if c}
@@ -463,17 +504,25 @@
           {/if}
         </div>
 
-        {#if !sess.dirs?.length}
-          <div class="chatonly">
-            <Icon name="chat" size={16} />
-            <div>
-              <strong>只聊天</strong>
-              <p>还没有工作目录，这个会话不能读写文件、执行命令。在下面加一个工作目录就能用工具了。</p>
-            </div>
-          </div>
-        {/if}
-        <h5>权限模式 {#if !sess.dirs?.length}<span class="muted small">有工作目录之后生效</span>{/if}</h5>
-        <div class="modes" class:inactive={!sess.dirs?.length}>
+        <h5>工作目录 <span class="muted small">在哪台机器的哪个目录上干活</span></h5>
+        {@const sm = store.machines.find((x) => x.name === sess.host)}
+        <button class="wscard" class:off={sess.workspace && !sess.host_online} onclick={() => (picking = true)}>
+          {#if sess.workspace}
+            <span class="wsm"><Icon name={machineMeta[sm?.kind ?? 'kernel'].icon} size={14} />{sess.host}</span>
+            <code class="wsp" title={sess.path}>{shortPath(homeShort(sess.path), 44)}</code>
+            <span class="wss">
+              {#if !sess.host_online}{sess.host} 现在用不了，只能聊天
+              {:else if sess.running}{sess.run_gateway ? `由内核 ${sess.run_node} 跑，工具交给网关在 ${sess.host} 上执行` : `由 ${sess.run_node} 上的内核直接执行`}
+              {:else}{sm?.kind === 'ssh' || (sm?.kind === 'local' && !sm.kernels.length) ? '工具由网关在这台机器上执行' : '工具由这台机器上的内核直接执行'}{/if}
+            </span>
+          {:else}
+            <span class="wsm"><Icon name="chat" size={14} />只聊天</span>
+            <span class="wss">没有工作目录，不能读写文件、执行命令</span>
+          {/if}
+          <span class="change">更换</span>
+        </button>
+        <h5>权限模式 {#if !sess.workspace}<span class="muted small">有工作目录之后生效</span>{/if}</h5>
+        <div class="modes" class:inactive={!sess.workspace}>
           {#each Object.entries(modeMeta) as [m, meta]}
             <button class:active={sess.mode === m} onclick={() => sess.mode !== m && patchSession({ mode: m })}>
               <strong>{meta.label}</strong>
@@ -481,21 +530,6 @@
             </button>
           {/each}
         </div>
-
-        <h5>机器 <span class="muted small">工作目录是这台机器上的路径</span></h5>
-        <select class="machine" value={sess.node_set ? sess.node : ''} onchange={(e) => setNode(e.currentTarget)}>
-          <option value="">默认（{ov.workspace.node || '和网关同一台机器'}）</option>
-          {#each store.machines as m (m.name)}
-            <option value={m.name}>{m.name}{m.online ? '' : '（离线）'}</option>
-          {/each}
-        </select>
-        {#if sess.node && !sess.node_online}
-          <p class="note warnline"><Icon name="alert" size={13} />{sess.node} 现在不在线，这个会话由别的内核顶上，只能聊天。</p>
-        {/if}
-        <h5>工作目录 <span class="muted small">第一个是默认目录，命令从这里开始执行</span></h5>
-        <DirInput node={sess.node} values={sess.dirs ?? []} onchange={(v) => patchSession({ dirs: v })} />
-        <h5>只读目录</h5>
-        <DirInput node={sess.node} values={sess.ro ?? []} first={false} placeholder="只能读不能写的目录" onchange={(v) => patchSession({ ro: v })} />
 
         {#if ov.model.levels?.length}
           <h5>思考强度</h5>
@@ -532,6 +566,16 @@
     {/if}
   </div>
 </aside>
+
+{#if picking && sess}
+  <WorkspacePicker current={sess.workspace} onpick={chooseWorkspace} onclose={() => (picking = false)} />
+{/if}
+{#if addingWs}
+  <WorkspacePicker title="添加工作目录" none={false} onpick={(id) => { addingWs = false; store.open({ type: 'workspace', id }); }} onclose={() => (addingWs = false)} />
+{/if}
+{#if browseOn}
+  <DirPicker host={browseOn.kind === 'local' ? '' : browseOn.name} onpick={addOn} onclose={() => (browseOn = null)} />
+{/if}
 
 <style>
   .insp {
@@ -736,36 +780,6 @@
     gap: 8px;
     align-items: baseline;
   }
-  .tools {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .tool {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    padding: 7px 10px;
-    border-radius: 9px;
-    background: var(--panel-2);
-    font-size: 12.5px;
-  }
-  .tool code {
-    width: 46px;
-    color: var(--c-kernel);
-  }
-  .tool span {
-    color: var(--text-2);
-  }
-  .tool.skill {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-  }
-  .tool.skill code {
-    width: auto;
-    overflow-wrap: anywhere;
-  }
   .btn.link {
     margin-top: 14px;
     width: 100%;
@@ -790,6 +804,91 @@
   }
   .srow:hover {
     border-color: var(--line-2);
+  }
+  .srow code,
+  .srow .grow {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mname {
+    flex: none;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .star {
+    color: var(--line-2);
+  }
+  .star.on {
+    color: var(--warn);
+  }
+  .krow {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 9px 11px;
+    border-radius: 10px;
+    background: var(--panel-2);
+  }
+  .krow .small {
+    line-height: 1.6;
+  }
+  /* 会话的工作目录：整张卡片是个按钮，点开选择器 */
+  .wscard {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 10px;
+    padding: 11px 13px;
+    border-radius: 13px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: var(--text);
+  }
+  .wscard:hover {
+    border-color: var(--accent);
+  }
+  .wscard.off {
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  }
+  .wsm {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  .wsm :global(svg) {
+    color: var(--c-kernel);
+  }
+  .wsp {
+    grid-column: 1;
+    font-size: 13px;
+    color: var(--c-dir);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wss {
+    grid-column: 1;
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .wscard.off .wss {
+    color: var(--warn);
+  }
+  .change {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    font-size: 11.5px;
+    color: var(--accent-2);
   }
   .guide {
     margin-top: 12px;
@@ -879,15 +978,6 @@
     font-size: 11.5px;
     color: var(--muted);
   }
-  select.machine {
-    width: 100%;
-    height: 34px;
-    padding: 0 10px;
-    border-radius: 10px;
-    border: 1px solid var(--line);
-    background: var(--bg-2);
-    font-size: 13px;
-  }
   .warnline {
     display: flex;
     gap: 6px;
@@ -907,24 +997,6 @@
   }
   .danger-text {
     color: var(--err);
-  }
-  .chatonly {
-    display: flex;
-    gap: 10px;
-    padding: 11px 13px;
-    border-radius: 12px;
-    color: var(--c-session);
-    background: color-mix(in srgb, var(--c-session) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--c-session) 30%, transparent);
-  }
-  .chatonly strong {
-    color: var(--text);
-    font-size: 13px;
-  }
-  .chatonly p {
-    margin: 2px 0 0;
-    font-size: 12.5px;
-    color: var(--text-2);
   }
   .modes.inactive {
     opacity: 0.6;

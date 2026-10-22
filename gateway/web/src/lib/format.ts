@@ -55,6 +55,13 @@ export function truncate(s: string, n: number): string {
   return r.length > n ? r.slice(0, n - 1).join('') + '…' : s;
 }
 
+/** 机器的种类：网关所在的本机、装了内核的电脑、网关通过 SSH 连的服务器 */
+export const machineMeta: Record<string, { label: string; icon: string }> = {
+  local: { label: '本机', icon: 'hub' },
+  kernel: { label: '电脑', icon: 'laptop' },
+  ssh: { label: 'SSH 服务器', icon: 'server' },
+};
+
 export const channelMeta: Record<string, { label: string; color: string; icon: string }> = {
   cli: { label: '命令行', color: 'var(--c-cli)', icon: 'terminal' },
   web: { label: '网页', color: 'var(--c-web)', icon: 'globe' },

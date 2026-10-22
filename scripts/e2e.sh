@@ -52,19 +52,38 @@ node = pc
 exec = $ROOT/kernel/nano-exec
 approval_timeout = 5
 CONF
-# phone 的内核还能通过 SSH 在服务器 box 上干活：用假的 ssh，把命令放到 $TMP/remote/box 这个“服务器主目录”里执行
+# 网关自己通过 SSH 连服务器 box：用假的 ssh，-M 建主连接（控制路径上的文件表示），
+# 其他命令放到 $TMP/remote/box 这个“服务器主目录”里执行
 cat > "$TMP/fakessh" <<'SSH'
 #!/bin/sh
-while [ $# -gt 0 ]; do case "$1" in -o) shift 2 ;; -T) shift ;; --) shift; break ;; *) break ;; esac; done
+master=0; op=""; ctl=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -M) master=1; shift ;;
+    -N|-T) shift ;;
+    -O) op=$2; shift 2 ;;
+    -o) case "$2" in ControlPath=*) ctl=${2#ControlPath=} ;; esac; shift 2 ;;
+    -p|-l|-i) shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
 target=$1; shift
-export HOME="$REMOTE_ROOT/$target"
-mkdir -p "$HOME" && cd "$HOME" && exec sh -c "$*"
+if [ -n "$op" ]; then [ -e "$ctl" ]; exit $?; fi
+if [ "$master" = 1 ]; then touch "$ctl"; while :; do sleep 1; done; fi
+[ -e "$ctl" ] || { echo "ssh: control socket missing" >&2; exit 255; }
+export HOME="$REMOTE_ROOT/$target"; mkdir -p "$HOME"; cd "$HOME" && exec sh -c "$*"
 SSH
 chmod +x "$TMP/fakessh"
-mkdir -p "$TMP/remote/box/proj"
-{ sed 's/^node = pc$/node = phone/' "$TMP/kernel.conf"; echo "ssh = $TMP/fakessh"; echo "remote = box box"; } > "$TMP/kernel2.conf"
+mkdir -p "$TMP/remote/box/proj" "$TMP/data" "$TMP/run"
+chmod 700 "$TMP/run"
+cat > "$TMP/data/connections.json" <<'JSON'
+{"e2ebox": {"id": "e2ebox", "name": "box", "host": "box", "auto_connect": true}}
+JSON
+sed 's/^node = pc$/node = phone/' "$TMP/kernel.conf" > "$TMP/kernel2.conf"
 
-"$ROOT/gateway/nano-gateway" -c "$TMP/gateway.toml" </dev/null >"$TMP/gateway.out" 2>"$TMP/gateway.log" &
+REMOTE_ROOT="$TMP/remote" NANO_SSH_PROGRAM="$TMP/fakessh" XDG_RUNTIME_DIR="$TMP/run" \
+  "$ROOT/gateway/nano-gateway" -c "$TMP/gateway.toml" </dev/null >"$TMP/gateway.out" 2>"$TMP/gateway.log" &
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>"$TMP/kernel.log" &
 KPID=$!
 for _ in $(seq 50); do grep -q '内核已连接' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
@@ -114,7 +133,7 @@ send '!call Shell {"command":"cat ~/.profile"}';        expect "沙箱里读不�
 send '!call nope {}';                                 expect "未知工具变成错误结果" "未知工具：nope"
 send '!call Read {oops';                              expect "非法参数变成错误结果" "不是合法的 JSON 对象"
 send "/whoami";                                       expect "查身份" "你的身份：cli:local"
-send "/dir";                                          expect "查看工作目录" "1. $TMP/work"
+send "/dir";                                          expect "查看工作目录" "1. 本机:$TMP/work（当前，新会话默认）"
 send "/reset";                                        expect "清空上下文" "上下文已清空"
 send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
 send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
@@ -124,32 +143,37 @@ if ! grep -qF "回到主会话" "$TMP/data/sessions/main.jsonl"; then echo "  ok
 send "撤回之后";                                      expect "撤回后照常对话" "（mock）收到：撤回之后"
 
 # 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
-REMOTE_ROOT="$TMP/remote" XDG_RUNTIME_DIR="$TMP/run" "$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
+"$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
 for _ in $(seq 50); do grep -q 'node=phone' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
-send "/node";                                         expect "两个内核同时在线" "在线的机器：pc（和网关同一台机器）、phone（和网关同一台机器）"
+send "/node";                                         expect "两个内核同时在线" "· 本机（网关所在的机器，内核 pc、phone）"
 kill $KPID; wait $KPID 2>/dev/null || true
 for _ in $(seq 50); do grep -q '内核连接断开.*node=pc' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
 send "pc 关机了";                                     expect "pc 掉线后 phone 顶上" "（mock）收到：pc 关机了"
 if grep -q '开始处理 sid=main node=phone' "$TMP/gateway.log"; then echo "  ok   这一轮由 phone 跑"; pass=$((pass + 1)); else echo "  FAIL 这一轮由 phone 跑"; fail=$((fail + 1)); fi
-send '!call Read {"path":"hello.txt"}';               expect "替补不能用工具" "没有使用工具的权限"
+send '!call Read {"path":"hello.txt"}';               expect_n "替补照样能用工具" "1	hello e2e" 2
 echo "pc is back" > "$TMP/work/back.txt"
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel.conf" 2>>"$TMP/kernel.log" &
 for _ in $(seq 50); do [ "$(grep -c '内核已连接 node=pc' "$TMP/gateway.log")" -ge 2 ] && break; sleep 0.1; done
 send '!call Read {"path":"back.txt"}';                expect "pc 回来后照常用工具" "1	pc is back"
 
-# 会话切到服务器 box：工具在服务器上执行（循环在 phone 的内核上）
-for _ in $(seq 100); do grep -q '服务器可用.*server=box' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
-send "/node box";                                     expect "切到服务器" "这个会话改在 box 上工作了"
-send "/dir add ~/proj";                               expect "添加服务器上的目录" "1. ~/proj"
+# 会话切到服务器 box 上的目录：网关自己连 SSH，工具交给网关在服务器上执行（服务器上不跑内核）
+for _ in $(seq 100); do grep -q '服务器已就绪.*server=box' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
+send "/dir add box:~/proj";                           expect "切到服务器上的目录" "这个会话改在 box:~/proj 上工作了"
 send '!call Write {"path":"r.txt","content":"remote-e2e"}'; expect "在服务器上写文件" "已创建"
 if [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上"; fail=$((fail + 1)); fi
+if ls "$TMP"/remote/box/.cache/nano-agent/nano-exec-* >/dev/null 2>&1 && ! ls "$TMP"/remote/box/.cache/nano-agent/ | grep -q kernel; then
+  echo "  ok   服务器上只有执行器，没有内核"; pass=$((pass + 1))
+else
+  echo "  FAIL 服务器上只有执行器，没有内核"; fail=$((fail + 1))
+fi
 send '!call Skill {"name":"demo"}';                   expect "服务器上加载技能" "技能目录：~/.cache/nano-agent/skills/"
 if find "$TMP/remote/box/.cache/nano-agent/skills" -name data.txt -exec cat {} \; | grep -qF "skill-e2e-data"; then
   echo "  ok   技能附带文件传到服务器"; pass=$((pass + 1))
 else
   echo "  FAIL 技能附带文件传到服务器"; fail=$((fail + 1))
 fi
-send "/node default";                                 expect "切回默认机器" "这个会话改在 pc 上工作了"
+send "!call Read {\"path\":\"$TMP/remote/box/.cache/nano-agent/skills/pc/demo/data.txt\"}"; expect "服务器上读技能文件" "skill-e2e-data"
+send "/dir 1";                                        expect "切回本机的目录" "这个会话改在 本机:$TMP/work 上工作了"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"

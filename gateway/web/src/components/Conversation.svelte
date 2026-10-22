@@ -7,6 +7,7 @@
   import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
   import type { Msg, SessionInfo } from '../lib/types';
   import ToolCard from './ToolCard.svelte';
+  import WorkspacePicker from './WorkspacePicker.svelte';
   import Icon from './Icon.svelte';
 
   let { sid }: { sid: string } = $props();
@@ -115,6 +116,17 @@
     for (let i = list.length - 1; i >= 0; i--) if (ok(list[i])) return i;
     return -1;
   }
+  // 换工作目录：直接在对话头部选，不用先打开会话设置
+  let picking = $state(false);
+  async function chooseWorkspace(id: string) {
+    picking = false;
+    try {
+      store.upsertSession(await api.patch<SessionInfo>(sidPath(sid), { workspace: id }));
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+
   let undoing = $state(false);
   async function undo() {
     if (undoing) return;
@@ -163,11 +175,11 @@
           <span class="tag ep" style="--c: {channelMeta[e.channel]?.color ?? 'var(--muted)'}" title="这个窗口接在这个会话上：{e.key}"><Icon name={channelMeta[e.channel]?.icon ?? 'link'} size={11} />{endpointLabel(e)}</span>
         {/each}
         {#if info}
-          {#if info.dirs?.length}
+          {#if info.workspace}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
-            <button class="tag mono" title={info.dirs[0]} onclick={() => store.open({ type: 'session', sid })}><Icon name="folder" size={11} />{shortPath(homeShort(info.dirs[0]), 36)}{info.dirs.length > 1 ? ` +${info.dirs.length - 1}` : ''}</button>
+            <button class="tag mono" class:warnt={!info.host_online} title="{info.host}:{info.path}{info.host_online ? '' : '（这台机器现在用不了）'} · 点击更换" onclick={() => (picking = true)}><Icon name="folder" size={11} />{info.host}:{shortPath(homeShort(info.path), 32)}</button>
           {:else}
-            <button class="tag" onclick={() => store.open({ type: 'session', sid })} title="没有工作目录，不能用工具。点这里添加">只聊天</button>
+            <button class="tag" onclick={() => (picking = true)} title="没有工作目录，不能用工具。点这里选一个">只聊天</button>
           {/if}
           {#if info.thinking}<span class="tag">思考 {info.thinking === 'none' ? '关闭' : info.thinking}</span>{/if}
           {#if info.usage.prompt_tokens}<span class="tag accent">缓存命中 {pct(info.usage.cached_tokens, info.usage.prompt_tokens)}</span>{/if}
@@ -190,8 +202,8 @@
           {#if eps.some((e) => e.channel !== 'web')}
             <p class="muted">{eps.filter((e) => e.channel !== 'web').map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
           {/if}
-          {#if !info?.dirs?.length}
-            <p class="muted">想让它读写文件、执行命令？先在 <button class="lnk" onclick={() => store.open({ type: 'session', sid })}>会话设置</button> 里给它一个工作目录。</p>
+          {#if info && !info.workspace}
+            <p class="muted">想让它读写文件、执行命令？先给它 <button class="lnk" onclick={() => (picking = true)}>选一个工作目录</button>，本机或者 SSH 服务器上的都行。</p>
           {/if}
         </div>
       {/if}
@@ -295,6 +307,10 @@
 </div>
 {/if}
 
+{#if picking && info}
+  <WorkspacePicker current={info.workspace} onpick={chooseWorkspace} onclose={() => (picking = false)} />
+{/if}
+
 <style>
   .conv {
     flex: 1;
@@ -344,6 +360,10 @@
   .chips .mono {
     font-family: var(--mono);
     font-size: 11px;
+  }
+  .chips .warnt {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
   }
   .scroll {
     flex: 1;

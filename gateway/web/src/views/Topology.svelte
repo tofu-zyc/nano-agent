@@ -2,17 +2,17 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api } from '../lib/api';
-  import { ago, channelMeta, homeShort, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
+  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
   import Icon from '../components/Icon.svelte';
-  import type { Ev, Machine, SessionInfo, Target } from '../lib/types';
+  import type { Ev, MachineInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'kernel' | 'dir' | 'more';
+  type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'machine' | 'workspace' | 'more';
   type N = { id: string; kind: Kind; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
 
   const MAX_SESSIONS = 9;
   const ORDER = ['cli', 'web', 'telegram', 'feishu'];
-  const X = { chan: 0, sess: 290, gw: 640, right: 850, dir: 1170 };
+  const X = { chan: 0, sess: 290, gw: 640, right: 850, ws: 1170 };
 
   // 拖动过的节点记下偏移量（存在浏览器里，下次打开还是这样摆）
   function loadOffsets(): Record<string, { x: number; y: number }> {
@@ -88,47 +88,29 @@
     nodes.push({ id: 'model', kind: 'model', x: X.right, y: cy - 118, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
     edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
 
-    // 内核（节点）：在线的，加上有会话要在上面工作但不在线的；一个都没有时画一个“未连接”
-    const machines: Machine[] = store.machines.length ? store.machines : [{ name: '', online: false, isDefault: false }];
-    const kid = (m: string) => 'k:' + (machines.some((x) => x.name === m) ? m : machines[0].name);
+    // 机器：本机（网关所在的）、SSH 服务器、装了内核的电脑。工作目录挂在它所在的机器下面
+    const machines: MachineInfo[] = store.machines;
     machines.forEach((m, i) => {
-      const id = 'k:' + m.name;
-      nodes.push({ id, kind: 'kernel', x: X.right, y: cy + 38 + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
-        target: m.name ? { type: 'kernel', node: m.name } : { type: 'kernel' }, data: m });
+      const id = 'm:' + m.name;
+      nodes.push({ id, kind: 'machine', x: X.right, y: cy + 38 + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
+        target: { type: 'machine', name: m.name }, data: m });
       edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--c-kernel)' : 'var(--err)', dashed: !m.online });
     });
 
-    // 工作目录：显示出来的会话用到的，加上默认工作目录。挂在它所在的机器下面
-    type DirInfo = { path: string; machine: string; sessions: string[]; ro: boolean; def: boolean };
-    const dirs = new Map<string, DirInfo>();
-    const add = (machine: string, d: string, sid: string | null, ro: boolean) => {
-      const key = kid(machine) + '>' + d;
-      const cur = dirs.get(key) ?? { path: d, machine: kid(machine), sessions: [], ro: true, def: false };
-      if (sid && !cur.sessions.includes(sid)) cur.sessions.push(sid);
-      if (!ro) cur.ro = false;
-      if (!sid) cur.def = true;
-      dirs.set(key, cur);
-    };
-    for (const d of ov.workspace.dirs ?? []) add(ov.workspace.node, d, null, false);
-    for (const s of all) {
-      for (const d of s.dirs ?? []) add(s.node, d, s.sid, false);
-      for (const d of s.ro ?? []) add(s.node, d, s.sid, true);
-    }
-    const order = (k: string) => machines.findIndex((m) => 'k:' + m.name === k);
-    const list = [...dirs.entries()].sort((a, b) => order(a[1].machine) - order(b[1].machine)).slice(0, 8);
-    const kcy = cy + 38 + (machines.length * 96 - 16) / 2;
-    list.forEach(([key, info], i) => {
-      const y = kcy + (i - (list.length - 1) / 2) * 56;
-      const online = machines[order(info.machine)]?.online;
-      nodes.push({ id: 'd:' + key, kind: 'dir', x: X.dir, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
-        target: { type: 'dir', path: info.path }, data: info });
-      edges.push({ id: `${info.machine}>d:${key}`, from: info.machine, to: 'd:' + key, color: 'var(--c-dir)', dashed: !online });
+    const order = (h: string) => machines.findIndex((m) => m.name === h);
+    const list = (ov.workspaces ?? []).filter((w) => order(w.host) >= 0).sort((a, b) => order(a.host) - order(b.host)).slice(0, 8);
+    const mcy = cy + 38 + (machines.length * 96 - 16) / 2;
+    list.forEach((w, i) => {
+      const y = mcy + (i - (list.length - 1) / 2) * 56;
+      nodes.push({ id: 'w:' + w.id, kind: 'workspace', x: X.ws, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
+        target: { type: 'workspace', id: w.id }, data: w });
+      edges.push({ id: `m:${w.host}>w:${w.id}`, from: 'm:' + w.host, to: 'w:' + w.id, color: 'var(--c-dir)', dashed: !w.online });
     });
-    if (list.length === 0) {
-      const k = 'k:' + machines[0].name;
-      nodes.push({ id: 'd:none', kind: 'dir', x: X.dir, y: kcy - 22, w: 210, h: 44, color: 'var(--muted)',
-        target: { type: 'workspace' }, data: { path: '', sessions: [], none: true } });
-      edges.push({ id: `${k}>d:none`, from: k, to: 'd:none', color: 'var(--muted)', dashed: true });
+    if (list.length === 0 && machines.length) {
+      const m = 'm:' + machines[0].name;
+      nodes.push({ id: 'w:none', kind: 'workspace', x: X.ws, y: mcy - 22, w: 210, h: 44, color: 'var(--muted)',
+        target: { type: 'workspace' }, data: null });
+      edges.push({ id: `${m}>w:none`, from: m, to: 'w:none', color: 'var(--muted)', dashed: true });
     }
 
     for (const n of nodes) {
@@ -139,7 +121,7 @@
       }
     }
     const byId = new Map(nodes.map((n) => [n.id, n]));
-    return { nodes, edges, byId, W: X.dir + 210, H, shownSids: new Set(shown.map((s) => s.sid)) };
+    return { nodes, edges, byId, W: X.ws + 210, H, shownSids: new Set(shown.map((s) => s.sid)) };
   });
 
   function anchor(n: N, side: 'l' | 'r') {
@@ -292,8 +274,6 @@
 
   // 每个会话正在处理的这一轮是从哪个渠道来的：回复的光点流回那里
   const origin = new Map<string, string>();
-  // 每个会话这一轮在哪个内核上跑：工具调用的光点流向那里
-  const runNodes = new Map<string, string>();
 
   function onEvent(e: Ev) {
     const sid = e.sid ?? '';
@@ -327,13 +307,14 @@
         break;
       }
       case 'tool': {
-        const k = 'k:' + (runNodes.get(sid) ?? s?.run_node ?? s?.node ?? '');
-        const dir = s?.dirs?.[0];
-        chain(dir ? [[`gw>${k}`, false], [`${k}>d:${k}>${dir}`, false]] : [[`gw>${k}`, false]], 'var(--c-kernel)', 600);
+        // 工具在工作目录所在的机器上执行
+        if (!s?.host) break;
+        const m = 'm:' + s.host;
+        chain([[`gw>${m}`, false], [`${m}>w:${s.workspace}`, false]], 'var(--c-kernel)', 600);
         break;
       }
       case 'tool_result':
-        pulse(`gw>k:${runNodes.get(sid) ?? s?.run_node ?? s?.node ?? ''}`, e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
+        if (s?.host) pulse(`gw>m:${s.host}`, e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
         break;
       case 'say':
         if (sessEdge(sid)) chain([[`s:${sid}>gw`, true], [`c:${ch}>s:${sid}`, true]], chColor);
@@ -341,7 +322,6 @@
         break;
       case 'run':
         if (e.kind === 'start' && e.data?.channel) origin.set(sid, e.data.channel);
-        if (e.kind === 'start' && e.data?.node) runNodes.set(sid, e.data.node);
         if (e.kind === 'end') {
           clearInterval(busyModel.get(sid));
           busyModel.delete(sid);
@@ -369,9 +349,9 @@
 
   const phases = $derived(Object.values(store.phase));
   const modelBusy = $derived(phases.includes('thinking') || phases.includes('writing'));
-  // 正在执行工具的内核
-  const busyNodes = $derived(
-    new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').map((s) => s.run_node || s.node)),
+  // 正在执行工具的机器
+  const busyHosts = $derived(
+    new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').map((s) => s.host)),
   );
   const t = $derived(store.ov!.totals);
   const ov = $derived(store.ov!);
@@ -388,13 +368,21 @@
     }
   }
 
+  function machineSub(m: MachineInfo) {
+    if (!m.online) return truncate(m.detail || '现在用不了', 18);
+    const box = m.landlock > 0 ? `Landlock v${m.landlock} 沙箱` : '没有沙箱';
+    if (m.kind === 'ssh') return `网关直连 · ${box}`;
+    if (m.kernels.length) return truncate(`内核 ${m.kernels.join('、')} · ${box}`, 22);
+    return `网关执行工具 · ${box}`;
+  }
+
   function sessSub(s: SessionInfo) {
     const ph = store.phase[s.sid];
     if (ph === 'thinking') return '正在思考…';
     if (ph === 'writing') return '正在回复…';
     if (ph === 'tool') return '正在执行工具…';
     if (s.running) return '处理中…';
-    const mode = s.dirs?.length ? (modeMeta[s.mode]?.label ?? s.mode) : '只聊天';
+    const mode = s.workspace ? (modeMeta[s.mode]?.label ?? s.mode) : '只聊天';
     return `${mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
   }
 
@@ -537,36 +525,25 @@
             <text x="66" y="28" class="t3">模型 · {ov.model.provider}</text>
             <text x="66" y="48" class="t1">{truncate(ov.model.model || '未配置', 19)}</text>
             <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '默认'}</text>
-          {:else if n.kind === 'kernel'}
-            {@const m = n.data as Machine}
-            <rect class="card" class:active={busyNodes.has(m.name)} class:bad={!m.online && !m.name} class:off={!m.online && !!m.name} width={n.w} height={n.h} rx="16" />
+          {:else if n.kind === 'machine'}
+            {@const m = n.data as MachineInfo}
+            <rect class="card" class:active={busyHosts.has(m.name)} class:off={!m.online} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
-            <g class="ico"><Icon name={m.server ? 'terminal' : 'shield'} x={24} y={28} size={24} /></g>
-            <text x="66" y="28" class="t3">{m.server ? `服务器 · 经由 ${truncate(m.server.via, 10)}` : '内核'}{m.info?.local ? ' · 本机' : ''}{m.isDefault ? ' · 默认' : ''}</text>
-            {#if m.server}
-              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
-              <text x="66" y="66" class="t2" class:errt={!m.online}>{m.online ? `SSH · ${m.server.landlock > 0 ? `Landlock v${m.server.landlock} 沙箱` : '没有沙箱'}` : truncate(m.server.detail || '用不了', 18)}</text>
-            {:else if m.info}
-              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
-              <text x="66" y="66" class="t2">{m.info.landlock > 0 ? `Landlock v${m.info.landlock} 沙箱` : '没有沙箱'} · {m.info.tools.length} 个工具</text>
-            {:else if m.name}
-              <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
-              <text x="66" y="66" class="t2">离线 · 会话由别的内核顶着</text>
-            {:else}
-              <text x="66" y="48" class="t1 errt">未连接</text>
-              <text x="66" y="66" class="t2">启动 nano-kernel 后自动连上</text>
-            {/if}
-            <circle cx={n.w - 16} cy="16" r="4" class="sdot {m.online ? 'online' : m.name ? '' : 'error'}" />
-          {:else if n.kind === 'dir'}
-            {@const d = n.data}
-            <rect class="card" class:off={d.none} width={n.w} height={n.h} rx="12" />
+            <g class="ico"><Icon name={machineMeta[m.kind].icon} x={24} y={28} size={24} /></g>
+            <text x="66" y="28" class="t3">{m.kind === 'local' ? '网关所在的机器' : machineMeta[m.kind].label}</text>
+            <text x="66" y="48" class="t1">{truncate(m.name, 18)}</text>
+            <text x="66" y="66" class="t2" class:errt={!m.online}>{machineSub(m)}</text>
+            <circle cx={n.w - 16} cy="16" r="4" class="sdot {m.online ? 'online' : 'error'}" />
+          {:else if n.kind === 'workspace'}
+            {@const w = n.data as WorkspaceInfo | null}
+            <rect class="card" class:off={!w} width={n.w} height={n.h} rx="12" />
             <g class="ico small"><Icon name="folder" x={13} y={12} size={20} /></g>
-            {#if d.none}
+            {#if !w}
               <text x="42" y="20" class="t1">还没有工作目录</text>
-              <text x="42" y="35" class="t2">点击设置默认工作目录</text>
+              <text x="42" y="35" class="t2">点击添加一个</text>
             {:else}
-              <text x="42" y="20" class="t1 mono">{shortPath(homeShort(d.path), 22)}</text>
-              <text x="42" y="35" class="t2">{d.def ? '默认 · ' : ''}{d.sessions.length} 个会话{d.ro ? ' · 只读' : ''}</text>
+              <text x="42" y="20" class="t1 mono">{shortPath(homeShort(w.path), 22)}</text>
+              <text x="42" y="35" class="t2">{w.default ? '默认 · ' : ''}{w.sessions} 个会话</text>
             {/if}
           {/if}
         </g>
@@ -593,7 +570,7 @@
     <span style="--c: var(--c-gateway)">网关</span>
     <i>→</i>
     <span style="--c: var(--c-model)">模型</span>
-    <span style="--c: var(--c-kernel)">内核</span>
+    <span style="--c: var(--c-kernel)">机器</span>
     <i>→</i>
     <span style="--c: var(--c-dir)">工作目录</span>
     <em>点节点查看和修改设置 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处复位</em>

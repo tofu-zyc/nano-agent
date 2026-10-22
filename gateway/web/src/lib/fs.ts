@@ -1,12 +1,12 @@
-// 浏览内核那台机器上的目录（网关转给内核列出，只有子目录名）
+// 浏览一台机器上的目录（本机和 SSH 服务器由网关列，装了内核的电脑由它的内核列；只有子目录名）
 import { api } from './api';
 
 export type DirEntry = { name: string; blocked?: boolean };
 export type DirListing = { path: string; home: string; blocked: boolean; entries: DirEntry[]; truncated: boolean };
 
-/** 列出机器 node 上的目录；node 为空时用默认的机器 */
-export function listDir(path: string, node = ''): Promise<DirListing> {
-  return api.get<DirListing>('/api/fs?path=' + encodeURIComponent(path) + (node ? '&node=' + encodeURIComponent(node) : ''));
+/** 列出机器 host 上的目录；host 为空时是本机（网关所在的机器） */
+export function listDir(path: string, host = ''): Promise<DirListing> {
+  return api.get<DirListing>('/api/fs?path=' + encodeURIComponent(path) + (host ? '&host=' + encodeURIComponent(host) : ''));
 }
 
 /** 主目录下的路径写成 ~ 开头，短一些，换了机器也能用 */

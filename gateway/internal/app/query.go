@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
@@ -40,16 +41,16 @@ type SessionInfo struct {
 	Channel     string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints   []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title       string         `json:"title"`
-	Node        string         `json:"node"`        // 在哪台机器上工作，空表示不挑
-	NodeSet     bool           `json:"node_set"`    // 会话单独设置了机器（否则用默认的）
-	NodeOnline  bool           `json:"node_online"` // 那台机器的内核在线
+	Workspace   string         `json:"workspace"`   // 工作目录的 ID（workspaces.go），空表示只聊天
+	Host        string         `json:"host"`        // 工作目录所在的机器
+	Path        string         `json:"path"`        // 工作目录的路径
+	HostOnline  bool           `json:"host_online"` // 那台机器现在能用
 	RunNode     string         `json:"run_node"`    // 正在跑这一轮的内核
+	RunGateway  bool           `json:"run_gateway"` // 这一轮的工具交给网关执行（异机模式）
 	Running     bool           `json:"running"`
 	Pending     int            `json:"pending"` // 待审批的工具调用
 	LastAt      int64          `json:"last_at"` // 最后一条消息的时间（秒）
 	Messages    int            `json:"messages"`
-	Dirs        []string       `json:"dirs"`
-	RO          []string       `json:"ro"`
 	Mode        string         `json:"mode"`
 	Thinking    string         `json:"thinking"`
 	Persona     string         `json:"persona"`      // 用的人格文件名
@@ -69,19 +70,20 @@ type ApprovalInfo struct {
 }
 
 type Snapshot struct {
-	Started   int64          `json:"started"`
-	Kernels   []KernelInfo   `json:"kernels"`
-	Node      string         `json:"node"` // 默认的机器
-	Totals    Totals         `json:"totals"`
-	Sessions  []SessionInfo  `json:"sessions"`
-	Approvals []ApprovalInfo `json:"approvals"`
+	Started    int64           `json:"started"`
+	Kernels    []KernelInfo    `json:"kernels"`
+	Machines   []MachineInfo   `json:"machines"`
+	Workspaces []WorkspaceInfo `json:"workspaces"`
+	Totals     Totals          `json:"totals"`
+	Sessions   []SessionInfo   `json:"sessions"`
+	Approvals  []ApprovalInfo  `json:"approvals"`
 }
 
 // Snapshot 返回网关当前的全貌：内核、所有会话（包括只在磁盘上的）、待审批、累计用量。
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Node: a.defaultNode()}
+	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Machines: a.machineList(), Workspaces: a.workspaceInfos()}
 	for _, sid := range a.sessionIDs() {
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
@@ -102,8 +104,11 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
-	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title, Dirs: w.dirs, RO: st.RO,
+	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), Compacted: st.Base}
+	if w.ws != nil {
+		info.Workspace, info.Host, info.Path, info.HostOnline = w.ws.ID, w.ws.Host, w.ws.Path, a.hostUsable(w.ws.Host)
+	}
 	if len(info.Endpoints) > 0 {
 		info.Channel = info.Endpoints[0].Channel
 	}
@@ -117,9 +122,8 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Title = sid
 		}
 	}
-	info.Node, info.NodeSet, info.NodeOnline = w.node, st.Node != "", a.via(w.node) != ""
 	if s := a.sessions[sid]; s != nil && s.run != nil {
-		info.Running, info.RunNode = true, s.run.node
+		info.Running, info.RunNode, info.RunGateway = true, s.run.node, s.run.gateway
 	}
 	for _, ap := range a.approvals {
 		if ap.sid == sid {
@@ -165,12 +169,10 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。
 type SessionPatch struct {
-	Title    *string   `json:"title"`
-	Node     *string   `json:"node"` // 空字符串表示用默认的机器
-	Dirs     *[]string `json:"dirs"`
-	RO       *[]string `json:"ro"`
-	Mode     *string   `json:"mode"`
-	Thinking *string   `json:"thinking"` // 空字符串表示用默认值
+	Title     *string `json:"title"`
+	Workspace *string `json:"workspace"` // 工作目录的 ID，空字符串表示只聊天
+	Mode      *string `json:"mode"`
+	Thinking  *string `json:"thinking"` // 空字符串表示用默认值
 }
 
 func (a *App) UpdateSession(sid string, p SessionPatch) error {
@@ -179,39 +181,18 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
-	if p.Node != nil { // 先换机器（会清掉旧机器上的工作目录），再设置这台机器上的目录
-		if _, err := a.setNode(sid, strings.TrimSpace(*p.Node)); err != nil {
+	if p.Workspace != nil {
+		if _, err := a.setSessionWorkspace(sid, *p.Workspace); err != nil {
 			return err
 		}
 	}
 	st := a.store.Settings(sid)
 	var errs []error
-	clean := func(list []string) []string {
-		out := []string{}
-		for _, d := range list {
-			d = cleanPath(strings.TrimSpace(d))
-			if d == "" || slices.Contains(out, d) {
-				continue
-			}
-			if msg := a.checkDir(d); msg != "" {
-				errs = append(errs, errors.New(msg))
-				continue
-			}
-			out = append(out, d)
-		}
-		return out
-	}
 	if p.Title != nil {
 		st.Title = strings.TrimSpace(*p.Title)
 		if len([]rune(st.Title)) > 40 {
 			errs = append(errs, errors.New("名字最长 40 个字"))
 		}
-	}
-	if p.Dirs != nil {
-		st.Dirs, st.DirsSet = clean(*p.Dirs), true
-	}
-	if p.RO != nil {
-		st.RO = clean(*p.RO)
 	}
 	if p.Mode != nil {
 		if _, ok := modeNames[*p.Mode]; !ok {
@@ -270,6 +251,9 @@ func (a *App) cancelRun(s *sess) {
 		s.run.cancelLLM()
 		s.run.cancelLLM = nil
 	}
+	for _, cancel := range s.run.execs {
+		cancel() // 交给网关执行的工具也马上停下（内核也会发 exec_cancel）
+	}
 	a.hub.Send(s.run.node, proto.Msg{T: proto.TCancel, SID: s.sid}) // 内核会回 done(cancelled)
 }
 
@@ -282,24 +266,44 @@ type DirListing struct {
 	Truncated bool             `json:"truncated"`
 }
 
-// ListDir 请节点 node 上的内核列出那台机器上的一个目录，网页上选工作目录用。path 可以是 ~ 开头。
-// node 为空时用默认的机器。
-func (a *App) ListDir(ctx context.Context, node, path string) (*DirListing, error) {
+// ListDir 列出机器 hostName 上的一个目录（只有子目录），网页上选工作目录用。path 可以是 ~ 开头。
+// 本机和 SSH 服务器由网关自己列；装了内核的电脑请它的内核列。
+func (a *App) ListDir(ctx context.Context, hostName, path string) (*DirListing, error) {
+	if hostName == "" {
+		hostName = host.LocalName
+	}
 	a.mu.Lock()
-	if node == "" {
-		node = a.defaultNode()
+	var h host.Host
+	var info host.Info
+	ok := false
+	if a.hosts != nil {
+		h, info, ok = a.hosts.Host(hostName)
 	}
-	if node == "" {
-		node = a.substitute()
+	kernel := ""
+	if hostName == host.LocalName {
+		kernel = a.localKernel()
+	} else if a.nodes[hostName] != nil {
+		kernel = hostName
 	}
-	kernel := a.via(node)
-	if kernel == "" {
-		a.mu.Unlock()
-		if node == "" {
-			return nil, errors.New("没有在线的内核，没法浏览目录")
+	a.mu.Unlock()
+	if h != nil {
+		l, err := h.Ls(ctx, path)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("%s 不在线，没法浏览它上面的目录", node)
+		out := &DirListing{Path: l.Path, Home: l.Home, Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
+		if out.Entries == nil {
+			out.Entries = []proto.DirEntry{}
+		}
+		return out, nil
 	}
+	if kernel == "" {
+		if ok {
+			return nil, fmt.Errorf("%s 现在用不了：%s", hostName, info.Detail)
+		}
+		return nil, fmt.Errorf("%s 不在线，没法浏览它上面的目录", hostName)
+	}
+	a.mu.Lock()
 	a.lsSeq++
 	id := fmt.Sprintf("ls%d", a.lsSeq)
 	ch := make(chan *proto.Msg, 1)
@@ -310,11 +314,7 @@ func (a *App) ListDir(ctx context.Context, node, path string) (*DirListing, erro
 		delete(a.pendingLs, id)
 		a.mu.Unlock()
 	}()
-	msg := proto.Msg{T: proto.TLs, ID: id, Path: path}
-	if kernel != node {
-		msg.Node = node // 服务器上的目录，由能 SSH 过去的内核去列
-	}
-	if !a.hub.Send(kernel, msg) {
+	if !a.hub.Send(kernel, proto.Msg{T: proto.TLs, ID: id, Path: path}) {
 		return nil, errors.New("内核没有连接，没法浏览目录")
 	}
 	select {

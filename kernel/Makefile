@@ -6,7 +6,7 @@ STD      := -std=c11
 
 BIN   := nano-kernel
 EXEC  := nano-exec
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/remote.c src/skills.c src/util.c
+SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/skills.c src/util.c
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o

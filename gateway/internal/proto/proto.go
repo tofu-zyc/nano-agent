@@ -25,20 +25,23 @@ const (
 	TDone       = "done"
 	TPing       = "ping"
 	TLsResult   = "ls_result"
-	TRemotes    = "remotes" // 内核能连到的服务器有变化
-	TTools      = "tools"   // 技能目录变化后更新工具定义
+	TExec       = "exec"        // 异机模式：请网关执行一次工具
+	TExecCancel = "exec_cancel" // 工具超时或这一轮被停止：请网关停下
+	TSkillFiles = "skill_files" // 异机模式：把技能目录的文件交给网关，传到执行的机器上
+	TTools      = "tools"       // 技能目录变化后更新工具定义
 
 	// 网关 → 内核
-	TWelcome = "welcome"
-	TError   = "error"
-	TInput   = "input"
-	TTurn    = "turn"
-	TApprove = "approve"
-	TCancel  = "cancel"
-	TPong    = "pong"
-	TLs      = "ls"      // 列目录，网页上选工作目录用
-	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
-	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
+	TWelcome    = "welcome"
+	TError      = "error"
+	TInput      = "input"
+	TTurn       = "turn"
+	TApprove    = "approve"
+	TCancel     = "cancel"
+	TPong       = "pong"
+	TLs         = "ls"          // 列目录，网页上选工作目录用
+	TExecResult = "exec_result" // exec / skill_files 的结果
+	TPairing    = "pairing"     // 收到了配对请求，等管理员确认（Code 是确认码）
+	TPaired     = "paired"      // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
 )
 
 // error 的 reason：内核据此决定怎么办
@@ -78,7 +81,6 @@ type Msg struct {
 	Tools   []ToolSpec  `json:"tools,omitempty"`
 	Skills  []SkillSpec `json:"skills,omitempty"`
 	Sandbox *Sandbox    `json:"sandbox,omitempty"`
-	Remotes []Remote    `json:"remotes,omitempty"` // hello / remotes：内核通过 SSH 能用的服务器
 
 	SID    string `json:"sid,omitempty"`
 	From   string `json:"from,omitempty"`
@@ -90,6 +92,16 @@ type Msg struct {
 	Dirs []string `json:"dirs,omitempty"` // 工作目录，第一个是默认目录
 	RO   []string `json:"ro,omitempty"`   // 额外的只读路径
 	RW   []string `json:"rw,omitempty"`   // 额外的读写路径
+	// input：exec 为 gateway 表示工作目录不在这个内核的机器上，工具交给网关执行（异机模式）；
+	// landlock 是执行的那台机器的沙箱版本（0 表示没有，自动模式下的 Shell 也要审批）
+	Exec     string `json:"exec,omitempty"`
+	Landlock int    `json:"landlock,omitempty"`
+
+	// exec：工具的时限和输出上限；skill_files：技能名和文件
+	TimeoutMs int         `json:"timeout_ms,omitempty"`
+	MaxOutput int         `json:"max_output,omitempty"`
+	Skill     string      `json:"skill,omitempty"`
+	Files     []SkillFile `json:"files,omitempty"`
 
 	ID      string          `json:"id,omitempty"`
 	Name    string          `json:"name,omitempty"`
@@ -127,14 +139,11 @@ type SkillSpec struct {
 	Description string `json:"description"`
 }
 
-// Remote 是内核通过 SSH 执行工具的一台服务器（服务器上不跑内核）。input 的 node 写它的名字，
-// 这一轮的工具就在那台服务器上执行。OK 为 false 时 Detail 是原因（连不上、还在准备执行器……）。
-type Remote struct {
-	Name     string `json:"name"`
-	Target   string `json:"target"`
-	OK       bool   `json:"ok"`
-	Landlock int    `json:"landlock"`
-	Detail   string `json:"detail,omitempty"`
+// SkillFile 是技能目录里的一个文件，Data 是 base64。
+type SkillFile struct {
+	Path string `json:"path"`
+	Data string `json:"data"`
+	Exec bool   `json:"exec,omitempty"`
 }
 
 // Sandbox 是内核报告的沙箱能力。Landlock 为 0 表示没有沙箱，自动模式下的 Shell 也要审批。

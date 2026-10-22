@@ -11,3 +11,5 @@
 /kernel/nano-exec-src.tar.gz
 /kernel/build/
 /gateway/nano-gateway
+/dist/
+/build/

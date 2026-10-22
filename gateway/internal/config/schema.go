@@ -71,13 +71,9 @@ var Fields = []Field{
 	{Key: "kernel.token", Group: "kernel", Section: "连接", Label: "连接口令", Type: "secret", Restart: true,
 		Help: "和 kernel.conf 里的 token 一致"},
 	{Key: "kernel.device_listen", Group: "kernel", Section: "电脑接入", Label: "电脑接入地址", Type: "string",
-		Help: "额外的 TCP 接入地址，例如 0.0.0.0:7700；空表示关闭。设备页面可下载启动包，跨网络使用私有网络或隧道"},
+		Help: "别的电脑上的内核来连的 TCP 地址，例如 0.0.0.0:7700；空表示关闭。第一次连接要在设备页面确认配对，跨网络使用私有网络或隧道"},
 
 	// ---- 工作目录 ----
-	{Key: "workspace.node", Group: "workspace", Section: "默认值", Label: "默认机器", Type: "string",
-		Help: "会话默认在哪个内核（节点）所在的机器上工作，填内核的名字；空表示和网关在同一台机器上的内核。默认工作目录是这台机器上的路径", Keywords: "节点 node 内核 机器 替补"},
-	{Key: "workspace.dirs", Group: "workspace", Section: "默认值", Label: "默认工作目录", Type: "list",
-		Help: "新会话用的工作目录，第一个是默认目录。要写绝对路径或 ~ 开头。每个会话可以单独改", Keywords: "目录 路径 dir"},
 	{Key: "workspace.mode", Group: "workspace", Section: "默认值", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},
 		Help: "auto：工作目录内全部直接执行；ask：写文件、执行命令前要批准；readonly：只读", Keywords: "yolo 审批 权限"},
 	{Key: "workspace.extra_ro", Group: "workspace", Section: "沙箱", Label: "额外只读路径", Type: "list",

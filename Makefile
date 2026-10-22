@@ -1,21 +1,11 @@
-.PHONY: all kernel gateway web test run chat clean
+.PHONY: all kernel gateway web test run chat clean installer install-kernel
 
 all: kernel gateway
 
 kernel:
 	$(MAKE) -C kernel
 
-KERNEL_BUNDLE = gateway/internal/device/assets/kernel-src.tar.gz
-KERNEL_SOURCE = $(wildcard kernel/src/*.c kernel/src/*.h kernel/third_party/cjson/*.c kernel/third_party/cjson/*.h) kernel/Makefile
-DEVICE_SKILL = gateway/internal/device/assets/skills.tar.gz
-
-$(DEVICE_SKILL): skills/device-connections/SKILL.md skills/device-connections/references/devices.md
-	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 -C skills device-connections
-
-$(KERNEL_BUNDLE): $(KERNEL_SOURCE)
-	tar czf $@ --sort=name --owner=0 --group=0 --mtime=@0 kernel/Makefile kernel/src kernel/third_party/cjson
-
-gateway: kernel $(KERNEL_BUNDLE) $(DEVICE_SKILL)
+gateway: kernel
 	cd gateway && go build -o nano-gateway ./cmd/nano-gateway
 
 # 重新构建网页界面（改了 gateway/web 下的前端代码之后；构建结果提交在仓库里，平时不需要 Node）
@@ -37,6 +27,23 @@ chat:
 	@test -x gateway/nano-gateway || $(MAKE) -s gateway
 	@./gateway/nano-gateway chat -c gateway.toml
 
+# 在这台机器上安装内核（开机自启，连到网关）。别的电脑用 make installer 生成的单文件安装包
+install-kernel:
+	./scripts/install-kernel.sh
+
+# 单文件内核安装包：安装脚本后面带着内核源码，拷到别的 Linux / WSL 电脑上 sh 一下就装好
+INSTALLER := dist/nano-kernel-install.sh
+installer:
+	@mkdir -p dist build/installer/kernel
+	@rm -rf build/installer/kernel/*
+	@cd kernel && tar cf - Makefile src third_party | tar xf - -C ../build/installer/kernel
+	@git describe --always --dirty 2>/dev/null > build/installer/kernel/VERSION || echo dev > build/installer/kernel/VERSION
+	@{ cat scripts/install-kernel.sh; echo; echo '__NANO_PAYLOAD__'; \
+	   tar czf - --sort=name --owner=0 --group=0 -C build/installer kernel | base64; } > $(INSTALLER).tmp
+	@chmod 755 $(INSTALLER).tmp && mv $(INSTALLER).tmp $(INSTALLER)
+	@echo "已生成 $(INSTALLER)（$$(du -h $(INSTALLER) | cut -f1)）：拷到要接入的电脑上，运行 sh nano-kernel-install.sh"
+
 clean:
 	$(MAKE) -C kernel clean
 	rm -f gateway/nano-gateway
+	rm -rf dist build

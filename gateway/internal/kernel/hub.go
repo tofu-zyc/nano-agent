@@ -170,8 +170,8 @@ func (h *Hub) send(c *conn, m proto.Msg) bool {
 	}
 }
 
-// Attach 接入网关自己建立的通道（比如 SSH 到服务器上启动的内核），不需要再开端口，
-// 也不用口令：通道是网关自己用 SSH 登录建立的，服务器上不留网关的口令。
+// Attach 接入一条网关自己建立的连接，不查口令（连接不是从监听的端口进来的）。
+// local 表示把它当成本机的内核。目前只有测试用它模拟别的电脑上的内核。
 func (h *Hub) Attach(ctx context.Context, nc net.Conn, local bool) {
 	go func() {
 		done := make(chan struct{})

@@ -1,14 +1,11 @@
 package web
 
 import (
-	"fmt"
 	"net"
 	"net/http"
 	"runtime"
-	"strconv"
-	"strings"
 
-	"nano-agent/gateway/internal/device"
+	"nano-agent/gateway/internal/host"
 )
 
 func (s *Server) hasDevices(w http.ResponseWriter) bool {
@@ -22,8 +19,33 @@ func (s *Server) getDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.hasDevices(w) {
 		return
 	}
-	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": device.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH,
-		"pairing": s.devices.PairRequests(), "paired": s.devices.PairedDevices()})
+	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": host.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH,
+		"pairing": s.devices.PairRequests(), "paired": s.devices.PairedDevices(), "addrs": lanAddrs()})
+}
+
+// lanAddrs 是这台机器的局域网地址，给别的电脑填网关地址时参考（网页常常是在本机用 localhost 打开的）。
+// 跳过回环网卡上的所有地址（WSL 会在 lo 上挂一个 10.255.255.254），私有网段排在前面。
+func lanAddrs() []string {
+	var private, other []string
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			n, ok := a.(*net.IPNet)
+			if !ok || n.IP.To4() == nil || n.IP.IsLoopback() || n.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			if n.IP.IsPrivate() {
+				private = append(private, n.IP.String())
+			} else {
+				other = append(other, n.IP.String())
+			}
+		}
+	}
+	return append(append([]string{}, private...), other...)
 }
 
 // decidePair 允许或拒绝一台电脑的配对请求。
@@ -59,7 +81,7 @@ func (s *Server) saveDevice(w http.ResponseWriter, r *http.Request) {
 	if !s.hasDevices(w) {
 		return
 	}
-	var req device.Connection
+	var req host.Connection
 	if !readJSON(w, r, &req) {
 		return
 	}
@@ -122,32 +144,48 @@ func (s *Server) deviceListener(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]string{"listener": s.devices.Listener()})
 }
-func (s *Server) devicePackage(w http.ResponseWriter, r *http.Request) {
-	if !s.hasDevices(w) {
+
+// ---- 工作目录列表 ----
+
+func (s *Server) getWorkspaces(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.app.Workspaces())
+}
+
+func (s *Server) addWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host    string `json:"host"`
+		Path    string `json:"path"`
+		Default bool   `json:"default"`
+	}
+	if !readJSON(w, r, &req) {
 		return
 	}
-	gateway := r.URL.Query().Get("gateway")
-	if gateway == "" {
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
-		}
-		gateway = "tcp:" + net.JoinHostPort(host, "7700")
-	}
-	addr := strings.TrimPrefix(gateway, "tcp:")
-	host, port, err := net.SplitHostPort(addr)
-	number, parseErr := strconv.Atoi(port)
-	if err != nil || parseErr != nil || number < 1 || number > 65535 || host == "" || strings.ContainsAny(gateway, "\r\n") {
-		writeErr(w, http.StatusBadRequest, "请填写网关的 IP 或域名和端口，例如 192.168.1.2:7700")
-		return
-	}
-	data, name, err := s.devices.Package(r.URL.Query().Get("platform"), "tcp:"+addr)
+	ws, err := s.app.AddWorkspace(r.Context(), req.Host, req.Path, req.Default)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write(data)
+	writeJSON(w, ws)
+}
+
+func (s *Server) removeWorkspace(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.RemoveWorkspace(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) defaultWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.SetDefaultWorkspace(req.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }

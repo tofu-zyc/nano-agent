@@ -10,21 +10,23 @@ export type Usage = {
 export type ChannelStatus = { state: string; identity?: string; error?: string; since: number };
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
-// 内核通过 SSH 执行工具的服务器（服务器上不跑内核）
-export type RemoteInfo = { name: string; target: string; ok: boolean; landlock: number; detail?: string };
-
-// 一个在线的内核（节点）。local 表示它和网关在同一台机器上
+// 一个在线的内核（agent）。local 表示它和网关在同一台机器上
 export type SkillInfo = { name: string; description: string };
-export type KernelInfo = { node: string; landlock: number; tools: string[]; skills: SkillInfo[]; since: number; local: boolean; remotes: RemoteInfo[] | null };
+export type KernelInfo = { node: string; landlock: number; tools: string[]; skills: SkillInfo[]; since: number; local: boolean };
 
-// 一台机器：在线的内核、内核能 SSH 过去的服务器，或者有会话要在上面工作但现在不在线的
-export type Machine = {
+// 一台能放工作目录的机器：网关所在的本机、装了内核的电脑、网关通过 SSH 连的服务器
+export type MachineInfo = {
   name: string;
-  online: boolean;
-  info?: KernelInfo;
-  isDefault: boolean;
-  server?: { via: string; target: string; landlock: number; detail?: string };
+  kind: 'local' | 'kernel' | 'ssh';
+  online: boolean; // 上面的工作目录现在能用
+  landlock: number;
+  state?: string;
+  detail?: string;
+  kernels: string[]; // 这台机器上在线的内核
 };
+
+// 工作目录：机器 + 路径。会话从列表里选一个；default 是新会话的默认
+export type WorkspaceInfo = { id: string; host: string; path: string; default?: boolean; sessions: number; online: boolean };
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员
@@ -35,16 +37,16 @@ export type SessionInfo = {
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
   endpoints: EndpointInfo[] | null;
   title: string;
-  node: string; // 在哪台机器上工作，空表示不挑
-  node_set: boolean;
-  node_online: boolean;
+  workspace: string; // 工作目录的 ID，空表示只聊天
+  host: string; // 工作目录所在的机器
+  path: string;
+  host_online: boolean;
   run_node: string; // 正在跑这一轮的内核
+  run_gateway: boolean; // 这一轮的工具交给网关执行（工作目录不在内核那台机器上）
   running: boolean;
   pending: number;
   last_at: number;
   messages: number;
-  dirs: string[] | null;
-  ro: string[] | null;
   mode: string;
   thinking: string;
   persona: string;
@@ -80,7 +82,9 @@ export type Overview = {
   sessions: SessionInfo[] | null;
   approvals: Approval[];
   totals: Totals;
-  workspace: { node: string; dirs: string[] | null; mode: string };
+  machines: MachineInfo[];
+  workspaces: WorkspaceInfo[];
+  workspace: { mode: string };
   access: { admins: string[] | null; guest: string };
 };
 
@@ -139,10 +143,10 @@ export type LiveItem =
 export type Target =
   | { type: 'gateway' }
   | { type: 'model' }
-  | { type: 'kernel'; node?: string }
-  | { type: 'workspace' }
+  | { type: 'kernel' } // 内核的连接设置和在线的内核
+  | { type: 'machine'; name?: string } // 一台机器；没有名字时是所有机器
+  | { type: 'workspace'; id?: string } // 一个工作目录；没有 ID 时是工作目录列表和默认设置
   | { type: 'channel'; name: string }
-  | { type: 'session'; sid: string }
-  | { type: 'dir'; path: string };
+  | { type: 'session'; sid: string };
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
