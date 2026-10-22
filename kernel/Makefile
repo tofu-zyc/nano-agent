@@ -22,6 +22,7 @@ PLAT := src/plat_win.c
 SB   := src/sandbox_win.c
 RUNNER := src/runner_win.c
 else ifeq ($(NA_PLATFORM),macos)
+CPPFLAGS += -D_DARWIN_C_SOURCE
 PLAT := src/plat_posix.c
 SB   := src/sandbox_stub.c
 RUNNER := src/runner.c
@@ -138,11 +139,11 @@ $(WIN_KERNEL): $(KWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERS
 
 # Windows 执行器通过 WSL interop 在真实 Windows 上跑；没有 zig 或 rg.exe 时给出提示后跳过
 test-win:
-	@if [ -x "$(ZIG)" ]; then \
+	@if [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  $(MAKE) --no-print-directory windows-exec windows-kernel && \
 	  { test -f "$(RG_WIN)" || { echo "没有 $(RG_WIN)：先运行 scripts/fetch-rg.sh"; exit 1; }; } && \
 	  python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
-	else echo "（没有 zig，跳过 Windows 执行器测试；先运行 scripts/fetch-zig.sh）"; fi
+	else echo "（没有 zig 或 WSL interop，跳过 Windows 执行器测试；Windows 上的测试在 CI 的 Windows runner 跑）"; fi
 
 test: build/test_core build/nano-kernel-asan build/nano-exec-asan test-win
 	./build/test_core
