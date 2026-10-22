@@ -62,6 +62,9 @@ jobs:
 
   macos:
     runs-on: macos-14
+    env:
+      # macOS 默认的临时目录（/var/folders/…）很长，测试里的 unix socket 会超过 104 字节的上限
+      TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
