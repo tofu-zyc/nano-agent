@@ -26,7 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      3
+#define PROTO_VERSION      4
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000

@@ -1,6 +1,7 @@
-# 内核 ⇄ 网关协议（v3）
+# 内核 ⇄ 网关协议（v4）
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
+- **版本**：v4 起有异机模式（`exec` 等）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧；v3 的内核（旧启动包装的）要用安装脚本重装。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -73,8 +74,8 @@
 ## 一次完整的处理
 
 ```
-K→G {"t":"hello","v":3,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
-G→K {"t":"welcome","v":3}
+K→G {"t":"hello","v":4,"token":"…","node":"home-pc","tools":[{"name":"Read","description":"…","input_schema":{…}},…],"sandbox":{"landlock":7}}
+G→K {"t":"welcome","v":4}
 G→K {"t":"input","sid":"tg:-1001234","from":"tg:10001","mode":"auto","dirs":["~/projects/foo"],"ro":["~/.gitconfig"]}
 K→G {"t":"model","sid":"tg:-1001234"}
 G→K {"t":"turn","sid":"tg:-1001234","reason":"tool_use","calls":[{"id":"call_1","name":"Shell","args":{"command":"date"}}]}

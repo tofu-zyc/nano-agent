@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 3
+const Version = 4
 
 // 权限模式，随 input 传给内核。
 const (

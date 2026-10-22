@@ -440,7 +440,7 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 3, hello
+            assert hello["token"] == "t0k" and hello["v"] == 4, hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Skill", "Write"], names
             skill = next(t for t in hello["tools"] if t["name"] == "Skill")
             assert "- demo：示例技能， 测试用" in skill["description"], skill["description"]

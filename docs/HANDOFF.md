@@ -130,5 +130,6 @@ cd gateway && go test -race ./...
 - 测试内核都通过 unix socket 连上来，都算本机；要模拟别的电脑上的内核用 Hub.Attach(local=false)（nodes_test 的 dialRemote）。从 127.0.0.1 用 TCP 连上来的也算本机。
 - SSH 服务器上 `~` 不能当工作目录（执行器在 ~/.cache 里，执行器自己拒绝），要用子目录。
 - 起演示网关时别用 `cd X && cmd &` 记 `$!`：那是子 shell 的 pid，杀了它网关还在跑。
+- 协议 v4（异机模式）。旧启动包装的 v3 内核连上来会被拒（错误里说要重装），否则它会无视 exec=gateway、拿网关机器上的路径在自己机器上执行。以前 SSH 服务器上部署的内核文件（~/.local/share/nano-agent/managed/）不再使用，可以删。
 - 内核日志用 `%.*s` + `utf8_cut` 截断，别用 `%.200s`（会切坏中文）。
 - `make` 每次都会尝试静态链接执行器，失败只提示一次（build/.static-tried）。

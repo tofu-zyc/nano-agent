@@ -204,7 +204,11 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 		err = fmt.Errorf("第一条消息应为 hello，收到 %q", hello.T)
 	}
 	if err == nil && hello.V != proto.Version {
-		err = fmt.Errorf("协议版本不兼容：内核 %d，网关 %d", hello.V, proto.Version)
+		fix := "网关太旧了，先升级网关"
+		if hello.V < proto.Version {
+			fix = "内核太旧了，重新运行安装脚本（或者在源码目录 make）升级"
+		}
+		err = fmt.Errorf("协议版本不兼容：内核 %d，网关 %d。%s", hello.V, proto.Version, fix)
 	}
 	if err == nil && !validNode(hello.Node) {
 		err = fmt.Errorf("内核的名字 %q 不能用：不能为空、不能有空白和冒号，最长 64 个字（在 kernel.conf 里设 node）", hello.Node)
