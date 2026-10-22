@@ -36,8 +36,9 @@ test-macos:
 
 # 离线安装测试：make release 的包在临时 HOME / USERPROFILE 里装、配对、升级、卸载
 test-install:
-	@if [ -x $(ZIG) ]; then python3 scripts/test-install-linux.py; \
-	else echo "（没有 zig，跳过 Linux 离线安装测试）"; fi
+	@if [ -x $(ZIG) ]; then $(MAKE) --no-print-directory release VERSION=test >/dev/null && \
+	  python3 scripts/test-install-linux.py && python3 scripts/test-oneliner.py; \
+	else echo "（没有 zig，跳过 Linux 离线安装测试和一行安装测试）"; fi
 	@if [ -x $(ZIG) ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then python3 scripts/test-install-win.py; \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 离线安装测试）"; fi
 
@@ -85,7 +86,9 @@ $(RG)/linux-x86_64:
 	scripts/fetch-rg.sh --all
 
 release: release-kernel release-gateway
-	@cd $(DIST) && sha256sum *.tar.gz *.zip > SHA256SUMS
+	@cp scripts/install.sh scripts/install.ps1 $(DIST)/
+	@echo '$(VERSION)' > $(DIST)/VERSION
+	@cd $(DIST) && sha256sum *-$(VERSION)-*.tar.gz *-$(VERSION)-*.zip install.sh install.ps1 VERSION > SHA256SUMS
 	@echo "发布包在 $(DIST)/："
 	@ls -1 $(DIST)
 

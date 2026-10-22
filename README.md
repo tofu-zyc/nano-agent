@@ -17,7 +17,40 @@
 nano-exec   Read / Write / Edit / Grep / Shell，关在 Landlock + seccomp 沙箱里
 ```
 
-## 快速开始（本机）
+## 安装
+
+网关装在一台常开的 Linux 机器上（x86_64 / arm64），一行命令：
+
+```sh
+curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.sh | sh
+```
+
+装到 `~/.nano-agent`，注册成后台服务（有 systemd 用用户服务，没有就用后台进程 + 看护），打印网页地址；带密码的登录链接用 `nano-gateway url` 查看。再运行一次就是升级，配置和数据保留。
+
+别的电脑上装内核，接到这个网关（网关的 `[kernel] listen` 要改成 `tcp:0.0.0.0:7700`）：
+
+```sh
+# Linux / macOS
+curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.sh | sh -s -- --kernel --gateway tcp:网关地址:7700
+```
+
+```powershell
+# Windows（PowerShell）
+& ([scriptblock]::Create((irm https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.ps1))) -Gateway tcp:网关地址:7700
+```
+
+装好后在网关网页的「设备」里核对确认码、点「允许」。下载慢时可以设 `NANO_DOWNLOAD_URL` 换成镜像地址。
+
+把网关搬到另一台机器：
+
+```sh
+nano-gateway export                 # 旧机器上：配置、数据、密钥文件打成一个包（当密码一样保管）
+curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.sh | sh -s -- --import nano-agent-export-xxx.tar.gz --old-local-as 旧机器名
+```
+
+`--old-local-as` 把旧网关“本机”上的工作目录改记到这个机器名下：之后在旧机器上装内核、用这个名字连过来，工作目录和会话都能接着用。配对过的电脑要改连新地址（在那台电脑上重新运行安装命令，配对口令保留）。
+
+## 快速开始（从源码）
 
 需要 gcc 或 clang、make、Go 1.22 以上。沙箱需要 Linux 5.13 以上（WSL2 也可以，支持 Windows 盘符下的工作目录）。
 
@@ -451,3 +484,7 @@ scripts/           install-gateway.sh（安装到用户目录）、install-kerne
 docs/ARCHITECTURE.md  机器、工作目录、两种执行模式
 docs/protocol.md   内核 ⇄ 网关协议
 ```
+
+## 许可
+
+[Apache-2.0](LICENSE)

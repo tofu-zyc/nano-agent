@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""在 WSL 里通过 interop 驱动 Windows 版 nano-exec.exe。
+"""驱动 Windows 版 nano-exec.exe：在 WSL 里通过 interop，或者直接在 Windows 上（CI）。
 
 用法：python3 tests/test_exec_win.py build/nano-exec.exe [rg.exe]
-测试目录放在 Windows 的临时目录下（wslpath -w 转换），USERPROFILE 也指向临时目录，
-不碰用户自己的文件。需要 WSL interop 和 Windows 的 powershell.exe。
+测试目录放在 Windows 的临时目录下（WSL 里用 wslpath -w 转换），USERPROFILE 也指向临时目录，
+不碰用户自己的文件。需要 Windows 的 powershell.exe。
 """
 import json
 import os
@@ -15,17 +15,28 @@ import time
 
 EXEC_SRC = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./build/nano-exec.exe")
 RG_SRC = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "../build/tools/rg.exe")
-CMD = "/mnt/c/Windows/System32/cmd.exe"
-TASKLIST = "/mnt/c/Windows/System32/tasklist.exe"
+NATIVE = os.name == "nt"   # 直接在 Windows 上跑（GitHub Actions 的 Windows runner）
+if NATIVE:
+    CMD = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+    TASKLIST = "tasklist.exe"
+    WIN_CWD = None
+else:
+    CMD = "/mnt/c/Windows/System32/cmd.exe"
+    TASKLIST = "/mnt/c/Windows/System32/tasklist.exe"
+    WIN_CWD = "/mnt/c"
 FAILS = []
 
 
 def wslpath(flag, p):
+    if NATIVE:
+        return os.path.abspath(p)
     return subprocess.check_output(["wslpath", flag, p], text=True).strip()
 
 
 def windows_temp():
-    out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd="/mnt/c", capture_output=True, text=True)
+    if NATIVE:
+        return os.path.abspath(tempfile.gettempdir())
+    out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd=WIN_CWD, capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
         raise RuntimeError("拿不到 Windows 的 TEMP：" + out.stderr)
     return out.stdout.strip().splitlines()[-1].strip()
@@ -115,7 +126,7 @@ def run(tool, args=None, dirs=(WORK_WIN,), write=True, ro=(), rw=(), home=False,
            "write": write, "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test",
            "max_output": max_output, "watch_stdin": True}
     p = subprocess.Popen(win_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, cwd="/mnt/c")
+                         stderr=subprocess.PIPE, cwd=WIN_CWD)
     p.stdin.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
     p.stdin.flush()
     out = p.stdout.readline()
@@ -146,7 +157,7 @@ def bad(res, *needles):
 
 
 def pid_alive(pid):
-    out = subprocess.run([TASKLIST, "/FI", f"PID eq {pid}", "/NH"], cwd="/mnt/c", capture_output=True)
+    out = subprocess.run([TASKLIST, "/FI", f"PID eq {pid}", "/NH"], cwd=WIN_CWD, capture_output=True)
     return str(pid).encode() in out.stdout
 
 
@@ -170,7 +181,7 @@ PROBE = None
 @case("probe：报告 windows / arch / 无沙箱 / rg")
 def t_probe():
     global PROBE
-    p = subprocess.run(win_cmd(["--probe"]), capture_output=True, text=True, cwd="/mnt/c")
+    p = subprocess.run(win_cmd(["--probe"]), capture_output=True, text=True, cwd=WIN_CWD)
     PROBE = json.loads(p.stdout)
     assert PROBE["os"] == "windows", PROBE
     assert PROBE["landlock"] == 0, PROBE
@@ -260,7 +271,7 @@ def t_cancel():
     req = {"tool": "Shell", "args": {"command": "Start-Sleep -Seconds 30"}, "dirs": [WORK_WIN],
            "write": True, "tmp_key": "test", "watch_stdin": True}
     p = subprocess.Popen(win_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, cwd="/mnt/c")
+                         stderr=subprocess.PIPE, cwd=WIN_CWD)
     p.stdin.write((json.dumps(req) + "\n").encode())
     p.stdin.flush()
     time.sleep(0.8)
@@ -284,15 +295,15 @@ def t_grep():
 
 @case("--ls：根目录盘符、C:\\、中文目录")
 def t_ls():
-    p = subprocess.run(win_cmd(["--ls", "/"]), capture_output=True, text=True, cwd="/mnt/c")
+    p = subprocess.run(win_cmd(["--ls", "/"]), capture_output=True, text=True, cwd=WIN_CWD)
     roots = json.loads(p.stdout)
     assert roots["ok"] and roots["path"] == "", roots
     names = [e["name"] for e in roots["entries"]]
     assert any(n.startswith("C:") for n in names), names
-    p = subprocess.run(win_cmd(["--ls", "C:\\"]), capture_output=True, text=True, cwd="/mnt/c")
+    p = subprocess.run(win_cmd(["--ls", "C:\\"]), capture_output=True, text=True, cwd=WIN_CWD)
     croot = json.loads(p.stdout)
     assert croot["ok"] and croot["path"] == "C:\\", croot
-    p = subprocess.run(win_cmd(["--ls", WORK_WIN]), capture_output=True, text=True, cwd="/mnt/c")
+    p = subprocess.run(win_cmd(["--ls", WORK_WIN]), capture_output=True, text=True, cwd=WIN_CWD)
     w = json.loads(p.stdout)
     assert w["ok"] and w["path"] == WORK_WIN, (w, WORK_WIN)
     assert any(e["name"] == "sub" for e in w["entries"]), w

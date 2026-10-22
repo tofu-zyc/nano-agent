@@ -1,0 +1,40 @@
+# 推 v* 标签：先跑完整的 CI，全过才编译所有平台的包并发布到 GitHub Release。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: 下载 zig 和 rg
+        run: scripts/fetch-zig.sh && scripts/fetch-rg.sh --all
+      - name: 编译发布包
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          case "$VERSION" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "标签要写成 v1.2.3：$GITHUB_REF_NAME"; exit 1 ;; esac
+          make release VERSION="$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "nano-agent $VERSION" --generate-notes \
+            *-"$VERSION"-*.tar.gz *-"$VERSION"-*.zip install.sh install.ps1 VERSION SHA256SUMS

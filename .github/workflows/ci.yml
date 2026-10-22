@@ -1,0 +1,76 @@
+# 每次推送和 PR：Linux 上跑全部测试；Windows 和 macOS 在真机上跑各自平台的测试。
+# 发布（release.yml）也先跑这里。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: 下载 zig 和 rg
+        run: scripts/fetch-zig.sh && scripts/fetch-rg.sh --all
+      - name: make test
+        run: make test
+      - name: 交叉编译 Windows 程序
+        run: make -C kernel windows-exec windows-kernel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-bins
+          path: |
+            kernel/build/nano-exec.exe
+            kernel/build/nano-kernel.exe
+            build/tools/rg/windows-x86_64.exe
+            scripts/install-kernel.ps1
+          if-no-files-found: error
+          retention-days: 3
+
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-bins
+          path: .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Windows 执行器
+        run: python kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg/windows-x86_64.exe
+      - name: Windows 安装（含任务计划程序）
+        env:
+          NANO_TEST_SERVICE: "1"
+        run: python scripts/test-install-win.py
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: 内核测试
+        run: make -C kernel test
+      - name: 网关测试
+        run: cd gateway && go test ./...
+      - name: 端到端测试
+        run: ./scripts/e2e.sh

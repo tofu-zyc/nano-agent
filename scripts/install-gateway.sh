@@ -4,6 +4,8 @@
 #   make install                 安装/升级（程序、配置、数据都放在 ~/.nano-agent）
 #   scripts/install-gateway.sh --migrate
 #                                复制源码目录的 gateway.toml 和 data/（源文件不动）
+#   scripts/install-gateway.sh --import 导出包 [--old-local-as 机器名]
+#                                装好后导入另一台机器 nano-gateway export 的配置和数据
 #   scripts/install-gateway.sh --uninstall
 #                                停服务，删服务文件和 PATH 行，再删 ~/.nano-agent
 #
@@ -42,15 +44,26 @@ MIGRATE=0
 YES=0
 UNINSTALL=0
 WSL_KEEPALIVE=0
-for a in "$@"; do
-  case "$a" in
+IMPORT=""
+OLD_LOCAL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
   --migrate) MIGRATE=1 ;;
   --yes) YES=1 ;;
   --uninstall) UNINSTALL=1 ;;
   --wsl-keepalive) WSL_KEEPALIVE=1 ;;
-  *) echo "不认识的选项：$a"; exit 2 ;;
+  --import) IMPORT=${2:-}; shift ;;
+  --import=*) IMPORT=${1#*=} ;;
+  --old-local-as) OLD_LOCAL=${2:-}; shift ;;
+  --old-local-as=*) OLD_LOCAL=${1#*=} ;;
+  *) echo "不认识的选项：$1"; exit 2 ;;
   esac
+  shift
 done
+if [ -n "$IMPORT" ]; then
+  [ -f "$IMPORT" ] || { echo "找不到导出包：$IMPORT"; exit 1; }
+  IMPORT=$(cd "$(dirname "$IMPORT")" && pwd)/$(basename "$IMPORT")
+fi
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -145,9 +158,19 @@ elif [ -d "$ROOT/.git" ]; then
   (cd "$ROOT" && git describe --always --dirty 2>/dev/null) >"$LIB/VERSION" || echo dev >"$LIB/VERSION"
 fi
 rm -f "$BIN/nano-gateway-ctl"
-for f in nano-exec-static nano-exec-src.tar.gz; do
+for f in nano-exec-static nano-exec-src.tar.gz rg; do
   [ -f "$LIBDIR/$f" ] && install -m755 "$LIBDIR/$f" "$LIB/$f"
 done
+
+# ---- 导入另一台机器导出的配置和数据（在生成新配置之前） ----
+if [ -n "$IMPORT" ]; then
+  step "导入 $IMPORT"
+  if [ -n "$OLD_LOCAL" ]; then
+    NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" import "$IMPORT" --old-local-as "$OLD_LOCAL" || die "导入失败"
+  else
+    NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" import "$IMPORT" || die "导入失败"
+  fi
+fi
 
 # ---- 配置 ----
 step "安装配置到 $NANO_HOME"

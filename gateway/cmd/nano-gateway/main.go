@@ -64,12 +64,16 @@ func main() {
 			os.Exit(runDoctor(os.Args[2:]))
 		case "version":
 			os.Exit(runVersion())
+		case "export":
+			os.Exit(runExport(os.Args[2:]))
+		case "import":
+			os.Exit(runImport(os.Args[2:]))
 		case "supervise":
 			os.Exit(runSupervisor(os.Args[2:]))
 		}
 		if !strings.HasPrefix(arg, "-") {
 			fmt.Fprintf(os.Stderr, "不认识的子命令：%s\n", arg)
-			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|chat")
+			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|chat|export|import")
 			os.Exit(2)
 		}
 	}

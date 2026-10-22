@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-22，网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-22，发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -70,7 +70,7 @@ make run          # 开发：编译，后台起内核、前台起网关（Ctrl-C
 make chat         # 另一个终端：终端聊天（nano-gateway chat），随时进出
 make test         # C 测试（ASan）+ Go 测试 + e2e（mock 模型，真实内核/执行器/网关）+ 离线安装测试 + macOS 交叉编译检查；有 Windows 内核和 WSL interop 时还跑 Windows 内核 e2e；装了 zig 和 build/tools/rg.exe 时还跑 Windows 执行器测试
 make test-win     # 只跑 Windows 执行器测试和 Windows 内核 e2e
-make test-install # 离线安装测试（临时 HOME / USERPROFILE；Linux 和 Windows）
+make test-install # 离线安装测试和一行安装测试（先 make release VERSION=test；临时 HOME / USERPROFILE；Linux 和 Windows）
 make release VERSION=x.y.z  # 本地交叉编译到 dist/：Linux/Windows 内核包、Linux 网关包、SHA256SUMS（不联网发布）
 make web          # 改了前端后重新构建（npm run check && build），产物要提交
 cd gateway && go test -race ./...
@@ -108,35 +108,45 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - WSL 保活：Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 和 PowerShell `Register-ScheduledTask` 都返回“拒绝访问”（即使是当前用户 ONLOGON 任务），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
 - 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway status 字段、Gateway logs 脱敏、GatewayAdmin restart 的测试。
 
+## 发布、一行安装、内核自我更新、搬家（2026-10-22）
+
+- 仓库公开在 https://github.com/tofu-zyc/nano-agent （Apache-2.0）。提交身份是 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`（仓库本地 git config 已设，历史改写过；改写前的历史留在本地 ref `refs/backup/before-email-rewrite`，不推送）。**第一次推送之后不再改写历史、不强推。**
+- 推送前：`scripts/fetch-gitleaks.sh` 后 `build/tools/gitleaks git --no-banner .`（`.gitleaks.toml` 放过脱敏测试里的假密钥）；用户本地的真实密钥（data/ 里加密保存的）要解密后在内存里比对历史，不能打印。
+- CI（`.github/workflows/ci.yml`）：Linux 跑 `make test`；Windows runner 原生跑 `test_exec_win.py` 和 `test-install-win.py`（`NANO_TEST_SERVICE=1` 时测任务计划程序）；macOS runner 跑内核测试、Go 测试和 e2e。发布（`release.yml`）：推 `v1.2.3` 标签 → 先跑 CI → `make release VERSION=1.2.3` → `gh release create`，附件是各平台包、`install.sh`、`install.ps1`、`VERSION`、`SHA256SUMS`。
+- 一行安装：`scripts/install.sh`（Linux 网关 / Linux、macOS 内核；`--kernel`、`--import`、`--old-local-as`、`--version`）和 `scripts/install.ps1`（Windows 内核；字符串只用 ASCII，因为 `irm` 拿到的内容没有编码信息；不用 Get-FileHash / Expand-Archive，有的环境加载不了模块）。从 `$NANO_DOWNLOAD_URL`（默认 GitHub Release）下载 `latest/download/VERSION` 和 `download/v<版本>/` 下的包，按 `SHA256SUMS` 校验，再运行包里现有的安装脚本。`scripts/test-oneliner.py` 用本地 HTTP 服务模拟 Release 测试（含 WSL 里调 Windows 的 install.ps1）。
+- 内核版本：`kernel/build/version.h`（`VERSION` 变了才重写），`nano-kernel --version`，`hello` 带 `version`。macOS 上直接 `make` 自动用 macOS 平台层。
+- 内核自我更新（`kernel/src/update.c`，协议 v9 的 `update` / `update_result`，见 protocol.md）：新程序先写成 `.new`，旧的改名 `.old`，回报后重启自己（POSIX exec 安装目录里的 `nano-kernel`——不能用 /proc/self/exe，改名后它指向 `.old`；Windows 以 75 退出，`run-kernel.ps1` 现在是循环，75 立即拉起、崩溃 5 秒后拉起、0 退出）。90 秒内没被网关接受或启动超过 3 次就退回，`hello` 带 `update_failed`。**网关这边还没有推送更新的逻辑**（下一步）。
+- 搬家：`nano-gateway export` 打包 gateway.toml（数据/人格/技能目录和 unix socket 改成相对位置）、data/（不含日志、web.url、local-kernel.conf）、secret.key、personas/、skills/，0600；`nano-gateway import <包> [--force] [--old-local-as 名字]`，已有数据时要 `--force`（先备份到 backup/import-时间/），导入后列出不存在的“本机”工作目录和要改连地址的配对电脑。`install-gateway.sh --import` 在生成新配置之前导入。
+
 ## 已经完成的（按提交）
 
 | 提交 | 内容 |
 |---|---|
-| b924520 | 初版：C 内核 + Go 网关 + 协议 |
-| b97b56c | 内置工具 Read/Write/Edit/Grep/Shell；沙箱执行器（Landlock + seccomp）；权限模式 auto/ask/readonly/none |
-| 2bab4a0 | 流式输出、思考强度（只传 OpenAI 风格的 reasoning_effort）、前缀缓存优先的上下文 |
-| 1741bed | 网页管理界面：拓扑图、点节点改设置、Ctrl+K、审批、人格 |
-| 60d2c8a | 目录浏览、飞书扫码创建机器人、没有工作目录就只聊天、默认代理、只支持私聊、拖动节点 |
-| 2c8dfa0 / 8883a05 | 会话和聊天窗口分开：所有窗口能接入同一个会话（主会话 main），/session |
-| a8bf7b6 | 不是管理员时说明原因；网页里一键设为管理员 |
-| f08e92d | 切换会话/回来时补上没看到的聊天记录（/history）；网关和终端聊天分开（make chat） |
-| 131e2e2 | 多个内核（节点）：会话绑定机器，掉线时替补只聊天，/node |
-| b3c1929 | SSH 远程执行：服务器作为节点（经由某个内核），自动上传/现编执行器 |
-| fb07909 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
-| 8c2e48f | Telegram 发送后编辑、飞书 CardKit 流式卡片，含思考/工具/用量、长回复分段和失败降级 |
-| 77f4944 | 超限时合并旧摘要和旧对话，完整保留近期工具链与当前轮；支持取消、失败裁剪、重启恢复和统计 |
-| c10c4d4 | 跨端自动同步、默认折叠思考与工具、完整原始历史查询，修复 WSL DrvFS Permission denied |
-| 4bc5110 | Windows WSL2 / Linux 启动包、网页 SSH 密码 / 密钥 / config 接入与断开、自动部署、stdio 通道、接入技能 |
-| 33bdff6 | 各端都能停（「停」、Ctrl-C、Telegram 按钮、网页输入框旁）；撤回最近一轮（/undo、「撤回」、网页按钮放回输入框、飞书撤回事件）；电脑首次连接配对 |
-| 094effa、c0b8c07 | 重写：SSH 服务器由网关自己连、只放执行器（去掉内核侧 remote 和服务器上的内核、启动包）；工作目录 = 机器 + 目录的列表；同机 / 异机两种执行模式（exec / skill_files 协议）；网页工作目录选择器、拓扑按机器画；内核安装脚本和单文件安装包；协议 v4 |
-| 36d19b9、9b8d8f3、902e1af | 网关查看和控制：`status/start/stop/restart/logs/url/doctor/version`、control socket、配置检查后 `syscall.Exec` 自重启和回话、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway status/logs` 和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项 |
+| 6a66c7a | 初版：C 内核 + Go 网关 + 协议 |
+| c06f2a9 | 内置工具 Read/Write/Edit/Grep/Shell；沙箱执行器（Landlock + seccomp）；权限模式 auto/ask/readonly/none |
+| c7c66df | 流式输出、思考强度（只传 OpenAI 风格的 reasoning_effort）、前缀缓存优先的上下文 |
+| d90b992 | 网页管理界面：拓扑图、点节点改设置、Ctrl+K、审批、人格 |
+| 9f4e5ab | 目录浏览、飞书扫码创建机器人、没有工作目录就只聊天、默认代理、只支持私聊、拖动节点 |
+| eddd6dd / e1c9670 | 会话和聊天窗口分开：所有窗口能接入同一个会话（主会话 main），/session |
+| b08140b | 不是管理员时说明原因；网页里一键设为管理员 |
+| e636508 | 切换会话/回来时补上没看到的聊天记录（/history）；网关和终端聊天分开（make chat） |
+| bd6fae2 | 多个内核（节点）：会话绑定机器，掉线时替补只聊天，/node |
+| 902f8af | SSH 远程执行：服务器作为节点（经由某个内核），自动上传/现编执行器 |
+| 8017fb3 | SKILL.md 按需加载、技能热更新、网页列表、SSH 附带文件上传与只读访问 |
+| aad4e2a | Telegram 发送后编辑、飞书 CardKit 流式卡片，含思考/工具/用量、长回复分段和失败降级 |
+| 096fbec | 超限时合并旧摘要和旧对话，完整保留近期工具链与当前轮；支持取消、失败裁剪、重启恢复和统计 |
+| 512529b | 跨端自动同步、默认折叠思考与工具、完整原始历史查询，修复 WSL DrvFS Permission denied |
+| 338f527 | Windows WSL2 / Linux 启动包、网页 SSH 密码 / 密钥 / config 接入与断开、自动部署、stdio 通道、接入技能 |
+| 62b0dff | 各端都能停（「停」、Ctrl-C、Telegram 按钮、网页输入框旁）；撤回最近一轮（/undo、「撤回」、网页按钮放回输入框、飞书撤回事件）；电脑首次连接配对 |
+| 07cdded、c71ce05 | 重写：SSH 服务器由网关自己连、只放执行器（去掉内核侧 remote 和服务器上的内核、启动包）；工作目录 = 机器 + 目录的列表；同机 / 异机两种执行模式（exec / skill_files 协议）；网页工作目录选择器、拓扑按机器画；内核安装脚本和单文件安装包；协议 v4 |
+| cc51a6b、2e26cb8、5e67b7d | 网关查看和控制：`status/start/stop/restart/logs/url/doctor/version`、control socket、配置检查后 `syscall.Exec` 自重启和回话、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway status/logs` 和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项 |
 | 多工作目录 | 一个会话挂好几个工作目录（可跨机器），工具参数 workspace；技能移到网关（Skill 由网关处理，附带文件放到各机器的 ~/.nano-agent/skills）；网关代执行别的电脑上的工具（run）；网关启动本机内核；拓扑加内核节点、右键菜单；输入框命令提示；协议 v5 |
 | 多模型 | 网页上管理多个 OpenAI 兼容接口和模型：默认模型、会话单独选（/model、会话设置）、每个模型自己的上下文窗口、历史上限、思考强度；接口只回传“有没有设置 key” |
 | 图片输入 | 网页粘贴/拖拽/上传、Telegram 照片、飞书图片消息；模型能力（modalities）决定发不发给模型；图片存 data/uploads，历史里只存引用，支持图片的模型收到 OpenAI content parts |
-| 36c4126 | 跨平台阶段 1：平台层（POSIX 一份、Windows 一份）+ Windows 执行器 `nano-exec.exe`；宽字符路径、符号链接/junction 解析、CRLF Edit、PowerShell UTF-8、Job Object 超时/取消、自带 rg；zig 交叉编译，WSL interop 实测 |
-| 530bbd6 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
-| 95e68da | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
-| dfc7020 | 跨平台阶段 4：macOS 平台层（`_NSGetExecutablePath`、无沙箱 `sandbox_stub`、`nexec_main` 去掉 Linux `sys/syscall.h` 依赖、`_DARWIN_C_SOURCE` 解决 `DT_DIR`）；`cross-macos` 交叉编译 aarch64/x86_64；`make release` 出 macOS 包；`install-kernel.sh` 的 launchd 用户 agent（启动、卸载）和 `nano-kernel-ctl` 的 macOS 支持。没有真机测试 |
+| f9ee514 | 跨平台阶段 1：平台层（POSIX 一份、Windows 一份）+ Windows 执行器 `nano-exec.exe`；宽字符路径、符号链接/junction 解析、CRLF Edit、PowerShell UTF-8、Job Object 超时/取消、自带 rg；zig 交叉编译，WSL interop 实测 |
+| 56b1e33 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
+| 2189325 | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
+| 8bf1bac | 跨平台阶段 4：macOS 平台层（`_NSGetExecutablePath`、无沙箱 `sandbox_stub`、`nexec_main` 去掉 Linux `sys/syscall.h` 依赖、`_DARWIN_C_SOURCE` 解决 `DT_DIR`）；`cross-macos` 交叉编译 aarch64/x86_64；`make release` 出 macOS 包；`install-kernel.sh` 的 launchd 用户 agent（启动、卸载）和 `nano-kernel-ctl` 的 macOS 支持。没有真机测试 |
 
 ## 关键设计（改之前先理解）
 
@@ -182,6 +192,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 ## 接下来要做的（用户要求先把主体功能做齐）
 
+0. 按 [PLAN-release.md](PLAN-release.md) 阶段 4 做 v0.1.1：网关 `nano-gateway update`（`/update`、网页按钮、GatewayAdmin `update`，下载校验、备份、换程序、检查配置、自重启，起不来自动退回；每天查一次新版本只提示；包里的 personas/skills 用户没改过的才更新）；内核版本和网关不同时自动推 `update`（网关是 dev 版本时不推，`update_failed` 等于目标版本时不再自动推；内核包按 os/arch 从 Release 下载并缓存）；网页显示各内核版本、添加电脑时给出一行安装命令。
 1. 卡片重新设计、审批按钮都只用模拟服务测过，没往真实的飞书 / Telegram 发过，等用户实际用了再调样式。用户现有的飞书机器人是之前扫码建的：流式卡片要 cardkit:card:write、撤回同步要订阅 im.message.recalled_v1、按钮要订阅回调 card.action.trigger，需在开放平台后台补上。
 2. 飞书卡片按钮要用户在开放平台订阅 card.action.trigger（扫码注册的 addons 里没有回调，没敢猜格式）。聊天里配置网关已经做了，见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 3. 图片的清理策略（不用了的图片一直占着 uploads）；音视频输入用户说以后再说（支持音视频的模型还少，也有别的办法）。

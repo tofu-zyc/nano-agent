@@ -2,7 +2,9 @@
 """Windows 内核离线安装测试：在临时 USERPROFILE 里跑 install-kernel.ps1。
 
 覆盖：安装（不注册服务）、启动配对、升级保留 paired.token、卸载。
-网关是 Python 假实现，只需要配对和 welcome；不联网。
+NANO_TEST_SERVICE=1 时再测注册任务计划程序（GitHub Actions 的 Windows runner 上跑；
+WSL interop 里注册任务会被拒绝）。网关是 Python 假实现，只需要配对和 welcome；不联网。
+WSL 里通过 interop 跑，或者直接在 Windows 上跑。
 """
 import json
 import os
@@ -15,17 +17,30 @@ import threading
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-CMD = "/mnt/c/Windows/System32/cmd.exe"
-POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+NATIVE = os.name == "nt"
+if NATIVE:
+    CMD = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+    POWERSHELL = "powershell.exe"
+    WIN_CWD = None
+else:
+    CMD = "/mnt/c/Windows/System32/cmd.exe"
+    POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    WIN_CWD = "/mnt/c"
 PAIRED = "paired-install-test"
+SERVICE = os.environ.get("NANO_TEST_SERVICE") == "1"
+TASK = "nano-agent-kernel-test"
 
 
 def wslpath(flag, p):
+    if NATIVE:
+        return os.path.abspath(p)
     return subprocess.check_output(["wslpath", flag, p], text=True).strip()
 
 
 def win_temp():
-    out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd="/mnt/c", capture_output=True, text=True)
+    if NATIVE:
+        return os.path.abspath(tempfile.gettempdir())
+    out = subprocess.run([CMD, "/c", "echo %TEMP%"], cwd=WIN_CWD, capture_output=True, text=True)
     return out.stdout.strip().splitlines()[-1].strip()
 
 
@@ -59,7 +74,7 @@ class FakeGateway(threading.Thread):
                 return
             hello = json.loads(line)
             if hello.get("token") == PAIRED:
-                f.write((json.dumps({"t": "welcome", "v": 8}) + "\n").encode())
+                f.write((json.dumps({"t": "welcome", "v": 9}) + "\n").encode())
                 f.flush()
                 self.accepted.set()
                 return
@@ -92,7 +107,7 @@ class FakeGateway(threading.Thread):
 
 def ps(script, *args):
     return subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *args],
-                          cwd="/mnt/c", capture_output=True, text=True, errors="replace")
+                          cwd=WIN_CWD, capture_output=True, text=True, errors="replace")
 
 
 def wait_file(path, timeout=30):
@@ -146,7 +161,7 @@ try:
 
     # 手动启动安装包里生成的 run-kernel.ps1；内核请求配对，假网关发口令
     runner = subprocess.Popen([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", RUNNER_W],
-                              cwd="/mnt/c", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                              cwd=WIN_CWD, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert wait_file(TOKEN, 30), "没有拿到 paired.token"
     assert gw.paired.wait(10) and gw.accepted.wait(10), "假网关没有收到配对和重连"
     print("  ok   启动后配对并重新连上网关")
@@ -168,7 +183,26 @@ try:
     r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W)
     assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
     print("  ok   卸载")
-    print("install-win: 4 passed")
+    passed = 4
+
+    if SERVICE:
+        gw.paired.clear()
+        gw.accepted.clear()
+        r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "servicepc", "-Yes", "-Dir", INST_W,
+               "-TaskName", TASK)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert wait_file(TOKEN, 60), "任务计划程序启动的内核没有拿到 paired.token：" + r.stdout + r.stderr
+        assert gw.accepted.wait(30), "任务计划程序启动的内核没有连上假网关"
+        q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
+        assert q.returncode == 0, q.stdout + q.stderr
+        print("  ok   注册任务计划程序并由它启动内核")
+        r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W, "-TaskName", TASK)
+        assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
+        q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
+        assert q.returncode != 0, "卸载后任务还在"
+        print("  ok   卸载时删掉任务")
+        passed += 2
+    print(f"install-win: {passed} passed")
 finally:
     if runner:
         try:
