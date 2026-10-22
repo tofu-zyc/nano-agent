@@ -23,22 +23,50 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
+	"nano-agent/gateway/internal/skills"
 )
 
-const helpText = `可用命令：
-/whoami  查看你的身份、这个窗口和它接着的会话
-/session 查看会话；管理员可以 /session <编号> 切换，/session new [名字] 新建
-/history 查看这个会话最近的对话；/history <轮数> 看更多
-/sync    补上其他窗口的聊天记录（同一会话内也会自动同步）
-/dir     查看和切换工作目录（哪台机器上的哪个目录），切换需管理员
-/node    查看机器和在线的内核
-/stop    停止当前任务（任务进行中直接发「停」也行）
-/undo    撤回最近一条消息：还没处理的直接拿掉，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）
-/reset   清空本会话的上下文
-/mode    查看和切换权限模式：auto 自动、ask 审批、readonly 只读（切换需管理员）
-/think   查看和切换思考强度（切换需管理员）
-/approve <编号>  批准一次工具执行（需管理员）
-/deny <编号>     拒绝一次工具执行（需管理员）`
+// Command 是一个聊天命令。/help、网页输入框里打 / 时的提示都用这张表。
+type Command struct {
+	Name  string `json:"name"` // 不带斜杠
+	Args  string `json:"args,omitempty"`
+	Desc  string `json:"desc"`
+	Admin bool   `json:"admin,omitempty"` // 需要管理员
+}
+
+var Commands = []Command{
+	{Name: "help", Desc: "列出命令"},
+	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
+	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "history", Args: "[轮数]", Desc: "查看这个会话最近的对话"},
+	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
+	{Name: "dir", Args: "[编号 | -编号 | add 机器:路径 | none]", Desc: "查看、挂载、取下工作目录（可以同时挂好几个，在不同的机器上）", Admin: true},
+	{Name: "node", Desc: "查看机器和在线的内核"},
+	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
+	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
+	{Name: "reset", Desc: "清空本会话的上下文"},
+	{Name: "mode", Args: "[auto | ask | readonly]", Desc: "查看、切换权限模式：自动、审批、只读", Admin: true},
+	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
+	{Name: "approve", Args: "<编号>", Desc: "批准一次工具执行", Admin: true},
+	{Name: "deny", Args: "<编号>", Desc: "拒绝一次工具执行", Admin: true},
+}
+
+var helpText = func() string {
+	var b strings.Builder
+	b.WriteString("可用命令：")
+	for _, c := range Commands[1:] {
+		line := "/" + c.Name
+		if c.Args != "" {
+			line += " " + c.Args
+		}
+		line += "  " + c.Desc
+		if c.Admin {
+			line += "（需管理员）"
+		}
+		b.WriteString("\n" + line)
+	}
+	return b.String()
+}()
 
 type App struct {
 	ctx     context.Context
@@ -61,23 +89,25 @@ type App struct {
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
 
-	mu           sync.Mutex
-	groupNoticed map[string]bool            // 已经提醒过“只支持私聊”的群
-	pendingLs    map[string]chan *proto.Msg // 等内核回复的列目录请求
-	lsSeq        int
-	chans        map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
-	outboxes     map[string]chan outItem
-	eps          map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
-	wss          []Workspace       // 工作目录列表（workspaces.go）
-	hosts        Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
-	nodes        map[string]*node  // 在线的内核（nodes.go）
-	localNode    string            // 最近一个和网关在同一台机器上的内核
-	nodeSeq      int
-	totals       Totals
-	sessions     map[string]*sess
-	approvals    map[int]*approval
-	nextAppr     int
-	runSeq       uint64
+	mu            sync.Mutex
+	groupNoticed  map[string]bool     // 已经提醒过“只支持私聊”的群
+	hostWaits     map[string]hostWait // 等内核回复的列目录、代执行请求（kernelhost.go）
+	hostSeq       int
+	skills        *skills.Registry           // 技能（放在网关上）
+	managedKernel string                     // 网关自己启动的本机内核的名字（localkernel.go）
+	chans         map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
+	outboxes      map[string]chan outItem
+	eps           map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
+	wss           []Workspace       // 工作目录列表（workspaces.go）
+	hosts         Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
+	nodes         map[string]*node  // 在线的内核（nodes.go）
+	localNode     string            // 最近一个和网关在同一台机器上的内核
+	nodeSeq       int
+	totals        Totals
+	sessions      map[string]*sess
+	approvals     map[int]*approval
+	nextAppr      int
+	runSeq        uint64
 }
 
 type sess struct {
@@ -123,14 +153,13 @@ type run struct {
 	start    time.Time
 	calls    int       // 这一轮请求了几次模型
 	usage    llm.Usage // 这一轮的累计用量
-	noTools  bool      // 没有工作目录：不给模型工具，只聊天
+	noTools  bool      // 没有能用的工作目录：不给模型工具，只聊天
 
-	// 异机模式（exec.go）：工具交给网关在 host 上执行，约束是这一轮开始时定下的
-	gateway      bool
-	host         string
-	dirs, ro, rw []string
-	write        bool
-	execs        map[string]context.CancelFunc // 正在执行的工具调用
+	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
+	rt    route
+	w     workspace
+	write bool
+	execs map[string]context.CancelFunc // 网关正在执行的工具调用、正在放的技能文件
 }
 
 // views 是这一轮所有能流式显示的窗口
@@ -178,7 +207,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		now: time.Now, loc: loc, bus: events.NewBus(), started: time.Now(),
 		chans:        map[string]channel.Channel{},
 		groupNoticed: map[string]bool{},
-		pendingLs:    map[string]chan *proto.Msg{},
+		hostWaits:    map[string]hostWait{},
+		skills:       skills.New(cfg.Skills.Dir),
 		outboxes:     map[string]chan outItem{},
 		sessions:     map[string]*sess{},
 		approvals:    map[int]*approval{},
@@ -187,6 +217,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.migrate()
 	a.loadEndpoints()
 	a.loadWorkspaces()
+	a.skills.Scan()
 	return a
 }
 
@@ -241,8 +272,13 @@ func (a *App) SetLLM(c llm.Client) {
 
 // ---- 聊天消息 ----
 
-var commands = map[string]bool{"help": true, "start": true, "sync": true, "whoami": true, "stop": true, "reset": true, "approve": true, "deny": true,
-	"undo": true, "dir": true, "mode": true, "think": true, "session": true, "history": true, "node": true}
+var commands = func() map[string]bool {
+	m := map[string]bool{"start": true} // Telegram 的 /start
+	for _, c := range Commands {
+		m[c.Name] = true
+	}
+	return m
+}()
 
 func parseCommand(text string) (cmd, arg string) {
 	if !strings.HasPrefix(text, "/") {
@@ -435,6 +471,7 @@ func (a *App) startRun(s *sess) {
 		return
 	}
 	head := s.queue[0]
+	a.refreshSkills()
 	w := a.workspaceOf(s.sid)
 	rt := a.route(w)
 	node := rt.kernel
@@ -470,13 +507,10 @@ func (a *App) startRun(s *sess) {
 	// 工作目录、权限、机器变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	st := a.store.Settings(s.sid)
 	dirty := false
-	if !st.WorkspaceSet && w.ws != nil {
-		st.Workspace, st.WorkspaceSet, dirty = w.ws.ID, true, true // 新会话第一次说话：定下默认的工作目录
+	if !st.WorkspacesSet && len(w.wss) > 0 {
+		st.Workspaces, st.WorkspacesSet, dirty = w.ids(), true, true // 新会话第一次说话：定下默认挂载的工作目录
 	}
-	note := envNote(w)
-	if rt.note != "" {
-		note = rt.note // 工作目录所在的机器用不了，只聊天
-	}
+	note := a.envNote(w, rt)
 	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
 		st.EnvNote, dirty = note, true
@@ -495,7 +529,8 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{}}
+	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+		rt: rt, w: w}
 	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
 		r.outs[0].view = st.OpenRun(head.ep.chat, "")
@@ -517,18 +552,17 @@ func (a *App) startRun(s *sess) {
 	}
 	r.stopTyping = a.startTyping(head.ep)
 	mode := a.runMode(w, r.from)
-	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode, Dirs: w.dirs, RO: w.ro, RW: w.rw}
-	if w.ws == nil || rt.note != "" {
-		// 没有工作目录，或者工作目录所在的机器用不了：不给模型工具，只聊天
-		r.noTools = true
-		in.Mode, in.Dirs, in.RO, in.RW = proto.ModeNone, nil, nil, nil
-	} else if rt.gateway {
-		// 异机模式：工具交给网关在工作目录所在的机器上执行
-		in.Exec, in.Landlock = "gateway", rt.landlock
-		r.gateway, r.host, r.dirs, r.ro, r.rw = true, w.ws.Host, w.dirs, w.ro, w.rw
-		r.write = mode == proto.ModeAuto || mode == proto.ModeAsk
+	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
+	for _, m := range rt.mounts {
+		in.Workspaces = append(in.Workspaces, rt.spec(m, w))
 	}
-	a.log.Info("开始处理", "sid", s.sid, "node", node, "gateway", rt.gateway, "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
+	r.write = mode == proto.ModeAuto || mode == proto.ModeAsk
+	if len(rt.mounts) == 0 {
+		// 没有挂载工作目录，或者都在用不了的机器上：不给模型工具，只聊天
+		r.noTools = true
+		in.Mode = proto.ModeNone
+	}
+	a.log.Info("开始处理", "sid", s.sid, "node", node, "workspaces", len(rt.mounts), "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content,
 		Data: map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}})
@@ -613,10 +647,8 @@ func (a *App) decide(c in, arg string, ok bool) {
 func (a *App) KernelMsg(node string, m *proto.Msg) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if m.T == proto.TLsResult {
-		if ch := a.pendingLs[m.ID]; ch != nil {
-			ch <- m
-		}
+	if m.T == proto.TLsResult || m.T == proto.TRunResult {
+		a.hostReply(node, m)
 		return
 	}
 	if m.T == proto.TTools {
@@ -636,8 +668,6 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.callModel(s)
 	case proto.TExec:
 		a.execTool(node, s, m)
-	case proto.TSkillFiles:
-		a.skillFiles(node, s, m)
 	case proto.TExecCancel:
 		if cancel := s.run.execs[m.ID]; cancel != nil {
 			cancel()
@@ -766,7 +796,7 @@ func (a *App) generateModel(s *sess) {
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = slices.Clone(n.tools)
+		req.Tools = a.toolsFor(n)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel

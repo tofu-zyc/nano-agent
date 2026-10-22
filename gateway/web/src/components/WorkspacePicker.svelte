@@ -6,16 +6,25 @@
   import DirPicker from './DirPicker.svelte';
   import Icon from './Icon.svelte';
 
-  // 选工作目录：工作目录是“机器 + 目录”，选哪个，会话就在哪台机器上干活。
-  // 列表里没有的，先选机器再浏览那台机器上的目录，添加进列表。
+  // 工作目录是“机器 + 目录”。两种用法：
+  //   - 给会话挂载（mounted 不为 null）：可以同时挂好几个，在不同的机器上，点一下挂上、再点取下；
+  //   - 只选一个（onpick）：比如在拓扑图上添加工作目录。
+  // 列表里没有的，先选机器再浏览那台机器上的目录，添加进列表（挂载模式下顺便挂上）。
   let {
-    current = '',
-    title = '选择工作目录',
-    none = true,
+    mounted = null,
+    title = '工作目录',
+    onchange,
     onpick,
     onclose,
-  }: { current?: string; title?: string; none?: boolean; onpick: (id: string) => void; onclose: () => void } = $props();
+  }: {
+    mounted?: string[] | null;
+    title?: string;
+    onchange?: (ids: string[]) => void;
+    onpick?: (id: string) => void;
+    onclose: () => void;
+  } = $props();
 
+  const mounting = $derived(mounted !== null);
   const machines = $derived(store.machines);
   const groups = $derived(
     machines
@@ -30,13 +39,20 @@
     return m.detail || '现在用不了';
   }
 
+  function choose(w: WorkspaceInfo) {
+    if (!mounting) return onpick?.(w.id);
+    const ids = mounted!;
+    onchange?.(ids.includes(w.id) ? ids.filter((x) => x !== w.id) : [...ids, w.id]);
+  }
+
   async function add(path: string) {
     const m = browsing!;
     browsing = null;
     busy = true;
     try {
       const w = await api.post<WorkspaceInfo>('/api/workspaces', { host: m.name, path });
-      onpick(w.id);
+      if (mounting) onchange?.([...mounted!.filter((x) => x !== w.id), w.id]);
+      else onpick?.(w.id);
     } catch (err) {
       store.fail(err);
     } finally {
@@ -47,8 +63,8 @@
   async function star(w: WorkspaceInfo, e: MouseEvent) {
     e.stopPropagation();
     try {
-      await api.put('/api/workspaces/default', { id: w.default ? '' : w.id });
-      store.toast({ kind: 'ok', text: w.default ? '新会话不再默认用它' : `新会话默认在 ${w.host}:${w.path} 上工作` }, 2400);
+      await api.put('/api/workspaces/default', { id: w.id, default: !w.default });
+      store.toast({ kind: 'ok', text: w.default ? '新会话不再默认挂它' : `新会话会默认挂上 ${w.host}:${w.path}` }, 2400);
     } catch (err) {
       store.fail(err);
     }
@@ -65,7 +81,11 @@
       <span class="grow"></span>
       <button class="btn sm ghost" onclick={onclose} aria-label="关闭"><Icon name="x" size={14} /></button>
     </header>
-    <p class="lead">工作目录是“机器 + 目录”：选哪个，这个会话就在哪台机器上读写文件、执行命令。</p>
+    {#if mounting}
+      <p class="lead">挂上的工作目录 AI 都能用，可以在不同的机器上；挂了好几个时，它调用工具会写明在哪个上执行。排第一的决定优先由哪台机器上的内核来跑。</p>
+    {:else}
+      <p class="lead">工作目录是“机器 + 目录”：工具在那台机器上、只能碰到这个目录。</p>
+    {/if}
 
     <div class="body">
       {#each groups as { m, list } (m.name)}
@@ -77,26 +97,23 @@
             <span class="st" class:off={!m.online}><i class="dot {m.online ? 'online' : 'stopped'}"></i>{status(m)}</span>
           </div>
           {#each list as w (w.id)}
-            <button class="ws" class:cur={w.id === current} onclick={() => onpick(w.id)} disabled={busy}>
-              <Icon name="folder" size={15} />
-              <code class="p" title={w.path}>{shortPath(homeShort(w.path), 58)}</code>
+            {@const on = mounted?.includes(w.id)}
+            <button class="ws" class:cur={on} onclick={() => choose(w)} disabled={busy}>
+              {#if mounting}
+                <span class="check" class:on>{#if on}<Icon name="check" size={12} />{/if}</span>
+              {:else}
+                <Icon name="folder" size={15} />
+              {/if}
+              <code class="p" title={w.path}>{shortPath(homeShort(w.path), 54)}</code>
+              {#if on && mounted!.length > 1}<span class="ord" title="挂载的顺序">#{mounted!.indexOf(w.id) + 1}</span>{/if}
               <span class="meta">{w.sessions ? `${w.sessions} 个会话` : ''}</span>
-              <span class="star" class:on={w.default} role="button" tabindex="-1" title={w.default ? '新会话默认用它（点一下取消）' : '设为新会话的默认'} onclick={(e) => star(w, e)}>★</span>
-              {#if w.id === current}<span class="tag accent">当前</span>{/if}
+              <span class="star" class:on={w.default} role="button" tabindex="-1" title={w.default ? '新会话默认挂上它（点一下取消）' : '新会话默认挂上它'} onclick={(e) => star(w, e)}>★</span>
             </button>
           {/each}
         </div>
       {:else}
         <p class="empty">还没有工作目录。在下面选一台机器，浏览它上面的目录添加一个。</p>
       {/each}
-
-      {#if none}
-        <button class="ws chat" class:cur={!current} onclick={() => onpick('')} disabled={busy}>
-          <Icon name="chat" size={15} />
-          <span class="p">只聊天，不用工作目录</span>
-          {#if !current}<span class="tag accent">当前</span>{/if}
-        </button>
-      {/if}
 
       <div class="add">
         <div class="ah"><Icon name="plus" size={14} />添加新的工作目录：先选机器</div>
@@ -112,6 +129,13 @@
         </div>
       </div>
     </div>
+    {#if mounting}
+      <footer>
+        <span class="sum">{mounted!.length ? `挂了 ${mounted!.length} 个` : '没有挂载：只聊天，不能读写文件、执行命令'}</span>
+        {#if mounted!.length}<button class="btn sm ghost" onclick={() => onchange?.([])}>全部取下</button>{/if}
+        <button class="btn sm primary" onclick={onclose}>完成</button>
+      </footer>
+    {/if}
   </div>
 </div>
 
@@ -229,9 +253,6 @@
     color: var(--c-dir);
     flex: none;
   }
-  .ws.chat :global(svg) {
-    color: var(--muted);
-  }
   .p {
     flex: 1;
     min-width: 0;
@@ -308,6 +329,40 @@
     background: transparent;
     color: var(--muted);
     border-style: dashed;
+  }
+  .check {
+    width: 17px;
+    height: 17px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 5px;
+    border: 1.5px solid var(--line-2);
+    color: #fff;
+  }
+  .check.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .ws .check :global(svg) {
+    color: #fff;
+  }
+  .ord {
+    font-size: 11px;
+    color: var(--accent-2);
+    font-family: var(--mono);
+  }
+  footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+  }
+  .sum {
+    flex: 1;
+    font-size: 12px;
+    color: var(--muted);
   }
   .dot {
     width: 7px;

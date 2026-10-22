@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 4
+const Version = 5
 
 // 权限模式，随 input 传给内核。
 const (
@@ -25,10 +25,10 @@ const (
 	TDone       = "done"
 	TPing       = "ping"
 	TLsResult   = "ls_result"
-	TExec       = "exec"        // 异机模式：请网关执行一次工具
+	TExec       = "exec"        // 请网关执行一次工具：工作目录不在这个内核的机器上，或者 Skill
 	TExecCancel = "exec_cancel" // 工具超时或这一轮被停止：请网关停下
-	TSkillFiles = "skill_files" // 异机模式：把技能目录的文件交给网关，传到执行的机器上
-	TTools      = "tools"       // 技能目录变化后更新工具定义
+	TRunResult  = "run_result"  // run / skill_put 的结果
+	TTools      = "tools"       // 旧内核：技能变化后更新工具定义（现在技能在网关上）
 
 	// 网关 → 内核
 	TWelcome    = "welcome"
@@ -39,7 +39,10 @@ const (
 	TCancel     = "cancel"
 	TPong       = "pong"
 	TLs         = "ls"          // 列目录，网页上选工作目录用
-	TExecResult = "exec_result" // exec / skill_files 的结果
+	TExecResult = "exec_result" // exec 的结果
+	TRun        = "run"         // 请内核在它的机器上执行一次工具（工作目录在那台机器上，这一轮由别的内核跑）
+	TRunCancel  = "run_cancel"  // 停下 run
+	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.cache/nano-agent/skills/<技能名>/
 	TPairing    = "pairing"     // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired     = "paired"      // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
 )
@@ -87,21 +90,18 @@ type Msg struct {
 	Reason string `json:"reason,omitempty"`
 	Calls  []Call `json:"calls,omitempty"`
 
-	// input：这一轮的权限模式和工作目录
-	Mode string   `json:"mode,omitempty"`
-	Dirs []string `json:"dirs,omitempty"` // 工作目录，第一个是默认目录
-	RO   []string `json:"ro,omitempty"`   // 额外的只读路径
-	RW   []string `json:"rw,omitempty"`   // 额外的读写路径
-	// input：exec 为 gateway 表示工作目录不在这个内核的机器上，工具交给网关执行（异机模式）；
-	// landlock 是执行的那台机器的沙箱版本（0 表示没有，自动模式下的 Shell 也要审批）
-	Exec     string `json:"exec,omitempty"`
-	Landlock int    `json:"landlock,omitempty"`
+	// input：这一轮的权限模式和挂载的工作目录
+	Mode       string          `json:"mode,omitempty"`
+	Workspaces []WorkspaceSpec `json:"workspaces,omitempty"`
 
-	// exec：工具的时限和输出上限；skill_files：技能名和文件
-	TimeoutMs int         `json:"timeout_ms,omitempty"`
-	MaxOutput int         `json:"max_output,omitempty"`
-	Skill     string      `json:"skill,omitempty"`
-	Files     []SkillFile `json:"files,omitempty"`
+	// exec：在哪个工作目录上执行（Skill 没有）、工具的时限和输出上限
+	Workspace string `json:"workspace,omitempty"`
+	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	MaxOutput int    `json:"max_output,omitempty"`
+	// run：交给执行器的完整请求；skill_put：技能名和文件
+	Req   json.RawMessage `json:"req,omitempty"`
+	Skill string          `json:"skill,omitempty"`
+	Files []SkillFile     `json:"files,omitempty"`
 
 	ID      string          `json:"id,omitempty"`
 	Name    string          `json:"name,omitempty"`
@@ -133,7 +133,19 @@ type ToolSpec struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// SkillSpec 是内核安装的技能简介，正文在调用 Skill 时才加载。
+// WorkspaceSpec 是 input 里挂载的一个工作目录。Name 是给模型看的名字（机器:路径），
+// 工具参数里的 workspace 用它。Local 表示在跑这一轮的内核的机器上，内核自己执行，
+// 否则交给网关（Landlock 是那台机器的沙箱版本）。
+type WorkspaceSpec struct {
+	Name     string   `json:"name"`
+	Dirs     []string `json:"dirs"`
+	RO       []string `json:"ro"`
+	RW       []string `json:"rw"`
+	Local    bool     `json:"local,omitempty"`
+	Landlock int      `json:"landlock,omitempty"`
+}
+
+// SkillSpec 是技能简介，正文在调用 Skill 时才加载。
 type SkillSpec struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`

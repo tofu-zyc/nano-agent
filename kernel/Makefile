@@ -6,7 +6,7 @@ STD      := -std=c11
 
 BIN   := nano-kernel
 EXEC  := nano-exec
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/skills.c src/util.c
+SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/runner.c src/link.c src/util.c
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox.c src/util.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -53,13 +53,8 @@ build/test_core: tests/test_core.c src/core.c src/core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(WARN) $(SAN) -o $@ tests/test_core.c src/core.c
 
-build/test_skills: tests/test_skills.c src/skills.c src/skills.h src/util.c src/util.h third_party/cjson/cJSON.c
-	@mkdir -p $(dir $@)
-	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(WARN) $(SAN) -o $@ tests/test_skills.c src/skills.c src/util.c third_party/cjson/cJSON.c
-
-test: build/test_core build/test_skills build/nano-kernel-asan build/nano-exec-asan
+test: build/test_core build/nano-kernel-asan build/nano-exec-asan
 	./build/test_core
-	./build/test_skills
 	python3 tests/test_exec.py build/nano-exec-asan
 	python3 tests/test_host.py build/nano-kernel-asan build/nano-exec-asan
 

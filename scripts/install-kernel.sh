@@ -227,7 +227,7 @@ case "$NAME" in
 esac
 
 stop_kernel
-mkdir -p "$DIR/skills"
+mkdir -p "$DIR"
 install -m 755 "$BUILD/nano-kernel" "$DIR/nano-kernel.new"
 install -m 755 "$BUILD/nano-exec" "$DIR/nano-exec.new"
 mv -f "$DIR/nano-kernel.new" "$DIR/nano-kernel"
@@ -236,8 +236,10 @@ echo "$VERSION" >"$DIR/VERSION"
 
 if [ "$UPGRADE" = 1 ]; then
 	# 只改网关地址和名字两行，别的配置原样留着
+	# 技能已经改放在网关上，旧版本写的 skills = 一并去掉
 	sed -e "s|^[[:space:]]*gateway[[:space:]]*=.*|gateway = $GATEWAY|" \
-		-e "s|^[[:space:]]*node[[:space:]]*=.*|node = $NAME|" "$DIR/kernel.conf" >"$DIR/kernel.conf.new"
+		-e "s|^[[:space:]]*node[[:space:]]*=.*|node = $NAME|" \
+		-e "/^[[:space:]]*skills[[:space:]]*=/d" "$DIR/kernel.conf" >"$DIR/kernel.conf.new"
 	grep -q '^[[:space:]]*node[[:space:]]*=' "$DIR/kernel.conf.new" || echo "node = $NAME" >>"$DIR/kernel.conf.new"
 	mv -f "$DIR/kernel.conf.new" "$DIR/kernel.conf"
 else
@@ -253,9 +255,6 @@ node = $NAME
 
 # 没有写口令：第一次连上网关时请求配对，在网关网页的「设备」里核对确认码、点允许，
 # 网关发给这台电脑的专用口令会存在本文件旁边的 paired.token。
-
-# 技能目录：每个技能一个子目录，里面是 SKILL.md 和可选的脚本、资料
-skills = skills
 
 max_steps = 16
 run_timeout = 600

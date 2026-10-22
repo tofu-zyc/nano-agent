@@ -3,19 +3,19 @@
  * 单线程 poll 循环：网关连接、执行器的管道、信号唤醒管道都在同一个 poll 里。
  * 外部消息 → 事件 → na_core_feed；na_core_next 取出的命令 → 发给网关或交给执行器。
  */
+#define _XOPEN_SOURCE 700   /* nftw */
 #include "cJSON.h"
 #include "conf.h"
 #include "core.h"
 #include "link.h"
 #include "runner.h"
-#include "runner.h"
-#include "skills.h"
 #include "tools.h"
 #include "util.h"
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -26,7 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define PROTO_VERSION      4
+#define PROTO_VERSION      5
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -45,11 +45,14 @@ static void on_signal(int sig)
     errno = saved;
 }
 
-/* 异机模式：工具调用交给网关执行，等 exec_result。skill 非空时是在等网关把技能文件传到执行的机器上 */
+/* 交给网关执行的工具调用（工作目录不在这台机器上，或者 Skill），等 exec_result */
 typedef struct gwjob {
-    char *sid, *id, *skill;
+    char *sid, *id;
     struct gwjob *next;
 } gwjob_t;
+
+/* 执行器任务的种类：自己这一轮的工具调用，或者网关请这台机器代为执行的（run） */
+enum { JOB_TOOL = 0, JOB_HOST = 1 };
 
 typedef struct {
     kconf           conf;
@@ -61,8 +64,6 @@ typedef struct {
     na_core        *core;
     runner_t        runner;
     struct gwjob   *gwjobs;      /* 交给网关执行、还没有结果的工具调用 */
-    skills_t        skills;      /* 技能 */
-    int64_t         skills_at;   /* 下一次重新扫描技能目录的时刻 */
     link_t          link;
     int64_t         last_ping;
     int64_t         next_connect;
@@ -85,22 +86,6 @@ static cJSON *msg_new(const char *type, const char *sid)
     return m;
 }
 
-/* 给模型看的工具：内置工具，有技能时加上 Skill（按名字排序） */
-static cJSON *all_tools(kernel_t *k)
-{
-    cJSON *arr = tools_specs();
-    cJSON *sk = skills_tool_spec(&k->skills);
-    if (!sk) return arr;
-    int i = 0;
-    const cJSON *it;
-    cJSON_ArrayForEach(it, arr) {
-        if (strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(it, "name")), "Skill") > 0) break;
-        i++;
-    }
-    cJSON_InsertItemInArray(arr, i, sk);
-    return arr;
-}
-
 static void send_hello(kernel_t *k)
 {
     cJSON *m = msg_new("hello", NULL);
@@ -108,30 +93,10 @@ static void send_hello(kernel_t *k)
     cJSON_AddStringToObject(m, "token", k->conf.token);
     if (!*k->conf.token) cJSON_AddBoolToObject(m, "pair", true);
     cJSON_AddStringToObject(m, "node", k->conf.node);
-    cJSON_AddItemToObject(m, "tools", all_tools(k));
-    cJSON_AddItemToObject(m, "skills", skills_json(&k->skills));
+    cJSON_AddItemToObject(m, "tools", tools_specs());
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
     link_send(&k->link, m);
-}
-
-/* 技能变了：重新报一遍工具 */
-static void send_tools(kernel_t *k)
-{
-    if (k->link.fd < 0) return;
-    cJSON *m = msg_new("tools", NULL);
-    cJSON_AddItemToObject(m, "tools", all_tools(k));
-    cJSON_AddItemToObject(m, "skills", skills_json(&k->skills));
-    link_send(&k->link, m);
-}
-
-static void refresh_skills(kernel_t *k, int64_t now)
-{
-    k->skills_at = now + 30000;
-    if (skills_scan(&k->skills, k->conf.skills)) {
-        log_info("技能有变化：%zu 个", k->skills.n);
-        send_tools(k);
-    }
 }
 
 /* ---- 命令 → 外部动作 ---- */
@@ -239,12 +204,11 @@ static void handle_ls(kernel_t *k, const cJSON *m)
     link_send(&k->link, r);
 }
 
-static void gw_add(kernel_t *k, const char *sid, const char *id, const char *skill)
+static void gw_add(kernel_t *k, const char *sid, const char *id)
 {
     gwjob_t *g = xcalloc(1, sizeof *g);
     g->sid = xstrdup(sid ? sid : "");
     g->id = xstrdup(id ? id : "");
-    g->skill = skill ? xstrdup(skill) : NULL;
     g->next = k->gwjobs;
     k->gwjobs = g;
 }
@@ -253,7 +217,6 @@ static void gw_free(gwjob_t *g)
 {
     free(g->sid);
     free(g->id);
-    free(g->skill);
     free(g);
 }
 
@@ -276,95 +239,308 @@ static void tool_done(kernel_t *k, const char *sid, const char *id, bool ok, con
     na_core_feed(k->core, now, &ev);
 }
 
-/* Skill：说明由内核读。工具交给网关执行时，先把技能目录的文件交给网关传到执行的机器上，
- * 网关回复那台机器上的目录后再返回说明（handle_msg 里的 exec_result）。 */
-static void load_skill(kernel_t *k, const na_cmd *c, bool gateway, int64_t now)
+/* ---- 工作目录 ----
+ *
+ * 一个会话可以同时挂好几个工作目录，可能在不同的机器上。input 的 workspaces 每项是
+ * {name, dirs, ro, rw, local, landlock}：name 是给模型看的名字（机器:路径），local 表示在这台机器上
+ * （内核自己执行），否则交给网关在那台机器上执行。工具参数里的 workspace 指定用哪个。 */
+
+static void ws_names(const cJSON *list, char *out, size_t outlen)
 {
-    cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-    const char *name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(args, "name"));
-    const skill_t *sk = skills_find(&k->skills, name);
-    if (gateway && sk) {
-        char err[256] = "";
-        cJSON *files = skill_files_json(sk, err, sizeof err);
-        if (files) {
-            cJSON *m = msg_new("skill_files", c->sid);
-            cJSON_AddStringToObject(m, "id", c->id);
-            cJSON_AddStringToObject(m, "skill", sk->name);
-            cJSON_AddItemToObject(m, "files", files);
-            link_send(&k->link, m);
-            gw_add(k, c->sid, c->id, sk->name);
-            log_info("技能 %s（%s）：附带文件交给网关传到执行的机器上", sk->name, c->id);
-        } else {
-            tool_done(k, c->sid, c->id, false, err, now);
-        }
-        cJSON_Delete(args);
-        return;
+    buf_t b = {0};
+    const cJSON *it;
+    cJSON_ArrayForEach(it, list) {
+        const char *n = sget(it, "name");
+        buf_puts(&b, b.len ? "、" : "");
+        buf_puts(&b, n ? n : "?");
     }
-    bool ok;
-    char *res = skill_load(&k->skills, name, NULL, &ok);
-    log_info("技能 %s（%s）%s", name ? name : "?", c->id, ok ? "" : "没有找到");
-    tool_done(k, c->sid, c->id, ok, res, now);
-    free(res);
-    cJSON_Delete(args);
+    char *s = buf_cstr(&b);   /* 接管了 b 的内存 */
+    snprintf(out, outlen, "%s", s);
+    free(s);
 }
 
-static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
+/* 名字里冒号前面是机器，后面是路径 */
+static bool ws_part_is(const char *name, const char *want, bool machine)
 {
-    char err[512] = "";
-    cJSON *req = cJSON_Parse(c->policy ? c->policy : "{}");
-    if (!cJSON_IsObject(req)) {
-        cJSON_Delete(req);
-        req = cJSON_CreateObject();
+    const char *colon = strchr(name, ':');
+    if (!colon) return false;
+    return machine ? (size_t)(colon - name) == strlen(want) && !strncmp(name, want, (size_t)(colon - name))
+                   : !strcmp(colon + 1, want);
+}
+
+/* 按参数里的 workspace 找挂载的工作目录：完整的名字、序号（从 1 开始）、只写机器或只写路径（唯一时）。
+ * 只挂了一个时可以不写。找不到返回 NULL，原因写进 err（直接作为工具结果给模型看）。 */
+static const cJSON *pick_workspace(const cJSON *policy, const cJSON *args, char *err, size_t errlen)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(policy, "workspaces");
+    int n = cJSON_IsArray(list) ? cJSON_GetArraySize(list) : 0;
+    char names[600];
+    if (n == 0) {
+        snprintf(err, errlen, "这个会话没有挂载工作目录，不能用工具");
+        return NULL;
     }
-    /* 异机模式：工作目录不在这台机器上，工具交给网关执行，约束由网关按会话的设置生成 */
-    bool gateway = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "gateway"));
-    cJSON_DeleteItemFromObjectCaseSensitive(req, "gateway");
-    if (!strcmp(c->name, "Skill")) {
-        load_skill(k, c, gateway, now);
-        cJSON_Delete(req);
-        return;
+    ws_names(list, names, sizeof names);
+    const cJSON *want = cJSON_GetObjectItemCaseSensitive(args, "workspace");
+    if (!want || cJSON_IsNull(want) || (cJSON_IsString(want) && !*want->valuestring)) {
+        if (n == 1) return cJSON_GetArrayItem(list, 0);
+        snprintf(err, errlen, "这个会话挂了 %d 个工作目录，用 workspace 参数指明在哪个上执行：%s", n, names);
+        return NULL;
     }
-    if (gateway) {
-        cJSON *m = msg_new("exec", c->sid);
-        cJSON_AddStringToObject(m, "id", c->id);
-        cJSON_AddStringToObject(m, "name", c->name);
-        cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-        cJSON_AddItemToObject(m, "args", args ? args : cJSON_CreateString(c->args ? c->args : ""));
-        cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
-        cJSON_AddNumberToObject(m, "max_output", (double)k->conf.max_output);
-        link_send(&k->link, m);
-        gw_add(k, c->sid, c->id, NULL);
-        log_info("交给网关执行 %s（%s）", c->name, c->id);
-        cJSON_Delete(req);
-        return;
+    if (cJSON_IsNumber(want)) {
+        int i = want->valueint;
+        if (i >= 1 && i <= n) return cJSON_GetArrayItem(list, i - 1);
+    } else if (cJSON_IsString(want)) {
+        const char *w = want->valuestring;
+        const cJSON *it, *hit = NULL;
+        int hits = 0;
+        cJSON_ArrayForEach(it, list)
+            if (sget(it, "name") && !strcmp(sget(it, "name"), w)) return it;
+        char *end;
+        long i = strtol(w, &end, 10);
+        if (!*end && i >= 1 && i <= n) return cJSON_GetArrayItem(list, (int)i - 1);
+        for (int pass = 0; pass < 2 && !hits; pass++) {
+            cJSON_ArrayForEach(it, list) {
+                if (sget(it, "name") && ws_part_is(sget(it, "name"), w, pass == 0)) {
+                    hit = it;
+                    hits++;
+                }
+            }
+        }
+        if (hits == 1) return hit;
     }
+    char *shown = cJSON_PrintUnformatted(want);
+    snprintf(err, errlen, "没有工作目录 %s。这个会话挂载的工作目录：%s", shown ? shown : "?", names);
+    cJSON_free(shown);
+    return NULL;
+}
+
+/* 交给网关：Skill（技能在网关上），或者工作目录不在这台机器上的工具调用 */
+static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *workspace)
+{
+    cJSON *m = msg_new("exec", c->sid);
+    cJSON_AddStringToObject(m, "id", c->id);
+    cJSON_AddStringToObject(m, "name", c->name);
+    cJSON_AddItemToObject(m, "args", args ? args : cJSON_CreateString(c->args ? c->args : ""));
+    if (workspace) cJSON_AddStringToObject(m, "workspace", workspace);
+    cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
+    cJSON_AddNumberToObject(m, "max_output", (double)k->conf.max_output);
+    link_send(&k->link, m);
+    gw_add(k, c->sid, c->id);
+    log_info("交给网关执行 %s（%s）%s%s", c->name, c->id, workspace ? "：" : "", workspace ? workspace : "");
+}
+
+/* 启动执行器。req 是请求（接管所有权），补上执行器需要的通用字段 */
+static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *id, const char *name,
+                         char *err, size_t errlen)
+{
     bool ok = true;
     for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key && ok; key++)
-        ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, sizeof err);
-    if (ok && k->skills.n) {
-        /* 技能目录在沙箱里只读可见：附带的脚本和资料用 Read 读、用 Shell 运行 */
-        cJSON *ro = cJSON_GetObjectItemCaseSensitive(req, "ro");
-        if (!cJSON_IsArray(ro)) ro = cJSON_AddArrayToObject(req, "ro");
-        cJSON_AddItemToArray(ro, cJSON_CreateString(k->skills.root));
-    }
+        ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
+    job_t *j = NULL;
     if (ok) {
-        cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-        cJSON_AddStringToObject(req, "tool", c->name);
-        cJSON_AddItemToObject(req, "args", args ? args : cJSON_CreateObject());
-        cJSON_AddStringToObject(req, "tmp_key", c->sid);
-        cJSON_AddNumberToObject(req, "max_output", (double)k->conf.max_output);
+        if (!cJSON_GetObjectItemCaseSensitive(req, "max_output"))
+            cJSON_AddNumberToObject(req, "max_output", (double)k->conf.max_output);
+        cJSON_DeleteItemFromObjectCaseSensitive(req, "watch_stdin");
         cJSON_AddBoolToObject(req, "watch_stdin", true);
         char *body = cJSON_PrintUnformatted(req);
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
         char *argv[] = { k->conf.exec, NULL };
-        ok = runner_start(&k->runner, argv, c->sid, c->id, c->name, line, err, sizeof err) == 0;
-        if (ok) log_info("执行 %s（%s）", c->name, c->id);
+        j = runner_start_ex(&k->runner, argv, sid, id, name, line, strlen(line), err, errlen);
     }
     cJSON_Delete(req);
-    if (ok) return;
+    return j;
+}
+
+static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
+{
+    char err[1024] = "";
+    cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
+    if (!strcmp(c->name, "Skill")) {
+        send_exec(k, c, args, NULL);
+        return;
+    }
+    cJSON *pol = cJSON_Parse(c->policy ? c->policy : "{}");
+    const cJSON *ws = pick_workspace(pol, args, err, sizeof err);
+    job_t *j = NULL;
+    if (ws) {
+        cJSON_DeleteItemFromObjectCaseSensitive(args, "workspace");
+        if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"))) {
+            /* 工作目录不在这台机器上：交给网关，约束由网关按会话的设置生成 */
+            send_exec(k, c, args, sget(ws, "name"));
+            cJSON_Delete(pol);
+            return;
+        }
+        cJSON *req = cJSON_CreateObject();
+        for (const char *const *key = (const char *const[]){ "dirs", "ro", "rw", NULL }; *key; key++) {
+            const cJSON *v = cJSON_GetObjectItemCaseSensitive(ws, *key);
+            cJSON_AddItemToObject(req, *key, cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
+        }
+        cJSON_AddBoolToObject(req, "write", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(pol, "write")));
+        cJSON_AddStringToObject(req, "tool", c->name);
+        cJSON_AddItemToObject(req, "args", args);
+        args = NULL;
+        cJSON_AddStringToObject(req, "tmp_key", c->sid);
+        j = start_exec(k, req, c->sid, c->id, c->name, err, sizeof err);
+        if (j) log_info("执行 %s（%s）%s", c->name, c->id, sget(ws, "name") ? sget(ws, "name") : "");
+    }
+    cJSON_Delete(args);
+    cJSON_Delete(pol);
+    if (j) return;
     log_warn("无法执行 %s：%s", c->name, err);
     tool_done(k, c->sid, c->id, false, err, now);
+}
+
+/* ---- 网关请这台机器代为执行（工作目录在这台机器上，但这一轮由别的内核跑） ---- */
+
+static void send_run_result(kernel_t *k, const char *id, bool ok, const char *content)
+{
+    cJSON *m = msg_new("run_result", NULL);
+    cJSON_AddStringToObject(m, "id", id ? id : "");
+    cJSON_AddBoolToObject(m, "ok", ok);
+    cJSON_AddStringToObject(m, "content", content ? content : "");
+    link_send(&k->link, m);
+}
+
+static void handle_run(kernel_t *k, const cJSON *m)
+{
+    const char *id = sget(m, "id");
+    const cJSON *req = cJSON_GetObjectItemCaseSensitive(m, "req");
+    const char *tool = sget(req, "tool");
+    char err[1024] = "";
+    job_t *j = NULL;
+    if (!id || !cJSON_IsObject(req) || !tool) snprintf(err, sizeof err, "执行请求不完整");
+    else j = start_exec(k, cJSON_Duplicate(req, 1), "", id, tool, err, sizeof err);
+    if (!j) {
+        send_run_result(k, id, false, err);
+        return;
+    }
+    j->kind = JOB_HOST;
+    log_info("代网关执行 %s（%s）", tool, id);
+}
+
+/* 技能文件放在这台机器的 ~/.cache/nano-agent/skills/<技能名>/ 下，工具执行时只读可见 */
+static bool safe_rel(const char *p)
+{
+    if (!p || !*p || p[0] == '/') return false;
+    for (const char *s = p; *s;) {
+        const char *e = strchr(s, '/');
+        size_t n = e ? (size_t)(e - s) : strlen(s);
+        if (n == 0 || (n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) return false;
+        s += n + (e ? 1 : 0);
+    }
+    return true;
+}
+
+static int unb64(int ch)
+{
+    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+    if (ch == '+') return 62;
+    if (ch == '/') return 63;
+    return -1;
+}
+
+static unsigned char *base64_decode(const char *s, size_t *n)
+{
+    size_t len = strlen(s);
+    unsigned char *out = xmalloc(len / 4 * 3 + 3);
+    size_t o = 0;
+    unsigned v = 0;
+    int bits = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '=' || s[i] == '\n' || s[i] == '\r') continue;
+        int d = unb64((unsigned char)s[i]);
+        if (d < 0) { free(out); return NULL; }
+        v = v << 6 | (unsigned)d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (unsigned char)(v >> bits);
+        }
+    }
+    *n = o;
+    return out;
+}
+
+static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)st; (void)flag; (void)ftw;
+    return remove(path);
+}
+
+static bool mkdirs(char *path)
+{
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        int rc = mkdir(path, 0755);
+        *p = '/';
+        if (rc < 0 && errno != EEXIST) return false;
+    }
+    return mkdir(path, 0755) == 0 || errno == EEXIST;
+}
+
+static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_t dirlen, char *err, size_t errlen)
+{
+    const char *home = getenv("HOME");
+    if (!home || home[0] != '/') { snprintf(err, errlen, "没有 HOME"); return false; }
+    if (!name || !*name || strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != strlen(name) || name[0] == '.') {
+        snprintf(err, errlen, "技能名字不能用：%s", name ? name : "");
+        return false;
+    }
+    char *root = xasprintf("%s/.cache/nano-agent/skills", home);
+    char *dir = xasprintf("%s/%s", root, name);
+    char *tmp = xasprintf("%s/.%s.tmp", root, name);
+    bool ok = mkdirs(root);
+    if (ok) nftw(tmp, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    ok = ok && mkdir(tmp, 0755) == 0;
+    if (!ok) snprintf(err, errlen, "建不了目录 %s：%s", tmp, strerror(errno));
+    const cJSON *f;
+    cJSON_ArrayForEach(f, files) {
+        if (!ok) break;
+        const char *rel = sget(f, "path"), *data = sget(f, "data");
+        if (!safe_rel(rel) || !data) {
+            snprintf(err, errlen, "技能文件路径不能用：%s", rel ? rel : "");
+            ok = false;
+            break;
+        }
+        size_t n;
+        unsigned char *bytes = base64_decode(data, &n);
+        char *full = xasprintf("%s/%s", tmp, rel);
+        char *slash = strrchr(full, '/');
+        *slash = 0;
+        ok = bytes && mkdirs(full);
+        *slash = '/';
+        int fd = ok ? open(full, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                           cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(f, "exec")) ? 0755 : 0644) : -1;
+        ok = fd >= 0 && (n == 0 || write(fd, bytes, n) == (ssize_t)n);
+        if (fd >= 0) close(fd);
+        if (!ok) snprintf(err, errlen, "写不了 %s：%s", rel, bytes ? strerror(errno) : "数据不是 base64");
+        free(full);
+        free(bytes);
+    }
+    if (ok) {
+        nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+        ok = rename(tmp, dir) == 0;
+        if (!ok) snprintf(err, errlen, "放不到 %s：%s", dir, strerror(errno));
+    }
+    if (!ok) nftw(tmp, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    else snprintf(dir_out, dirlen, "%s", dir);
+    free(root);
+    free(dir);
+    free(tmp);
+    return ok;
+}
+
+static void handle_skill_put(kernel_t *k, const cJSON *m)
+{
+    char err[512] = "", dir[PATH_MAX] = "";
+    bool ok = put_skill(sget(m, "skill"), cJSON_GetObjectItemCaseSensitive(m, "files"), dir, sizeof dir, err, sizeof err);
+    if (ok) log_info("技能 %s 的文件放到了 %s", sget(m, "skill"), dir);
+    else log_warn("放技能文件失败：%s", err);
+    send_run_result(k, sget(m, "id"), ok, ok ? dir : err);
 }
 
 static void pump(kernel_t *k, int64_t now)
@@ -446,17 +622,12 @@ static na_mode parse_mode(const char *s)
     return NA_MODE_NONE;
 }
 
-/* input 里的工作目录设置 → 交给执行器的约束（内核状态机不解析，原样带着）。
- * gateway 表示这一轮的工具交给网关执行（异机模式），执行时取出来。 */
-static char *build_policy(const cJSON *m, na_mode mode, bool gateway)
+/* input 里挂载的工作目录 → 这一轮的执行约束（状态机不解析，原样带着，执行时按调用取用） */
+static char *build_policy(const cJSON *m, na_mode mode)
 {
     cJSON *p = cJSON_CreateObject();
-    if (gateway) cJSON_AddBoolToObject(p, "gateway", true);
-    const char *keys[] = { "dirs", "ro", "rw" };
-    for (size_t i = 0; i < 3; i++) {
-        const cJSON *v = cJSON_GetObjectItemCaseSensitive(m, keys[i]);
-        cJSON_AddItemToObject(p, keys[i], cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
-    }
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
+    cJSON_AddItemToObject(p, "workspaces", cJSON_IsArray(v) ? cJSON_Duplicate(v, 1) : cJSON_CreateArray());
     cJSON_AddBoolToObject(p, "write", mode == NA_MODE_ASK || mode == NA_MODE_AUTO);
     char *s = cJSON_PrintUnformatted(p);
     cJSON_Delete(p);
@@ -523,17 +694,21 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         gwjob_t *g = gw_take(k, sget(m, "sid"), sget(m, "id"));
         if (!g) return;   /* 已经超时或者被停止了 */
         bool ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "ok"));
-        const char *content = sget(m, "content") ? sget(m, "content") : "";
-        if (g->skill && ok) {
-            /* 技能文件传好了，content 是执行的机器上的技能目录 */
-            char *res = skill_load(&k->skills, g->skill, content, &ok);
-            tool_done(k, g->sid, g->id, ok, res, now);
-            free(res);
-        } else {
-            log_info("网关执行 %s %s", g->id, ok ? "完成" : "失败");
-            tool_done(k, g->sid, g->id, ok, content, now);
-        }
+        log_info("网关执行 %s %s", g->id, ok ? "完成" : "失败");
+        tool_done(k, g->sid, g->id, ok, sget(m, "content") ? sget(m, "content") : "", now);
         gw_free(g);
+        return;
+    }
+    if (!strcmp(t, "run")) {
+        handle_run(k, m);
+        return;
+    }
+    if (!strcmp(t, "run_cancel")) {
+        runner_kill(&k->runner, "", sget(m, "id"));
+        return;
+    }
+    if (!strcmp(t, "skill_put")) {
+        handle_skill_put(k, m);
         return;
     }
 
@@ -541,21 +716,18 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     na_call *calls = NULL;
     char **owned = NULL;
     char *policy = NULL;
+    cJSON *run_pol = NULL;
     size_t ncalls = 0;
 
     if (!strcmp(t, "input")) {
-        refresh_skills(k, now);
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
-        /* exec 为 gateway：工作目录不在这台机器上，工具交给网关执行；有没有沙箱按执行的那台机器算 */
-        bool gateway = sget(m, "exec") && !strcmp(sget(m, "exec"), "gateway");
-        const cJSON *ll = cJSON_GetObjectItemCaseSensitive(m, "landlock");
-        ev.sandbox = !gateway ? NA_SB_DEFAULT : cJSON_IsNumber(ll) && ll->valuedouble > 0 ? NA_SB_YES : NA_SB_NO;
-        policy = build_policy(m, ev.mode, gateway);
+        policy = build_policy(m, ev.mode);
         ev.policy = policy;
-        log_info("run 开始 sid=%s from=%s mode=%s%s", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
-                 sget(m, "mode") ? sget(m, "mode") : "none", gateway ? "（工具交给网关执行）" : "");
+        const cJSON *ws = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
+        log_info("run 开始 sid=%s from=%s mode=%s 工作目录 %d 个", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
+                 sget(m, "mode") ? sget(m, "mode") : "none", cJSON_IsArray(ws) ? cJSON_GetArraySize(ws) : 0);
     } else if (!strcmp(t, "turn")) {
         ev.type = NA_EV_TURN;
         ev.reason = parse_reason(sget(m, "reason"));
@@ -564,8 +736,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ncalls = cJSON_IsArray(arr) ? (size_t)cJSON_GetArraySize(arr) : 0;
         if (ncalls) {
             calls = xcalloc(ncalls, sizeof *calls);
-            owned = xcalloc(ncalls, sizeof *owned);
+            owned = xcalloc(ncalls * 2, sizeof *owned);   /* 参数文本、预检的错误 */
         }
+        const char *pol_s = na_core_policy(k->core, ev.sid);
+        run_pol = pol_s ? cJSON_Parse(pol_s) : NULL;
         for (size_t i = 0; i < ncalls; i++) {
             const cJSON *it = cJSON_GetArrayItem(arr, (int)i);
             const cJSON *args = cJSON_GetObjectItemCaseSensitive(it, "args");
@@ -580,6 +754,20 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                 owned[i] = cJSON_PrintUnformatted(args);
                 calls[i].args = owned[i];
                 calls[i].args_ok = cJSON_IsObject(args);
+            }
+            /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
+            if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") && run_pol) {
+                char err[1024];
+                const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
+                if (!ws) {
+                    owned[ncalls + i] = xstrdup(err);
+                    calls[i].error = owned[ncalls + i];
+                } else {
+                    bool local = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"));
+                    const cJSON *ll = cJSON_GetObjectItemCaseSensitive(ws, "landlock");
+                    int landlock = local ? k->landlock : cJSON_IsNumber(ll) ? ll->valueint : 0;
+                    calls[i].sandbox = landlock > 0 ? NA_SB_YES : NA_SB_NO;
+                }
             }
             log_info("模型请求 %s（%s）", calls[i].name ? calls[i].name : "?", calls[i].id ? calls[i].id : "?");
         }
@@ -600,10 +788,14 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     if (na_core_feed(k->core, now, &ev) < 0)
         log_warn("忽略与当前状态不符的消息：%s sid=%s", t, ev.sid ? ev.sid : "-");
 
-    for (size_t i = 0; i < ncalls; i++) cJSON_free(owned[i]);
+    for (size_t i = 0; i < ncalls; i++) {
+        cJSON_free(owned[i]);
+        free(owned[ncalls + i]);
+    }
     free(owned);
     free(calls);
     cJSON_free(policy);
+    cJSON_Delete(run_pol);
 }
 
 /* ---- 连接管理 ---- */
@@ -648,8 +840,12 @@ static void collect_finished(kernel_t *k, int64_t now)
             bool ok;
             char *res = job_result(j, &ok);
             log_info("%s（%s）%s", j->name, j->id, ok ? "完成" : "失败");
-            na_event ev = { .type = NA_EV_TOOL_DONE, .sid = j->sid, .id = j->id, .ok = ok, .content = res };
-            na_core_feed(k->core, now, &ev);
+            if (j->kind == JOB_HOST) {
+                send_run_result(k, j->id, ok, res);
+            } else {
+                na_event ev = { .type = NA_EV_TOOL_DONE, .sid = j->sid, .id = j->id, .ok = ok, .content = res };
+                na_core_feed(k->core, now, &ev);
+            }
             free(res);
         }
         job_free(j);
@@ -728,7 +924,6 @@ static void loop(kernel_t *k)
 
         if (np > base) runner_on_poll(&k->runner, pfds + base, refs + base, np - base);
         collect_finished(k, now);
-        if (now >= k->skills_at) refresh_skills(k, now);
 
         na_event tick = { .type = NA_EV_TICK };
         na_core_feed(k->core, now, &tick);
@@ -860,26 +1055,15 @@ int main(int argc, char **argv)
         return 1;
     }
     k.tools = tools_policies(&k.ntools);
-    skills_scan(&k.skills, k.conf.skills);
-    k.skills_at = now_ms() + 30000;
 
     log_info("节点 %s，网关 %s", k.conf.node, k.conf.gateway);
-    if (k.skills.n) {
-        buf_t names = {0};
-        for (size_t i = 0; i < k.skills.n; i++) {
-            buf_puts(&names, i ? "、" : "");
-            buf_puts(&names, k.skills.list[i].name);
-        }
-        char *s = buf_cstr(&names);
-        log_info("技能目录 %s：%s", k.skills.root, s);
-        free(s);
-    }
+    if (k.conf.skills)
+        log_warn("kernel.conf 里的 skills 不再使用：技能改放在网关上（网关配置目录的 skills/），这一行可以删掉");
     if (k.landlock > 0)
         log_info("执行器 %s，沙箱 Landlock v%d%s", k.conf.exec, k.landlock, k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
     else
         log_warn("执行器 %s：本机不支持 Landlock，没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {
-        skills_free(&k.skills);
         free(k.exec_real);
         kconf_free(&k.conf);
         return 0;
@@ -919,7 +1103,6 @@ int main(int argc, char **argv)
     buf_free(&k.link.in);
     buf_free(&k.link.out);
     na_core_free(k.core);
-    skills_free(&k.skills);
     free(k.exec_real);
     kconf_free(&k.conf);
     return 0;

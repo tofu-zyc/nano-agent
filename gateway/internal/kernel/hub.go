@@ -40,6 +40,7 @@ type Handler interface {
 
 type Hub struct {
 	token string
+	extra []string // 另外接受的口令（网关自己启动的本机内核用的，每次启动随机生成）
 	h     Handler
 	log   *slog.Logger
 
@@ -64,6 +65,24 @@ func (c *conn) close() {
 		close(c.done)
 		c.nc.Close()
 	})
+}
+
+// AllowToken 另外接受一个口令，任何名字都能用（网关自己启动的本机内核用）。
+func (h *Hub) AllowToken(token string) {
+	h.mu.Lock()
+	h.extra = append(h.extra, token)
+	h.mu.Unlock()
+}
+
+func (h *Hub) extraToken(t string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, x := range h.extra {
+		if subtle.ConstantTimeCompare([]byte(t), []byte(x)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func NewHub(token string, h Handler, log *slog.Logger) *Hub {
@@ -219,6 +238,7 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 			h.pair(nc, sc, hello)
 			return
 		case hello.Token != "" && subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.token)) == 1:
+		case hello.Token != "" && h.extraToken(hello.Token):
 		case hello.Token != "" && h.pairedToken(hello.Node, hello.Token):
 			c.paired = true
 		default:

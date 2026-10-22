@@ -10,8 +10,11 @@ import (
 
 // Settings 是单个会话覆盖默认值的设置，存在 data/sessions/<会话ID>.settings.json。
 type Settings struct {
-	// Workspace 是工作目录列表里的一项（app/workspaces.go），WorkspaceSet 为 false 时用新会话的默认工作目录，
-	// 第一次说话时定下来；为 true 而 Workspace 为空表示只聊天。
+	// Workspaces 是挂载的工作目录（工作目录列表里的 ID，app/workspaces.go），可以有好几个、在不同的机器上。
+	// WorkspacesSet 为 false 时用新会话的默认工作目录，第一次说话时定下来；为 true 而列表为空表示只聊天。
+	Workspaces    []string `json:"workspaces,omitempty"`
+	WorkspacesSet bool     `json:"workspaces_set,omitempty"`
+	// 旧版本：只能挂一个工作目录（启动时迁移到 Workspaces）
 	Workspace    string `json:"workspace,omitempty"`
 	WorkspaceSet bool   `json:"workspace_set,omitempty"`
 	Mode         string `json:"mode,omitempty"` // 空表示用配置里的默认模式

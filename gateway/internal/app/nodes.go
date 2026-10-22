@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -11,20 +12,21 @@ import (
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/skills"
 )
 
 // 内核和机器
 //
 // 内核是 agent 本身，装在哪台设备上都行，可以同时连好几个，按名字区分；它们没有状态，上下文、
 // 会话、审批都在网关，哪个在线都能接手。工作目录在具体的机器上（workspaces.go）：网关所在的本机、
-// SSH 服务器、装了内核的电脑。每一轮开始时按会话的工作目录决定怎么跑（route）：
+// SSH 服务器、装了内核的电脑。一个会话可以同时挂好几个。每一轮开始时决定怎么跑（route）：
 //
-//   - 同机：工作目录所在的机器上有在线的内核（本机的目录 → 和网关同一台机器上的内核；电脑上的目录
-//     → 那台电脑的内核），这一轮由它来跑，工具在它自己的机器上执行；
-//   - 异机：工作目录在本机（但本机没有在线的内核）或者 SSH 服务器上，由任意在线的内核来跑
-//     （本机的优先），工具交给网关执行（exec.go）；
-//   - 工作目录所在的机器用不了（电脑不在线、服务器连不上）：找个在线的内核顶上，这一轮只聊天，
-//     并在用户消息前说明原因（和环境说明一样，变了才追加，不破坏前缀缓存）。
+//   - 先挑跑这一轮的内核：第一个挂载的工作目录所在的机器上有内核就用它，其次是别的挂载的机器上的，
+//     再其次本机的、最近连上来的；
+//   - 每个工作目录：在这个内核的机器上（同机），内核自己执行；否则（异机）工具交给网关，
+//     网关在那台机器上执行（exec.go）：本机和 SSH 服务器网关自己执行，别的电脑请那台电脑的内核代为执行；
+//   - 机器用不了（电脑不在线、服务器连不上）的工作目录这一轮不挂，在用户消息前说明
+//     （和环境说明一样，变了才追加，不破坏前缀缓存）。
 
 // Hosts 是网关能直接执行工具的机器：本机和 SSH 服务器（host 包）。
 type Hosts interface {
@@ -46,14 +48,21 @@ func (a *App) HostsChanged() {
 	a.publishWorkspaces()
 }
 
+// SetManagedKernel 记下网关自己启动的本机内核的名字（网页上标出来）。
+func (a *App) SetManagedKernel(name string) {
+	a.mu.Lock()
+	a.managedKernel = name
+	a.mu.Unlock()
+}
+
 // KernelInfo 是一个在线的内核。
 type KernelInfo struct {
-	Node     string            `json:"node"`
-	Landlock int               `json:"landlock"` // 0 表示没有沙箱
-	Tools    []string          `json:"tools"`
-	Skills   []proto.SkillSpec `json:"skills"`
-	Since    int64             `json:"since"`
-	Local    bool              `json:"local"` // 和网关在同一台机器上
+	Node     string   `json:"node"`
+	Landlock int      `json:"landlock"` // 0 表示没有沙箱
+	Tools    []string `json:"tools"`
+	Since    int64    `json:"since"`
+	Local    bool     `json:"local"`             // 和网关在同一台机器上
+	Managed  bool     `json:"managed,omitempty"` // 网关自己启动的本机内核
 }
 
 type node struct {
@@ -62,30 +71,59 @@ type node struct {
 	seq   int // 第几个连上来的，挑内核时优先最近连上的
 }
 
-func (n *node) setTools(tools []proto.ToolSpec, skills []proto.SkillSpec) {
+func toolOf(t proto.ToolSpec) llm.Tool {
+	params := t.InputSchema
+	if len(params) == 0 {
+		params = json.RawMessage(`{"type":"object","properties":{}}`)
+	}
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: t.Name, Description: t.Description, Parameters: params}}
+}
+
+func (n *node) setTools(tools []proto.ToolSpec) {
 	n.tools = nil
 	n.info.Tools = []string{}
-	n.info.Skills = skills
-	if n.info.Skills == nil {
-		n.info.Skills = []proto.SkillSpec{}
-	}
 	for _, t := range tools {
-		params := t.InputSchema
-		if len(params) == 0 {
-			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		if t.Name == "Skill" {
+			continue // 技能在网关上，Skill 由网关提供
 		}
-		n.tools = append(n.tools, llm.Tool{Type: "function", Function: llm.ToolFunction{
-			Name: t.Name, Description: t.Description, Parameters: params,
-		}})
+		n.tools = append(n.tools, toolOf(t))
 		n.info.Tools = append(n.info.Tools, t.Name)
 	}
+}
+
+// toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill），按名字排序（顺序固定，方便前缀缓存）。
+// 调用方持有锁。
+func (a *App) toolsFor(n *node) []llm.Tool {
+	tools := slices.Clone(n.tools)
+	if spec, ok := a.skills.ToolSpec(); ok {
+		tools = append(tools, toolOf(spec))
+		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
+	}
+	return tools
+}
+
+// refreshSkills 重新扫描技能目录，有变化时通知网页。调用方持有锁。
+func (a *App) refreshSkills() {
+	if a.skills.Scan() {
+		a.publish(events.Event{T: "skills", Data: a.skills.List()})
+		a.log.Info("技能有变化", "count", len(a.skills.List()), "dir", a.skills.Dir())
+	}
+}
+
+// Skills 是网关上的技能（网页显示用）。
+func (a *App) Skills() []skills.Skill {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refreshSkills()
+	return a.skills.List()
 }
 
 func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	n := &node{info: KernelInfo{Node: name, Since: time.Now().UnixMilli(), Local: local}}
-	n.setTools(hello.Tools, hello.Skills)
+	n.setTools(hello.Tools)
+	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock
 	}
@@ -122,15 +160,15 @@ func (a *App) toolsChanged(name string, m *proto.Msg) {
 	if n == nil {
 		return
 	}
-	n.setTools(m.Tools, m.Skills)
+	n.setTools(m.Tools)
 	a.publish(events.Event{T: "kernel", Name: name, Data: n.info})
-	a.log.Info("内核工具已更新", "node", name, "skills", len(m.Skills))
 }
 
 func (a *App) KernelDown(name string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.nodes, name)
+	a.hostGone(name)
 	a.publish(events.Event{T: "kernel", Name: name})
 	a.publish(events.Event{T: "machines", Data: a.machineList()})
 	for _, s := range a.sessions {
@@ -174,55 +212,126 @@ func (a *App) preferred() string {
 	return best
 }
 
-// route 是一轮怎么跑
-type route struct {
-	kernel   string // 跑这一轮的内核，空表示没有在线的内核
-	gateway  bool   // 异机模式：工具交给网关执行
-	landlock int    // 异机模式下执行的那台机器的沙箱版本
-	note     string // 工作目录所在的机器用不了时告诉模型的说明，这一轮只聊天
+// machineOf 是内核所在的机器：和网关在同一台机器上的内核都算本机
+func (a *App) machineOf(kernel string) string {
+	if n := a.nodes[kernel]; n != nil && n.info.Local {
+		return host.LocalName
+	}
+	return kernel
 }
 
-func (a *App) route(w workspace) route {
-	any := a.preferred()
-	if any == "" || w.ws == nil {
-		return route{kernel: any}
-	}
-	name := w.ws.Host
-	// 同机：工作目录所在的机器上有内核
+// kernelOn 是机器 name 上在线的内核
+func (a *App) kernelOn(name string) string {
 	if name == host.LocalName {
-		if k := a.localKernel(); k != "" {
-			return route{kernel: k}
-		}
-	} else if a.nodes[name] != nil {
-		return route{kernel: name}
+		return a.localKernel()
 	}
-	// 异机：网关自己能执行的机器（本机、SSH 服务器）
+	if a.nodes[name] != nil {
+		return name
+	}
+	return ""
+}
+
+func (a *App) isSSH(name string) bool {
+	if name == host.LocalName || a.hosts == nil {
+		return false
+	}
+	_, info, ok := a.hosts.Host(name)
+	return ok && info.Kind == "ssh"
+}
+
+// hostFor 是网关在机器 name 上执行工具用的 Host：本机和 SSH 服务器网关自己执行，装了内核的电脑请它的内核
+// 代为执行。用不了时返回 nil 和原因。调用方持有锁。
+func (a *App) hostFor(name string) (host.Host, int, string) {
 	if a.hosts != nil {
 		if h, info, ok := a.hosts.Host(name); ok {
 			if h != nil {
-				return route{kernel: any, gateway: true, landlock: info.Landlock}
+				return h, info.Landlock, ""
 			}
-			what := "服务器 " + name
-			if name == host.LocalName {
-				what = "本机"
+			if k := a.kernelOn(name); k == "" {
+				d := info.Detail
+				if d == "" {
+					d = "连不上"
+				}
+				return nil, 0, d
 			}
-			return route{kernel: any, note: fmt.Sprintf("[系统] 工作目录所在的%s现在用不了（%s），这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。", what, info.Detail, any)}
 		}
 	}
-	return route{kernel: any, note: fmt.Sprintf("[系统] 工作目录所在的机器 %s 现在不在线，这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。", name, any)}
+	if k := a.kernelOn(name); k != "" {
+		return kernelHost{a: a, node: k}, a.nodes[k].info.Landlock, ""
+	}
+	return nil, 0, "不在线"
 }
 
-// hostUsable：机器 name 上的工作目录现在能用
-func (a *App) hostUsable(name string) bool {
-	if (name == host.LocalName && a.localKernel() != "") || a.nodes[name] != nil {
-		return true
-	}
-	if a.hosts != nil {
-		if h, _, ok := a.hosts.Host(name); ok && h != nil {
-			return true
+// mount 是这一轮挂上的一个工作目录
+type mount struct {
+	ws       *Workspace
+	local    bool // 在跑这一轮的内核的机器上，内核自己执行
+	landlock int  // 异机时执行的那台机器的沙箱版本
+}
+
+// route 是一轮怎么跑
+type route struct {
+	kernel string   // 跑这一轮的内核，空表示没有在线的内核
+	mounts []mount  // 能用的工作目录
+	down   []string // 用不了的工作目录和原因
+}
+
+func (a *App) route(w workspace) route {
+	rt := route{}
+	for _, x := range w.wss {
+		if k := a.kernelOn(x.Host); k != "" {
+			rt.kernel = k
+			break
 		}
 	}
-	return false
+	if rt.kernel == "" {
+		rt.kernel = a.preferred()
+	}
+	if rt.kernel == "" {
+		return rt
+	}
+	here := a.machineOf(rt.kernel)
+	for _, x := range w.wss {
+		if x.Host == here {
+			rt.mounts = append(rt.mounts, mount{ws: x, local: true, landlock: a.nodes[rt.kernel].info.Landlock})
+			continue
+		}
+		if _, landlock, why := a.hostFor(x.Host); why != "" {
+			rt.down = append(rt.down, fmt.Sprintf("%s：%s %s", x.Label(), x.Host, why))
+		} else {
+			rt.mounts = append(rt.mounts, mount{ws: x, landlock: landlock})
+		}
+	}
+	return rt
+}
+
+// find 按给模型看的名字（机器:路径）找这一轮挂上的工作目录
+func (rt route) find(name string) *mount {
+	for i := range rt.mounts {
+		if rt.mounts[i].ws.Label() == name {
+			return &rt.mounts[i]
+		}
+	}
+	return nil
+}
+
+// spec 是交给内核的工作目录：同一台机器上挂的别的工作目录也能读写（方便在它们之间拷文件），
+// 技能文件的缓存目录只读。
+func (rt route) spec(m mount, w workspace) proto.WorkspaceSpec {
+	dirs := []string{m.ws.Path}
+	for _, o := range rt.mounts {
+		if o.ws.Host == m.ws.Host && o.ws.ID != m.ws.ID {
+			dirs = append(dirs, o.ws.Path)
+		}
+	}
+	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: append(slices.Clone(w.ro), skills.CacheDir),
+		RW: slices.Clone(w.rw), Local: m.local, Landlock: m.landlock}
+}
+
+// hostUsable：机器 name 上的工作目录现在能用（有内核，或者网关能在上面执行）
+func (a *App) hostUsable(name string) bool {
+	h, _, _ := a.hostFor(name)
+	return h != nil
 }
 
 // MachineInfo 是网页和 /node 上显示的一台机器。
@@ -289,19 +398,23 @@ func (a *App) cmdNode(c in, _ string) {
 func (a *App) describeMachines(sid string) string {
 	var b strings.Builder
 	w := a.workspaceOf(sid)
-	if w.ws == nil {
-		b.WriteString("这个会话没有工作目录，只聊天。\n")
-	} else {
-		rt := a.route(w)
-		switch {
-		case rt.kernel == "":
-			fmt.Fprintf(&b, "这个会话在 %s 上工作，现在没有在线的内核。\n", w.ws.Label())
-		case rt.note != "":
-			fmt.Fprintf(&b, "这个会话在 %s 上工作，但 %s 现在用不了，只能聊天。\n", w.ws.Label(), w.ws.Host)
-		case rt.gateway:
-			fmt.Fprintf(&b, "这个会话在 %s 上工作：由内核 %s 跑，工具交给网关在 %s 上执行。\n", w.ws.Label(), rt.kernel, w.ws.Host)
-		default:
-			fmt.Fprintf(&b, "这个会话在 %s 上工作：由同一台机器上的内核 %s 跑。\n", w.ws.Label(), rt.kernel)
+	rt := a.route(w)
+	switch {
+	case rt.kernel == "":
+		b.WriteString("现在没有在线的内核，没法处理消息。\n")
+	case len(w.wss) == 0:
+		fmt.Fprintf(&b, "这个会话没有挂载工作目录，只聊天，由内核 %s 跑。\n", rt.kernel)
+	default:
+		fmt.Fprintf(&b, "这个会话由内核 %s 跑，挂载的工作目录：\n", rt.kernel)
+		for _, m := range rt.mounts {
+			how := "工具交给网关在 " + m.ws.Host + " 上执行"
+			if m.local {
+				how = "同一台机器，内核自己执行"
+			}
+			fmt.Fprintf(&b, "· %s（%s）\n", m.ws.Label(), how)
+		}
+		for _, d := range rt.down {
+			fmt.Fprintf(&b, "· %s（用不了）\n", d)
 		}
 	}
 	b.WriteString("机器：\n")
@@ -329,6 +442,6 @@ func (a *App) describeMachines(sid string) string {
 		}
 		fmt.Fprintf(&b, "· %s（%s）\n", m.Name, strings.Join(tags, "，"))
 	}
-	b.WriteString("用 /dir 选择在哪台机器的哪个目录上工作")
+	b.WriteString("用 /dir 挂载或取下工作目录")
 	return b.String()
 }

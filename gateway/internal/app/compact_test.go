@@ -112,7 +112,7 @@ func TestSummaryCompactionMergesOldSummaryAndPreservesRecentTurn(t *testing.T) {
 	st := e.a.store.Settings(e.sid)
 	totals := e.a.totals
 	e.a.mu.Unlock()
-	if st.Base != 6 || !strings.Contains(st.Summary, "工作目录") || totals.ModelCalls != 2 || totals.PromptTokens != 900 || totals.CompletionTokens != 40 || totals.CachedTokens != 290 {
+	if st.Base != 6 || !strings.Contains(st.Summary, "上工作") || totals.ModelCalls != 2 || totals.PromptTokens != 900 || totals.CompletionTokens != 40 || totals.CachedTokens != 290 {
 		t.Fatalf("设置或统计: %+v %+v", st, totals)
 	}
 	store, err := session.New(e.a.store.Dir())

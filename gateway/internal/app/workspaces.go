@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +23,8 @@ import (
 //
 // 工作目录是“机器 + 路径”：网关所在的本机、SSH 服务器（host 包）或者装了内核的电脑（内核的名字）
 // 上的一个目录。网关维护一张列表（data/workspaces.json），拓扑里挂在各自的机器下。每个会话从列表里
-// 选一个（不选就只聊天）；可以标一个为新会话的默认，新会话第一次说话时用它。
-// 工作目录在哪台机器上，决定这一轮怎么跑（nodes.go 的 route）。
+// 挂载任意几个（可以在不同的机器上，工具调用时用 workspace 参数指定；一个都不挂就只聊天）。
+// 标了默认的工作目录，新会话第一次说话时都挂上。工作目录在哪台机器上，决定工具怎么执行（nodes.go 的 route）。
 
 type Workspace struct {
 	ID      string `json:"id"`
@@ -43,11 +44,26 @@ func (a *App) loadWorkspaces() {
 		if err := json.Unmarshal(b, &a.wss); err != nil {
 			a.log.Error("工作目录列表读不了，先用空的", "file", a.workspacesFile(), "err", err)
 		}
-		return
+	} else {
+		a.migrateWorkspaces()
+		if err := a.saveWorkspaces(); err != nil {
+			a.log.Warn("保存工作目录列表失败", "err", err)
+		}
 	}
-	a.migrateWorkspaces()
-	if err := a.saveWorkspaces(); err != nil {
-		a.log.Warn("保存工作目录列表失败", "err", err)
+	// 上一个版本每个会话只能挂一个工作目录
+	for _, sid := range a.store.List() {
+		st := a.store.Settings(sid)
+		if !st.WorkspaceSet || st.WorkspacesSet {
+			continue
+		}
+		st.Workspaces, st.WorkspacesSet = nil, true
+		if st.Workspace != "" {
+			st.Workspaces = []string{st.Workspace}
+		}
+		st.Workspace, st.WorkspaceSet = "", false
+		if err := a.store.SaveSettings(sid, st); err != nil {
+			a.log.Warn("迁移会话的工作目录失败", "sid", sid, "err", err)
+		}
 	}
 }
 
@@ -90,10 +106,10 @@ func (a *App) migrateWorkspaces() {
 		} else if !st.DirsSet {
 			dirs = nil // 旧版本里默认工作目录只属于默认机器
 		}
-		st.Workspace, st.WorkspaceSet = "", true
-		if len(dirs) > 0 {
-			if w := a.addWorkspaceLocked(hostFor(node), cleanPath(dirs[0])); w != nil {
-				st.Workspace = w.ID
+		st.Workspaces, st.WorkspacesSet = nil, true
+		for _, d := range dirs {
+			if w := a.addWorkspaceLocked(hostFor(node), cleanPath(d)); w != nil {
+				st.Workspaces = append(st.Workspaces, w.ID)
 			}
 		}
 		st.Node, st.DirsSet, st.Dirs, st.RO = "", false, nil, nil
@@ -127,13 +143,15 @@ func (a *App) findWorkspace(id string) *Workspace {
 	return nil
 }
 
-func (a *App) defaultWorkspace() *Workspace {
+// defaultWorkspaces 是新会话默认挂载的工作目录
+func (a *App) defaultWorkspaces() []*Workspace {
+	var out []*Workspace
 	for i := range a.wss {
 		if a.wss[i].Default {
-			return &a.wss[i]
+			out = append(out, &a.wss[i])
 		}
 	}
-	return nil
+	return out
 }
 
 // addWorkspaceLocked 把 host:path 加进列表（已经有了就返回原来的），不保存。调用方持有锁。
@@ -203,7 +221,7 @@ func (a *App) checkWorkspace(hostName, path string) error {
 // WorkspaceInfo 是网页上显示的一个工作目录。
 type WorkspaceInfo struct {
 	Workspace
-	Sessions int  `json:"sessions"` // 在用它的会话
+	Sessions int  `json:"sessions"` // 挂着它的会话
 	Online   bool `json:"online"`   // 它所在的机器能用
 }
 
@@ -211,7 +229,7 @@ func (a *App) workspaceInfos() []WorkspaceInfo {
 	out := []WorkspaceInfo{}
 	count := map[string]int{}
 	for _, sid := range a.sessionIDs() {
-		if w := a.workspaceOf(sid).ws; w != nil {
+		for _, w := range a.workspaceOf(sid).wss {
 			count[w.ID]++
 		}
 	}
@@ -254,9 +272,6 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 	defer a.mu.Unlock()
 	w := a.addWorkspaceLocked(hostName, path)
 	if makeDefault {
-		for i := range a.wss {
-			a.wss[i].Default = false
-		}
 		w.Default = true
 	}
 	added := *w
@@ -267,7 +282,7 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 	return added, nil
 }
 
-// RemoveWorkspace 从列表里删掉一个工作目录，在用它的会话改成只聊天。不动机器上的文件。
+// RemoveWorkspace 从列表里删掉一个工作目录，挂着它的会话取下它。不动机器上的文件。
 func (a *App) RemoveWorkspace(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -281,14 +296,15 @@ func (a *App) RemoveWorkspace(id string) error {
 		return errors.New("没有这个工作目录")
 	}
 	for _, sid := range a.sessionIDs() {
-		if w := a.workspaceOf(sid).ws; w != nil && w.ID == id {
-			st := a.store.Settings(sid)
-			st.Workspace, st.WorkspaceSet = "", true
-			if err := a.store.SaveSettings(sid, st); err != nil {
-				return err
-			}
-			defer a.publishSession(sid)
+		st := a.store.Settings(sid)
+		if !st.WorkspacesSet || !slices.Contains(st.Workspaces, id) {
+			continue
 		}
+		st.Workspaces = slices.DeleteFunc(st.Workspaces, func(x string) bool { return x == id })
+		if err := a.store.SaveSettings(sid, st); err != nil {
+			return err
+		}
+		defer a.publishSession(sid)
 	}
 	a.wss = append(a.wss[:i], a.wss[i+1:]...)
 	if err := a.saveWorkspaces(); err != nil {
@@ -298,16 +314,15 @@ func (a *App) RemoveWorkspace(id string) error {
 	return nil
 }
 
-// SetDefaultWorkspace 设新会话的默认工作目录，id 为空表示新会话只聊天。
-func (a *App) SetDefaultWorkspace(id string) error {
+// SetDefaultWorkspace 设置一个工作目录是不是新会话默认挂载的（可以有好几个）。
+func (a *App) SetDefaultWorkspace(id string, on bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if id != "" && a.findWorkspace(id) == nil {
+	w := a.findWorkspace(id)
+	if w == nil {
 		return errors.New("没有这个工作目录")
 	}
-	for i := range a.wss {
-		a.wss[i].Default = a.wss[i].ID == id
-	}
+	w.Default = on
 	if err := a.saveWorkspaces(); err != nil {
 		return err
 	}
@@ -315,52 +330,93 @@ func (a *App) SetDefaultWorkspace(id string) error {
 	return nil
 }
 
-// setSessionWorkspace 让会话在工作目录 id 上工作（空表示只聊天），返回给用户的说明。调用方持有锁。
-func (a *App) setSessionWorkspace(sid, id string) (string, error) {
-	var w *Workspace
-	if id != "" {
-		if w = a.findWorkspace(id); w == nil {
-			return "", errors.New("没有这个工作目录")
+// setSessionWorkspaces 设置会话挂载的工作目录（按顺序，空表示只聊天）。调用方持有锁。
+func (a *App) setSessionWorkspaces(sid string, ids []string) error {
+	var clean []string
+	for _, id := range ids {
+		if a.findWorkspace(id) == nil {
+			return errors.New("没有这个工作目录：" + id)
+		}
+		if !slices.Contains(clean, id) {
+			clean = append(clean, id)
 		}
 	}
 	st := a.store.Settings(sid)
-	st.Workspace, st.WorkspaceSet = id, true
+	st.Workspaces, st.WorkspacesSet = clean, true
 	if err := a.store.SaveSettings(sid, st); err != nil {
-		return "", err
+		return err
 	}
 	a.publishSession(sid)
 	a.publishWorkspaces()
+	return nil
+}
+
+// describeMounts 是会话挂着哪些工作目录（给用户看）
+func (a *App) describeMounts(sid string) string {
+	w := a.workspaceOf(sid)
+	if len(w.wss) == 0 {
+		return "这个会话没有挂载工作目录，只聊天（不能读写文件、执行命令）。"
+	}
+	var labels []string
+	for _, x := range w.wss {
+		l := x.Label()
+		if !a.hostUsable(x.Host) {
+			l += "（" + x.Host + " 现在用不了）"
+		}
+		labels = append(labels, l)
+	}
+	return "这个会话挂载的工作目录：" + strings.Join(labels, "、") + "。"
+}
+
+// mountWorkspace 让会话挂上（on）或取下工作目录，返回给用户的说明。调用方持有锁。
+func (a *App) mountWorkspace(sid, id string, on bool) (string, error) {
+	ids := a.workspaceOf(sid).ids()
+	w := a.findWorkspace(id)
 	if w == nil {
-		return "这个会话改成只聊天了（没有工作目录，不能读写文件、执行命令）。", nil
+		return "", errors.New("没有这个工作目录")
 	}
-	msg := "这个会话改在 " + w.Label() + " 上工作了。"
-	if !a.hostUsable(w.Host) {
-		msg += "（" + w.Host + " 现在用不了，能用之前只能聊天）"
+	has := slices.Contains(ids, id)
+	switch {
+	case on && has:
+		return w.Label() + " 已经挂着了。" + a.describeMounts(sid), nil
+	case !on && !has:
+		return w.Label() + " 本来就没有挂。" + a.describeMounts(sid), nil
+	case on:
+		ids = append(ids, id)
+	default:
+		ids = slices.DeleteFunc(ids, func(x string) bool { return x == id })
 	}
-	return msg, nil
+	if err := a.setSessionWorkspaces(sid, ids); err != nil {
+		return "", err
+	}
+	verb := "挂上了 "
+	if !on {
+		verb = "取下了 "
+	}
+	return verb + w.Label() + "。" + a.describeMounts(sid), nil
 }
 
 // ---- /dir 命令 ----
 
-const dirUsage = "/dir <编号> 切换；/dir add 机器:路径 添加并切换（只写路径就是当前的机器）；/dir none 只聊天；" +
-	"/dir default <编号> 设为新会话的默认；/dir rm <编号> 从列表里删掉"
+const dirUsage = "/dir <编号> 挂上；/dir -<编号> 取下；/dir add 机器:路径 添加并挂上（只写路径就是本机）；/dir none 全部取下；" +
+	"/dir default <编号> 设为/取消新会话默认挂载；/dir rm <编号> 从列表里删掉"
 
 func (a *App) describeWorkspaces(sid string) string {
 	w := a.workspaceOf(sid)
 	var b strings.Builder
-	if w.ws == nil {
-		b.WriteString("这个会话没有工作目录，只聊天。\n")
-	} else {
-		fmt.Fprintf(&b, "这个会话在 %s 上工作，权限模式：%s。\n", w.ws.Label(), modeNames[w.mode])
+	b.WriteString(a.describeMounts(sid))
+	if len(w.wss) > 0 {
+		fmt.Fprintf(&b, "权限模式：%s。", modeNames[w.mode])
 	}
+	b.WriteString("\n")
 	if len(a.wss) == 0 {
 		b.WriteString("工作目录列表是空的。\n")
 	} else {
 		b.WriteString("工作目录列表：\n")
 		for i, x := range a.wss {
 			var tags []string
-			if w.ws != nil && w.ws.ID == x.ID {
-				tags = append(tags, "当前")
+			if w.has(x.ID) {
+				tags = append(tags, "已挂载")
 			}
 			if x.Default {
 				tags = append(tags, "新会话默认")
@@ -401,18 +457,14 @@ func (a *App) cmdDir(c in, arg string) {
 	}
 	switch sub {
 	case "none":
-		msg, err := a.setSessionWorkspace(c.s.sid, "")
-		a.reply(c, msg, err)
+		err := a.setSessionWorkspaces(c.s.sid, nil)
+		a.reply(c, "工作目录全部取下了，这个会话只聊天（不能读写文件、执行命令）。", err)
 	case "add":
 		if rest == "" {
 			a.answer(c, dirUsage)
 			return
 		}
-		cur := host.LocalName
-		if w := a.workspaceOf(c.s.sid).ws; w != nil {
-			cur = w.Host
-		}
-		hostName, path := parseWorkspace(rest, cur)
+		hostName, path := parseWorkspace(rest, host.LocalName)
 		// 确认目录存在要等机器回复，不能拿着锁等
 		go func() {
 			ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
@@ -424,7 +476,7 @@ func (a *App) cmdDir(c in, arg string) {
 				a.answer(c, err.Error())
 				return
 			}
-			msg, err := a.setSessionWorkspace(c.s.sid, w.ID)
+			msg, err := a.mountWorkspace(c.s.sid, w.ID, true)
 			a.reply(c, msg, err)
 		}()
 	case "default", "rm":
@@ -433,27 +485,31 @@ func (a *App) cmdDir(c in, arg string) {
 			a.answer(c, err.Error())
 			return
 		}
-		id, label := w.ID, w.Label()
+		id, label, on := w.ID, w.Label(), !w.Default
 		// 下面两个操作自己拿锁
 		go func() {
 			var err error
-			msg := label + " 现在是新会话的默认工作目录了。"
-			if sub == "rm" {
+			var msg string
+			switch {
+			case sub == "rm":
 				err, msg = a.RemoveWorkspace(id), "已从列表里删掉 "+label+"（机器上的文件没有动）。"
-			} else {
-				err = a.SetDefaultWorkspace(id)
+			case on:
+				err, msg = a.SetDefaultWorkspace(id, true), "新会话会默认挂上 "+label+"。"
+			default:
+				err, msg = a.SetDefaultWorkspace(id, false), "新会话不再默认挂 "+label+"。"
 			}
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			a.reply(c, msg, err)
 		}()
 	default:
-		w, err := a.pickWorkspace(sub)
+		on := !strings.HasPrefix(sub, "-")
+		w, err := a.pickWorkspace(strings.TrimPrefix(strings.TrimPrefix(sub, "-"), "+"))
 		if err != nil {
 			a.answer(c, err.Error()+"\n"+dirUsage)
 			return
 		}
-		msg, err := a.setSessionWorkspace(c.s.sid, w.ID)
+		msg, err := a.mountWorkspace(c.s.sid, w.ID, on)
 		a.reply(c, msg, err)
 	}
 }

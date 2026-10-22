@@ -1,18 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
-  import { api } from '../lib/api';
+  import { api, sidPath } from '../lib/api';
   import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
   import Icon from '../components/Icon.svelte';
-  import type { Ev, MachineInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
+  import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
+  import WorkspacePicker from '../components/WorkspacePicker.svelte';
+  import DirPicker from '../components/DirPicker.svelte';
+  import type { Ev, KernelInfo, MachineInfo, MountInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'machine' | 'workspace' | 'more';
+  type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'kernel' | 'machine' | 'workspace' | 'more';
   type N = { id: string; kind: Kind; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
 
   const MAX_SESSIONS = 9;
   const ORDER = ['cli', 'web', 'telegram', 'feishu'];
-  const X = { chan: 0, sess: 290, gw: 640, right: 850, ws: 1170 };
+  const X = { chan: 0, sess: 290, gw: 640, right: 850, mach: 1170, ws: 1490 };
 
   // 拖动过的节点记下偏移量（存在浏览器里，下次打开还是这样摆）
   function loadOffsets(): Record<string, { x: number; y: number }> {
@@ -36,6 +39,9 @@
     fit();
   }
 
+  // 正在跑任务的内核（连线上有流动的效果）
+  const busyKernels = $derived(new Set((store.ov?.sessions ?? []).filter((s) => s.running).map((s) => s.run_node)));
+
   const layout = $derived.by(() => {
     const ov = store.ov!;
     const nodes: N[] = [];
@@ -51,7 +57,7 @@
 
     const chans = ov.channels;
     const nS = shown.length + (more > 0 ? 1 : 0);
-    const H = Math.max(600, nS * 64 + 120, chans.length * 96 + 120, 2 * (70 + Math.max(1, store.machines.length) * 96));
+    const H = Math.max(600, nS * 64 + 120, chans.length * 96 + 120, 2 * (70 + Math.max(1, store.machines.length, ov.kernels?.length ?? 0) * 96));
     const cy = H / 2;
 
     chans.forEach((c, i) => {
@@ -88,18 +94,44 @@
     nodes.push({ id: 'model', kind: 'model', x: X.right, y: cy - 118, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
     edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
 
-    // 机器：本机（网关所在的）、SSH 服务器、装了内核的电脑。工作目录挂在它所在的机器下面
-    const machines: MachineInfo[] = store.machines;
+    // 内核：连着网关的 agent，各自跑在某台机器上（网关启动的本机内核排在最前面）
+    const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
+      Number(!!b.managed) - Number(!!a.managed) || Number(b.local) - Number(a.local) || a.node.localeCompare(b.node));
+    const top = cy + 38;
+    kernels.forEach((k, i) => {
+      const id = 'k:' + k.node;
+      nodes.push({ id, kind: 'kernel', x: X.right, y: top + i * 86, w: 250, h: 70, color: 'var(--c-kernel)',
+        target: { type: 'kernel', node: k.node }, data: k });
+      edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: 'var(--c-kernel)', flow: busyKernels.has(k.node) });
+    });
+    if (!kernels.length) {
+      nodes.push({ id: 'k:none', kind: 'kernel', x: X.right, y: top, w: 250, h: 70, color: 'var(--muted)', target: { type: 'kernel' }, data: null });
+      edges.push({ id: 'gw>k:none', from: 'gw', to: 'k:none', color: 'var(--err)', dashed: true });
+    }
+
+    // 机器：本机（网关所在的）、装了内核的电脑、SSH 服务器。内核连到它所在的机器；SSH 服务器由网关直接连
+    // 有内核的机器按内核的顺序排在前面，SSH 服务器和不在线的放后面，连线少交叉
+    const kidx = (m: MachineInfo) => {
+      const i = kernels.findIndex((k) => (k.local ? '本机' : k.node) === m.name);
+      return i < 0 ? kernels.length + (m.kind === 'ssh' ? 0 : 1) : i;
+    };
+    const machines: MachineInfo[] = store.machines.slice().sort((a, b) => kidx(a) - kidx(b));
+    const mtop = top + Math.max(0, (Math.max(1, kernels.length) * 86 - machines.length * 96) / 2);
     machines.forEach((m, i) => {
       const id = 'm:' + m.name;
-      nodes.push({ id, kind: 'machine', x: X.right, y: cy + 38 + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
+      nodes.push({ id, kind: 'machine', x: X.mach, y: mtop + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
         target: { type: 'machine', name: m.name }, data: m });
-      edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--c-kernel)' : 'var(--err)', dashed: !m.online });
+      const ks = kernels.filter((k) => (k.local ? '本机' : k.node) === m.name);
+      for (const k of ks) edges.push({ id: `k:${k.node}>${id}`, from: 'k:' + k.node, to: id, color: 'var(--c-kernel)' });
+      if (m.kind === 'ssh' || (m.kind === 'local' && !ks.length)) {
+        // 网关自己执行：SSH 服务器，或者本机没有内核时
+        edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--accent-2)' : 'var(--err)', dashed: !m.online });
+      }
     });
 
     const order = (h: string) => machines.findIndex((m) => m.name === h);
-    const list = (ov.workspaces ?? []).filter((w) => order(w.host) >= 0).sort((a, b) => order(a.host) - order(b.host)).slice(0, 8);
-    const mcy = cy + 38 + (machines.length * 96 - 16) / 2;
+    const list = (ov.workspaces ?? []).filter((w) => order(w.host) >= 0).sort((a, b) => order(a.host) - order(b.host)).slice(0, 10);
+    const mcy = mtop + (machines.length * 96 - 16) / 2;
     list.forEach((w, i) => {
       const y = mcy + (i - (list.length - 1) / 2) * 56;
       nodes.push({ id: 'w:' + w.id, kind: 'workspace', x: X.ws, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
@@ -275,6 +307,29 @@
   // 每个会话正在处理的这一轮是从哪个渠道来的：回复的光点流回那里
   const origin = new Map<string, string>();
 
+  // 工具调用参数里的 workspace 指的是哪个挂载的工作目录（只挂了一个时可以不写）
+  function mountOf(s: SessionInfo, raw: unknown): MountInfo | undefined {
+    let want = '';
+    try {
+      const a = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      want = String((a as any)?.workspace ?? '');
+    } catch {
+      /* 参数不完整 */
+    }
+    if (!want) return s.workspaces.length === 1 ? s.workspaces[0] : undefined;
+    return s.workspaces.find((m, i) => `${m.host}:${m.path}` === want || m.host === want || m.path === want || String(i + 1) === want);
+  }
+  function toolPath(s: SessionInfo, mt: MountInfo): string[] {
+    const m = 'm:' + mt.host;
+    const w = `${m}>w:${mt.id}`;
+    const k = s.run_node || s.kernel;
+    if (mt.how === 'local' && k) return [`gw>k:${k}`, `k:${k}>${m}`, w];
+    if (layout.edges.some((x) => x.id === `gw>${m}`)) return [`gw>${m}`, w];
+    const other = (store.ov?.kernels ?? []).find((x) => (x.local ? '本机' : x.node) === mt.host);
+    return other ? [`gw>k:${other.node}`, `k:${other.node}>${m}`, w] : [w];
+  }
+  const lastPath = new Map<string, string>();
+
   function onEvent(e: Ev) {
     const sid = e.sid ?? '';
     const s = store.session(sid);
@@ -307,15 +362,19 @@
         break;
       }
       case 'tool': {
-        // 工具在工作目录所在的机器上执行
-        if (!s?.host) break;
-        const m = 'm:' + s.host;
-        chain([[`gw>${m}`, false], [`${m}>w:${s.workspace}`, false]], 'var(--c-kernel)', 600);
+        // 工具在工作目录所在的机器上执行：沿着 网关 → 内核 → 机器 → 工作目录（或者 网关 → 机器）流过去
+        const mt = s ? mountOf(s, e.data) : undefined;
+        if (!s || !mt) break;
+        const steps = toolPath(s, mt);
+        lastPath.set(sid, steps[0]);
+        chain(steps.map((x) => [x, false]), 'var(--c-kernel)', 520);
         break;
       }
-      case 'tool_result':
-        if (s?.host) pulse(`gw>m:${s.host}`, e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
+      case 'tool_result': {
+        const first = lastPath.get(sid);
+        if (first) pulse(first, e.ok ? 'var(--c-kernel)' : 'var(--err)', { reverse: true, dur: 600 });
         break;
+      }
       case 'say':
         if (sessEdge(sid)) chain([[`s:${sid}>gw`, true], [`c:${ch}>s:${sid}`, true]], chColor);
         else pulse(`c:${ch}>gw`, chColor, { reverse: true });
@@ -349,9 +408,9 @@
 
   const phases = $derived(Object.values(store.phase));
   const modelBusy = $derived(phases.includes('thinking') || phases.includes('writing'));
-  // 正在执行工具的机器
+  // 正在执行工具的会话挂着的机器、正在跑任务的内核
   const busyHosts = $derived(
-    new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').map((s) => s.host)),
+    new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').flatMap((s) => s.workspaces.map((m) => m.host))),
   );
   const t = $derived(store.ov!.totals);
   const ov = $derived(store.ov!);
@@ -382,12 +441,124 @@
     if (ph === 'writing') return '正在回复…';
     if (ph === 'tool') return '正在执行工具…';
     if (s.running) return '处理中…';
-    const mode = s.workspace ? (modeMeta[s.mode]?.label ?? s.mode) : '只聊天';
+    const mode = s.workspaces.length ? (modeMeta[s.mode]?.label ?? s.mode) + (s.workspaces.length > 1 ? ` · ${s.workspaces.length} 个目录` : '') : '只聊天';
     return `${mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
   }
 
   async function startWebChat() {
     location.hash = '#/sessions/main';
+  }
+
+  // ---- 右键菜单：常用操作 ----
+
+  let menu = $state<{ x: number; y: number; title: string; items: MenuItem[] } | null>(null);
+  let mountFor = $state<SessionInfo | null>(null); // 给这个会话挂载工作目录
+  let browseOn = $state<MachineInfo | null>(null); // 浏览这台机器，添加工作目录
+
+  async function act(fn: () => Promise<unknown>, ok?: string) {
+    try {
+      await fn();
+      if (ok) store.toast({ kind: 'ok', text: ok }, 2000);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
+
+  async function sshAction(name: string, op: 'connect' | 'disconnect') {
+    const d = await api.get<{ connections: { id: string; name: string }[] }>('/api/devices');
+    const c = d.connections.find((x) => x.name === name);
+    if (!c) throw new Error('没有找到这台服务器的连接');
+    await api.post(`/api/devices/${c.id}/${op}`);
+  }
+
+  function menuFor(n: N): { title: string; items: MenuItem[] } | null {
+    const open: MenuItem = { label: '查看和设置', icon: 'sliders', run: () => n.target && store.open(n.target) };
+    switch (n.kind) {
+      case 'session': {
+        const s = n.data as SessionInfo;
+        return { title: '会话 · ' + s.title, items: [
+          { label: '打开对话', icon: 'chat', run: () => (location.hash = '#/sessions/' + encodeURIComponent(s.sid)) },
+          { label: '挂载 / 取下工作目录…', icon: 'folder', run: () => (mountFor = s) },
+          open,
+          'sep',
+          { label: '停止当前任务', icon: 'stop', disabled: !s.running, run: () => act(() => api.post(`${sidPath(s.sid)}/stop`), '已停止') },
+          { label: '清空上下文', icon: 'trash', run: () => confirm(`清空「${s.title}」的上下文？`) && act(() => api.post(`${sidPath(s.sid)}/reset`), '上下文已清空') },
+          ...(s.sid === 'main' ? [] : [{ label: '删除会话', icon: 'trash', danger: true,
+            run: () => confirm(`删除会话「${s.title}」？历史和设置都会删掉。`) && act(() => api.del(sidPath(s.sid)), '会话已删除') } as MenuItem]),
+        ] };
+      }
+      case 'channel': {
+        const c = n.data;
+        const on = c.status.state !== 'disabled';
+        const toggle: MenuItem[] = c.name === 'web' ? [] : [{ label: on ? '停用' : '启用', icon: on ? 'stop' : 'zap',
+          run: () => store.setConfig({ [`${c.name}.enabled`]: !on }) }];
+        return { title: c.meta.label, items: [open, ...toggle] };
+      }
+      case 'kernel': {
+        const k = n.data as KernelInfo | null;
+        if (!k) return { title: '内核', items: [open, { label: '去“设备”页接入电脑', icon: 'laptop', run: () => store.go('#/devices') }] };
+        const paired = !k.local;
+        return { title: '内核 · ' + k.node, items: [
+          open,
+          { label: '它所在的机器', icon: 'hub', run: () => store.open({ type: 'machine', name: k.local ? '本机' : k.node }) },
+          ...(paired ? ['sep', { label: '移除这台电脑（口令作废）', icon: 'trash', danger: true,
+            run: () => confirm(`移除 ${k.node}？它会断开，要再接入需重新配对。`) && act(() => api.del(`/api/paired/${encodeURIComponent(k.node)}`), '已移除') }] as MenuItem[] : []),
+        ] };
+      }
+      case 'machine': {
+        const m = n.data as MachineInfo;
+        const items: MenuItem[] = [
+          { label: '浏览目录，添加工作目录…', icon: 'folder', disabled: !m.online, run: () => (browseOn = m) },
+          open,
+        ];
+        if (m.kind === 'ssh') {
+          items.push('sep',
+            m.online
+              ? { label: '断开 SSH 连接', icon: 'stop', run: () => act(() => sshAction(m.name, 'disconnect'), '正在断开') }
+              : { label: '连接', icon: 'link', run: () => act(() => sshAction(m.name, 'connect'), '正在连接') },
+            { label: '在“设备”里管理', icon: 'server', run: () => store.go('#/devices') });
+        }
+        return { title: (m.kind === 'local' ? '本机 · 网关所在的机器' : machineMeta[m.kind].label + ' · ' + m.name), items };
+      }
+      case 'workspace': {
+        const w = n.data as WorkspaceInfo | null;
+        if (!w) return { title: '工作目录', items: [open] };
+        const main = store.session('main');
+        const mounted = main?.workspaces.some((x) => x.id === w.id);
+        return { title: `${w.host}:${w.path}`, items: [
+          ...(main ? [{ label: mounted ? '从主会话取下' : '挂到主会话', icon: 'hub',
+            run: () => act(async () => store.upsertSession(await api.patch<SessionInfo>(sidPath('main'),
+              { workspaces: mounted ? main.workspaces.filter((x) => x.id !== w.id).map((x) => x.id) : [...main.workspaces.map((x) => x.id), w.id] })),
+              mounted ? '已从主会话取下' : '已挂到主会话') } as MenuItem] : []),
+          { label: w.default ? '新会话不再默认挂它' : '新会话默认挂上它', icon: 'check',
+            run: () => act(() => api.put('/api/workspaces/default', { id: w.id, default: !w.default })) },
+          open,
+          'sep',
+          { label: '从列表里删掉', icon: 'trash', danger: true,
+            run: () => confirm(`从列表里删掉 ${w.host}:${w.path}？机器上的文件不会动。`) && act(() => api.del(`/api/workspaces/${w.id}`), '已删掉') },
+        ] };
+      }
+      case 'model':
+        return { title: '模型', items: [open] };
+      case 'gateway':
+        return { title: '网关', items: [open, { label: '全部设置', icon: 'sliders', run: () => store.go('#/settings') }] };
+      case 'more':
+        return { title: '会话', items: [{ label: '查看全部会话', icon: 'chat', run: () => (location.hash = '#/sessions') }] };
+    }
+    return null;
+  }
+
+  function openMenu(ev: MouseEvent, n: N) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const m = menuFor(n);
+    if (m) menu = { x: ev.clientX, y: ev.clientY, ...m };
+  }
+
+  async function addOn(path: string) {
+    const m = browseOn!;
+    browseOn = null;
+    await act(() => api.post('/api/workspaces', { host: m.name, path }), `已添加 ${m.name}:${path}`);
   }
 
   function activate(n: N) {
@@ -465,6 +636,7 @@
           role="button"
           tabindex="0"
           onclick={() => activate(n)}
+          oncontextmenu={(ev) => openMenu(ev, n)}
           ondblclick={() => n.kind === 'session' && (location.hash = '#/sessions/' + encodeURIComponent(n.data.sid))}
           onkeydown={(ev) => ev.key === 'Enter' && activate(n)}
           onmouseenter={() => (hover = n.id)}
@@ -525,6 +697,20 @@
             <text x="66" y="28" class="t3">模型 · {ov.model.provider}</text>
             <text x="66" y="48" class="t1">{truncate(ov.model.model || '未配置', 19)}</text>
             <text x="66" y="66" class="t2">{truncate(hostOf(ov.model.base_url) || '—', 16)} · 思考 {ov.model.thinking === 'none' ? '关闭' : ov.model.thinking || '默认'}</text>
+          {:else if n.kind === 'kernel'}
+            {@const k = n.data as KernelInfo | null}
+            <rect class="card" class:active={!!k && busyKernels.has(k.node)} class:bad={!k} width={n.w} height={n.h} rx="16" />
+            <circle class="disc" cx="34" cy="35" r="18" />
+            <g class="ico"><Icon name="shield" x={23} y={24} size={22} /></g>
+            {#if k}
+              <text x="62" y="24" class="t3">{k.managed ? '内核 · 网关启动的' : k.local ? '内核 · 在本机' : '内核 · 在别的电脑上'}</text>
+              <text x="62" y="43" class="t1">{truncate(k.node, 18)}</text>
+              <text x="62" y="59" class="t2">{k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱'}{busyKernels.has(k.node) ? ' · 正在跑' : ''}</text>
+              <circle cx={n.w - 16} cy="16" r="4" class="sdot online" />
+            {:else}
+              <text x="62" y="31" class="t1 errt">没有内核在线</text>
+              <text x="62" y="49" class="t2">网关会在本机启动一个</text>
+            {/if}
           {:else if n.kind === 'machine'}
             {@const m = n.data as MachineInfo}
             <rect class="card" class:active={busyHosts.has(m.name)} class:off={!m.online} width={n.w} height={n.h} rx="16" />
@@ -570,10 +756,12 @@
     <span style="--c: var(--c-gateway)">网关</span>
     <i>→</i>
     <span style="--c: var(--c-model)">模型</span>
+    <span style="--c: var(--c-kernel)">内核</span>
+    <i>→</i>
     <span style="--c: var(--c-kernel)">机器</span>
     <i>→</i>
     <span style="--c: var(--c-dir)">工作目录</span>
-    <em>点节点查看和修改设置 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处复位</em>
+    <em>点节点查看和修改设置 · 右键节点有常用操作 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处复位</em>
   </div>
 
   <div class="tools">
@@ -589,7 +777,22 @@
     <div><b>{num(t.completion_tokens)}</b><span>输出 tokens</span></div>
     <div><b>{t.model_calls}</b><span>模型调用</span></div>
   </div>
+
+  {#if menu}
+    <ContextMenu x={menu.x} y={menu.y} title={menu.title} items={menu.items} onclose={() => (menu = null)} />
+  {/if}
+
 </div>
+
+{#if mountFor}
+  {@const cur = store.session(mountFor.sid) ?? mountFor}
+  <WorkspacePicker title="给「{cur.title}」挂载工作目录" mounted={cur.workspaces.map((m) => m.id)}
+    onchange={(ids) => act(async () => store.upsertSession(await api.patch<SessionInfo>(sidPath(cur.sid), { workspaces: ids })))}
+    onclose={() => (mountFor = null)} />
+{/if}
+{#if browseOn}
+  <DirPicker host={browseOn.kind === 'local' ? '' : browseOn.name} onpick={addOn} onclose={() => (browseOn = null)} />
+{/if}
 
 <style>
   .canvas {

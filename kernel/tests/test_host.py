@@ -81,8 +81,16 @@ def case(name):
     return wrap
 
 
-def start_run(gw, sid, mode="auto", dirs=(WORK,), frm="tg:user"):
-    gw.send(t="input", sid=sid, mode=mode, dirs=list(dirs), ro=[], rw=[], **{"from": frm})
+def local_ws(dirs=(WORK,)):
+    return {"name": "本机:" + dirs[0], "dirs": list(dirs), "ro": [], "rw": [], "local": True}
+
+
+def box_ws(landlock=7):
+    return {"name": "box:~/proj", "dirs": ["~/proj"], "ro": [], "rw": [], "local": False, "landlock": landlock}
+
+
+def start_run(gw, sid, mode="auto", dirs=(WORK,), frm="tg:user", workspaces=None):
+    gw.send(t="input", sid=sid, mode=mode, workspaces=workspaces or [local_ws(dirs)], **{"from": frm})
     gw.expect("model", sid=sid)
 
 
@@ -98,9 +106,7 @@ def finish(gw, sid):
 
 
 def start_gateway_run(gw, sid, mode="auto", landlock=7):
-    gw.send(t="input", sid=sid, mode=mode, dirs=["~/proj"], ro=[], rw=[], exec="gateway", landlock=landlock,
-            **{"from": "tg:user"})
-    gw.expect("model", sid=sid)
+    start_run(gw, sid, mode=mode, workspaces=[box_ws(landlock)])
 
 
 def expect_all(gw, n, sid):
@@ -116,47 +122,69 @@ def leftover(tag):
     return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
 
 
-SKILLS = os.path.join(T, "skills")
-
-
-@case("技能：Skill 返回说明，附带文件在沙箱里只读可见")
+@case("技能在网关上：Skill 交给网关，不带工作目录")
 def t_skill(gw):
     start_run(gw, "sk")
     call(gw, "sk", ("c1", "Skill", {"name": "demo"}))
-    gw.expect("result", sid="sk", id="c1", ok=True,
-              content=lambda s: s.startswith("技能 demo\n技能目录：") and "附带文件：data.txt、scripts/run.sh" in s
-              and s.rstrip().endswith("照着做就行。"))
-    gw.expect("model", sid="sk")
-    call(gw, "sk", ("c2", "Shell", {"command": f"cat {SKILLS}/demo/data.txt"}),
-         ("c3", "Write", {"path": f"{SKILLS}/demo/data.txt", "content": "x"}),
-         ("c4", "Skill", {"name": "nope"}))
-    got = {}
-    for _ in range(3):
-        r = gw.expect("result", sid="sk")
-        got[r["id"]] = r
-    assert got["c2"]["ok"] and "技能数据" in got["c2"]["content"], got["c2"]
-    assert not got["c3"]["ok"], got["c3"]
-    assert not got["c4"]["ok"] and "没有这个技能" in got["c4"]["content"], got["c4"]
+    m = gw.expect("exec", sid="sk", id="c1", name="Skill")
+    assert m["args"] == {"name": "demo"} and "workspace" not in m, m
+    gw.send(t="exec_result", sid="sk", id="c1", ok=True, content="技能 demo：照着做就行")
+    gw.expect("result", sid="sk", id="c1", ok=True, content="技能 demo：照着做就行")
     finish(gw, "sk")
 
 
-@case("技能热更新：下一轮加载新增技能，删除后撤下 Skill 工具")
-def t_skill_reload(gw):
-    demo = os.path.join(SKILLS, "demo", "SKILL.md")
-    saved = open(demo).read()
-    os.unlink(demo)
-    gw.send(t="input", sid="reload", mode="auto", dirs=[WORK], **{"from": "tg:user"})
-    msg = gw.expect("tools", skills=[])
-    assert "Skill" not in [t["name"] for t in msg["tools"]], msg
-    finish(gw, "reload")
+@case("多个工作目录：按 workspace 参数决定在哪台机器上执行")
+def t_multi_ws(gw):
+    start_run(gw, "mw", workspaces=[local_ws(), box_ws(landlock=0)])
+    call(gw, "mw", ("c1", "Read", {"path": "a.txt"}),
+         ("c2", "Write", {"path": "m.txt", "content": "本机", "workspace": "本机:" + WORK}),
+         ("c3", "Read", {"path": "r.txt", "workspace": "box"}),
+         ("c4", "Read", {"path": "r.txt", "workspace": 2}),
+         ("c5", "Read", {"path": "x", "workspace": "nope"}),
+         ("c6", "Shell", {"command": "ls", "workspace": "box:~/proj"}))
+    got = expect_all(gw, 6, "mw")   # c2 在本机执行，结果也在这些消息里
+    assert not got[("result", "c1")]["ok"] and "用 workspace 参数指明" in got[("result", "c1")]["content"], got
+    assert "box:~/proj" in got[("result", "c1")]["content"], got
+    assert not got[("result", "c5")]["ok"] and "没有工作目录" in got[("result", "c5")]["content"], got
+    for c in ("c3", "c4"):
+        e = got[("exec", c)]
+        assert e["workspace"] == "box:~/proj" and e["args"] == {"path": "r.txt"}, e   # workspace 参数不交给执行器
+    assert ("approve_req", "c6") in got, got   # box 没有沙箱：Shell 要审批
+    assert got[("result", "c2")]["ok"] and open(os.path.join(WORK, "m.txt")).read() == "本机", got
+    gw.send(t="exec_result", sid="mw", id="c3", ok=True, content="r")
+    gw.send(t="exec_result", sid="mw", id="c4", ok=True, content="r")
+    gw.send(t="approve", sid="mw", id="c6", ok=False, **{"from": "tg:admin"})
+    got = expect_all(gw, 3, "mw")
+    assert not got[("result", "c6")]["ok"], got
+    finish(gw, "mw")
 
-    with open(demo, "w") as f:
-        f.write(saved)
-    gw.send(t="input", sid="reload2", mode="auto", dirs=[WORK], **{"from": "tg:user"})
-    msg = gw.expect("tools")
-    assert msg["skills"][0]["name"] == "demo", msg
-    assert "Skill" in [t["name"] for t in msg["tools"]], msg
-    finish(gw, "reload2")
+
+@case("代网关执行：网关请这台机器执行工具、放技能文件")
+def t_host_run(gw):
+    with open(os.path.join(WORK, "h.txt"), "w") as f:
+        f.write("代执行\n")
+    gw.send(t="run", id="r1", req={"tool": "Read", "args": {"path": "h.txt"}, "dirs": [WORK], "ro": [], "rw": [],
+                                    "write": False, "tmp_key": "s"})
+    gw.expect("run_result", id="r1", ok=True, content=lambda c: "代执行" in c)
+    gw.send(t="run", id="r2", req={"tool": "Read", "args": {"path": "kernel.conf"}, "dirs": [T], "write": False})
+    gw.expect("run_result", id="r2", ok=False, content=lambda c: "包含 nano-agent 自己" in c)
+    gw.send(t="run", id="r3", req={"tool": "Shell", "args": {"command": "sleep 4747"}, "dirs": [WORK], "write": True})
+    time.sleep(0.4)
+    gw.send(t="run_cancel", id="r3")
+    time.sleep(0.5)
+    assert not leftover("sleep 4747"), leftover("sleep 4747")
+    data = base64.b64encode("echo 技能\n".encode()).decode()
+    gw.send(t="skill_put", id="p1", skill="demo",
+            files=[{"path": "SKILL.md", "data": base64.b64encode(b"# demo").decode()},
+                   {"path": "scripts/run.sh", "data": data, "exec": True}])
+    r = gw.expect("run_result", id="p1", ok=True)
+    d = os.path.join(T, "home", ".cache", "nano-agent", "skills", "demo")
+    assert r["content"] == d and os.access(os.path.join(d, "scripts", "run.sh"), os.X_OK), r
+    gw.send(t="skill_put", id="p2", skill="demo", files=[{"path": "../escape", "data": data}])
+    gw.expect("run_result", id="p2", ok=False, content=lambda c: "路径不能用" in c)
+    assert os.path.exists(os.path.join(d, "SKILL.md")), "失败时不动原来的文件"
+    gw.send(t="skill_put", id="p3", skill="../x", files=[])
+    gw.expect("run_result", id="p3", ok=False)
 
 
 @case("工具往返：Write 写文件，Read 读回来")
@@ -309,7 +337,7 @@ def t_reconnect(gw):
     gw.accept()
     hello = gw.expect("hello", timeout=10)
     assert hello["token"] == "t0k"
-    gw.send(t="welcome", v=3)
+    gw.send(t="welcome", v=5)
     time.sleep(0.5)
     assert not leftover("sleep 4242"), f"断线后工具还在跑：{leftover('sleep 4242')}"
     gw.send(t="turn", sid="s12", reason="final")   # 旧 run 已丢弃，内核应忽略
@@ -347,7 +375,7 @@ def t_gateway_exec(gw):
     got = expect_all(gw, 2, "g1")
     w = got[("exec", "c1")]
     assert w["name"] == "Write" and w["args"] == {"path": "r.txt", "content": "x"} and w["timeout_ms"] > 0, w
-    assert "dirs" not in w and "ro" not in w, w
+    assert "dirs" not in w and "ro" not in w and w["workspace"] == "box:~/proj", w
     gw.send(t="exec_result", sid="g1", id="c2", ok=True, content="1\tx")
     gw.send(t="exec_result", sid="g1", id="c1", ok=False, content="写不了")
     got = expect_all(gw, 2, "g1")
@@ -384,23 +412,6 @@ def t_gateway_cancel(gw):
     assert got[("done", None)]["status"] == "cancelled", got
 
 
-@case("异机模式：技能文件交给网关传到执行的机器上")
-def t_gateway_skill(gw):
-    start_gateway_run(gw, "g4")
-    call(gw, "g4", ("c1", "Skill", {"name": "demo"}))
-    m = gw.expect("skill_files", sid="g4", id="c1", skill="demo")
-    files = {f["path"]: f for f in m["files"]}
-    assert set(files) == {"SKILL.md", "data.txt", "scripts/run.sh"}, files.keys()
-    assert base64.b64decode(files["data.txt"]["data"]).decode() == "技能数据\n", files["data.txt"]
-    gw.send(t="exec_result", sid="g4", id="c1", ok=True, content="~/.cache/nano-agent/skills/pc/demo")
-    gw.expect("result", sid="g4", id="c1", ok=True,
-              content=lambda s: "技能目录：~/.cache/nano-agent/skills/pc/demo（" in s and "照着做就行" in s)
-    gw.expect("model", sid="g4")
-    call(gw, "g4", ("c2", "Skill", {"name": "nope"}))
-    gw.expect("result", sid="g4", id="c2", ok=False)
-    finish(gw, "g4")
-
-
 def old_ssh_config():
     """kernel.conf 里的 remote = / ssh = 已经不用了，要给出明白的提示"""
     conf = os.path.join(T, "old.conf")
@@ -418,18 +429,10 @@ def main():
     try:
         os.makedirs(WORK)
         os.makedirs(os.path.join(T, "home"))
-        os.makedirs(os.path.join(SKILLS, "demo", "scripts"))
-        with open(os.path.join(SKILLS, "demo", "SKILL.md"), "w") as f:
-            f.write("---\nname: demo\ndescription: >\n  示例技能，\n  测试用\n---\n\n# 示例\n照着做就行。\n")
-        with open(os.path.join(SKILLS, "demo", "data.txt"), "w") as f:
-            f.write("技能数据\n")
-        with open(os.path.join(SKILLS, "demo", "scripts", "run.sh"), "w") as f:
-            f.write("echo hi\n")
-        os.makedirs(os.path.join(SKILLS, "broken"))  # 没有 SKILL.md 的目录不算技能
         sock = os.path.join(T, "gw.sock")
         conf = os.path.join(T, "kernel.conf")
         with open(conf, "w") as f:
-            f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nskills = {SKILLS}\n"
+            f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nskills = skills\n"
                     f"max_output = 4096\napproval_timeout = 2\n")
 
         gw = Gateway(sock)
@@ -440,19 +443,16 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 4, hello
-            assert names == ["Edit", "Grep", "Read", "Shell", "Skill", "Write"], names
-            skill = next(t for t in hello["tools"] if t["name"] == "Skill")
-            assert "- demo：示例技能， 测试用" in skill["description"], skill["description"]
-            assert skill["input_schema"]["properties"]["name"]["enum"] == ["demo"], skill
-            assert hello["skills"] == [{"name": "demo", "description": "示例技能， 测试用"}], hello["skills"]
+            assert hello["token"] == "t0k" and hello["v"] == 5, hello
+            assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names   # Skill 由网关提供
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
+            assert all("workspace" in t["input_schema"]["properties"] for t in hello["tools"]), hello["tools"]
             assert "landlock" in hello["sandbox"], hello
-            gw.send(t="welcome", v=3)
+            gw.send(t="welcome", v=5)
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_ls, t_skill, t_skill_reload, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve, t_approve_timeout,
-                      t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox, t_gateway_cancel,
-                      t_gateway_skill, t_reconnect):
+            for t in (t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve,
+                      t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
+                      t_gateway_cancel, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理

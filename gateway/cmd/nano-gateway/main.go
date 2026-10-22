@@ -104,6 +104,7 @@ func main() {
 	}
 	a.SetHosts(devices)
 	devices.OnChange(a.HostsChanged)
+	kernelDone := startLocalKernel(ctx, cfg, exe, hub, a, log)
 	if err := devices.SetListener(cfg.Kernel.DeviceListen); err != nil {
 		log.Warn("电脑接入地址用不了", "err", err)
 	}
@@ -171,6 +172,9 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("退出")
+	if kernelDone != nil {
+		<-kernelDone
+	}
 	if p, ok := strings.CutPrefix(cfg.Kernel.Listen, "unix:"); ok {
 		os.Remove(p)
 	}

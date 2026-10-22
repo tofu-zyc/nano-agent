@@ -12,7 +12,8 @@ import (
 	"nano-agent/gateway/internal/proto"
 )
 
-// 工作目录和权限模式：配置里是默认值，每个会话可以用 /dir、/mode 单独改。
+// 工作目录和权限模式：权限模式的默认值在配置里，每个会话可以用 /mode 单独改；
+// 一个会话可以同时挂好几个工作目录（workspaces.go），可以在不同的机器上，工具调用时用 workspace 参数指定。
 // 改动在下一条消息开始的那一轮生效。
 
 var modeNames = map[string]string{
@@ -29,9 +30,9 @@ var modeDesc = map[string]string{
 
 // workspace 是一个会话实际生效的设置。
 type workspace struct {
-	ws           *Workspace // 工作目录（workspaces.go），nil 表示只聊天
-	dirs, ro, rw []string   // 交给执行器的：工作目录、额外的只读和读写路径
-	mode         string
+	wss    []*Workspace // 挂载的工作目录（workspaces.go），空表示只聊天
+	ro, rw []string     // 配置里额外的只读和读写路径，每台机器上都一样
+	mode   string
 }
 
 func (a *App) workspaceOf(sid string) workspace {
@@ -40,17 +41,35 @@ func (a *App) workspaceOf(sid string) workspace {
 	if st.Mode != "" {
 		w.mode = st.Mode
 	}
-	if st.WorkspaceSet {
-		w.ws = a.findWorkspace(st.Workspace)
+	if st.WorkspacesSet {
+		for _, id := range st.Workspaces {
+			if x := a.findWorkspace(id); x != nil {
+				w.wss = append(w.wss, x)
+			}
+		}
 	} else {
-		w.ws = a.defaultWorkspace()
+		w.wss = a.defaultWorkspaces()
 	}
-	if w.ws != nil {
-		w.dirs = []string{w.ws.Path}
-		w.ro = slices.Clone(a.cfg.Workspace.ExtraRO)
-		w.rw = slices.Clone(a.cfg.Workspace.ExtraRW)
-	}
+	w.ro = slices.Clone(a.cfg.Workspace.ExtraRO)
+	w.rw = slices.Clone(a.cfg.Workspace.ExtraRW)
 	return w
+}
+
+func (w workspace) ids() []string {
+	ids := make([]string, len(w.wss))
+	for i, x := range w.wss {
+		ids[i] = x.ID
+	}
+	return ids
+}
+
+func (w workspace) has(id string) bool {
+	for _, x := range w.wss {
+		if x.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // isAdmin：命令行用户（能在这台机器上开终端的人本来就有全部权限）和登录了网页的用户始终是管理员。
@@ -71,20 +90,46 @@ func (a *App) runMode(w workspace, from string) string {
 
 // noToolsNote 告诉模型这个会话没有工具。不说的话，模型（尤其是人格里写了“需要时使用工具”）
 // 会在回复里编造工具调用的文本。
-const noToolsNote = "[系统] 这个会话没有工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
-	"用户需要这些的话，请他让管理员选一个工作目录（/dir，或者在网页里设置）。"
+const noToolsNote = "[系统] 这个会话没有挂载工作目录，你没有任何可用的工具，不能读写文件、执行命令，只能聊天。" +
+	"用户需要这些的话，请他让管理员挂一个工作目录（/dir，或者在网页里设置）。"
 
-// envNote 描述当前环境，追加在用户消息前面（变了才追加，不改系统提示词）。
-func envNote(w workspace) string {
-	if w.ws == nil {
+// machineDesc 是给模型看的机器说明
+func (a *App) machineDesc(name string) string {
+	switch {
+	case name == host.LocalName:
+		return "网关所在的机器"
+	case a.isSSH(name):
+		return "SSH 服务器"
+	}
+	return "电脑"
+}
+
+// envNote 描述这一轮的环境，追加在用户消息前面（变了才追加，不改系统提示词）。
+func (a *App) envNote(w workspace, rt route) string {
+	if len(w.wss) == 0 {
 		return noToolsNote
 	}
-	where := w.ws.Host
-	if where == host.LocalName {
-		where = "本机（网关所在的机器）"
+	if len(rt.mounts) == 0 {
+		return fmt.Sprintf("[系统] 挂载的工作目录所在的机器现在都用不了（%s），这一轮由 %s 接手：不能读写文件、执行命令，只能聊天。",
+			strings.Join(rt.down, "；"), rt.kernel)
 	}
-	return fmt.Sprintf("[系统] 在 %s 上工作。工作目录：%s（相对路径和命令都从这里开始）。权限模式：%s，%s。",
-		where, w.ws.Path, modeNames[w.mode], modeDesc[w.mode])
+	var b strings.Builder
+	if len(rt.mounts) == 1 && len(rt.down) == 0 {
+		x := rt.mounts[0].ws
+		fmt.Fprintf(&b, "[系统] 在 %s 上工作（%s）。相对路径和命令都从这个目录开始。", x.Label(), a.machineDesc(x.Host))
+	} else {
+		b.WriteString("[系统] 这个会话挂载了下面的工作目录，可以在不同的机器上。工具调用时用 workspace 参数写明在哪个上执行（写这里列出的名字），" +
+			"相对路径和命令从那个目录开始：")
+		for _, m := range rt.mounts {
+			fmt.Fprintf(&b, "\n- %s（%s）", m.ws.Label(), a.machineDesc(m.ws.Host))
+		}
+		for _, d := range rt.down {
+			fmt.Fprintf(&b, "\n- %s，这一轮用不了", d)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "权限模式：%s，%s。", modeNames[w.mode], modeDesc[w.mode])
+	return b.String()
 }
 
 // ---- 命令 ----

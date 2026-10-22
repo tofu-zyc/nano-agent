@@ -64,19 +64,21 @@ typedef enum {
     NA_TURN_ERROR,     /* 模型调用失败（网关已经重试过） */
 } na_turn_reason;
 
+/* 执行工具的机器有没有沙箱（工作目录可能在别的机器上，和本机不同） */
+typedef enum {
+    NA_SB_DEFAULT = 0,   /* 用 run 的设置（再没有就用 na_core_config.sandbox） */
+    NA_SB_YES,
+    NA_SB_NO,
+} na_sandbox;
+
 typedef struct {
     const char *id;     /* 调用 ID，由模型生成 */
     const char *name;   /* 工具名 */
     const char *args;   /* 参数 JSON 文本；args_ok 为 false 时是原始文本，只用于报错 */
     bool args_ok;       /* 参数是否为合法的 JSON 对象 */
+    na_sandbox sandbox; /* 这个调用在哪台机器上执行，那里有没有沙箱（宿主按参数里的工作目录判断） */
+    const char *error;  /* 宿主预先检查出的问题（比如工作目录写错了）：非空时直接以此失败，不执行 */
 } na_call;
-
-/* 这一轮执行工具的机器有没有沙箱（远程执行时和本机不同） */
-typedef enum {
-    NA_SB_DEFAULT = 0,   /* 用 na_core_config.sandbox */
-    NA_SB_YES,
-    NA_SB_NO,
-} na_sandbox;
 
 typedef struct {
     na_ev_type type;
@@ -130,5 +132,7 @@ void     na_cmd_free(na_cmd *cmd);
 /* 最近的超时时刻，没有则返回 -1。宿主据此决定 poll 等多久。 */
 int64_t  na_core_next_deadline(const na_core *c);
 size_t   na_core_active_runs(const na_core *c);
+/* 会话正在进行的 run 的执行约束（INPUT 时传入的 policy），没有 run 时返回 NULL */
+const char *na_core_policy(const na_core *c, const char *sid);
 
 #endif

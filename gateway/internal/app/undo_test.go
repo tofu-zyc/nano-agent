@@ -130,11 +130,11 @@ func TestUndoRestatesEnvironment(t *testing.T) {
 	e.ch.wait(t, dir)
 	e.say("看看目录")
 	in := e.k.expect(proto.TInput)
-	if len(in.Dirs) == 0 {
+	if len(in.Workspaces) == 0 {
 		t.Fatalf("input: %+v", in)
 	}
 	msgs := e.roundTrip(t)
-	if !strings.Contains(lastUser(msgs), "工作目录") {
+	if !strings.Contains(lastUser(msgs), "上工作") {
 		t.Fatalf("第一条消息前面应当有环境说明：%s", lastUser(msgs))
 	}
 	e.say("撤回")
@@ -142,7 +142,7 @@ func TestUndoRestatesEnvironment(t *testing.T) {
 	// 环境说明跟着那一轮删掉了，下一条消息前面重新说
 	e.say("再看看")
 	e.k.expect(proto.TInput)
-	if msgs := e.roundTrip(t); !strings.Contains(lastUser(msgs), "工作目录") {
+	if msgs := e.roundTrip(t); !strings.Contains(lastUser(msgs), "上工作") {
 		t.Fatalf("撤回后没有重新说明环境：%s", lastUser(msgs))
 	}
 }

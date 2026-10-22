@@ -137,6 +137,7 @@ func setup(t *testing.T) *env {
 		Kernel:    config.Kernel{Listen: "unix:" + sock, Token: "tok"},
 		LLM:       config.LLM{Provider: "mock", MaxHistoryTokens: 10000, TrimTo: 0.5},
 		Persona:   config.Persona{Dir: filepath.Join(dir, "personas")},
+		Skills:    config.Skills{Dir: filepath.Join(dir, "skills")},
 		Access:    config.Access{Admins: []string{"fake:u1"}, Guest: "none"},
 		Workspace: config.Workspace{Mode: "ask"},
 		Dir:       filepath.Join(dir, "conf"),
@@ -281,7 +282,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	e := setup(t)
 	e.useDir(t, "work")
 	e.say("看看目录")
-	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || len(in.Dirs) != 1 {
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAsk || len(in.Workspaces) != 1 {
 		t.Fatalf("input: %+v", in)
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
@@ -429,27 +430,30 @@ func TestWorkspaceAndModes(t *testing.T) {
 	work := filepath.Join(e.dir, "work")
 	os.MkdirAll(work, 0o755)
 
-	// 没设置工作目录的纯聊天会话：告诉模型它没有工具
+	// 没挂工作目录的纯聊天会话：告诉模型它没有工具
 	e.say("你好")
 	in := e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeNone || len(in.Dirs) != 0 {
+	if in.Mode != proto.ModeNone || len(in.Workspaces) != 0 {
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有工作目录") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 这个会话没有挂载工作目录") || !strings.HasSuffix(got, "\n"+stamp+" 你好") {
 		t.Fatalf("user content: %q", got)
 	}
 
 	e.say("/dir add " + work)
-	e.ch.wait(t, "这个会话改在 本机:"+work+" 上工作了")
+	e.ch.wait(t, "挂上了 本机:"+work)
 	e.say("/mode auto")
 	e.ch.wait(t, "已切换为自动")
 	e.say("看看目录")
 	in = e.k.expect(proto.TInput)
-	if in.Mode != proto.ModeAuto || len(in.Dirs) != 1 || in.Dirs[0] != work || in.Exec != "" {
-		t.Fatalf("本机的目录由本机的内核直接执行：%+v", in)
+	if in.Mode != proto.ModeAuto || len(in.Workspaces) != 1 {
+		t.Fatalf("input: %+v", in)
+	}
+	if w := in.Workspaces[0]; w.Name != "本机:"+work || !w.Local || len(w.Dirs) != 1 || w.Dirs[0] != work {
+		t.Fatalf("本机的目录由本机的内核直接执行：%+v", w)
 	}
 	msgs := e.roundTrip(t)
-	want := "[系统] 在 本机（网关所在的机器） 上工作。工作目录：" + work + "（相对路径和命令都从这里开始）。权限模式：自动，"
+	want := "[系统] 在 本机:" + work + " 上工作（网关所在的机器）。相对路径和命令都从这个目录开始。权限模式：自动，"
 	if got := lastUser(msgs); !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "\n"+stamp+" 看看目录") {
 		t.Fatalf("env note: %q", got)
 	}
@@ -465,22 +469,30 @@ func TestWorkspaceAndModes(t *testing.T) {
 		t.Fatalf("user content: %q", got)
 	}
 
-	// 列表、切换、只聊天、设为默认、删除
+	// 再挂一个：同一台机器上的工作目录互相都能读写，模型要用 workspace 参数指明
 	other := filepath.Join(e.dir, "docs")
 	os.MkdirAll(other, 0o755)
 	e.say("/dir add " + other)
-	e.ch.wait(t, "本机:"+other)
+	e.ch.wait(t, "挂上了 本机:"+other)
+	e.say("两个一起看")
+	in = e.k.expect(proto.TInput)
+	if len(in.Workspaces) != 2 || in.Workspaces[1].Name != "本机:"+other || len(in.Workspaces[0].Dirs) != 2 || in.Workspaces[0].Dirs[1] != other {
+		t.Fatalf("两个工作目录：%+v", in.Workspaces)
+	}
+	if got := lastUser(e.roundTrip(t)); !strings.Contains(got, "用 workspace 参数写明") || !strings.Contains(got, "\n- 本机:"+other+"（网关所在的机器）") {
+		t.Fatalf("env note: %q", got)
+	}
 	e.say("/dir")
-	if msg := e.ch.wait(t, "工作目录列表"); !strings.Contains(msg, "1. 本机:"+work+"\n") || !strings.Contains(msg, "2. 本机:"+other+"（当前）") {
+	if msg := e.ch.wait(t, "工作目录列表"); !strings.Contains(msg, "1. 本机:"+work+"（已挂载）") || !strings.Contains(msg, "2. 本机:"+other+"（已挂载）") {
 		t.Fatalf("list: %q", msg)
 	}
-	e.say("/dir 1")
-	e.ch.wait(t, "这个会话改在 本机:"+work)
+	e.say("/dir -2")
+	e.ch.wait(t, "取下了 本机:"+other)
 	e.say("/dir default 2")
-	e.ch.wait(t, "现在是新会话的默认工作目录")
+	e.ch.wait(t, "新会话会默认挂上 本机:"+other)
 	e.say("/dir none")
-	e.ch.wait(t, "只聊天")
-	if info, _ := e.a.Session(mainSID); info.Workspace != "" {
+	e.ch.wait(t, "全部取下")
+	if info, _ := e.a.Session(mainSID); len(info.Workspaces) != 0 {
 		t.Fatalf("只聊天：%+v", info)
 	}
 	e.say("/dir rm 2")
@@ -489,14 +501,14 @@ func TestWorkspaceAndModes(t *testing.T) {
 		t.Fatalf("workspaces: %+v", ws)
 	}
 	e.say("/dir 1")
-	e.ch.wait(t, "这个会话改在")
+	e.ch.wait(t, "挂上了")
 
 	// /reset 之后历史是空的，环境说明要重新给一次
 	e.say("/reset")
 	e.ch.wait(t, "上下文已清空")
 	e.say("新的开始")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 在 本机（网关所在的机器） 上工作。工作目录：") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 在 本机:"+work+" 上工作") {
 		t.Fatalf("after reset: %q", got)
 	}
 }

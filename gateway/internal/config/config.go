@@ -17,6 +17,7 @@ type Config struct {
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
 	LLM       LLM       `toml:"llm" json:"llm"`
 	Persona   Persona   `toml:"persona" json:"persona"`
+	Skills    Skills    `toml:"skills" json:"skills"`
 	Session   Session   `toml:"session" json:"session"`
 	Access    Access    `toml:"access" json:"access"`
 	Workspace Workspace `toml:"workspace" json:"workspace"`
@@ -33,6 +34,8 @@ type Kernel struct {
 	Listen       string `toml:"listen" json:"listen"`               // unix:/path 或 tcp:host:port
 	Token        string `toml:"token" json:"token"`                 // 与内核配置里的 token 一致
 	DeviceListen string `toml:"device_listen" json:"device_listen"` // 额外的电脑接入地址，空表示关闭，可热更新
+	Local        *bool  `toml:"local" json:"local"`                 // 网关自己在本机启动一个内核，默认开
+	LocalName    string `toml:"local_name" json:"local_name"`       // 本机内核的名字，默认是 gateway
 }
 
 type LLM struct {
@@ -120,6 +123,11 @@ type Workspace struct {
 	ExtraRW []string `toml:"extra_rw" json:"extra_rw"` // 沙箱里额外可写的路径，比如某些工具的缓存目录
 }
 
+// Skills：技能放在网关上，每个技能一个目录（SKILL.md 和附带文件）
+type Skills struct {
+	Dir string `toml:"dir" json:"dir"` // 默认是配置文件旁边的 skills/
+}
+
 type CLI struct {
 	Enabled       *bool `toml:"enabled" json:"enabled"`               // 终端聊天（make chat 连进来），默认开
 	ShowReasoning *bool `toml:"show_reasoning" json:"show_reasoning"` // 显示模型的思考过程，默认开
@@ -190,6 +198,7 @@ func parse(path string, overlay []byte) (*Config, toml.MetaData, []string, error
 	}
 	c.Dir = base
 	c.Persona.Dir = resolve(base, c.Persona.Dir)
+	c.Skills.Dir = resolve(base, c.Skills.Dir)
 	c.Session.DataDir = resolve(base, c.Session.DataDir)
 	if strings.HasPrefix(c.Kernel.Listen, "unix:") {
 		c.Kernel.Listen = "unix:" + resolve(base, strings.TrimPrefix(c.Kernel.Listen, "unix:"))
@@ -231,6 +240,7 @@ func (c *Config) applyDefaults() {
 	}
 	defInt(&c.LLM.Timeout, 600)
 	def(&c.Persona.Dir, "personas")
+	def(&c.Skills.Dir, "skills")
 	def(&c.Session.DataDir, "data")
 	def(&c.Telegram.APIBase, "https://api.telegram.org")
 	def(&c.Feishu.Domain, "feishu")

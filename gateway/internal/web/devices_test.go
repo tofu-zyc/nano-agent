@@ -136,21 +136,22 @@ func TestWorkspacesAPI(t *testing.T) {
 	if code, out := c.do("POST", "/api/workspaces", map[string]any{"host": "nowhere", "path": "/x"}, true); code != 400 {
 		t.Fatal("没有的机器", code, out)
 	}
-	if code, _ := c.do("PATCH", "/api/sessions/main", map[string]any{"workspace": id}, true); code != 200 {
-		t.Fatal("会话选工作目录", code)
+	if code, _ := c.do("PATCH", "/api/sessions/main", map[string]any{"workspaces": []string{id}}, true); code != 200 {
+		t.Fatal("会话挂工作目录", code)
 	}
 	_, out = c.do("GET", "/api/sessions/main", nil, false)
-	if info := out["info"].(map[string]any); info["host"] != "本机" || info["path"] != "/srv/proj" {
-		t.Fatalf("info: %v", info)
+	ws := out["info"].(map[string]any)["workspaces"].([]any)
+	if len(ws) != 1 || ws[0].(map[string]any)["host"] != "本机" || ws[0].(map[string]any)["path"] != "/srv/proj" {
+		t.Fatalf("info: %v", ws)
 	}
-	if code, _ := c.do("PUT", "/api/workspaces/default", map[string]string{"id": ""}, true); code != 200 {
+	if code, _ := c.do("PUT", "/api/workspaces/default", map[string]any{"id": id, "default": false}, true); code != 200 {
 		t.Fatal("取消默认", code)
 	}
 	if code, _ := c.do("DELETE", "/api/workspaces/"+id, nil, true); code != 200 {
 		t.Fatal("删除", code)
 	}
 	_, out = c.do("GET", "/api/sessions/main", nil, false)
-	if info := out["info"].(map[string]any); info["workspace"] != "" {
-		t.Fatalf("删掉后会话只聊天：%v", info)
+	if ws := out["info"].(map[string]any)["workspaces"].([]any); len(ws) != 0 {
+		t.Fatalf("删掉后会话只聊天：%v", ws)
 	}
 }

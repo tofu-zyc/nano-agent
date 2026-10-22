@@ -5,7 +5,7 @@
   import { buildBlocks, type Block } from '../lib/conv';
   import { markdown } from '../lib/markdown';
   import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
-  import type { Msg, SessionInfo } from '../lib/types';
+  import type { CommandInfo, Msg, SessionInfo } from '../lib/types';
   import ToolCard from './ToolCard.svelte';
   import WorkspacePicker from './WorkspacePicker.svelte';
   import Icon from './Icon.svelte';
@@ -102,7 +102,50 @@
     }
   }
 
+  // ---- 命令提示：输入框里打 / 时列出命令，上下键选，Tab 补全，Enter 补全（不用参数的直接发送），Esc 收起 ----
+  let ta = $state<HTMLTextAreaElement>();
+  let menuIdx = $state(0);
+  let menuHidden = $state(false);
+  const cmdWord = $derived(text.startsWith('/') ? text.slice(1).split(/\s/)[0].toLowerCase() : null);
+  const cmdMatches = $derived(
+    cmdWord !== null && !/\s/.test(text) && !menuHidden ? (store.ov?.commands ?? []).filter((c) => c.name.startsWith(cmdWord)) : [],
+  );
+  // 已经打完命令、开始写参数时，提示参数的写法
+  const cmdHint = $derived(cmdWord !== null && /\s/.test(text) ? store.ov?.commands?.find((c) => c.name === cmdWord) : undefined);
+  $effect(() => {
+    cmdWord;
+    menuIdx = 0;
+    if (!text.startsWith('/')) menuHidden = false;
+  });
+  function pickCmd(c: CommandInfo, sendNow: boolean) {
+    const optional = !c.args || c.args.startsWith('[');
+    if (sendNow && optional) {
+      text = '/' + c.name;
+      send();
+      return;
+    }
+    text = '/' + c.name + ' ';
+    ta?.focus();
+  }
+
   function onkey(e: KeyboardEvent) {
+    if (cmdMatches.length && !e.isComposing) {
+      const n = cmdMatches.length;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        menuIdx = (menuIdx + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault();
+        pickCmd(cmdMatches[menuIdx], e.key === 'Enter');
+        return;
+      }
+      if (e.key === 'Escape') {
+        menuHidden = true;
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
@@ -116,12 +159,11 @@
     for (let i = list.length - 1; i >= 0; i--) if (ok(list[i])) return i;
     return -1;
   }
-  // 换工作目录：直接在对话头部选，不用先打开会话设置
+  // 挂载、取下工作目录：直接在对话头部操作，不用先打开会话设置
   let picking = $state(false);
-  async function chooseWorkspace(id: string) {
-    picking = false;
+  async function mountWorkspaces(ids: string[]) {
     try {
-      store.upsertSession(await api.patch<SessionInfo>(sidPath(sid), { workspace: id }));
+      store.upsertSession(await api.patch<SessionInfo>(sidPath(sid), { workspaces: ids }));
     } catch (err) {
       store.fail(err);
     }
@@ -175,11 +217,13 @@
           <span class="tag ep" style="--c: {channelMeta[e.channel]?.color ?? 'var(--muted)'}" title="这个窗口接在这个会话上：{e.key}"><Icon name={channelMeta[e.channel]?.icon ?? 'link'} size={11} />{endpointLabel(e)}</span>
         {/each}
         {#if info}
-          {#if info.workspace}
+          {#if info.workspaces.length}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
-            <button class="tag mono" class:warnt={!info.host_online} title="{info.host}:{info.path}{info.host_online ? '' : '（这台机器现在用不了）'} · 点击更换" onclick={() => (picking = true)}><Icon name="folder" size={11} />{info.host}:{shortPath(homeShort(info.path), 32)}</button>
+            {#each info.workspaces as mt (mt.id)}
+              <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击挂载 / 取下" onclick={() => (picking = true)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
+            {/each}
           {:else}
-            <button class="tag" onclick={() => (picking = true)} title="没有工作目录，不能用工具。点这里选一个">只聊天</button>
+            <button class="tag" onclick={() => (picking = true)} title="没有挂载工作目录，不能用工具。点这里挂一个">只聊天</button>
           {/if}
           {#if info.thinking}<span class="tag">思考 {info.thinking === 'none' ? '关闭' : info.thinking}</span>{/if}
           {#if info.usage.prompt_tokens}<span class="tag accent">缓存命中 {pct(info.usage.cached_tokens, info.usage.prompt_tokens)}</span>{/if}
@@ -202,8 +246,8 @@
           {#if eps.some((e) => e.channel !== 'web')}
             <p class="muted">{eps.filter((e) => e.channel !== 'web').map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
           {/if}
-          {#if info && !info.workspace}
-            <p class="muted">想让它读写文件、执行命令？先给它 <button class="lnk" onclick={() => (picking = true)}>选一个工作目录</button>，本机或者 SSH 服务器上的都行。</p>
+          {#if info && !info.workspaces.length}
+            <p class="muted">想让它读写文件、执行命令？先给它 <button class="lnk" onclick={() => (picking = true)}>挂一个工作目录</button>，本机、别的电脑或者 SSH 服务器上的都行，可以挂好几个。</p>
           {/if}
         </div>
       {/if}
@@ -298,7 +342,22 @@
   </div>
 
   <div class="composer">
-    <textarea bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行。/help 查看命令"></textarea>
+    {#if cmdMatches.length || cmdHint}
+      <div class="cmdmenu" role="listbox">
+        {#each cmdMatches as c, i (c.name)}
+          <button class="cmd" class:sel={i === menuIdx} role="option" aria-selected={i === menuIdx} onmousedown={(e) => { e.preventDefault(); pickCmd(c, false); }} onmouseenter={() => (menuIdx = i)}>
+            <code>/{c.name}</code>{#if c.args}<span class="args">{c.args}</span>{/if}
+            <span class="desc">{c.desc}</span>
+          </button>
+        {/each}
+        {#if cmdHint}
+          <div class="cmd hint"><code>/{cmdHint.name}</code>{#if cmdHint.args}<span class="args">{cmdHint.args}</span>{/if}<span class="desc">{cmdHint.desc}</span></div>
+        {:else}
+          <div class="keys">↑↓ 选择 · Tab 补全 · Enter 确定 · Esc 收起</div>
+        {/if}
+      </div>
+    {/if}
+    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行。打 / 看命令"></textarea>
     {#if info?.running}
       <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
     {/if}
@@ -308,7 +367,7 @@
 {/if}
 
 {#if picking && info}
-  <WorkspacePicker current={info.workspace} onpick={chooseWorkspace} onclose={() => (picking = false)} />
+  <WorkspacePicker title="挂载工作目录" mounted={info.workspaces.map((m) => m.id)} onchange={mountWorkspaces} onclose={() => (picking = false)} />
 {/if}
 
 <style>
@@ -617,6 +676,7 @@
     text-decoration: underline;
   }
   .composer {
+    position: relative;
     display: flex;
     gap: 10px;
     align-items: flex-end;
@@ -645,6 +705,71 @@
   .composer .btn {
     height: 44px;
     border-radius: 13px;
+  }
+  .cmdmenu {
+    position: absolute;
+    left: 22px;
+    right: 22px;
+    bottom: calc(100% - 6px);
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    padding: 6px;
+    border-radius: 13px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-solid);
+    box-shadow: var(--shadow);
+    max-height: 340px;
+    overflow: auto;
+    animation: rise 0.12s ease;
+  }
+  .cmd {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 0;
+    background: none;
+    color: var(--text);
+    text-align: left;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .cmd.sel {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .cmd code {
+    font-family: var(--mono);
+    color: var(--accent-2);
+    flex: none;
+  }
+  .cmd .args {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    flex: none;
+  }
+  .cmd .desc {
+    color: var(--text-2);
+    font-size: 12.5px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmd.hint {
+    cursor: default;
+    flex-wrap: wrap;
+  }
+  .cmd.hint .desc {
+    white-space: normal;
+  }
+  .keys {
+    padding: 5px 10px 2px;
+    font-size: 11px;
+    color: var(--muted);
   }
   .composer .stop {
     color: var(--err);

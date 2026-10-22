@@ -17,7 +17,7 @@ typedef struct {
     int    run_timeout;       /* 秒 */
     int    approval_timeout;  /* 秒 */
     size_t max_output;        /* 工具输出最多保留的字节数 */
-    char  *skills;            /* 技能目录，默认是配置目录下的 skills/ */
+    char  *skills;            /* 旧配置：技能目录（技能已经改放在网关上，只用来提示） */
 } kconf;
 
 int  kconf_load(kconf *k, const char *path, char *err, size_t errlen);

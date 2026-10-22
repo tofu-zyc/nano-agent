@@ -30,6 +30,9 @@ cat > "$TMP/gateway.toml" <<CONF
 [kernel]
 listen = "unix:$TMP/k.sock"
 token = "e2e"
+local = false   # 内核由测试自己启动（pc、phone）
+[skills]
+dir = "$TMP/skills"
 [llm]
 provider = "mock"
 max_history_tokens = 4000
@@ -127,13 +130,13 @@ expect "Ctrl-C 提示再按一次退出" "再按一次 Ctrl-C 退出"
 send "/mode auto";                                    expect "切换到自动模式" "已切换为自动"
 send '!call Shell {"command":"echo auto-$((6*7))"}';  expect "自动模式直接执行" "auto-42"
 send '!call Skill {"name":"demo"}';                   expect "加载技能说明" "技能 demo"
-send "!call Read {\"path\":\"$TMP/skills/demo/data.txt\"}"; expect "读取技能附带文件" "skill-e2e-data"
+send '!call Read {"path":"~/.cache/nano-agent/skills/demo/data.txt"}'; expect "技能附带文件放到执行的机器上" "skill-e2e-data"
 send '!call Read {"path":"/etc/hostname"}';           expect "工作目录外的文件读不了" "不在工作目录内"
 send '!call Shell {"command":"cat ~/.profile"}';        expect "沙箱里读不到 HOME" "Permission denied"
 send '!call nope {}';                                 expect "未知工具变成错误结果" "未知工具：nope"
 send '!call Read {oops';                              expect "非法参数变成错误结果" "不是合法的 JSON 对象"
 send "/whoami";                                       expect "查身份" "你的身份：cli:local"
-send "/dir";                                          expect "查看工作目录" "1. 本机:$TMP/work（当前，新会话默认）"
+send "/dir";                                          expect "查看工作目录" "1. 本机:$TMP/work（已挂载，新会话默认）"
 send "/reset";                                        expect "清空上下文" "上下文已清空"
 send "/session new 第二个";                            expect "新建会话并切换" "已切换到会话「第二个」"
 send "/session 1";                                    expect "切回主会话" "已切换到会话「主会话」"
@@ -156,24 +159,26 @@ echo "pc is back" > "$TMP/work/back.txt"
 for _ in $(seq 50); do [ "$(grep -c '内核已连接 node=pc' "$TMP/gateway.log")" -ge 2 ] && break; sleep 0.1; done
 send '!call Read {"path":"back.txt"}';                expect "pc 回来后照常用工具" "1	pc is back"
 
-# 会话切到服务器 box 上的目录：网关自己连 SSH，工具交给网关在服务器上执行（服务器上不跑内核）
+# 再挂上服务器 box 上的目录：网关自己连 SSH，工具交给网关在服务器上执行（服务器上不跑内核）
 for _ in $(seq 100); do grep -q '服务器已就绪.*server=box' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done
-send "/dir add box:~/proj";                           expect "切到服务器上的目录" "这个会话改在 box:~/proj 上工作了"
-send '!call Write {"path":"r.txt","content":"remote-e2e"}'; expect "在服务器上写文件" "已创建"
+send "/dir add box:~/proj";                           expect "挂上服务器上的目录" "挂上了 box:~/proj"
+send '!call Write {"path":"r.txt","content":"x"}';    expect "挂了两个要写明在哪个上执行" "用 workspace 参数指明"
+send '!call Write {"path":"r.txt","content":"remote-e2e","workspace":"box:~/proj"}'; expect "在服务器上写文件" "已创建"
 if [ "$(cat "$TMP/remote/box/proj/r.txt" 2>/dev/null)" = "remote-e2e" ]; then echo "  ok   文件写在服务器上"; pass=$((pass + 1)); else echo "  FAIL 文件写在服务器上"; fail=$((fail + 1)); fi
 if ls "$TMP"/remote/box/.cache/nano-agent/nano-exec-* >/dev/null 2>&1 && ! ls "$TMP"/remote/box/.cache/nano-agent/ | grep -q kernel; then
   echo "  ok   服务器上只有执行器，没有内核"; pass=$((pass + 1))
 else
   echo "  FAIL 服务器上只有执行器，没有内核"; fail=$((fail + 1))
 fi
-send '!call Skill {"name":"demo"}';                   expect "服务器上加载技能" "技能目录：~/.cache/nano-agent/skills/"
+send '!call Skill {"name":"demo"}';                   expect_n "加载技能（两台机器上都放好附带文件）" "技能目录：~/.cache/nano-agent/skills/demo" 2
 if find "$TMP/remote/box/.cache/nano-agent/skills" -name data.txt -exec cat {} \; | grep -qF "skill-e2e-data"; then
   echo "  ok   技能附带文件传到服务器"; pass=$((pass + 1))
 else
   echo "  FAIL 技能附带文件传到服务器"; fail=$((fail + 1))
 fi
-send "!call Read {\"path\":\"$TMP/remote/box/.cache/nano-agent/skills/pc/demo/data.txt\"}"; expect "服务器上读技能文件" "skill-e2e-data"
-send "/dir 1";                                        expect "切回本机的目录" "这个会话改在 本机:$TMP/work 上工作了"
+send '!call Read {"path":"~/.cache/nano-agent/skills/demo/data.txt","workspace":"box"}'; expect_n "服务器上读技能文件" "skill-e2e-data" 2
+send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
+send "/dir -2";                                       expect "取下服务器上的目录" "取下了 box:~/proj"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"

@@ -178,12 +178,13 @@ func (s *Server) removeWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) defaultWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID string `json:"id"`
+		ID      string `json:"id"`
+		Default bool   `json:"default"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.app.SetDefaultWorkspace(req.ID); err != nil {
+	if err := s.app.SetDefaultWorkspace(req.ID, req.Default); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

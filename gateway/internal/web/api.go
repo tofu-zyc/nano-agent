@@ -70,6 +70,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"machines":   snap.Machines,
 		"workspaces": snap.Workspaces,
 		"workspace":  map[string]any{"mode": cfg.Workspace.Mode},
+		"skills":     map[string]any{"dir": cfg.Skills.Dir, "list": s.app.Skills()},
+		"commands":   app.Commands,
 		"access":     map[string]any{"admins": cfg.Access.Admins, "guest": cfg.Access.Guest},
 	})
 }

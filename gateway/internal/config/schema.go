@@ -58,6 +58,8 @@ var Fields = []Field{
 	{Key: "session.timezone", Group: "gateway", Section: "消息", Label: "时区", Type: "string",
 		Help: "比如 Asia/Shanghai；空表示系统时区", Keywords: "时间"},
 	{Key: "persona.dir", Group: "gateway", Section: "存储", Label: "人格目录", Type: "string", Restart: true, Advanced: true},
+	{Key: "skills.dir", Group: "gateway", Section: "存储", Label: "技能目录", Type: "string", Restart: true, Advanced: true,
+		Help: "每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料。改动下一轮自动生效"},
 	{Key: "session.data_dir", Group: "gateway", Section: "存储", Label: "数据目录", Type: "string", ReadOnly: true, Advanced: true,
 		Help: "对话历史、会话设置、网页里改的配置都存在这里，只能在配置文件里改"},
 	{Key: "web.listen", Group: "gateway", Section: "网页管理", Label: "网页地址", Type: "string", Restart: true,
@@ -72,6 +74,10 @@ var Fields = []Field{
 		Help: "和 kernel.conf 里的 token 一致"},
 	{Key: "kernel.device_listen", Group: "kernel", Section: "电脑接入", Label: "电脑接入地址", Type: "string",
 		Help: "别的电脑上的内核来连的 TCP 地址，例如 0.0.0.0:7700；空表示关闭。第一次连接要在设备页面确认配对，跨网络使用私有网络或隧道"},
+	{Key: "kernel.local", Group: "kernel", Section: "本机内核", Label: "启动本机内核", Type: "bool", Restart: true,
+		Help: "网关自己在这台机器上启动一个内核（退出了自动重启），本机的工作目录由它执行"},
+	{Key: "kernel.local_name", Group: "kernel", Section: "本机内核", Label: "本机内核的名字", Type: "string", Restart: true, Advanced: true,
+		Help: "默认是 gateway。不要和别的内核同名，同名的会互相顶掉"},
 
 	// ---- 工作目录 ----
 	{Key: "workspace.mode", Group: "workspace", Section: "默认值", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},

@@ -41,12 +41,9 @@ type SessionInfo struct {
 	Channel     string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints   []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title       string         `json:"title"`
-	Workspace   string         `json:"workspace"`   // 工作目录的 ID（workspaces.go），空表示只聊天
-	Host        string         `json:"host"`        // 工作目录所在的机器
-	Path        string         `json:"path"`        // 工作目录的路径
-	HostOnline  bool           `json:"host_online"` // 那台机器现在能用
-	RunNode     string         `json:"run_node"`    // 正在跑这一轮的内核
-	RunGateway  bool           `json:"run_gateway"` // 这一轮的工具交给网关执行（异机模式）
+	Workspaces  []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只聊天
+	Kernel      string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
+	RunNode     string         `json:"run_node"`   // 正在跑这一轮的内核
 	Running     bool           `json:"running"`
 	Pending     int            `json:"pending"` // 待审批的工具调用
 	LastAt      int64          `json:"last_at"` // 最后一条消息的时间（秒）
@@ -57,6 +54,15 @@ type SessionInfo struct {
 	PersonaFile string         `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
 	Usage       llm.Usage      `json:"usage"`        // 历史里记下的累计用量
 	Compacted   int            `json:"compacted"`
+}
+
+// MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
+// gateway（交给网关在那台机器上执行）、down（那台机器现在用不了）。
+type MountInfo struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Path string `json:"path"`
+	How  string `json:"how"`
 }
 
 type ApprovalInfo struct {
@@ -106,8 +112,20 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	w := a.workspaceOf(sid)
 	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), Compacted: st.Base}
-	if w.ws != nil {
-		info.Workspace, info.Host, info.Path, info.HostOnline = w.ws.ID, w.ws.Host, w.ws.Path, a.hostUsable(w.ws.Host)
+	rt := a.route(w)
+	if s := a.sessions[sid]; s != nil && s.run != nil {
+		rt = s.run.rt
+	}
+	info.Kernel = rt.kernel
+	info.Workspaces = []MountInfo{}
+	for _, x := range w.wss {
+		how := "down"
+		if m := rt.find(x.Label()); m != nil && m.local {
+			how = "local"
+		} else if m != nil {
+			how = "gateway"
+		}
+		info.Workspaces = append(info.Workspaces, MountInfo{ID: x.ID, Host: x.Host, Path: x.Path, How: how})
 	}
 	if len(info.Endpoints) > 0 {
 		info.Channel = info.Endpoints[0].Channel
@@ -123,7 +141,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		}
 	}
 	if s := a.sessions[sid]; s != nil && s.run != nil {
-		info.Running, info.RunNode, info.RunGateway = true, s.run.node, s.run.gateway
+		info.Running, info.RunNode = true, s.run.node
 	}
 	for _, ap := range a.approvals {
 		if ap.sid == sid {
@@ -169,10 +187,10 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。
 type SessionPatch struct {
-	Title     *string `json:"title"`
-	Workspace *string `json:"workspace"` // 工作目录的 ID，空字符串表示只聊天
-	Mode      *string `json:"mode"`
-	Thinking  *string `json:"thinking"` // 空字符串表示用默认值
+	Title      *string   `json:"title"`
+	Workspaces *[]string `json:"workspaces"` // 挂载的工作目录（ID），空列表表示只聊天
+	Mode       *string   `json:"mode"`
+	Thinking   *string   `json:"thinking"` // 空字符串表示用默认值
 }
 
 func (a *App) UpdateSession(sid string, p SessionPatch) error {
@@ -181,8 +199,8 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
-	if p.Workspace != nil {
-		if _, err := a.setSessionWorkspace(sid, *p.Workspace); err != nil {
+	if p.Workspaces != nil {
+		if err := a.setSessionWorkspaces(sid, *p.Workspaces); err != nil {
 			return err
 		}
 	}
@@ -273,63 +291,24 @@ func (a *App) ListDir(ctx context.Context, hostName, path string) (*DirListing, 
 		hostName = host.LocalName
 	}
 	a.mu.Lock()
-	var h host.Host
-	var info host.Info
-	ok := false
-	if a.hosts != nil {
-		h, info, ok = a.hosts.Host(hostName)
-	}
-	kernel := ""
-	if hostName == host.LocalName {
-		kernel = a.localKernel()
-	} else if a.nodes[hostName] != nil {
-		kernel = hostName
-	}
+	h, _, why := a.hostFor(hostName)
+	known := a.knownHost(hostName)
 	a.mu.Unlock()
-	if h != nil {
-		l, err := h.Ls(ctx, path)
-		if err != nil {
-			return nil, err
+	if h == nil {
+		if !known {
+			return nil, fmt.Errorf("没有叫 %s 的机器", hostName)
 		}
-		out := &DirListing{Path: l.Path, Home: l.Home, Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
-		if out.Entries == nil {
-			out.Entries = []proto.DirEntry{}
-		}
-		return out, nil
+		return nil, fmt.Errorf("%s 现在用不了（%s），没法浏览它上面的目录", hostName, why)
 	}
-	if kernel == "" {
-		if ok {
-			return nil, fmt.Errorf("%s 现在用不了：%s", hostName, info.Detail)
-		}
-		return nil, fmt.Errorf("%s 不在线，没法浏览它上面的目录", hostName)
+	l, err := h.Ls(ctx, path)
+	if err != nil {
+		return nil, err
 	}
-	a.mu.Lock()
-	a.lsSeq++
-	id := fmt.Sprintf("ls%d", a.lsSeq)
-	ch := make(chan *proto.Msg, 1)
-	a.pendingLs[id] = ch
-	a.mu.Unlock()
-	defer func() {
-		a.mu.Lock()
-		delete(a.pendingLs, id)
-		a.mu.Unlock()
-	}()
-	if !a.hub.Send(kernel, proto.Msg{T: proto.TLs, ID: id, Path: path}) {
-		return nil, errors.New("内核没有连接，没法浏览目录")
+	out := &DirListing{Path: l.Path, Home: l.Home, Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
+	if out.Entries == nil {
+		out.Entries = []proto.DirEntry{}
 	}
-	select {
-	case m := <-ch:
-		if m.OK == nil || !*m.OK {
-			return nil, errors.New(m.Detail)
-		}
-		l := &DirListing{Path: m.Path, Home: m.Home, Blocked: m.Blocked, Entries: m.Entries, Truncated: m.Truncated}
-		if l.Entries == nil {
-			l.Entries = []proto.DirEntry{}
-		}
-		return l, nil
-	case <-ctx.Done():
-		return nil, errors.New("内核没有响应")
-	}
+	return out, nil
 }
 
 // Approvals 返回待审批的工具调用。

@@ -18,8 +18,14 @@
         return { icon: 'hub', color: 'var(--c-gateway)', title: '网关', sub: `已运行 ${since(ov.gateway.started)}` };
       case 'model':
         return { icon: 'sparkles', color: 'var(--c-model)', title: ov.model.model || '模型', sub: ov.model.base_url || '还没配置接口' };
-      case 'kernel':
+      case 'kernel': {
+        if (target.node) {
+          const k = ov.kernels.find((x) => x.node === target.node);
+          return { icon: 'shield', color: k ? 'var(--c-kernel)' : 'var(--muted)', title: target.node,
+            sub: k ? `内核 · ${k.managed ? '网关启动的本机内核' : k.local ? '在本机' : '在别的电脑上'}` : '内核 · 不在线' };
+        }
         return { icon: 'shield', color: 'var(--c-kernel)', title: '内核', sub: ov.kernels.length ? `${ov.kernels.length} 个在线` : '没有连接' };
+      }
       case 'machine': {
         if (!target.name) return { icon: 'hub', color: 'var(--c-kernel)', title: '机器', sub: '能放工作目录的地方' };
         const m = store.machines.find((x) => x.name === target.name);
@@ -107,12 +113,12 @@
       ? (ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === target.name).map((e) => ({ e, s })))
       : [],
   );
-  // 换工作目录（也就换了机器）
+  // 挂载、取下工作目录（可以同时挂好几个，在不同的机器上）
   let picking = $state(false);
-  async function chooseWorkspace(id: string) {
-    picking = false;
-    await patchSession({ workspace: id });
+  async function mountWorkspaces(ids: string[]) {
+    await patchSession({ workspaces: ids });
   }
+  const howText: Record<string, string> = { local: '内核自己执行', gateway: '网关执行', down: '用不了' };
   async function rename(title: string) {
     if (!sess || title.trim() === sess.title) return;
     try {
@@ -164,7 +170,7 @@
   // ---- 机器和工作目录 ----
   const machine = $derived(target.type === 'machine' && target.name ? store.machines.find((m) => m.name === target.name) : undefined);
   const ws = $derived(target.type === 'workspace' && target.id ? (ov.workspaces ?? []).find((w) => w.id === target.id) : undefined);
-  const wsSessions = $derived(ws ? (ov.sessions ?? []).filter((s) => s.workspace === ws.id) : []);
+  const wsSessions = $derived(ws ? (ov.sessions ?? []).filter((s) => s.workspaces.some((m) => m.id === ws.id)) : []);
   let browseOn = $state<MachineInfo | null>(null);
   let addingWs = $state(false);
   async function addOn(path: string) {
@@ -179,14 +185,14 @@
   }
   async function setDefault(w: WorkspaceInfo) {
     try {
-      await api.put('/api/workspaces/default', { id: w.default ? '' : w.id });
-      store.toast({ kind: 'ok', text: w.default ? '新会话不再默认用它，新会话只聊天' : '新会话默认在这里工作' }, 2400);
+      await api.put('/api/workspaces/default', { id: w.id, default: !w.default });
+      store.toast({ kind: 'ok', text: w.default ? '新会话不再默认挂它' : '新会话会默认挂上它' }, 2400);
     } catch (err) {
       store.fail(err);
     }
   }
   async function removeWorkspace(w: WorkspaceInfo) {
-    if (!confirm(`从列表里删掉 ${w.host}:${w.path}？${w.sessions ? `正在用它的 ${w.sessions} 个会话会改成只聊天。` : ''}机器上的文件不会动。`)) return;
+    if (!confirm(`从列表里删掉 ${w.host}:${w.path}？${w.sessions ? `挂着它的 ${w.sessions} 个会话会取下它。` : ''}机器上的文件不会动。`)) return;
     try {
       await api.del(`/api/workspaces/${w.id}`);
       store.open({ type: 'workspace' });
@@ -265,21 +271,38 @@
       </div>
       <FieldGroup group="model" focus={store.focus} />
     {:else if target.type === 'kernel'}
-      <p class="note lead">内核是 agent 本身：对话循环和权限判断，没有状态，可以装在好几台设备上，哪个在线都能接手。工作目录在哪台机器上，那台机器上的内核就直接执行；不在内核那台机器上的（比如 SSH 服务器），工具交给网关去执行。</p>
+      {@const list = target.node ? ov.kernels.filter((k) => k.node === target.node) : ov.kernels}
+      {#if !target.node}
+        <p class="note lead">内核是 agent 本身：对话循环和权限判断，没有状态，可以装在好几台设备上，哪个在线都能接手。网关所在的机器上的内核由网关自己启动。工作目录在内核那台机器上就由它直接执行，不在的（比如 SSH 服务器）交给网关去执行。</p>
+      {/if}
       <div class="card">
-        {#each ov.kernels as k (k.node)}
+        {#each list as k (k.node)}
+          {@const busy = (ov.sessions ?? []).filter((s) => s.run_node === k.node)}
           <div class="krow">
             <div class="row">
               <span class="dot online"></span>
               <strong class="grow">{k.node}</strong>
-              <span class="tag">{k.local ? '在本机' : '在别的电脑上'}</span>
+              <span class="tag">{k.managed ? '网关启动' : k.local ? '在本机' : '在别的电脑上'}</span>
               {#if k.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{k.landlock}</span>{:else}<span class="tag warn">没有沙箱</span>{/if}
             </div>
-            <div class="muted small">已连接 {since(k.since)} · 工具 {k.tools.join('、')}{k.skills?.length ? ` · 技能 ${k.skills.map((x) => x.name).join('、')}` : ''}</div>
+            <div class="muted small">已连接 {since(k.since)} · 机器 {k.local ? '本机' : k.node} · 工具 {k.tools.join('、')}</div>
+            {#if busy.length}<div class="muted small">正在跑：{busy.map((s) => s.title).join('、')}</div>{/if}
           </div>
         {:else}
-          <p class="note">还没有内核连上来。本机运行 <code>make run</code>；别的电脑用安装脚本装好后连过来（见“设备”页）。</p>
+          <p class="note">{target.node ? '这个内核现在不在线。' : '还没有内核连上来。网关会在本机启动一个；别的电脑用安装脚本装好后连过来（见“设备”页）。'}</p>
         {/each}
+      </div>
+      <h5>技能 <span class="muted small">放在网关上，所有内核共用</span></h5>
+      <div class="card">
+        {#each ov.skills?.list ?? [] as sk (sk.name)}
+          <div class="skill">
+            <code>{sk.name}</code>
+            <span>{sk.description}</span>
+          </div>
+        {:else}
+          <p class="note">还没有技能。</p>
+        {/each}
+        <p class="note small">技能目录：<code>{homeShort(ov.skills?.dir ?? '')}</code>。每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料；改动下一轮自动生效。调用时附带文件放到每台用到的机器的 <code>~/.cache/nano-agent/skills/</code> 下。</p>
       </div>
       <button class="btn link" onclick={() => store.open({ type: 'machine' })}><Icon name="hub" size={14} />机器和工作目录</button>
       <FieldGroup group="kernel" title="连接" focus={store.focus} />
@@ -355,7 +378,7 @@
               <button class="srow" onclick={() => store.open({ type: 'session', sid: s.sid })}>
                 <span class="dot" style="background: {channelMeta[s.channel]?.color}"></span>
                 <span class="grow">{s.title}</span>
-                {#if s.running}<span class="tag">{s.run_gateway ? `由 ${s.run_node} 跑，网关执行` : `由 ${s.run_node} 跑`}</span>{/if}
+                {#if s.running}<span class="tag">由 {s.run_node} 跑</span>{/if}
                 <Icon name="right" size={13} />
               </button>
             {:else}
@@ -366,7 +389,7 @@
           <p class="note">这个工作目录已经从列表里删掉了。</p>
         {/if}
       {:else}
-        <p class="note lead">工作目录是“机器 + 目录”，工具只能碰到它。会话从这个列表里选一个，标了 ★ 的是新会话的默认（没有就只聊天）。</p>
+        <p class="note lead">工作目录是“机器 + 目录”，工具只能碰到它。每个会话可以挂好几个（在不同的机器上也行），标了 ★ 的新会话默认挂上。</p>
         <div class="card">
           {#each ov.workspaces ?? [] as w (w.id)}
             <button class="srow" onclick={() => store.open({ type: 'workspace', id: w.id })}>
@@ -504,25 +527,25 @@
           {/if}
         </div>
 
-        <h5>工作目录 <span class="muted small">在哪台机器的哪个目录上干活</span></h5>
-        {@const sm = store.machines.find((x) => x.name === sess.host)}
-        <button class="wscard" class:off={sess.workspace && !sess.host_online} onclick={() => (picking = true)}>
-          {#if sess.workspace}
-            <span class="wsm"><Icon name={machineMeta[sm?.kind ?? 'kernel'].icon} size={14} />{sess.host}</span>
-            <code class="wsp" title={sess.path}>{shortPath(homeShort(sess.path), 44)}</code>
-            <span class="wss">
-              {#if !sess.host_online}{sess.host} 现在用不了，只能聊天
-              {:else if sess.running}{sess.run_gateway ? `由内核 ${sess.run_node} 跑，工具交给网关在 ${sess.host} 上执行` : `由 ${sess.run_node} 上的内核直接执行`}
-              {:else}{sm?.kind === 'ssh' || (sm?.kind === 'local' && !sm.kernels.length) ? '工具由网关在这台机器上执行' : '工具由这台机器上的内核直接执行'}{/if}
-            </span>
+        <h5>工作目录 <span class="muted small">{sess.workspaces.length ? `挂了 ${sess.workspaces.length} 个${sess.kernel ? ` · 由内核 ${sess.kernel} 跑` : ''}` : '在哪些机器的哪些目录上干活'}</span></h5>
+        <div class="mounts">
+          {#each sess.workspaces as mt (mt.id)}
+            {@const sm = store.machines.find((x) => x.name === mt.host)}
+            <div class="mount" class:off={mt.how === 'down'}>
+              <Icon name={machineMeta[sm?.kind ?? 'kernel'].icon} size={14} />
+              <button class="mp" onclick={() => store.open({ type: 'workspace', id: mt.id })} title="{mt.host}:{mt.path}">
+                <b>{mt.host}</b><code>{shortPath(homeShort(mt.path), 34)}</code>
+              </button>
+              <span class="how {mt.how}">{howText[mt.how]}</span>
+              <button class="x" title="取下" aria-label="取下 {mt.host}:{mt.path}" onclick={() => mountWorkspaces(sess.workspaces.filter((x) => x.id !== mt.id).map((x) => x.id))}><Icon name="x" size={12} /></button>
+            </div>
           {:else}
-            <span class="wsm"><Icon name="chat" size={14} />只聊天</span>
-            <span class="wss">没有工作目录，不能读写文件、执行命令</span>
-          {/if}
-          <span class="change">更换</span>
-        </button>
-        <h5>权限模式 {#if !sess.workspace}<span class="muted small">有工作目录之后生效</span>{/if}</h5>
-        <div class="modes" class:inactive={!sess.workspace}>
+            <div class="mount empty"><Icon name="chat" size={14} /><span>只聊天：没有挂载工作目录，不能读写文件、执行命令</span></div>
+          {/each}
+          <button class="btn sm" onclick={() => (picking = true)}><Icon name="plus" size={13} />{sess.workspaces.length ? '挂载 / 取下…' : '挂载工作目录…'}</button>
+        </div>
+        <h5>权限模式 {#if !sess.workspaces.length}<span class="muted small">挂了工作目录之后生效</span>{/if}</h5>
+        <div class="modes" class:inactive={!sess.workspaces.length}>
           {#each Object.entries(modeMeta) as [m, meta]}
             <button class:active={sess.mode === m} onclick={() => sess.mode !== m && patchSession({ mode: m })}>
               <strong>{meta.label}</strong>
@@ -568,10 +591,10 @@
 </aside>
 
 {#if picking && sess}
-  <WorkspacePicker current={sess.workspace} onpick={chooseWorkspace} onclose={() => (picking = false)} />
+  <WorkspacePicker title="挂载工作目录" mounted={sess.workspaces.map((m) => m.id)} onchange={mountWorkspaces} onclose={() => (picking = false)} />
 {/if}
 {#if addingWs}
-  <WorkspacePicker title="添加工作目录" none={false} onpick={(id) => { addingWs = false; store.open({ type: 'workspace', id }); }} onclose={() => (addingWs = false)} />
+  <WorkspacePicker title="添加工作目录" onpick={(id) => { addingWs = false; store.open({ type: 'workspace', id }); }} onclose={() => (addingWs = false)} />
 {/if}
 {#if browseOn}
   <DirPicker host={browseOn.kind === 'local' ? '' : browseOn.name} onpick={addOn} onclose={() => (browseOn = null)} />
@@ -834,61 +857,105 @@
   .krow .small {
     line-height: 1.6;
   }
-  /* 会话的工作目录：整张卡片是个按钮，点开选择器 */
-  .wscard {
-    width: 100%;
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 4px 10px;
-    padding: 11px 13px;
-    border-radius: 13px;
+  /* 会话挂载的工作目录 */
+  .mounts {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .mounts > .btn {
+    align-self: flex-start;
+    margin-top: 2px;
+  }
+  .mount {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 11px;
+    border-radius: 11px;
     border: 1px solid var(--line);
     background: var(--panel-2);
-    text-align: left;
-    cursor: pointer;
-    font: inherit;
-    color: var(--text);
+    font-size: 12.5px;
   }
-  .wscard:hover {
-    border-color: var(--accent);
+  .mount > :global(svg) {
+    color: var(--c-kernel);
+    flex: none;
   }
-  .wscard.off {
+  .mount.off {
     border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
   }
-  .wsm {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--text-2);
+  .mount.empty {
+    color: var(--muted);
   }
-  .wsm :global(svg) {
-    color: var(--c-kernel);
+  .mp {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    gap: 7px;
+    align-items: baseline;
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
   }
-  .wsp {
-    grid-column: 1;
-    font-size: 13px;
+  .mp b {
+    flex: none;
+    white-space: nowrap;
+  }
+  .mp code {
     color: var(--c-dir);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .wss {
-    grid-column: 1;
-    font-size: 11.5px;
+  .how {
+    flex: none;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 999px;
     color: var(--muted);
-    line-height: 1.5;
+    background: var(--bg-2);
   }
-  .wscard.off .wss {
+  .how.local {
+    color: var(--c-kernel);
+  }
+  .how.down {
     color: var(--warn);
   }
-  .change {
-    grid-column: 2;
-    grid-row: 1;
-    align-self: start;
-    font-size: 11.5px;
-    color: var(--accent-2);
+  .x {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .x:hover {
+    color: var(--err);
+    background: var(--bg-2);
+  }
+  .skill {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 10px;
+    border-radius: 9px;
+    background: var(--panel-2);
+    font-size: 12.5px;
+  }
+  .skill code {
+    color: var(--c-kernel);
+  }
+  .skill span {
+    color: var(--text-2);
+    line-height: 1.5;
   }
   .guide {
     margin-top: 12px;

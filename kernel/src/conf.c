@@ -139,12 +139,6 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         }
     }
     if (!k->token) k->token = xstrdup("");
-    if (k->skills && k->skills[0] != '/') {
-        char *full = xasprintf("%s/%s", base, k->skills);
-        free(k->skills);
-        k->skills = full;
-    }
-    if (!k->skills) k->skills = xasprintf("%s/skills", base);
     if (k->exec && k->exec[0] != '/') {
         char *full = xasprintf("%s/%s", base, k->exec);
         free(k->exec);

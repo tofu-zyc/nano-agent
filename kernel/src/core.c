@@ -314,7 +314,8 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->args = dupstr(in->args ? in->args : "{}");
         k->tool = find_tool(c, k->name);
         const char *why = NULL;
-        decision d = k->tool ? decide(r->sandbox, r->mode, k->tool->kind, &why) : DECIDE_DENY;
+        bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
+        decision d = k->tool ? decide(sandbox, r->mode, k->tool->kind, &why) : DECIDE_DENY;
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);
@@ -322,6 +323,8 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             char *p = preview(k->args, ARGS_PREVIEW);
             result_err(c, r, k, "参数不是合法的 JSON 对象：%s", p);
             free(p);
+        } else if (in->error) {
+            result(c, r, k, false, in->error);
         } else if (d == DECIDE_DENY) {
             result(c, r, k, false, why);
         } else if (d == DECIDE_ASK) {
@@ -461,4 +464,11 @@ size_t na_core_active_runs(const na_core *c)
     size_t n = 0;
     for (const run_t *r = c->runs; r; r = r->next) n++;
     return n;
+}
+
+const char *na_core_policy(const na_core *c, const char *sid)
+{
+    for (const run_t *r = c->runs; r; r = r->next)
+        if (sid && !strcmp(r->sid, sid)) return r->policy;
+    return NULL;
 }

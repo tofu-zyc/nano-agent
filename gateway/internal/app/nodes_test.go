@@ -3,7 +3,6 @@ package app
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -65,6 +64,15 @@ func (k *fakeKernel) expectAll(n int) map[string]proto.Msg {
 	return got
 }
 
+// addSkill 在网关的技能目录里放一个技能
+func (e *env) addSkill(t *testing.T, name string) {
+	t.Helper()
+	dir := filepath.Join(e.dir, "skills", name)
+	os.MkdirAll(filepath.Join(dir, "scripts"), 0o755)
+	os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\ndescription: 示例技能\n---\n照着做"), 0o644)
+	os.WriteFile(filepath.Join(dir, "scripts", "run.sh"), []byte("echo hi\n"), 0o755)
+}
+
 // 本机的内核掉线了：别的设备上的内核顶上，本机的工作目录照样能用工具（网关在本机执行）
 func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	e := setup(t)
@@ -72,7 +80,7 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	phone := e.dialRemote(t, "phone")
 
 	e.say("你好")
-	if in := e.k.expect(proto.TInput); in.Exec != "" || len(in.Dirs) != 1 || in.Dirs[0] != work {
+	if in := e.k.expect(proto.TInput); len(in.Workspaces) != 1 || !in.Workspaces[0].Local || in.Workspaces[0].Dirs[0] != work {
 		t.Fatalf("同机：本机的内核自己执行：%+v", in)
 	}
 	e.roundTrip(t)
@@ -81,10 +89,11 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	waitNode(e.a, "test", false)
 	e.say("还在吗")
 	in := phone.expect(proto.TInput)
-	if in.Exec != "gateway" || in.Landlock != 7 || in.Mode != proto.ModeAsk {
+	if w := in.Workspaces; len(w) != 1 || w[0].Local || w[0].Landlock != 7 || w[0].Name != "本机:"+work || in.Mode != proto.ModeAsk {
 		t.Fatalf("异机：工具交给网关执行：%+v", in)
 	}
-	phone.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.txt"}`), TimeoutMs: 1000})
+	phone.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.txt"}`),
+		Workspace: "本机:" + work, TimeoutMs: 1000})
 	res := phone.expect(proto.TExecResult)
 	if res.ID != "c1" || res.OK == nil || !*res.OK || res.Content != "执行结果" {
 		t.Fatalf("exec_result: %+v", res)
@@ -96,8 +105,12 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	if dirs := req["dirs"].([]any); len(dirs) != 1 || dirs[0] != work {
 		t.Fatalf("约束由网关按会话的设置生成：%v", req["dirs"])
 	}
-	if ro := req["ro"].([]any); ro[len(ro)-1] != "~/.cache/nano-agent/skills/phone" {
+	if ro := req["ro"].([]any); ro[len(ro)-1] != "~/.cache/nano-agent/skills" {
 		t.Fatalf("技能目录只读可见：%v", req["ro"])
+	}
+	phone.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Read", Workspace: "gpu:~/x"})
+	if r := phone.expect(proto.TExecResult); r.OK == nil || *r.OK || !strings.Contains(r.Content, "没有挂载") {
+		t.Fatalf("没挂的工作目录：%+v", r)
 	}
 	phone.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	phone.expect(proto.TTurn)
@@ -106,7 +119,7 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	}
 	phone.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
 	e.ch.wait(t, "收到：还在吗")
-	if info, _ := e.a.Session(mainSID); info.Host != host.LocalName || !info.HostOnline {
+	if info, _ := e.a.Session(mainSID); info.Kernel != "phone" || len(info.Workspaces) != 1 || info.Workspaces[0].How != "gateway" {
 		t.Fatalf("info: %+v", info)
 	}
 
@@ -118,7 +131,8 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	}
 	phone.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	phone.expect(proto.TTurn)
-	if got := lastUser(e.llm.lastReq().Messages); !strings.HasPrefix(got, "[系统] 工作目录所在的本机现在用不了（执行器运行不了），这一轮由 phone 接手") {
+	want := "[系统] 挂载的工作目录所在的机器现在都用不了（本机:" + work + "：本机 执行器运行不了），这一轮由 phone 接手"
+	if got := lastUser(e.llm.lastReq().Messages); !strings.HasPrefix(got, want) {
 		t.Fatalf("note: %q", got)
 	}
 }
@@ -126,6 +140,7 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 // SSH 服务器上的工作目录：任意内核来跑，工具、技能文件交给网关在服务器上处理；服务器连不上时只聊天
 func TestSSHWorkspace(t *testing.T) {
 	e := setup(t)
+	e.addSkill(t, "demo")
 	gpu := e.hosts.set("gpu", "ssh", true, 0, "")
 	remote := filepath.Join(e.dir, "remote")
 	os.MkdirAll(remote, 0o755)
@@ -133,15 +148,15 @@ func TestSSHWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.a.UpdateSession(mainSID, SessionPatch{Workspace: &ws.ID}); err != nil {
+	if err := e.a.UpdateSession(mainSID, SessionPatch{Workspaces: &[]string{ws.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	e.say("在服务器上干活")
 	in := e.k.expect(proto.TInput)
-	if in.Exec != "gateway" || in.Landlock != 0 {
+	if w := in.Workspaces; len(w) != 1 || w[0].Local || w[0].Landlock != 0 || w[0].Name != "gpu:"+remote {
 		t.Fatalf("input: %+v", in)
 	}
-	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c1", Name: "Shell", Args: json.RawMessage(`{"command":"ls"}`)})
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c1", Name: "Shell", Args: json.RawMessage(`{"command":"ls"}`), Workspace: "gpu:" + remote})
 	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK {
 		t.Fatalf("exec_result: %+v", r)
 	}
@@ -149,23 +164,23 @@ func TestSSHWorkspace(t *testing.T) {
 		t.Fatalf("req: %v", req)
 	}
 
-	// 技能文件放到服务器上，回复服务器上的目录
-	data := base64.StdEncoding.EncodeToString([]byte("hi"))
-	e.k.send(proto.Msg{T: proto.TSkillFiles, SID: mainSID, ID: "c2", Skill: "demo", Files: []proto.SkillFile{{Path: "a.txt", Data: data}}})
-	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || r.Content != "~/.cache/nano-agent/skills/test/demo" {
-		t.Fatalf("skill_files: %+v", r)
+	// 技能在网关上：Skill 返回说明，附带文件放到服务器上
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Skill", Args: json.RawMessage(`{"name":"demo"}`)})
+	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || !strings.Contains(r.Content, "技能目录：~/.cache/nano-agent/skills/demo") ||
+		!strings.Contains(r.Content, "附带文件：scripts/run.sh") || !strings.HasSuffix(r.Content, "照着做") {
+		t.Fatalf("skill: %+v", r)
 	}
-	if f := gpu.put["~/.cache/nano-agent/skills/test/demo"]; len(f) != 1 || string(f[0].Data) != "hi" {
+	if f := gpu.put["~/.cache/nano-agent/skills/demo"]; len(f) != 2 || f[1].Path != "scripts/run.sh" || !f[1].Exec {
 		t.Fatalf("put: %+v", gpu.put)
 	}
-	e.k.send(proto.Msg{T: proto.TSkillFiles, SID: mainSID, ID: "c3", Skill: "../evil"})
-	if r := e.k.expect(proto.TExecResult); r.OK == nil || *r.OK {
-		t.Fatalf("技能名字带路径要拒绝：%+v", r)
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c3", Name: "Skill", Args: json.RawMessage(`{"name":"../evil"}`)})
+	if r := e.k.expect(proto.TExecResult); r.OK == nil || *r.OK || !strings.Contains(r.Content, "没有这个技能") {
+		t.Fatalf("没有的技能：%+v", r)
 	}
 
 	// 停止：正在服务器上执行的工具一起停下
 	gpu.block = true
-	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c4", Name: "Shell", Args: json.RawMessage(`{"command":"sleep 100"}`)})
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c4", Name: "Shell", Args: json.RawMessage(`{"command":"sleep 100"}`), Workspace: "gpu:" + remote})
 	gpu.lastReq(t)
 	time.Sleep(50 * time.Millisecond)
 	e.say("/stop")
@@ -179,11 +194,11 @@ func TestSSHWorkspace(t *testing.T) {
 	// 服务器连不上：只聊天，说明原因
 	e.hosts.set("gpu", "ssh", false, 0, "连不上：timeout")
 	e.say("还能用吗")
-	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone || in.Exec != "" {
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone || len(in.Workspaces) != 0 {
 		t.Fatalf("input: %+v", in)
 	}
 	msgs := e.roundTrip(t)
-	if got := lastUser(msgs); !strings.HasPrefix(got, "[系统] 工作目录所在的服务器 gpu现在用不了（连不上：timeout），这一轮由 test 接手") {
+	if got := lastUser(msgs); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（gpu:"+remote+"：gpu 连不上：timeout），这一轮由 test 接手") {
 		t.Fatalf("note: %q", got)
 	}
 	e.say("/node")
@@ -212,7 +227,7 @@ func TestKernelMachineWorkspace(t *testing.T) {
 	<-done
 
 	e.say("在电脑上")
-	if in := laptop.expect(proto.TInput); in.Exec != "" || in.Dirs[0] != "/data" {
+	if in := laptop.expect(proto.TInput); len(in.Workspaces) != 1 || !in.Workspaces[0].Local || in.Workspaces[0].Dirs[0] != "/data" {
 		t.Fatalf("同机：电脑的内核自己执行：%+v", in)
 	}
 	// 别的内核冒充这一轮发消息：不理，并告诉它没有这个任务
@@ -220,9 +235,9 @@ func TestKernelMachineWorkspace(t *testing.T) {
 	if m := e.k.expect(proto.TTurn); m.Reason != proto.ReasonError {
 		t.Fatalf("turn: %+v", m)
 	}
-	// 同机模式下内核不该请网关执行
-	laptop.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "x", Name: "Read"})
-	if r := laptop.expect(proto.TExecResult); r.OK == nil || *r.OK || !strings.Contains(r.Content, "不是交给网关执行的") {
+	// 同机的工作目录内核该自己执行
+	laptop.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "x", Name: "Read", Workspace: "laptop:/data"})
+	if r := laptop.expect(proto.TExecResult); r.OK == nil || *r.OK || !strings.Contains(r.Content, "内核自己执行") {
 		t.Fatalf("exec: %+v", r)
 	}
 	laptop.send(proto.Msg{T: proto.TModel, SID: mainSID})
@@ -236,12 +251,83 @@ func TestKernelMachineWorkspace(t *testing.T) {
 	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeNone {
 		t.Fatalf("input: %+v", in)
 	}
-	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 工作目录所在的机器 laptop 现在不在线，这一轮由 test 接手") {
+	if got := lastUser(e.roundTrip(t)); !strings.HasPrefix(got, "[系统] 挂载的工作目录所在的机器现在都用不了（laptop:/data：laptop 不在线），这一轮由 test 接手") {
 		t.Fatalf("note: %q", got)
 	}
 	if ms := e.a.Snapshot().Machines; len(ms) != 2 || ms[1].Name != "laptop" || ms[1].Online {
 		t.Fatalf("machines: %+v", ms)
 	}
+}
+
+// 一个会话同时挂三台机器上的工作目录：本机（有内核）、另一台电脑（请它的内核代为执行）、SSH 服务器
+func TestMountsOnSeveralMachines(t *testing.T) {
+	e := setup(t)
+	e.addSkill(t, "demo")
+	work := e.useDir(t, "work")
+	laptop := e.dialRemote(t, "laptop")
+	gpu := e.hosts.set("gpu", "ssh", true, 7, "")
+	remote := filepath.Join(e.dir, "remote")
+	os.MkdirAll(remote, 0o755)
+	gw, err := e.a.AddWorkspace(context.Background(), "gpu", remote, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Workspace, 1)
+	go func() {
+		ws, _ := e.a.AddWorkspace(context.Background(), "laptop", "/data", false)
+		done <- ws
+	}()
+	ls := laptop.expect(proto.TLs)
+	laptop.send(proto.Msg{T: proto.TLsResult, ID: ls.ID, OK: proto.Bool(true), Path: "/data"})
+	lw := <-done
+	e.say("/dir")
+	e.ch.wait(t, "工作目录列表")
+	ids := []string{e.a.Workspaces()[0].ID, lw.ID, gw.ID}
+	if err := e.a.UpdateSession(mainSID, SessionPatch{Workspaces: &ids}); err != nil {
+		t.Fatal(err)
+	}
+
+	e.say("三台机器一起干")
+	in := e.k.expect(proto.TInput) // 第一个工作目录在本机：本机的内核来跑
+	if len(in.Workspaces) != 3 || !in.Workspaces[0].Local || in.Workspaces[1].Local || in.Workspaces[2].Local || in.Workspaces[2].Landlock != 7 {
+		t.Fatalf("input: %+v", in.Workspaces)
+	}
+	// 电脑上的工作目录：网关请电脑的内核代为执行
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c1", Name: "Shell", Args: json.RawMessage(`{"command":"ls"}`), Workspace: "laptop:/data"})
+	run := laptop.expect(proto.TRun)
+	var req map[string]any
+	json.Unmarshal(run.Req, &req)
+	if req["tool"] != "Shell" || req["dirs"].([]any)[0] != "/data" || req["write"] != true {
+		t.Fatalf("run: %s", run.Req)
+	}
+	laptop.send(proto.Msg{T: proto.TRunResult, ID: run.ID, OK: proto.Bool(true), Content: "laptop 上的文件"})
+	if r := e.k.expect(proto.TExecResult); r.ID != "c1" || r.Content != "laptop 上的文件" {
+		t.Fatalf("exec_result: %+v", r)
+	}
+	// 技能文件放到挂着的每台机器上
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Skill", Args: json.RawMessage(`{"name":"demo"}`)})
+	put := laptop.expect(proto.TSkillPut)
+	if put.Skill != "demo" || len(put.Files) != 2 {
+		t.Fatalf("skill_put: %+v", put)
+	}
+	laptop.send(proto.Msg{T: proto.TRunResult, ID: put.ID, OK: proto.Bool(true)})
+	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || strings.Contains(r.Content, "没能放到") {
+		t.Fatalf("skill: %+v", r)
+	}
+	if len(gpu.put["~/.cache/nano-agent/skills/demo"]) != 2 || len(e.hosts.hosts[host.LocalName].put["~/.cache/nano-agent/skills/demo"]) != 2 {
+		t.Fatalf("put: %+v %+v", gpu.put, e.hosts.hosts[host.LocalName].put)
+	}
+	if info, _ := e.a.Session(mainSID); info.Workspaces[0].How != "local" || info.Workspaces[1].How != "gateway" || info.Workspaces[2].How != "gateway" {
+		t.Fatalf("info: %+v", info.Workspaces)
+	}
+	// 代执行时电脑断开了：结果说明连不上
+	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c3", Name: "Read", Args: json.RawMessage(`{"path":"a"}`), Workspace: "laptop:/data"})
+	laptop.expect(proto.TRun)
+	laptop.conn.Close()
+	if r := e.k.expect(proto.TExecResult); r.ID != "c3" || r.OK == nil || *r.OK || !strings.Contains(r.Content, "断开") {
+		t.Fatalf("exec_result: %+v", r)
+	}
+	_ = work
 }
 
 // 旧版本的设置（机器和目录分开设）迁移成工作目录列表
@@ -263,16 +349,16 @@ func TestWorkspaceMigration(t *testing.T) {
 	for _, w := range a.wss {
 		labels[w.Label()] = w
 	}
-	if len(a.wss) != 3 || !labels["本机:/x"].Default || labels["本机:/a"].ID == "" || labels["gpu:~/b"].ID == "" {
+	if len(a.wss) != 4 || !labels["本机:/x"].Default || labels["本机:/a"].ID == "" || labels["gpu:~/b"].ID == "" {
 		t.Fatalf("workspaces: %+v", a.wss)
 	}
 	check := func(sid, want string) {
 		t.Helper()
-		w := a.workspaceOf(sid).ws
-		got := ""
-		if w != nil {
-			got = w.Label()
+		var labels []string
+		for _, w := range a.workspaceOf(sid).wss {
+			labels = append(labels, w.Label())
 		}
+		got := strings.Join(labels, ",")
 		if got != want {
 			t.Fatalf("%s: %q，应该是 %q", sid, got, want)
 		}
@@ -280,7 +366,7 @@ func TestWorkspaceMigration(t *testing.T) {
 			t.Fatalf("旧的设置没清掉：%+v", st)
 		}
 	}
-	check("a", "本机:/a")
+	check("a", "本机:/a,本机:/a2")
 	check("b", "gpu:~/b")
 	check("c", "")
 	check("d", "本机:/x")
@@ -300,32 +386,30 @@ func waitFor(t *testing.T, f func() bool) {
 	t.Fatal("等不到")
 }
 
-func TestSkillToolsUpdateWithoutReconnect(t *testing.T) {
+// 技能放在网关上：加上、删掉都不用重连内核，下一轮的工具定义跟着变
+func TestGatewaySkills(t *testing.T) {
 	e := setup(t)
 	e.useDir(t, "work")
-	initial := e.a.Snapshot().Kernels[0]
-	skills := []proto.SkillSpec{{Name: "demo", Description: "示例技能"}}
-	tools := []proto.ToolSpec{{Name: "Skill", Description: "先加载 demo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
-	e.k.send(proto.Msg{T: proto.TTools, Tools: tools, Skills: skills})
-	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Skills) == 1 })
-	updated := e.a.Snapshot().Kernels[0]
-	if updated.Since != initial.Since || !updated.Local || updated.Skills[0].Name != "demo" {
-		t.Fatalf("更新工具不该重建节点：%+v", updated)
-	}
+	e.addSkill(t, "demo")
 	e.say("用一下技能")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if got := e.llm.lastReq().Tools; len(got) != 1 || got[0].Function.Name != "Skill" || got[0].Function.Description != "先加载 demo" {
-		t.Fatalf("模型没收到新的技能工具：%+v", got)
+	got := e.llm.lastReq().Tools
+	if len(got) != 2 || got[0].Function.Name != "Skill" || got[1].Function.Name != "echo" ||
+		!strings.Contains(got[0].Function.Description, "- demo：示例技能") {
+		t.Fatalf("模型没收到技能工具：%+v", got)
 	}
-
-	// 删掉技能后，后续请求也不再带过期的工具定义。
-	e.k.send(proto.Msg{T: proto.TTools})
-	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Skills) == 0 })
+	if s := e.a.Skills(); len(s) != 1 || s[0].Name != "demo" {
+		t.Fatalf("skills: %+v", s)
+	}
+	// 内核报上来的 Skill（旧内核）不用
+	e.k.send(proto.Msg{T: proto.TTools, Tools: []proto.ToolSpec{{Name: "Skill", Description: "旧的"}, echoTool[0]}})
+	os.RemoveAll(filepath.Join(e.dir, "skills", "demo"))
+	waitFor(t, func() bool { return len(e.a.Snapshot().Kernels[0].Tools) == 1 })
 	e.say("技能删掉了")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if len(e.llm.lastReq().Tools) != 0 {
-		t.Fatal("模型仍然带着已经删除的工具")
+	if got := e.llm.lastReq().Tools; len(got) != 1 || got[0].Function.Name != "echo" {
+		t.Fatalf("模型仍然带着已经删除的技能：%+v", got)
 	}
 }

@@ -126,6 +126,8 @@ class Store {
     this.checkPairing(); // 打开网页前就有电脑在等确认
   }
 
+  private reloadTimer: ReturnType<typeof setTimeout> | undefined;
+
   async refresh() {
     this.ov = await api.get<Overview>('/api/overview');
   }
@@ -246,14 +248,15 @@ class Store {
         }
         break;
       case 'machines':
-        // 机器能不能用变了：会话里“工作目录能不能用”也跟着变，重新读一遍
+        // 机器能不能用变了：会话里工作目录怎么执行也跟着变，过一会儿整体重新读一遍
         if (ov && e.data) {
           ov.machines = e.data;
-          for (const s of ov.sessions ?? []) {
-            const m = ov.machines.find((x) => x.name === s.host);
-            if (s.host) s.host_online = !!m?.online;
-          }
+          clearTimeout(this.reloadTimer);
+          this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 400);
         }
+        break;
+      case 'skills':
+        if (ov && e.data) ov.skills = { ...ov.skills, list: e.data };
         break;
       case 'workspaces':
         if (ov && e.data) ov.workspaces = e.data;
