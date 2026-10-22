@@ -128,6 +128,11 @@ func formatStatusBrief(st Status) string {
 	if st.DefaultModel != "" {
 		fmt.Fprintf(&b, "\n默认模型：%s", st.DefaultModel)
 	}
+	for _, c := range st.Channels {
+		if c.Enabled {
+			fmt.Fprintf(&b, "\n渠道：%s（%s）", c.Name, c.Status.State)
+		}
+	}
 	if st.PendingRestart > 0 {
 		fmt.Fprintf(&b, "\n有 %d 项设置改了还没重启", st.PendingRestart)
 	}

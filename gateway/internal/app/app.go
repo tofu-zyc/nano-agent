@@ -399,7 +399,13 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			a.answer(c, "只有管理员能查看网关状态")
 			return
 		}
-		a.answer(c, a.statusBriefLocked())
+		// OnMessage 持有 a.mu；Status 还要读渠道，放到锁外算完再回话
+		go func() {
+			text := a.StatusBrief()
+			a.mu.Lock()
+			a.answer(c, text)
+			a.mu.Unlock()
+		}()
 		return
 	case "restart":
 		if !a.isAdmin(c.who) {
