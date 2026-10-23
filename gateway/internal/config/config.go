@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	Search    Search    `toml:"search" json:"search"`
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
 	Channels  Channels  `toml:"channels" json:"channels"`
 	Context   Context   `toml:"context" json:"context"`
@@ -37,6 +38,12 @@ type Config struct {
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
 
+type Search struct {
+	Enabled  *bool  `toml:"enabled" json:"enabled"`
+	Provider string `toml:"provider" json:"provider"`
+	APIKey   string `toml:"api_key" json:"api_key"`
+	Count    int    `toml:"count" json:"count"`
+}
 type Channels struct {
 	Show string `toml:"show" json:"show"`
 }
@@ -109,7 +116,7 @@ type Update struct {
 
 // Secrets 是网关自己保存的密钥原文（给脱敏用，不要写日志）。
 func (c *Config) Secrets() []string {
-	return []string{c.Kernel.Token, c.Web.Password, c.Telegram.Token, c.Feishu.AppSecret, c.LLM.APIKey}
+	return []string{c.Kernel.Token, c.Web.Password, c.Telegram.Token, c.Feishu.AppSecret, c.LLM.APIKey, c.Search.APIKey}
 }
 
 // ProxyFor 是某个组件实际用的代理：组件自己没设置就用网关的默认代理。
@@ -285,6 +292,12 @@ func (c *Config) applyEnv() {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Search.Provider == "" {
+		c.Search.Provider = "deepseek"
+	}
+	if c.Search.Count == 0 {
+		c.Search.Count = 6
+	}
 	if c.Channels.Show == "" {
 		c.Channels.Show = "过程"
 	}
@@ -331,6 +344,9 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	if c.Search.Provider != "deepseek" || c.Search.Count < 1 || c.Search.Count > 10 {
+		errs = append(errs, errors.New("search：provider 只能是 deepseek，count 为 1–10"))
+	}
 	for _, show := range []string{c.Channels.Show, c.Telegram.Show, c.Feishu.Show} {
 		if show != "" && show != "详细" && show != "过程" && show != "简洁" {
 			errs = append(errs, errors.New("显示档位只能是详细、过程或简洁"))

@@ -18,6 +18,10 @@ type Field struct {
 
 // Fields 是全部可以在网页里查看、修改的配置项。
 var Fields = []Field{
+	{Key: "search.enabled", Group: "gateway", Section: "网络搜索", Label: "启用搜索", Type: "bool", Help: "没有可用的 DeepSeek key 时不提供搜索工具"},
+	{Key: "search.provider", Group: "gateway", Section: "网络搜索", Label: "搜索服务", Type: "enum", Options: []string{"deepseek"}},
+	{Key: "search.api_key", Group: "gateway", Section: "网络搜索", Label: "搜索 API key", Type: "secret", Help: "空时使用模型接口中 api.deepseek.com 的 key"},
+	{Key: "search.count", Group: "gateway", Section: "网络搜索", Label: "默认搜索条数", Type: "int", Help: "1–10，默认 6"},
 	{Key: "channels.show", Group: "gateway", Section: "消息", Label: "默认显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"}, Help: "详细含思考，过程只显示工具，简洁只保留答案"},
 	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
 	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},

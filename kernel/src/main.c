@@ -426,7 +426,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin")) {
+    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin") || !strcmp(c->name,"WebSearch") || !strcmp(c->name,"WebFetch")) {
         send_exec(k, c, args, NULL);
         return;
     }
@@ -833,7 +833,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
             if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") &&
-                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && run_pol) {
+                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && strcmp(calls[i].name,"WebSearch") && strcmp(calls[i].name,"WebFetch") && run_pol) {
                 char err[1024];
                 const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
                 if (!ws) {

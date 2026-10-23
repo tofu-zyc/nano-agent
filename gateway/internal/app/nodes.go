@@ -100,9 +100,12 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 // 调用方持有锁。
 func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
+	for _, spec := range a.searchTools() {
+		tools = append(tools, toolOf(spec))
+	}
 	if readOnly {
 		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
-			return t.Function.Name != "Read" && t.Function.Name != "Grep"
+			return t.Function.Name != "Read" && t.Function.Name != "Grep" && t.Function.Name != "WebSearch" && t.Function.Name != "WebFetch"
 		})
 	}
 	if spec, ok := a.skills.ToolSpec(); ok {

@@ -19,6 +19,8 @@ typedef struct {
 
 /* timeout_ms 是内核这边的兜底：执行器自己会先按工具的超时结束 */
 static const builtin BUILTINS[] = {
+    { { "WebSearch", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },
+    { { "WebFetch", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },
     { { "Edit", NA_TOOL_WRITE, 30 * 1000 },
       "把工作目录里的文件中的一段文本精确替换为新文本。old_string 必须与文件内容逐字一致（包括缩进、空格和换行），"
       "并且在文件中只出现一次；要替换所有出现的地方，把 replace_all 设为 true。默认只能写工作目录；写工作目录外要把 elevated 设为 true，会请用户批准。"

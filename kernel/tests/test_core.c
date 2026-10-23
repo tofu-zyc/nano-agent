@@ -17,12 +17,13 @@ static na_tool_policy tools[] = {
     { "Write", NA_TOOL_WRITE, 10000 },
     { "Shell", NA_TOOL_SHELL, 30000 },
     { "GatewayAdmin", NA_TOOL_ADMIN, 610000 },
+    { "WebSearch", NA_TOOL_PUBLIC_READ, 70000 },
 };
 
 static na_core *mk_sb(int max_steps, bool sandbox)
 {
     na_core_config cfg = {
-        .tools = tools, .ntools = 4,
+        .tools = tools, .ntools = 5,
         .sandbox = sandbox,
         .max_steps = max_steps,
         .run_timeout_ms = 600000,
@@ -472,8 +473,23 @@ static void test_admin_tool_always_approves(void)
     na_core_free(c);
 }
 
+static void test_public_read_all_modes(void)
+{
+    na_mode modes[] = {NA_MODE_NONE, NA_MODE_READONLY, NA_MODE_ASK, NA_MODE_AUTO};
+    for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+        na_core *c = mk(16);
+        input_mode(c, 0, "s", "guest", modes[i]);
+        drain(c);
+        na_call calls[] = {{"w", "WebSearch", "{}", true, NA_SB_DEFAULT, NULL}};
+        turn(c, 1, "s", NA_TURN_TOOL_USE, calls, 1);
+        EXPECT(c, "EXEC(w,WebSearch,70000)");
+        na_core_free(c);
+    }
+}
+
 int main(void)
 {
+    test_public_read_all_modes();
     test_final_answer();
     test_tool_roundtrip();
     test_parallel_calls_wait_for_all();

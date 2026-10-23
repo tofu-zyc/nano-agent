@@ -30,6 +30,12 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if n := a.nodes[rt.kernel]; n != nil && !noTools {
 		tools = a.toolsFor(n, false, admin)
 	}
+	if noTools {
+		tools = nil
+		for _, spec := range a.searchTools() {
+			tools = append(tools, toolOf(spec))
+		}
+	}
 	st := a.store.Settings(sid)
 	if st.Prefix != nil {
 		system, tools = st.Prefix.System, st.Prefix.Tools

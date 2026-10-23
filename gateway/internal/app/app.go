@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
 )
@@ -80,16 +81,19 @@ var helpText = func() string {
 }()
 
 type App struct {
-	ctx              context.Context
-	cfg              *config.Config
-	llm              llm.Client
-	store            *session.Store
-	persona          *persona.Loader
-	hub              *kernel.Hub
-	log              *slog.Logger
-	bus              *events.Bus
-	started          time.Time
-	lastArchiveClean time.Time
+	searchClient      search.Provider
+	searchFingerprint string
+	searchUsage       SearchUsage
+	ctx               context.Context
+	cfg               *config.Config
+	llm               llm.Client
+	store             *session.Store
+	persona           *persona.Loader
+	hub               *kernel.Hub
+	log               *slog.Logger
+	bus               *events.Bus
+	started           time.Time
+	lastArchiveClean  time.Time
 
 	version        string
 	mode           string
@@ -1018,9 +1022,7 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 	}
-	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = snapshotTools
-	}
+	req.Tools = snapshotTools
 	_, _, meterSignature, _ := a.contextParts(s.sid)
 	meterPosition := st.Base + len(a.store.History(s.sid))
 	ctx, cancel := context.WithCancel(a.ctx)
