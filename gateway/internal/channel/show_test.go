@@ -39,3 +39,26 @@ func TestShowLevels(t *testing.T) {
 		})
 	}
 }
+
+type showLevelSpy struct {
+	showSpy
+	level string
+}
+
+func (s *showLevelSpy) SetShow(level string) { s.level = level }
+
+// 要按档位排版的窗口在打开时就知道档位（包括详细档）
+func TestShowLevelIsAnnounced(t *testing.T) {
+	for _, level := range []string{"详细", "过程", "简洁"} {
+		s := &showLevelSpy{}
+		FilterView(s, level)
+		if s.level != level {
+			t.Fatalf("%s：收到 %q", level, s.level)
+		}
+	}
+	s := &showLevelSpy{}
+	FilterView(s, "")
+	if s.level != "过程" {
+		t.Fatalf("默认档位：%q", s.level)
+	}
+}

@@ -117,6 +117,11 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 			}
 			m.seq[id] = p.Sequence
 			if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/content") {
+				if p.Content == "" { // 飞书不接受空内容：要去掉组件就删掉它
+					t.Errorf("把组件内容更新成了空：%s", r.URL.Path)
+					io.WriteString(w, `{"code":99992402,"msg":"content is required"}`)
+					return
+				}
 				var i int
 				fmt.Sscan(id, &i)
 				path := strings.Split(r.URL.Path, "/")
@@ -288,15 +293,79 @@ func TestFeishuApprovalCard(t *testing.T) {
 func TestFeishuConciseRemovesStatus(t *testing.T) {
 	f, m := mockFeishu(t, false)
 	s := &feishuStream{f: f, chat: "123"}
-	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Transient: "正在执行 Shell"}); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Show: "简洁", Transient: "正在执行 Shell"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Content: "答案", Closed: true}); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Show: "简洁", Content: "答案", Closed: true}); err != nil {
 		t.Fatal(err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.deleted[s.cards[0].id+"/foot"] {
 		t.Fatal(m.deleted)
+	}
+}
+
+// 默认的过程档走 FilterView：卡片只有“工具调用”面板，结束时状态行写上完成和用量，不补发正文
+func TestFeishuProcessLevelThroughFilter(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	r := f.OpenRun("chat-test", "").(*streamRun)
+	v := FilterView(r, "过程")
+	v.Reasoning("不该显示的思考")
+	v.Tool("Read", "a.txt")
+	awaitStream(t, m.started)
+	v.ToolResult(true, "读取成功")
+	v.Content("完整回复")
+	v.EndMessage()
+	v.Note("1 次模型调用")
+	v.Close()
+	awaitStream(t, r.done)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.parts[0]
+	if _, ok := p["think"]; ok || strings.Contains(fmt.Sprint(p), "不该显示的思考") {
+		t.Fatalf("过程档不该有思考：%v", p)
+	}
+	if !strings.Contains(p["tools"], "读取成功") || m.texts[0] != "完整回复" || !strings.Contains(p["foot"], "完成") || !strings.Contains(p["foot"], "1 次模型调用") {
+		t.Fatalf("parts=%v", p)
+	}
+	if len(m.sent) != 1 || m.deleted["1/proc"] || m.deleted["1/foot"] || !m.deleted["1/stop"] || !m.closed["1"] {
+		t.Fatalf("sent=%v deleted=%v closed=%v", m.sent, m.deleted, m.closed)
+	}
+}
+
+// 过程档没调工具：结束时去掉空的面板
+func TestFeishuProcessLevelSimpleReply(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	r := f.OpenRun("chat-test", "").(*streamRun)
+	v := FilterView(r, "过程")
+	v.Reasoning("想一下")
+	v.Content("你好")
+	v.Note("1 次模型调用")
+	v.Close()
+	awaitStream(t, r.done)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.texts[0] != "你好" || !m.deleted["1/proc"] || !strings.Contains(m.parts[0]["foot"], "1 次模型调用") || len(m.sent) != 1 {
+		t.Fatalf("texts=%v parts=%v deleted=%v sent=%v", m.texts, m.parts, m.deleted, m.sent)
+	}
+}
+
+// 简洁档：没有面板，结束时删掉状态行
+func TestFeishuConciseLevelThroughFilter(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	r := f.OpenRun("chat-test", "").(*streamRun)
+	v := FilterView(r, "简洁")
+	v.Tool("Shell", "ls")
+	awaitStream(t, m.started)
+	v.ToolResult(true, "ok")
+	v.Content("答案")
+	v.Note("1 次模型调用")
+	v.Close()
+	awaitStream(t, r.done)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.panels != 0 || m.texts[0] != "答案" || !m.deleted["1/foot"] || m.deleted["1/proc"] || len(m.sent) != 1 {
+		t.Fatalf("panels=%d texts=%v deleted=%v sent=%v", m.panels, m.texts, m.deleted, m.sent)
 	}
 }

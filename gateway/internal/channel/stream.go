@@ -12,7 +12,7 @@ import (
 type streamSnapshot struct {
 	Reasoning, Content, Notes, Source string
 	Transient                         string
-	Concise                           bool
+	Show                              string // 显示档位：详细（空也算）、过程、简洁
 	Tools                             []toolEntry
 	Closed                            bool
 	ver                               int // 每次变化加一，没变就不发请求
@@ -24,6 +24,12 @@ type toolEntry struct {
 	Done, OK     bool
 	Result       string
 }
+
+// concise：简洁档，只显示正文，处理中只有一行临时状态
+func (s streamSnapshot) concise() bool { return s.Show == "简洁" }
+
+// thinking：详细档才显示思考
+func (s streamSnapshot) thinking() bool { return s.Show == "" || s.Show == "详细" }
 
 func (s streamSnapshot) fallbackText() string {
 	return strings.TrimSpace(s.Source + "\n\n" + s.Content + "\n\n" + s.Notes)
@@ -58,7 +64,7 @@ type streamRun struct {
 	tools               []toolEntry
 	source              string
 	transient           string
-	concise             bool
+	show                string
 	closed              bool
 	ver                 int
 	wake, closing, done chan struct{}
@@ -90,7 +96,9 @@ func (r *streamRun) change(f func()) {
 	}
 }
 
-func (r *streamRun) Status(text string) { r.change(func() { r.transient = text; r.concise = true }) }
+// SetShow 定下这一轮的显示档位（FilterView 打开时调用，在任何内容之前），平台按档位决定排版
+func (r *streamRun) SetShow(level string) { r.change(func() { r.show = level }) }
+func (r *streamRun) Status(text string)   { r.change(func() { r.transient = text }) }
 func (r *streamRun) Reasoning(text string) {
 	if text != "" {
 		r.change(func() { r.reasoning.WriteString(text) })
@@ -130,8 +138,13 @@ func (r *streamRun) EndMessage() {
 		r.content.WriteString("\n\n")
 	}
 }
+
+// mirror 记下来源但先不发：紧接着 FilterView 会定下档位再叫醒发送协程，卡片按档位建
 func (r *streamRun) mirror(via, text string) RunView {
-	r.change(func() { r.source = "来自" + via + "：" + streamClip(text, 1000) })
+	r.mu.Lock()
+	r.source = "来自" + via + "：" + streamClip(text, 1000)
+	r.ver++
+	r.mu.Unlock()
 	return r
 }
 func (r *streamRun) Close() {
@@ -147,7 +160,7 @@ func (r *streamRun) snapshot() streamSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return streamSnapshot{Reasoning: r.reasoning.String(), Content: strings.TrimSpace(r.content.String()),
-		Tools: append([]toolEntry(nil), r.tools...), Notes: strings.Join(r.notes, "\n"), Source: r.source, Transient: r.transient, Concise: r.concise, Closed: r.closed, ver: r.ver}
+		Tools: append([]toolEntry(nil), r.tools...), Notes: strings.Join(r.notes, "\n"), Source: r.source, Transient: r.transient, Show: r.show, Closed: r.closed, ver: r.ver}
 }
 
 func (r *streamRun) loop() {

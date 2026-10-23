@@ -14,9 +14,9 @@ import (
 // 飞书上一轮的显示是一张 CardKit 流式卡片：
 //
 //	（来自别的窗口时）一行来源
-//	▸ 思考和工具调用（默认收起）
+//	▸ 思考和工具调用（默认收起；过程档只有工具调用，简洁档没有这个面板）
 //	回复正文（Markdown，边生成边显示）
-//	一行灰色的状态：处理中 / 用量
+//	一行灰色的状态：处理中 / 用量（简洁档结束时去掉）
 //	[停止]（处理中才有）
 //
 // 回复太长时后面接着发只有正文的卡片。没有思考和工具调用时，结束时把折叠面板去掉。
@@ -164,9 +164,6 @@ func feishuTools(s streamSnapshot) string {
 }
 
 func feishuFoot(s streamSnapshot) string {
-	if s.Concise && s.Closed {
-		return ""
-	}
 	var head string
 	if s.Closed {
 		head = "✅ 完成"
@@ -202,10 +199,20 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 		if snap.Source != "" {
 			els = append(els, notation("src", "📨 "+fsEscape(snap.Source)))
 		}
+		// 过程面板按档位放：详细档放思考和工具，过程档只放工具，简洁档不要
+		panel := func(title string, children ...any) map[string]any {
+			return map[string]any{"tag": "collapsible_panel", "element_id": "proc", "expanded": false,
+				"header":   map[string]any{"title": map[string]string{"tag": "plain_text", "content": title}},
+				"elements": children}
+		}
+		switch {
+		case snap.concise():
+		case snap.thinking():
+			els = append(els, panel("💭 思考和工具调用", notation("think", feishuThink(snap)), markdown("tools", feishuTools(snap))))
+		default:
+			els = append(els, panel("🔧 工具调用", markdown("tools", feishuTools(snap))))
+		}
 		els = append(els,
-			map[string]any{"tag": "collapsible_panel", "element_id": "proc", "expanded": false,
-				"header":   map[string]any{"title": map[string]string{"tag": "plain_text", "content": "💭 思考和工具调用"}},
-				"elements": []any{notation("think", feishuThink(snap)), markdown("tools", feishuTools(snap))}},
 			// 正文先放占位，建好后再单独更新：创建时如果已经攒了很多内容（第一次写得晚），
 			// 思考、工具记录、来源和一整段正文加起来会超过卡片的体积上限
 			markdown("reply", "…"),
@@ -217,9 +224,20 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 			return err
 		}
 		c.parts = map[string]string{"think": feishuThink(snap), "tools": feishuTools(snap), "reply": "…", "foot": feishuFoot(snap)}
+		// 没放进卡片的组件当作已经删掉：之后既不更新也不删
+		if !snap.thinking() {
+			c.gone["think"] = true
+		}
+		if snap.concise() {
+			c.gone["tools"], c.gone["proc"] = true, true
+		}
 	}
 	main := s.cards[0]
-	for _, p := range [][2]string{{"think", feishuThink(snap)}, {"tools", feishuTools(snap)}, {"reply", first}, {"foot", feishuFoot(snap)}} {
+	parts := [][2]string{{"think", feishuThink(snap)}, {"tools", feishuTools(snap)}, {"reply", first}}
+	if !snap.concise() || !snap.Closed {
+		parts = append(parts, [2]string{"foot", feishuFoot(snap)})
+	}
+	for _, p := range parts {
 		if err := s.update(ctx, main, p[0], p[1]); err != nil {
 			return err
 		}
@@ -235,12 +253,12 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 			return err
 		}
 	}
-	if snap.Concise && snap.Closed {
-		if err := s.remove(ctx, s.cards[0], "foot"); err != nil {
+	if snap.concise() && snap.Closed {
+		if err := s.remove(ctx, main, "foot"); err != nil { // 简洁档结束时去掉状态行，只留答案
 			return err
 		}
 	}
-	if snap.Closed && len(snap.Tools) == 0 && snap.Reasoning == "" {
+	if snap.Closed && len(snap.Tools) == 0 && (snap.Reasoning == "" || !snap.thinking()) {
 		return s.remove(ctx, main, "proc") // 简单的回答：不要空的折叠面板
 	}
 	return nil

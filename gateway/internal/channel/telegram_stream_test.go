@@ -271,13 +271,49 @@ func TestTelegramConciseDeletesStatus(t *testing.T) {
 	defer srv.Close()
 	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s := &telegramStream{t: tg, chat: "123"}
-	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Transient: "正在执行 Shell"}); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Show: "简洁", Transient: "正在执行 Shell"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Content: "答案", Closed: true}); err != nil {
+	if err := s.Write(context.Background(), streamSnapshot{Show: "简洁", Content: "答案", Closed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(methods) != 3 || !strings.HasSuffix(methods[1], "deleteMessage") || s.processID != 0 {
 		t.Fatal(methods, s.processID)
+	}
+}
+
+// 默认的过程档：结束时过程消息改成“完成”，留着工具记录和用量，不删
+func TestTelegramProcessLevelKeepsToolRecord(t *testing.T) {
+	var methods []string
+	var last string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			Text string `json:"text"`
+		}
+		json.NewDecoder(r.Body).Decode(&p)
+		methods = append(methods, r.URL.Path)
+		if strings.Contains(p.Text, "Read") {
+			last = p.Text
+		}
+		io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := &telegramStream{t: tg, chat: "123"}
+	snap := streamSnapshot{Show: "过程", Tools: []toolEntry{{Name: "Read", Detail: "a.txt", Done: true, OK: true}}, Content: "答案", Notes: "1 次模型调用"}
+	if err := s.Write(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	snap.Closed = true
+	if err := s.Write(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range methods {
+		if strings.HasSuffix(m, "deleteMessage") {
+			t.Fatal("过程档不该删过程消息：", methods)
+		}
+	}
+	if s.processID == 0 || !strings.Contains(last, "完成") {
+		t.Fatalf("过程消息：%q", last)
 	}
 }

@@ -2,6 +2,9 @@ package channel
 
 // StatusView：简洁档的临时状态行（“正在执行 Shell…”），回答结束后由渠道删掉
 type StatusView interface{ Status(string) }
+
+// ShowView：要按档位排版的窗口（飞书卡片、Telegram 过程消息），打开时告诉它是哪一档
+type ShowView interface{ SetShow(string) }
 type filteredView struct {
 	RunView
 	show string
@@ -11,11 +14,14 @@ func FilterView(v RunView, show string) RunView {
 	if v == nil {
 		return nil
 	}
-	if show == "详细" {
-		return v
-	}
 	if show == "" {
 		show = "过程"
+	}
+	if sv, ok := v.(ShowView); ok {
+		sv.SetShow(show)
+	}
+	if show == "详细" {
+		return v
 	}
 	f := &filteredView{v, show}
 	if show == "简洁" {
@@ -56,4 +62,9 @@ func (v *filteredView) Note(text string) {
 		v.RunView.Note(text)
 	}
 }
-func (v *filteredView) Close() { v.status(""); v.RunView.Close() }
+func (v *filteredView) Close() {
+	if v.show == "简洁" {
+		v.status("") // 只有简洁档有临时状态行
+	}
+	v.RunView.Close()
+}

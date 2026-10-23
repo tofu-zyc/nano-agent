@@ -103,7 +103,7 @@ func htmlText(s string) string {
 // Write 更新这一轮的显示。处理中时“停止”按钮挂在过程消息下面，没有过程消息时挂在回复的第一条下面。
 func (s *telegramStream) Write(ctx context.Context, snap streamSnapshot) error {
 	running := !snap.Closed
-	if snap.Concise && snap.Closed && s.processID != 0 {
+	if snap.concise() && snap.Closed && s.processID != 0 {
 		if err := s.t.callRetry(ctx, "deleteMessage", map[string]any{"chat_id": s.chat, "message_id": s.processID}, nil); err != nil {
 			return err
 		}
@@ -111,7 +111,7 @@ func (s *telegramStream) Write(ctx context.Context, snap streamSnapshot) error {
 		s.processID = 0
 		s.processText = ""
 	}
-	if snap.Concise && !snap.Closed && snap.Transient != "" {
+	if snap.concise() && !snap.Closed && snap.Transient != "" {
 		text := html.EscapeString(snap.Transient)
 		if text != s.processText {
 			id, err := s.send(ctx, text, true, s.processID, false, true)
@@ -123,7 +123,7 @@ func (s *telegramStream) Write(ctx context.Context, snap streamSnapshot) error {
 		}
 	}
 
-	if !snap.Concise && (snap.Reasoning != "" || len(snap.Tools) > 0 || snap.Source != "" || (snap.Notes != "" && snap.Content == "")) {
+	if !snap.concise() && (snap.Reasoning != "" || len(snap.Tools) > 0 || snap.Source != "" || (snap.Notes != "" && snap.Content == "")) {
 		text := telegramProcess(snap)
 		if text != s.processText {
 			id, err := s.send(ctx, text, true, s.processID, false, running)
