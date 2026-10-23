@@ -35,8 +35,10 @@ type Settings struct {
 	EnvNote string `json:"env_note,omitempty"`
 
 	// Base 是历史文件里已经被 Compact 丢掉的消息数；Summary 代替被丢掉的部分，放在历史最前面。
-	Base    int    `json:"base,omitempty"`
-	Summary string `json:"summary,omitempty"`
+	Meter       Meter  `json:"meter,omitempty"`
+	CompactedAt int64  `json:"compacted_at,omitempty"`
+	Base        int    `json:"base,omitempty"`
+	Summary     string `json:"summary,omitempty"`
 }
 
 func (s *Store) settingsFile(sid string) string {

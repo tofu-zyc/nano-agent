@@ -139,7 +139,7 @@ $(WIN_KERNEL): $(KWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERS
 
 # Windows 执行器通过 WSL interop 在真实 Windows 上跑；没有 zig 或 rg.exe 时给出提示后跳过
 test-win:
-	@if [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
+	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  $(MAKE) --no-print-directory windows-exec windows-kernel && \
 	  { test -f "$(RG_WIN)" || { echo "没有 $(RG_WIN)：先运行 scripts/fetch-rg.sh"; exit 1; }; } && \
 	  python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \

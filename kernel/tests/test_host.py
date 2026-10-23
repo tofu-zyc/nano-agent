@@ -452,7 +452,7 @@ def main():
 
         gw = Gateway(sock)
         log = open(os.path.join(T, "kernel.log"), "w")
-        env = dict(os.environ, HOME=os.path.join(T, "home"))
+        env = dict(os.environ, HOME=os.path.join(T, "home"), NANO_HOME=os.path.join(T, "home", ".nano-agent"))
         proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log, env=env)
         try:
             gw.accept()
@@ -522,7 +522,7 @@ def update_tests(T):
         f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {xbin}\n")
     gw = Gateway(sock)
     log = open(os.path.join(U, "kernel.log"), "w")
-    env = dict(os.environ, HOME=os.path.join(U, "home"), NA_UPDATE_CONFIRM_MS="2000")
+    env = dict(os.environ, HOME=os.path.join(U, "home"), NANO_HOME=os.path.join(U, "home", ".nano-agent"), NA_UPDATE_CONFIRM_MS="2000")
     files = [{"path": n, "data": base64.b64encode(open(p, "rb").read()).decode()}
              for n, p in (("nano-kernel", kbin), ("nano-exec", xbin))]
     pending, failed = os.path.join(U, "update-pending.json"), os.path.join(U, "update-failed")

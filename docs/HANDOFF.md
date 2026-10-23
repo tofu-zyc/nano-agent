@@ -5,6 +5,16 @@
 
 最后更新：2026-10-23，**v0.2.2 已发布**：自带人格「小纳」「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹，`nano-kernel start` 在任务不存在时直接拉起）、`nano-gateway help` / `--help` / `-h`、`nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一个大版本（v0.3 – v0.6：上下文压缩、显示档位、搜索、定时任务、多 agent 和群聊、知识库和做梦、MCP 和 computer use）见 [PLAN-roadmap.md](PLAN-roadmap.md)；更早的计划见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
+## v0.3 开发进度（dev/v0.3）
+
+### 阶段 1：上下文计量和 /context（2026-10-23）
+
+- 保存每次正常模型请求的真实输入、缓存、输出用量和请求前的绝对历史位置；摘要调用只计累计用量，不覆盖正常请求的校准。上下文使用真实输入加新增历史估算，分项等比缩放并用对话项吸收整数舍入误差。
+- `/context`、网页会话里的可展开进度条、`Gateway {"what":"session"}` 共用同一份计量；窗口跟随所选模型。重启保留计量；reset 清掉计量。
+- 选择：模型、人格、工具定义或摘要变了，旧校准失效，恢复估算直到下一次真实请求，避免把另一套请求的用量套进来。图片暂无独立 token 估算，仍由真实接口用量校准。
+- 测试：`scripts/test-isolated.sh` 运行 `make test`，临时 HOME/NANO_HOME/USERPROFILE/XDG 目录；mock 模型、本地假服务。`scripts/test-isolated.sh web` 运行 `make web`（检查和构建），提交 dist。新增计量组合、分项总和、初始估算、校准失效、窗口及重启测试。
+- 坑：原测试子进程换 HOME 后继承外层 NANO_HOME，技能路径落错；已让宿主测试和 e2e 同步设各自临时 NANO_HOME。新增 `NANO_TEST_NO_WINDOWS=1`，跳过 Windows interop、安装和 DrvFS 测试；第一轮漏掉 kernel 的带引号判断，触发了原有临时 Windows 执行器测试，已补齐，未动用户 Windows 配置/服务。后续统一通过隔离入口测试。
+
 ## 一句话
 
 nano-agent 是作者自己的轻量 bot 智能体：**C 内核**（agent 循环、权限、沙箱里执行工具，没有状态）+ **Go 网关**（上下文、模型、聊天平台、网页界面，唯一有状态的中心）。工作目录 = 机器 + 目录，机器是网关所在的本机、网关自己 SSH 连的服务器（只放执行器）、装了内核的电脑；不管内核跑在哪，都能在任何挂在网关上的工作目录里干活（同机由内核本地执行，异机由网关执行）。

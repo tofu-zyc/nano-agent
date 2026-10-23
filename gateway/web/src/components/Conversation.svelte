@@ -323,6 +323,17 @@
     <button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>
     <button class="btn sm ghost" onclick={() => store.open({ type: 'session', sid })} title="会话设置"><Icon name="sliders" size={14} /></button>
   </header>
+  {#if info?.context}
+    {@const c = info.context}
+    <details class="context-meter">
+      <summary>上下文 {c.total.toLocaleString()} / {c.window.toLocaleString()} · {Math.round(c.total / c.window * 100)}% · {c.model}
+        <progress max={c.window} value={c.total}></progress>
+      </summary>
+      <div>人格 {c.persona} · 工具定义 {c.tools} · 摘要 {c.summary}（已整理 {c.compacted} 条）</div>
+      <div>对话 {c.dialogue}（{c.messages} 条，工具结果 {c.tool_results}）</div>
+      <div>上次输入 {c.last.prompt_tokens} · 缓存命中 {Math.round((c.last.cached_tokens ?? 0) / Math.max(1, c.last.prompt_tokens) * 100)}% · 输出 {c.last.completion_tokens}</div>
+    </details>
+  {/if}
 
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="inner">
@@ -499,6 +510,8 @@
 {/if}
 
 <style>
+  .context-meter { padding: 8px 20px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .context-meter progress { width: 100%; height: 5px; accent-color: var(--accent); display: block; margin-top: 5px; }
   .conv {
     flex: 1;
     min-width: 0;

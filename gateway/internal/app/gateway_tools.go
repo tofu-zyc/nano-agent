@@ -24,7 +24,7 @@ import (
 const gatewaySchema = `{
   "type":"object",
   "properties":{
-    "what":{"type":"string","enum":["status","models","ssh","workspaces","pairing","ssh_config","logs"],
+    "what":{"type":"string","enum":["status","session","models","ssh","workspaces","pairing","ssh_config","logs"],
       "description":"要查什么：网关状态、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名，或网关日志"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500"}
   }
@@ -88,6 +88,8 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 	var out any
 	var err error
 	switch args.What {
+	case "session":
+		out, _ = a.Session(sid)
 	case "status":
 		st := a.Status()
 		out = map[string]any{

@@ -24,6 +24,7 @@ SKILL
 echo "skill-e2e-data" > "$TMP/skills/demo/data.txt"
 echo "hello e2e" > "$TMP/work/hello.txt"
 echo "secret-profile" > "$TMP/home/.profile"
+export NANO_HOME="$TMP/home/.nano-agent"
 export HOME="$TMP/home"   # 执行器的临时目录和缓存放在 HOME 下，别弄脏真实的 HOME
 
 cat > "$TMP/gateway.toml" <<CONF

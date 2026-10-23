@@ -303,6 +303,9 @@ def t_request_errors():
 
 @case("WSL Windows 盘：列目录、读写与目录外隔离", need_sandbox=True)
 def t_drvfs():
+    if os.environ.get("NANO_TEST_NO_WINDOWS") == "1":
+        print("       按测试设置跳过 Windows 盘实测")
+        return
     drive = next((p for p in ("/mnt/d", "/mnt/c") if os.path.isdir(p) and os.access(p, os.W_OK)), None)
     if drive is None:
         print("       没有可用的 Windows 盘，跳过 DrvFS 实测")

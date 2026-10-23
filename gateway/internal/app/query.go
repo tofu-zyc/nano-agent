@@ -55,10 +55,11 @@ type SessionInfo struct {
 	ModelUsed      string         `json:"model_used"`      // 实际用的模型 ID
 	ModelLabel     string         `json:"model_label"`     // 实际用的模型的名字
 
-	Persona     string    `json:"persona"`      // 用的人格文件名
-	PersonaFile string    `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
-	Usage       llm.Usage `json:"usage"`        // 历史里记下的累计用量
-	Compacted   int       `json:"compacted"`
+	Persona     string              `json:"persona"`      // 用的人格文件名
+	PersonaFile string              `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
+	Usage       llm.Usage           `json:"usage"`        // 历史里记下的累计用量
+	Context     session.ContextInfo `json:"context"`
+	Compacted   int                 `json:"compacted"`
 }
 
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
@@ -117,7 +118,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	w := a.workspaceOf(sid)
 	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
-		Model: st.Model, Compacted: st.Base}
+		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
 	if m, _, ok := a.modelOf(sid); ok {
 		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
 	}

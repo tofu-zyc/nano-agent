@@ -41,6 +41,7 @@ var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
 	{Name: "history", Args: "[轮数]", Desc: "查看这个会话最近的对话"},
 	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
 	{Name: "dir", Args: "[编号 | -编号 | add 机器:路径 | none]", Desc: "查看、挂载、取下工作目录（可以同时挂好几个，在不同的机器上）", Admin: true},
@@ -389,6 +390,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "session":
 		a.cmdSession(c, arg)
+		return
+	case "context":
+		a.answer(c, a.contextText(c.s.sid))
 		return
 	case "history":
 		a.cmdHistory(c, arg)
@@ -973,6 +977,8 @@ func (a *App) generateModel(s *sess) {
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
 		req.Tools = a.toolsFor(n, r.readOnly, a.isAdmin(r.from))
 	}
+	_, _, meterSignature, _ := a.contextParts(s.sid)
+	meterPosition := st.Base + len(a.store.History(s.sid))
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
 	r.calls++
@@ -1028,6 +1034,13 @@ func (a *App) generateModel(s *sess) {
 			return
 		}
 		u := res.Usage
+		if u.PromptTokens > 0 {
+			st := a.store.Settings(s.sid)
+			st.Meter = session.Meter{Position: meterPosition, Usage: u, Signature: meterSignature}
+			if err := a.store.SaveSettings(s.sid, st); err != nil {
+				a.log.Warn("保存上下文计量失败", "err", err)
+			}
+		}
 		a.addUsage(r, u)
 		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
