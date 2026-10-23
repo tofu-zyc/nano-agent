@@ -1,8 +1,8 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath, since, stateLabel } from '../lib/format';
-  import type { EndpointInfo, MachineInfo, SessionInfo, WorkspaceInfo } from '../lib/types';
+  import { ago, channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath, since, stateLabel, whenText } from '../lib/format';
+  import type { EndpointInfo, MachineInfo, ScheduleTask, SessionInfo, WorkspaceInfo } from '../lib/types';
   import FieldGroup from './FieldGroup.svelte';
   import ModelPanel from './ModelPanel.svelte';
   import DirPicker from './DirPicker.svelte';
@@ -52,6 +52,17 @@
         const c = ov.channels.find((x) => x.name === target.name);
         return { icon: m?.icon ?? 'link', color: m?.color ?? 'var(--muted)', title: m?.label ?? target.name, sub: c ? (c.status.identity ? `${stateLabel[c.status.state]} · ${c.status.identity}` : stateLabel[c.status.state]) : '' };
       }
+      case 'search': {
+        const si = ov.search;
+        return { icon: 'search', color: searchReady ? 'var(--c-search)' : 'var(--muted)', title: '网络搜索',
+          sub: !si?.enabled ? '已关闭' : searchReady ? `DeepSeek · 今天搜索 ${si.today.search} 次` : '没有可用的 key' };
+      }
+      case 'memory':
+        return { icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: `到 ${pctText('context.compact_at', 0.75)} 自动整理到 ${pctText('context.compact_to', 0.4)}` };
+      case 'schedules': {
+        const sc = ov.schedules;
+        return { icon: 'clock', color: 'var(--c-cron)', title: '定时任务', sub: sc?.total ? `${sc.total} 个任务 · ${sc.enabled} 个开着` : '还没有任务' };
+      }
       case 'session': {
         const s = store.session(target.sid);
         if (target.sid === 'main') return { icon: 'hub', color: 'var(--accent)', title: s?.title ?? '主会话', sub: '你的所有窗口默认都接在这里' };
@@ -60,6 +71,44 @@
     }
   });
 
+
+  // ---- 网络搜索、记忆、定时任务 ----
+  const searchReady = $derived(!!ov.search?.enabled && !!ov.search?.key);
+  const searchKeyText = $derived.by(() => {
+    const k = ov.search?.key ?? '';
+    if (k === 'settings') return '用设置里填的 key';
+    if (k.startsWith('endpoint:')) return `借用模型接口「${k.slice(9)}」的 key`;
+    return '没有：在下面填 DeepSeek 的 API key，或者添加一个地址是 api.deepseek.com 的模型接口';
+  });
+  function pctText(key: string, def: number) {
+    const v = Number(store.field(key)?.value);
+    return Math.round((v > 0 ? v : def) * 100) + '%';
+  }
+  function idleText() {
+    const v = String(store.field('context.idle_compact')?.value ?? '30m');
+    if (v === '0' || v === '0s') return '空闲时不整理';
+    const m = v.match(/^(\d+)(m|h)$/);
+    return m ? `空闲 ${m[1]} ${m[2] === 'h' ? '小时' : '分钟'}后整理一次` : `空闲 ${v} 后整理一次`;
+  }
+  let testingSearch = $state(false);
+  async function testSearch() {
+    testingSearch = true;
+    try {
+      const r = await api.post<{ ok: boolean; error?: string; results?: number; ms?: number }>('/api/test/search', {});
+      if (!r.ok) throw new Error(r.error || '没通');
+      store.toast({ kind: 'ok', text: `搜索正常 · ${r.results} 条结果 · ${r.ms} ms` }, 2600);
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      testingSearch = false;
+    }
+  }
+  let tasks = $state<ScheduleTask[]>([]);
+  $effect(() => {
+    if (target.type !== 'schedules') return;
+    void ov.schedules; // 任务有变化时重新读
+    api.get<{ tasks: ScheduleTask[] }>('/api/schedules').then((v) => (tasks = v.tasks ?? [])).catch(() => {});
+  });
 
   // ---- 会话 ----
   const sess = $derived(target.type === 'session' ? store.session(target.sid) : undefined);
@@ -245,6 +294,53 @@
       <FieldGroup group="gateway" focus={store.focus} />
     {:else if target.type === 'model'}
       <ModelPanel />
+    {:else if target.type === 'search'}
+      {@const si = ov.search}
+      <div class="grid">
+        <div class="stat"><b>{si?.today.search ?? 0}</b><span>今天搜索</span></div>
+        <div class="stat"><b>{si?.today.fetch ?? 0}</b><span>今天读网页</span></div>
+        <div class="stat"><b class:acc={searchReady}>{searchReady ? '可用' : si?.enabled ? '缺 key' : '关闭'}</b><span>状态</span></div>
+      </div>
+      <div class="card">
+        <div class="row"><span class="muted">服务</span><span class="grow">DeepSeek 官方搜索接口</span></div>
+        <div class="row"><span class="muted">key</span><span class="grow">{searchKeyText}</span></div>
+        <p class="note">开着并且有 key 时，模型多两个工具：WebSearch 搜网页、WebFetch 读网页，回答时会附上来源链接；访客也能用。按次计费，每千次成功请求 5 元，空结果和失败不收费。工具定义在新会话、/reset 或整理上下文之后才出现在已有的会话里。</p>
+        <button class="btn sm" disabled={!searchReady || testingSearch} onclick={testSearch}><Icon name="zap" size={13} />{testingSearch ? '搜索中…' : '测试搜索（计费一次）'}</button>
+      </div>
+      <FieldGroup group="search" focus={store.focus} />
+    {:else if target.type === 'memory'}
+      {@const mi = ov.memory}
+      <div class="grid">
+        <div class="stat"><b>{pctText('context.compact_at', 0.75)}</b><span>到这里自动整理</span></div>
+        <div class="stat"><b>{mi?.summarized ?? 0}</b><span>整理过的会话</span></div>
+        <div class="stat"><b>{mi?.archives ?? 0}</b><span>归档</span></div>
+      </div>
+      <div class="card">
+        <p class="note">每个会话的上下文到模型窗口的 {pctText('context.compact_at', 0.75)} 时自动整理，整理到 {pctText('context.compact_to', 0.4)}：先把旧的长工具输出换成一行占位，还不够再把更早的对话合成一段摘要，最近几轮原样保留。{idleText()}。聊天里发 <code>/context</code> 看用量，<code>/compact</code> 马上整理，<code>/reset</code> 把旧对话归档后清空。</p>
+        <p class="note">长期记忆（知识库、睡觉做梦）还没有做，做好以后也挂在这个节点上。</p>
+      </div>
+      <FieldGroup group="memory" focus={store.focus} />
+    {:else if target.type === 'schedules'}
+      {@const sc = ov.schedules}
+      {#if sc?.error}<div class="errbox">{sc.error}</div>{/if}
+      <div class="grid">
+        <div class="stat"><b>{sc?.total ?? 0}</b><span>任务</span></div>
+        <div class="stat"><b>{sc?.running ?? 0}</b><span>正在运行</span></div>
+        <div class="stat"><b>{whenText(sc?.next)}</b><span>下一次</span></div>
+      </div>
+      <div class="card">
+        {#each tasks as t (t.id)}
+          <div class="row">
+            <span class="dot {t.running ? 'starting' : t.enabled ? 'online' : 'disabled'}"></span>
+            <strong class="grow">{t.name}</strong>
+            <span class="muted small nowrap">{t.enabled ? '下次 ' + whenText(t.next) : '已暂停'}</span>
+          </div>
+          <div class="muted small">{t.when}{t.last ? ` · 上次${t.last.ok ? '完成' : '没完成'}（${whenText(t.last.at)}）` : ''}</div>
+        {:else}
+          <p class="note">还没有定时任务。在聊天里说“每天 8 点给我发 AI 新闻”，模型会帮你建；也可以在定时任务页手动添加。</p>
+        {/each}
+        <a class="btn sm" href="#/schedules" onclick={() => (store.inspector = null)}><Icon name="clock" size={13} />打开定时任务页</a>
+      </div>
     {:else if target.type === 'kernel'}
       {@const list = target.node ? ov.kernels.filter((k) => k.node === target.node) : ov.kernels}
       {#if !target.node}
@@ -729,6 +825,9 @@
     width: 48px;
     flex: none;
     font-size: 12.5px;
+  }
+  .nowrap {
+    white-space: nowrap;
   }
   .grow {
     flex: 1;

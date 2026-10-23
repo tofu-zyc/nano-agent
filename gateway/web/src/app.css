@@ -26,6 +26,9 @@
   --c-web: #f472b6;
   --c-telegram: #38bdf8;
   --c-feishu: #2dd4bf;
+  --c-search: #fb923c;
+  --c-memory: #e879f9;
+  --c-cron: #fda4af;
 
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   --radius: 14px;
@@ -56,6 +59,9 @@
     --c-web: #db2777;
     --c-telegram: #0ea5e9;
     --c-feishu: #0d9488;
+    --c-search: #ea580c;
+    --c-memory: #c026d3;
+    --c-cron: #e11d48;
     --shadow: 0 12px 36px rgba(40, 40, 70, 0.14);
     color-scheme: light;
   }
@@ -81,6 +87,9 @@
   --c-web: #db2777;
   --c-telegram: #0ea5e9;
   --c-feishu: #0d9488;
+  --c-search: #ea580c;
+  --c-memory: #c026d3;
+  --c-cron: #e11d48;
   --shadow: 0 12px 36px rgba(40, 40, 70, 0.14);
   color-scheme: light;
 }

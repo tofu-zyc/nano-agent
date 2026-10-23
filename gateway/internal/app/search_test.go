@@ -28,6 +28,40 @@ func TestSearchKeyFallback(t *testing.T) {
 	if searchKey(config.Search{}, es[:1]) != "" {
 		t.Fatal("unsafe hostname fallback")
 	}
+	// 网页显示 key 从哪来：设置里填的、借用的接口名、没有
+	es[1].Name = "DeepSeek 官方"
+	for _, tc := range []struct {
+		cfg  config.Search
+		want string
+	}{
+		{config.Search{}, "endpoint:DeepSeek 官方"}, {config.Search{APIKey: "explicit"}, "settings"}, {config.Search{Enabled: &off}, ""},
+	} {
+		if _, from := searchKeySource(tc.cfg, es); from != tc.want {
+			t.Fatalf("来源：%q，想要 %q", from, tc.want)
+		}
+	}
+}
+
+func TestSearchInfoAndScheduleSummary(t *testing.T) {
+	e := setup(t)
+	if si := e.a.SearchInfo(); !si.Enabled || si.Key != "" || si.Provider != "deepseek" {
+		t.Fatalf("没有 key：%+v", si)
+	}
+	e.a.mu.Lock()
+	e.a.cfg.Search.APIKey = "test-key"
+	e.a.mu.Unlock()
+	if si := e.a.SearchInfo(); si.Key != "settings" {
+		t.Fatalf("设置里的 key：%+v", si)
+	}
+	if sum := e.a.ScheduleSummary(); sum.Total != 0 || sum.Error != "" {
+		t.Fatalf("没有任务：%+v", sum)
+	}
+	if _, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "create", Name: "早报", When: "every 1h", Prompt: "新闻"}); err != nil {
+		t.Fatal(err)
+	}
+	if sum := e.a.ScheduleSummary(); sum.Total != 1 || sum.Enabled != 1 || sum.Next == 0 {
+		t.Fatalf("一个任务：%+v", sum)
+	}
 }
 
 type fakeSearch struct{ count int }

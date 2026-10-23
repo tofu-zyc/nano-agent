@@ -156,3 +156,17 @@ export function sessionChannels(s: SessionInfo): string[] {
 export function homeShort(p: string): string {
   return p.replace(/^\/home\/[^/]+/, '~').replace(/^\/root(?=\/|$)/, '~');
 }
+
+/** 一个时间点写短一点：今天 08:00、明天 08:00、10-24 08:00（浏览器所在时区） */
+export function whenText(t?: number | string): string {
+  if (!t) return '无';
+  const d = new Date(t);
+  if (isNaN(d.getTime()) || d.getFullYear() < 2000) return '无';
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(new Date())) / 86400000);
+  if (diff === 0) return '今天 ' + hm;
+  if (diff === 1) return '明天 ' + hm;
+  if (diff === -1) return '昨天 ' + hm;
+  return `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
+}

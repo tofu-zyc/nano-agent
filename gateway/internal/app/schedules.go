@@ -50,6 +50,49 @@ const scheduleSchema = `{"type":"object","properties":{
 func scheduleTool() proto.ToolSpec {
 	return proto.ToolSpec{Name: "Schedule", Description: "管理定时任务（仅管理员）：create/list/update/delete/run_now。创建、修改、删除遵循当前权限模式。任务独立会话运行，结果和审批送到 deliver，默认当前窗口。先列出再按 id 修改，回答中说明运行时间和投递位置。", InputSchema: json.RawMessage(scheduleSchema)}
 }
+// ScheduleSummary 是网页「定时任务」节点要显示的概况
+type ScheduleSummary struct {
+	Total   int    `json:"total"`
+	Enabled int    `json:"enabled"`
+	Running int    `json:"running"`
+	Next    int64  `json:"next,omitempty"` // 最近一次要运行的时间（毫秒）
+	Error   string `json:"error,omitempty"`
+}
+
+func (a *App) ScheduleSummary() ScheduleSummary {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.scheduleSummary()
+}
+func (a *App) scheduleSummary() ScheduleSummary {
+	var sum ScheduleSummary
+	if a.schedulesErr != nil {
+		sum.Error = a.schedulesErr.Error()
+		return sum
+	}
+	if a.schedules == nil {
+		return sum
+	}
+	for _, t := range a.schedules.List() {
+		sum.Total++
+		if t.Running {
+			sum.Running++
+		}
+		if t.Enabled {
+			sum.Enabled++
+			if !t.Next.IsZero() && (sum.Next == 0 || t.Next.UnixMilli() < sum.Next) {
+				sum.Next = t.Next.UnixMilli()
+			}
+		}
+	}
+	return sum
+}
+
+// publishSchedules 告诉网页任务有变化（带上概况，拓扑图的节点直接用）
+func (a *App) publishSchedules() {
+	a.publish(events.Event{T: "schedules", Data: a.scheduleSummary()})
+}
+
 func (a *App) loadSchedules() {
 	a.schedules, a.schedulesErr = schedule.Open(filepath.Join(a.store.Dir(), "schedules.json"), a.now())
 	if a.schedulesErr != nil {
@@ -127,7 +170,7 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 		if err := a.schedules.Save(slices.Delete(tasks, i, i+1)); err != nil {
 			return nil, err
 		}
-		a.publish(events.Event{T: "schedules"})
+		a.publishSchedules()
 		return "已删除任务", nil
 	}
 	if p.Action != "create" && p.Action != "update" {
@@ -225,7 +268,7 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	if err = a.schedules.Save(tasks); err != nil {
 		return nil, err
 	}
-	a.publish(events.Event{T: "schedules"})
+	a.publishSchedules()
 	return task, nil
 }
 func (a *App) scheduleLoop() {
@@ -302,7 +345,7 @@ func (a *App) saveTask(task schedule.Task) error {
 		a.log.Error("保存定时任务失败", "err", err)
 		return err
 	}
-	a.publish(events.Event{T: "schedules"})
+	a.publishSchedules()
 	return nil
 }
 func (a *App) launchSchedule(task schedule.Task, advance bool) error {

@@ -238,6 +238,9 @@ func (s *Store) Describe() []FieldState {
 			st.IsSet = v != nil && v != ""
 			st.Value = ""
 		}
+		if f.Type == "bool" && v == nil {
+			st.Value = true // 没写的开关（*bool）都是默认开，见 config.On
+		}
 		if f.Restart {
 			bv, _ := getPath(boot, f.Key)
 			st.Pending = !reflect.DeepEqual(v, bv)

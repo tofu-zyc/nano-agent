@@ -221,3 +221,27 @@ func TestSearchKeyEncryptedAndHidden(t *testing.T) {
 		t.Fatalf("secret descriptor: %+v", fkey)
 	}
 }
+
+// 没写的开关（*bool）默认开，设置页要显示成开着；写了 false 就是关
+func TestDefaultOnSwitchesShowOn(t *testing.T) {
+	path := writeConf(t)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("\n[update]\ncheck = false\n")
+	f.Close()
+	st, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := st.Describe()
+	for _, key := range []string{"search.enabled", "session.timestamps", "update.kernels"} {
+		if v := find(ds, key).Value; v != true {
+			t.Errorf("%s 没写，应该显示开着：%v", key, v)
+		}
+	}
+	if v := find(ds, "update.check").Value; v != false {
+		t.Errorf("update.check 写了 false：%v", v)
+	}
+}

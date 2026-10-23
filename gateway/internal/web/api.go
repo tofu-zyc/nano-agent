@@ -121,6 +121,9 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"skills":     map[string]any{"dir": cfg.Skills.Dir, "list": s.app.Skills()},
 		"commands":   app.Commands,
 		"access":     map[string]any{"admins": cfg.Access.Admins, "guest": cfg.Access.Guest},
+		"search":     s.app.SearchInfo(),
+		"schedules":  s.app.ScheduleSummary(),
+		"memory":     s.app.MemoryInfo(),
 	})
 }
 
@@ -390,6 +393,19 @@ func (s *Server) reloadConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // testModel 用一个模型发一个很小的请求，看接口通不通、多快。body 里的 id 为空表示默认模型。
+// testSearch 真的搜一次（按次计费，一次 0.005 元），看搜索 key 和网络通不通
+func (s *Server) testSearch(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	start := time.Now()
+	n, err := s.app.TestSearch(ctx)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "results": n, "ms": time.Since(start).Milliseconds()})
+}
+
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`

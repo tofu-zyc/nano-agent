@@ -6,7 +6,9 @@
   import Icon from '../components/Icon.svelte';
 
   const groups: { id: string; label: string; icon: string; color: string; desc: string; target?: Target }[] = [
-    { id: 'context', label: '上下文与采样', icon: 'layers', color: 'var(--c-model)', desc: '历史压缩、默认温度、额外请求参数（模型和接口在「模型」页面）' },
+    { id: 'memory', label: '上下文与记忆', icon: 'brain', color: 'var(--c-memory)', desc: '上下文什么时候整理、整理到多少、空闲整理、归档保留多久', target: { type: 'memory' } },
+    { id: 'search', label: '网络搜索', icon: 'search', color: 'var(--c-search)', desc: '让模型能搜网页、读网页（DeepSeek 官方接口，按次计费）', target: { type: 'search' } },
+    { id: 'llm', label: '模型请求', icon: 'sparkles', color: 'var(--c-model)', desc: '请求超时、思考回传、默认温度、额外参数（模型和接口在拓扑图的「模型」节点）', target: { type: 'model' } },
     { id: 'workspace', label: '工作目录与沙箱', icon: 'folder', color: 'var(--c-dir)', desc: '工具能碰到的范围、默认权限模式', target: { type: 'workspace' } },
     { id: 'gateway', label: '网关', icon: 'hub', color: 'var(--c-gateway)', desc: '管理员、访客权限、消息时间、网页登录', target: { type: 'gateway' } },
     { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理', target: { type: 'channel', name: 'telegram' } },
@@ -18,7 +20,7 @@
   let q = $state('');
   let onlyChanged = $state(false);
   let showAdvanced = $state(false);
-  let selected = $state('context');
+  let selected = $state('memory');
 
   const focus = $derived(store.route.focus ?? null);
   $effect(() => {

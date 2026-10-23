@@ -351,6 +351,19 @@ class Store {
       case 'models':
         this.reloadModels();
         break;
+      case 'search':
+        if (ov && e.data) ov.search = e.data;
+        break;
+      case 'schedules':
+        if (ov && e.data) ov.schedules = e.data;
+        break;
+      case 'context':
+        // 整理完上下文：记忆节点上“整理过的会话”跟着变
+        if (e.kind === 'end') {
+          clearTimeout(this.reloadTimer);
+          this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 400);
+        }
+        break;
       case 'workspaces':
         if (ov && e.data) ov.workspaces = e.data;
         break;

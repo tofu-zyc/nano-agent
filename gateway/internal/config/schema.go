@@ -3,7 +3,7 @@ package config
 // Field 描述一个配置项，网页界面据此生成控件、做搜索。所有说明都集中在这里。
 type Field struct {
 	Key      string   `json:"key"`               // 比如 "llm.model"
-	Group    string   `json:"group"`             // 归属的对象：gateway、model、kernel、workspace、cli、telegram、feishu
+	Group    string   `json:"group"`             // 归属的对象：gateway、llm、memory、search、kernel、workspace、cli、telegram、feishu
 	Section  string   `json:"section,omitempty"` // 对象内的小标题
 	Label    string   `json:"label"`
 	Help     string   `json:"help,omitempty"`
@@ -18,29 +18,29 @@ type Field struct {
 
 // Fields 是全部可以在网页里查看、修改的配置项。
 var Fields = []Field{
-	{Key: "search.enabled", Group: "gateway", Section: "网络搜索", Label: "启用搜索", Type: "bool", Help: "没有可用的 DeepSeek key 时不提供搜索工具"},
-	{Key: "search.provider", Group: "gateway", Section: "网络搜索", Label: "搜索服务", Type: "enum", Options: []string{"deepseek"}},
-	{Key: "search.api_key", Group: "gateway", Section: "网络搜索", Label: "搜索 API key", Type: "secret", Help: "空时使用模型接口中 api.deepseek.com 的 key"},
-	{Key: "search.count", Group: "gateway", Section: "网络搜索", Label: "默认搜索条数", Type: "int", Help: "1–10，默认 6"},
+	{Key: "search.enabled", Group: "search", Label: "启用搜索", Type: "bool", Help: "开着并且有可用的 key 时，模型多了 WebSearch（搜网页）和 WebFetch（读网页）两个工具；访客也能用", Keywords: "搜索 联网 上网 web search fetch"},
+	{Key: "search.provider", Group: "search", Label: "搜索服务", Type: "enum", Options: []string{"deepseek"}},
+	{Key: "search.api_key", Group: "search", Label: "搜索 API key", Type: "secret", Help: "DeepSeek 的 API key。留空时借用模型接口里地址是 api.deepseek.com 的那个 key；按次计费，每千次成功请求 5 元"},
+	{Key: "search.count", Group: "search", Label: "默认搜索条数", Type: "int", Help: "模型没说要几条时返回几条，1–10，默认 6"},
 	{Key: "channels.show", Group: "gateway", Section: "消息", Label: "默认显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"}, Help: "详细含思考，过程只显示工具，简洁只保留答案"},
 	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
 	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
-	{Key: "context.compact_at", Group: "context", Section: "上下文", Label: "自动整理阈值", Type: "float", Help: "达到模型窗口的这个比例时整理，默认 0.75"},
-	{Key: "context.compact_to", Group: "context", Section: "上下文", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
-	{Key: "context.keep_turns", Group: "context", Section: "上下文", Label: "原样保留最近几轮", Type: "int"},
-	{Key: "context.idle_compact", Group: "context", Section: "上下文", Label: "空闲整理间隔", Type: "string", Help: "例如 30m，0 关闭"},
-	{Key: "context.idle_compact_min", Group: "context", Section: "上下文", Label: "空闲整理最低占比", Type: "float"},
-	{Key: "context.archive_days", Group: "context", Section: "上下文", Label: "归档保留天数", Type: "int", Help: "0 永久保留，默认 90"},
+	{Key: "context.compact_at", Group: "memory", Section: "上下文整理", Label: "自动整理阈值", Type: "float", Help: "上下文到模型窗口的这个比例时自动整理（旧的工具输出换成占位，更早的对话合成摘要），默认 0.75", Keywords: "压缩 compact 记忆"},
+	{Key: "context.compact_to", Group: "memory", Section: "上下文整理", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
+	{Key: "context.keep_turns", Group: "memory", Section: "上下文整理", Label: "原样保留最近几轮", Type: "int", Help: "整理时最近这几轮对话一字不动，默认 4"},
+	{Key: "context.idle_compact", Group: "memory", Section: "上下文整理", Label: "空闲整理间隔", Type: "string", Help: "会话空闲这么久后，在后台把上下文整理一次，下次说话不用等；例如 30m、2h，0 关闭"},
+	{Key: "context.idle_compact_min", Group: "memory", Section: "上下文整理", Label: "空闲整理最低占比", Type: "float", Help: "空闲时只整理上下文超过窗口这个比例的会话，默认 0.3"},
+	{Key: "context.archive_days", Group: "memory", Section: "归档", Label: "归档保留天数", Type: "int", Help: "/reset 时旧对话挪到 data/archive/ 下，保留这么多天，0 永久保留，默认 90"},
 	// ---- 模型的全局默认（接口和模型都在网页的模型节点里配置） ----
-	{Key: "llm.timeout", Group: "context", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true,
+	{Key: "llm.timeout", Group: "llm", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true,
 		Help: "所有模型接口的请求超时", Keywords: "超时 timeout"},
-	{Key: "llm.send_reasoning", Group: "context", Section: "思考", Label: "回传思考内容", Type: "bool", Advanced: true,
+	{Key: "llm.send_reasoning", Group: "llm", Section: "思考", Label: "回传思考内容", Type: "bool", Advanced: true,
 		Help: "把当前这一轮的思考内容回传给模型，部分推理模型调用工具时需要"},
-	{Key: "llm.trim_to", Group: "context", Section: "上下文", Label: "裁剪后保留比例", Type: "float",
-		Help: "历史超过上限时保留这个比例，其余合并成摘要；之后只追加，让请求前缀保持稳定", Keywords: "压缩 裁剪 缓存"},
-	{Key: "llm.temperature", Group: "context", Section: "采样", Label: "默认温度", Type: "float", Advanced: true,
+	{Key: "llm.trim_to", Group: "memory", Section: "上下文整理", Label: "超过历史上限时整理到", Type: "float", Advanced: true,
+		Help: "只在模型设了历史上限（max_history_tokens）时用：到上限就整理到上限的这个比例，默认 0.5；没设上限时看「整理后目标比例」", Keywords: "压缩 裁剪 缓存"},
+	{Key: "llm.temperature", Group: "llm", Section: "采样", Label: "默认温度", Type: "float", Advanced: true,
 		Help: "所有模型没单独设置温度时用这个；空表示用模型默认"},
-	{Key: "llm.extra", Group: "context", Section: "采样", Label: "额外请求参数", Type: "json", Advanced: true,
+	{Key: "llm.extra", Group: "llm", Section: "采样", Label: "额外请求参数", Type: "json", Advanced: true,
 		Help: "原样合并进请求体的 JSON 对象"},
 	// ---- 网关：访问控制、消息、网页 ----
 	{Key: "access.admins", Group: "gateway", Section: "访问控制", Label: "管理员", Type: "list",

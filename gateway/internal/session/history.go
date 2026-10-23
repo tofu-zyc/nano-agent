@@ -72,6 +72,17 @@ func (s *Store) Archives(sid string) []ArchiveInfo {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out
 }
+// ArchiveCount 是所有会话归档的份数
+func (s *Store) ArchiveCount() int {
+	n := 0
+	_ = filepath.WalkDir(filepath.Join(s.dir, "archive"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(path) == ".jsonl" {
+			n++
+		}
+		return nil
+	})
+	return n
+}
 func (s *Store) DeleteArchive(sid, id string) error {
 	if id == "" || filepath.Base(id) != id || filepath.Ext(id) != ".jsonl" {
 		return fmt.Errorf("归档 ID 不合法")

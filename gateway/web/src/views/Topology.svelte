@@ -2,14 +2,14 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate } from '../lib/format';
+  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate, whenText } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
-  import type { Ev, KernelInfo, MachineInfo, MountInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
+  import type { Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'session' | 'gateway' | 'model' | 'kernel' | 'machine' | 'workspace' | 'more';
+  type Kind = 'channel' | 'schedule' | 'session' | 'gateway' | 'model' | 'search' | 'memory' | 'kernel' | 'machine' | 'workspace' | 'more';
   type N = { id: string; kind: Kind; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
 
@@ -51,17 +51,21 @@
     // 先挑出最值得看的会话（在跑的、待审批的、最近活跃的），再按渠道排，连线少交叉
     all.sort((a, b) => Number(b.running || b.pending > 0) - Number(a.running || a.pending > 0) || b.last_at - a.last_at);
     const shown = all.slice(0, MAX_SESSIONS);
-    const rank = (s: SessionInfo) => (s.sid === 'main' ? -1 : ORDER.indexOf(sessionChannels(s)[0]));
+    const rank = (s: SessionInfo) => (s.sid === 'main' ? -1 : s.sid.startsWith('cron:') ? 99 : ORDER.indexOf(sessionChannels(s)[0]));
     shown.sort((a, b) => rank(a) - rank(b) || b.last_at - a.last_at);
     const more = all.length - shown.length;
 
     const chans = ov.channels;
     const nS = shown.length + (more > 0 ? 1 : 0);
-    const H = Math.max(600, nS * 64 + 120, chans.length * 96 + 120, 2 * (70 + Math.max(1, store.machines.length, ov.kernels?.length ?? 0) * 96));
+    // 左边一列：渠道，最下面是定时任务（按时自己发起对话，和渠道一样是消息的来源）
+    const nL = chans.length + 1;
+    // 右边一列从上到下：记忆、搜索、模型（网关用的服务），下面是内核
+    const H = Math.max(680, nS * 64 + 120, nL * 96 + 120, 2 * (70 + Math.max(1, store.machines.length, ov.kernels?.length ?? 0) * 96));
     const cy = H / 2;
+    const leftY = (i: number) => cy + (i - (nL - 1) / 2) * 96;
 
     chans.forEach((c, i) => {
-      const y = cy + (i - (chans.length - 1) / 2) * 96;
+      const y = leftY(i);
       const meta = channelMeta[c.name] ?? { label: c.name, color: 'var(--c-session)', icon: 'link' };
       nodes.push({ id: 'c:' + c.name, kind: 'channel', x: X.chan, y: y - 32, w: 200, h: 64, color: meta.color,
         target: { type: 'channel', name: c.name }, data: { ...c, meta } });
@@ -77,8 +81,15 @@
         const cc = channelMeta[ch]?.color ?? 'var(--c-session)';
         edges.push({ id: `c:${ch}>s:${s.sid}`, from: 'c:' + ch, to: 's:' + s.sid, color: cc, flow: s.running });
       }
+      if (s.sid.startsWith('cron:')) edges.push({ id: `sched>s:${s.sid}`, from: 'sched', to: 's:' + s.sid, color: 'var(--c-cron)', flow: s.running });
       edges.push({ id: `s:${s.sid}>gw`, from: 's:' + s.sid, to: 'gw', color: 'var(--c-session)', flow: s.running });
     });
+    const sc = ov.schedules;
+    nodes.push({ id: 'sched', kind: 'schedule', x: X.chan, y: leftY(chans.length) - 32, w: 200, h: 64, color: sc?.total ? 'var(--c-cron)' : 'var(--muted)',
+      target: { type: 'schedules' }, data: sc });
+    if (!shown.some((s) => s.sid.startsWith('cron:'))) {
+      edges.push({ id: 'sched>gw', from: 'sched', to: 'gw', color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true });
+    }
     if (more > 0) {
       const y = cy + (nS - 1 - (nS - 1) / 2) * 64;
       nodes.push({ id: 'more', kind: 'more', x: X.sess, y: y - 20, w: 220, h: 40, color: 'var(--muted)', data: more });
@@ -93,6 +104,12 @@
     nodes.push({ id: 'gw', kind: 'gateway', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
     nodes.push({ id: 'model', kind: 'model', x: X.right, y: cy - 118, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
     edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
+    const si = ov.search;
+    const searchOn = !!si?.enabled && !!si?.key;
+    nodes.push({ id: 'search', kind: 'search', x: X.right, y: cy - 206, w: 250, h: 72, color: searchOn ? 'var(--c-search)' : 'var(--muted)', target: { type: 'search' }, data: si });
+    edges.push({ id: 'gw>search', from: 'gw', to: 'search', color: searchOn ? 'var(--c-search)' : 'var(--muted)', dashed: !searchOn });
+    nodes.push({ id: 'memory', kind: 'memory', x: X.right, y: cy - 292, w: 250, h: 72, color: 'var(--c-memory)', target: { type: 'memory' }, data: ov.memory });
+    edges.push({ id: 'gw>memory', from: 'gw', to: 'memory', color: 'var(--c-memory)' });
 
     // 内核：连着网关的 agent，各自跑在某台机器上（网关启动的本机内核排在最前面）
     const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
@@ -368,6 +385,12 @@
         break;
       }
       case 'tool': {
+        if (e.name === 'WebSearch' || e.name === 'WebFetch') {
+          // 网络搜索由网关自己调 DeepSeek
+          lastPath.set(sid, 'gw>search');
+          pulse('gw>search', 'var(--c-search)', { dur: 600 });
+          break;
+        }
         // 工具在工作目录所在的机器上执行：沿着 网关 → 内核 → 机器 → 工作目录（或者 网关 → 机器）流过去
         const mt = s ? mountOf(s, e.data) : undefined;
         if (!s || !mt) break;
@@ -420,6 +443,10 @@
     return hover !== null && (e.from === hover || e.to === hover);
   }
 
+  function pctOf(key: string, def: number) {
+    const v = Number(store.field(key)?.value);
+    return Math.round((v > 0 ? v : def) * 100) + '%';
+  }
   function hostOf(u: string) {
     try {
       return new URL(u).host;
@@ -743,6 +770,35 @@
               <text x="66" y="48" class="t1">点开添加接口和模型</text>
               <text x="66" y="66" class="t2">模型只来自模型列表</text>
             {/if}
+          {:else if n.kind === 'search'}
+            {@const si = n.data as SearchInfo | undefined}
+            {@const on = !!si?.enabled && !!si?.key}
+            <rect class="card" class:off={!on} width={n.w} height={n.h} rx="16" />
+            <circle class="disc" cx="34" cy="36" r="18" />
+            <g class="ico"><Icon name="search" x={23} y={25} size={22} /></g>
+            <text x="62" y="24" class="t3">网络搜索 · DeepSeek</text>
+            <text x="62" y="43" class="t1">{!si?.enabled ? '已关闭' : on ? '模型可以搜网页' : '没有可用的 key'}</text>
+            <text x="62" y="60" class="t2" class:errt={si?.enabled && !on}>{on ? `今天搜索 ${si.today.search} 次 · 读网页 ${si.today.fetch} 次` : si?.enabled ? '点开填 key' : '点开打开'}</text>
+            <circle cx={n.w - 16} cy="16" r="4" class="sdot {on ? 'online' : si?.enabled ? 'error' : 'disabled'}" />
+          {:else if n.kind === 'memory'}
+            {@const mi = n.data as MemoryInfo | undefined}
+            <rect class="card" width={n.w} height={n.h} rx="16" />
+            <circle class="disc" cx="34" cy="36" r="18" />
+            <g class="ico"><Icon name="brain" x={23} y={25} size={22} /></g>
+            <text x="62" y="24" class="t3">上下文与记忆</text>
+            <text x="62" y="43" class="t1">到 {pctOf('context.compact_at', 0.75)} 自动整理到 {pctOf('context.compact_to', 0.4)}</text>
+            <text x="62" y="60" class="t2">{mi?.summarized ?? 0} 个会话整理过 · {mi?.archives ?? 0} 份归档</text>
+          {:else if n.kind === 'schedule'}
+            {@const sc = n.data as ScheduleSummary | undefined}
+            <rect class="card" class:off={!sc?.total} width={n.w} height={n.h} rx="16" />
+            <rect class="stripe" x="0" y="16" width="3" height="32" rx="1.5" />
+            <circle class="disc" cx="34" cy="32" r="18" />
+            <g class="ico"><Icon name="clock" x={23} y={21} size={22} /></g>
+            <text x="62" y="28" class="t1">定时任务</text>
+            <text x="62" y="47" class="t2" class:errt={!!sc?.error}>
+              {sc?.error ? '读不了任务文件' : !sc?.total ? '还没有任务 · 点击查看' : sc.running ? `${sc.running} 个正在运行` : sc.enabled ? `${sc.enabled} 个开着 · 下次 ${whenText(sc.next)}` : `${sc.total} 个，都暂停了`}
+            </text>
+            {#if sc?.total}<circle cx={n.w - 16} cy="16" r="4" class="sdot {sc.running ? 'starting' : sc.enabled ? 'online' : 'disabled'}" />{/if}
           {:else if n.kind === 'kernel'}
             {@const k = n.data as KernelInfo | null}
             <rect class="card" class:active={!!k && busyKernels.has(k.node)} class:bad={!k} width={n.w} height={n.h} rx="16" />
@@ -802,6 +858,8 @@
     <span style="--c: var(--c-gateway)">网关</span>
     <i>→</i>
     <span style="--c: var(--c-model)">模型</span>
+    <span style="--c: var(--c-search)">搜索</span>
+    <span style="--c: var(--c-memory)">记忆</span>
     <span style="--c: var(--c-kernel)">内核</span>
     <i>→</i>
     <span style="--c: var(--c-kernel)">机器</span>
@@ -1002,6 +1060,11 @@
   .sdot.error {
     fill: var(--err);
     filter: drop-shadow(0 0 4px var(--err));
+  }
+  .sdot.disabled {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.5;
   }
   .sdot.idle {
     fill: none;

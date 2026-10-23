@@ -110,3 +110,22 @@ func durationText(d time.Duration) string {
 	}
 	return d.String() + " "
 }
+
+// MemoryInfo 是网页「记忆」节点要显示的概况：整理过上下文的会话、归档份数
+type MemoryInfo struct {
+	Summarized int `json:"summarized"` // 上下文里有摘要（整理过）的会话
+	Archives   int `json:"archives"`   // /reset 归档的份数
+}
+
+func (a *App) MemoryInfo() MemoryInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var m MemoryInfo
+	for _, sid := range a.sessionIDs() {
+		if a.store.Settings(sid).Summary != "" {
+			m.Summarized++
+		}
+	}
+	m.Archives = a.store.ArchiveCount()
+	return m
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/search"
@@ -21,26 +22,71 @@ type SearchUsage struct {
 }
 
 func searchKey(cfg config.Search, endpoints []models.Endpoint) string {
+	key, _ := searchKeySource(cfg, endpoints)
+	return key
+}
+
+// searchKeySource 找搜索用的 key，并说明从哪来：设置里单独填的，或者借用的哪个模型接口（地址是 api.deepseek.com）
+func searchKeySource(cfg config.Search, endpoints []models.Endpoint) (key, from string) {
 	if !config.On(cfg.Enabled) {
-		return ""
+		return "", ""
 	}
 	if cfg.APIKey != "" {
-		return cfg.APIKey
+		return cfg.APIKey, "settings"
 	}
 	for _, e := range endpoints {
 		u, err := url.Parse(e.BaseURL)
 		if err == nil && strings.EqualFold(u.Hostname(), "api.deepseek.com") && e.APIKey != "" {
-			return e.APIKey
+			name := e.Name
+			if name == "" {
+				name = e.ID
+			}
+			return e.APIKey, "endpoint:" + name
 		}
 	}
-	return ""
+	return "", ""
 }
-func (a *App) searchKey() string {
-	var endpoints []models.Endpoint
+func (a *App) searchEndpoints() []models.Endpoint {
 	if a.models != nil {
-		endpoints = a.models.Endpoints()
+		return a.models.Endpoints()
 	}
-	return searchKey(a.cfg.Search, endpoints)
+	return nil
+}
+func (a *App) searchKey() string { return searchKey(a.cfg.Search, a.searchEndpoints()) }
+
+// SearchInfo 是网页「搜索」节点要显示的状态（不含 key 本身）
+type SearchInfo struct {
+	Enabled  bool        `json:"enabled"`
+	Provider string      `json:"provider"`
+	Key      string      `json:"key"` // settings：设置里填的；endpoint:<接口名>：借用模型接口的；空：没有可用的 key，不提供搜索工具
+	Today    SearchUsage `json:"today"`
+}
+
+func (a *App) SearchInfo() SearchInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.searchInfo()
+}
+func (a *App) searchInfo() SearchInfo {
+	a.loadSearchUsage()
+	_, from := searchKeySource(a.cfg.Search, a.searchEndpoints())
+	provider := a.cfg.Search.Provider
+	if provider == "" {
+		provider = "deepseek"
+	}
+	return SearchInfo{Enabled: config.On(a.cfg.Search.Enabled), Provider: provider, Key: from, Today: a.searchUsage}
+}
+
+// TestSearch 真的搜一次（计费一次），看 key 和网络通不通
+func (a *App) TestSearch(ctx context.Context) (int, error) {
+	a.mu.Lock()
+	provider, err := a.searchProvider()
+	a.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	results, err := provider.Search(ctx, "DeepSeek", 1)
+	return len(results), err
 }
 func (a *App) searchTools() []proto.ToolSpec {
 	if a.searchKey() == "" {
@@ -81,6 +127,7 @@ func (a *App) searchProvider() (search.Provider, error) {
 				a.log.Warn("保存搜索统计失败", "err", err)
 			}
 		}
+		a.publish(events.Event{T: "search", Data: a.searchInfo()})
 	}
 	a.searchClient = d
 	a.searchFingerprint = fingerprint

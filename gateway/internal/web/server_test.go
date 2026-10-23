@@ -122,6 +122,10 @@ func TestAuthAndGuards(t *testing.T) {
 	if len(chans) != 4 {
 		t.Fatalf("channels：%v", ov["channels"])
 	}
+	// 拓扑图的搜索、记忆、定时任务节点用的数据
+	if ov["search"] == nil || ov["memory"] == nil || ov["schedules"] == nil {
+		t.Fatalf("overview 缺搜索、记忆或定时任务：%v", ov)
+	}
 	// 首页是嵌进去的单页应用
 	resp, _ := c.hc.Get(srv.URL + "/")
 	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !strings.Contains(string(b), "<") {

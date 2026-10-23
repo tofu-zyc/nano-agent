@@ -162,7 +162,15 @@ export type Overview = {
   skills: { dir: string; list: SkillInfo[] };
   commands: CommandInfo[];
   access: { admins: string[] | null; guest: string };
+  search?: SearchInfo;
+  schedules?: ScheduleSummary;
+  memory?: MemoryInfo;
 };
+
+/** 网络搜索的状态；key 是 settings（设置里填的）、endpoint:<接口名>（借用模型接口的）或空（没有可用的 key） */
+export type SearchInfo = { enabled: boolean; provider: string; key: string; today: { date: string; search: number; fetch: number } };
+export type ScheduleSummary = { total: number; enabled: number; running: number; next?: number; error?: string };
+export type MemoryInfo = { summarized: number; archives: number };
 
 export type FieldState = {
   key: string;
@@ -225,7 +233,10 @@ export type Target =
   | { type: 'machine'; name?: string } // 一台机器；没有名字时是所有机器
   | { type: 'workspace'; id?: string } // 一个工作目录；没有 ID 时是工作目录列表和默认设置
   | { type: 'channel'; name: string }
-  | { type: 'session'; sid: string };
+  | { type: 'session'; sid: string }
+  | { type: 'search' }
+  | { type: 'memory' }
+  | { type: 'schedules' };
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
 export type PersonaPreset = { id: string; name: string; desc: string; text: string };

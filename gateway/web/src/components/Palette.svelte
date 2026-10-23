@@ -9,7 +9,9 @@
   type Item = { id: string; icon: string; title: string; sub?: string; kind: string; text: string; color?: string; run: () => void };
 
   const groupInfo: Record<string, { label: string; target: Target; icon: string; color: string }> = {
-    context: { label: '上下文与采样', target: { type: 'gateway' }, icon: 'layers', color: 'var(--c-model)' },
+    memory: { label: '上下文与记忆', target: { type: 'memory' }, icon: 'brain', color: 'var(--c-memory)' },
+    search: { label: '网络搜索', target: { type: 'search' }, icon: 'search', color: 'var(--c-search)' },
+    llm: { label: '模型请求', target: { type: 'gateway' }, icon: 'sparkles', color: 'var(--c-model)' },
     gateway: { label: '网关', target: { type: 'gateway' }, icon: 'hub', color: 'var(--c-gateway)' },
     kernel: { label: '内核', target: { type: 'kernel' }, icon: 'shield', color: 'var(--c-kernel)' },
     workspace: { label: '工作目录与沙箱', target: { type: 'workspace' }, icon: 'folder', color: 'var(--c-dir)' },
@@ -39,7 +41,9 @@
   const items = $derived.by(() => {
     const out: Item[] = [
       { id: 'v:topology', icon: 'graph', title: '拓扑', sub: '网关、渠道、会话、模型、内核的全貌', kind: '页面', text: '拓扑 首页 topology graph', run: go('#/') },
-      { id:'v:schedules',icon:'clock',title:'定时任务',sub:'查看下次运行、结果，创建和编辑任务',kind:'页面',text:'定时任务 cron schedule 提醒',run:go('#/schedules') },
+      { id: 'v:schedules', icon: 'clock', title: '定时任务', sub: '查看下次运行、结果，创建和编辑任务', kind: '页面', text: '定时任务 cron schedule 提醒', run: go('#/schedules') },
+      { id: 'n:search', icon: 'search', color: 'var(--c-search)', title: '网络搜索', sub: '开关、key、今天搜了几次', kind: '节点', text: '网络搜索 联网 上网 搜索 web search deepseek', run: () => { store.open({ type: 'search' }); close(); } },
+      { id: 'n:memory', icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: '自动整理、空闲整理、归档', kind: '节点', text: '上下文 记忆 整理 压缩 归档 memory context compact', run: () => { store.open({ type: 'memory' }); close(); } },
       { id: 'v:sessions', icon: 'chat', title: '会话', sub: '所有对话，网页聊天', kind: '页面', text: '会话 对话 聊天 sessions chat', run: go('#/sessions') },
       { id:'v:devices',icon:'terminal',title:'设备与服务器',sub:'下载电脑启动包，添加和连接 SSH 服务器',kind:'页面',text:'设备 服务器 安装包 启动器 SSH Windows Linux 连接',run:go('#/devices') },
       { id: 'v:personas', icon: 'persona', title: '人格', sub: '编辑系统提示词', kind: '页面', text: '人格 系统提示词 persona prompt', run: go('#/personas') },
@@ -121,7 +125,7 @@
         id: 'f:' + f.key, icon: g.icon, color: g.color, title: f.label, sub: `${g.label}${f.section ? ' · ' + f.section : ''} · ${truncate(valuePreview(f), 40)}`, kind: '设置',
         text: `${f.label} ${f.key} ${g.label} ${f.section ?? ''} ${f.help ?? ''} ${f.keywords ?? ''}`,
         run: () => {
-          if (f.group === 'context') location.hash = '#/settings?focus=' + encodeURIComponent(f.key);
+          if (f.group === 'llm') location.hash = '#/settings?focus=' + encodeURIComponent(f.key);
           else store.open(g.target, f.key);
           close();
         },
