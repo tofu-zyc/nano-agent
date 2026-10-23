@@ -72,6 +72,7 @@ func (s *Store) Archives(sid string) []ArchiveInfo {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out
 }
+
 // ArchiveCount 是所有会话归档的份数
 func (s *Store) ArchiveCount() int {
 	n := 0

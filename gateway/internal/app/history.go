@@ -4,6 +4,7 @@ import (
 	"errors"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/session"
+	"strings"
 )
 
 func (a *App) resetHistory(s *sess) error {
@@ -100,4 +101,38 @@ func (a *App) deleteHistory(sid string, p HistoryDelete, fromTool bool) error {
 	a.publish(events.Event{T: "undo", SID: sid})
 	a.publishSession(sid)
 	return nil
+}
+
+// TurnInfo 是 Gateway {"what":"turns"} 里的一轮：编号从 0 起，和 history_delete 的 from/to 一样
+type TurnInfo struct {
+	Turn      int    `json:"turn"`
+	At        int64  `json:"at,omitempty"`
+	Text      string `json:"text"`
+	InContext bool   `json:"in_context"` // false：已经整理进摘要，不在上下文里了（原始记录还在，可以删）
+	Running   bool   `json:"running,omitempty"`
+}
+
+// Turns 列出这个会话最近 n 轮用户说的话（整个历史文件，含已整理的部分）
+func (a *App) Turns(sid string, n int) map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n <= 0 {
+		n = 20
+	}
+	h := a.store.Archive(sid)
+	base := a.store.Settings(sid).Base
+	var turns []TurnInfo
+	for i, m := range h {
+		if m.Role == "user" {
+			turns = append(turns, TurnInfo{Turn: len(turns), At: m.TS, Text: clip(strings.Join(strings.Fields(userText(m)), " "), 80), InContext: i >= base})
+		}
+	}
+	total := len(turns)
+	if s := a.sessions[sid]; s != nil && s.run != nil && total > 0 {
+		turns[total-1].Running = true // 正在执行的这一轮不能删
+	}
+	if len(turns) > n {
+		turns = turns[len(turns)-n:]
+	}
+	return map[string]any{"total": total, "turns": turns}
 }

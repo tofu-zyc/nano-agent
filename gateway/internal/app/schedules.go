@@ -50,6 +50,7 @@ const scheduleSchema = `{"type":"object","properties":{
 func scheduleTool() proto.ToolSpec {
 	return proto.ToolSpec{Name: "Schedule", Description: "管理定时任务（仅管理员）：create/list/update/delete/run_now。创建、修改、删除遵循当前权限模式。任务独立会话运行，结果和审批送到 deliver，默认当前窗口。先列出再按 id 修改，回答中说明运行时间和投递位置。", InputSchema: json.RawMessage(scheduleSchema)}
 }
+
 // ScheduleSummary 是网页「定时任务」节点要显示的概况
 type ScheduleSummary struct {
 	Total   int    `json:"total"`

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/proto"
 )
@@ -328,6 +329,11 @@ func maskedGatewayArgs(raw json.RawMessage) string {
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
 		return prettyArgs(raw)
+	}
+	if key, _ := m["key"].(string); m["action"] == "settings_set" && m["value"] != nil {
+		if f, ok := config.FieldByKey(key); ok && f.Type == "secret" {
+			m["value"] = "***"
+		}
 	}
 	for _, k := range []string{"api_key", "password"} {
 		if _, ok := m[k]; ok {

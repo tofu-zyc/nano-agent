@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/models"
@@ -24,9 +26,11 @@ import (
 const gatewaySchema = `{
   "type":"object",
   "properties":{
-    "what":{"type":"string","enum":["status","session","models","ssh","workspaces","pairing","ssh_config","logs"],
-      "description":"要查什么：网关状态、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名，或网关日志"},
-    "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500"}
+    "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings"],
+      "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态，或设置项（当前值和说明）"},
+    "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
+    "group":{"type":"string","enum":["memory","search","llm","gateway","workspace","telegram","feishu","cli","kernel"],
+      "description":"settings 只看这一组：memory 上下文与记忆、search 网络搜索、llm 模型请求、gateway 网关（含消息显示档位）……不填就是全部"}
   }
 }`
 
@@ -37,8 +41,10 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove","restart","update","history_delete"
+      "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set"
     ],"description":"要做什么"},
+    "key":{"type":"string","description":"settings_set：设置项的 key，比如 search.enabled、context.compact_at、channels.show（先用 Gateway settings 查）"},
+    "value":{"description":"settings_set：新值（数字、true/false、文本或列表，类型按 Gateway settings 里的 type）；null 表示去掉网页里改的值、恢复成配置文件里的"},
     "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
     "name":{"type":"string","description":"接口或 SSH 连接的名字"},
@@ -73,8 +79,8 @@ const gatewayAdminSchema = `{
 
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
-		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
-		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
+		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
+		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }
 
@@ -83,6 +89,7 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 	var args struct {
 		What  string `json:"what"`
 		Lines int    `json:"lines"`
+		Group string `json:"group"`
 	}
 	json.Unmarshal([]byte(raw), &args)
 	if args.What == "" {
@@ -147,6 +154,12 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 		out = map[string]any{"pending": a.hub.PairRequests(), "paired": a.hub.PairedDevices()}
 	case "ssh_config":
 		out = map[string]any{"hosts": sshAliases()}
+	case "turns":
+		out = a.Turns(sid, args.Lines)
+	case "search":
+		out = a.SearchInfo()
+	case "settings":
+		out, err = a.settingsView(args.Group)
 	default:
 		err = fmt.Errorf("不认识的查询 %q", args.What)
 	}
@@ -196,6 +209,9 @@ type hostAdmin interface {
 
 type gatewayArgs struct {
 	HistoryDelete
+
+	Key   string `json:"key"`
+	Value any    `json:"value"`
 
 	Action, ID, Node, Name, Host, User, Password, IdentityFile           string
 	Port, ContextWindow, MaxTokens, MaxHistory                           int
@@ -427,6 +443,8 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 		err := a.deleteHistory(sid, args.HistoryDelete, true)
 		a.mu.Unlock()
 		return "指定历史已删除；摘要可能保留概要，可在网页清空摘要", err
+	case "settings_set":
+		return a.setSetting(args.Key, args.Value)
 	case "restart":
 		if err := a.RequestRestart(RestartRequest{By: "gateway-admin", SID: sid}); err != nil {
 			return "", err
@@ -547,4 +565,80 @@ func (a *App) testModel(id string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("模型 %s 正常（%d ms）：%s", id, time.Since(start).Milliseconds(), res.Content), nil
+}
+
+// settingChangeable：聊天里能改的设置项。要重启才生效的（监听地址、网页地址等）、只能在配置文件里改的、
+// 渠道 token 和网页密码这类密钥不开放；搜索 key 可以改（加密保存）。
+func settingChangeable(f config.Field) (bool, string) {
+	switch {
+	case f.ReadOnly:
+		return false, "只能在配置文件里改"
+	case f.Restart:
+		return false, "要重启网关才生效，请在网页设置页改"
+	case f.Type == "secret" && f.Key != "search.api_key":
+		return false, "这类密钥请在网页设置页填"
+	}
+	return true, ""
+}
+
+// settingsView 是 Gateway {"what":"settings"} 的结果：当前值、来源、说明，密钥只说有没有设置
+func (a *App) settingsView(group string) (any, error) {
+	if a.confStore == nil {
+		return nil, errors.New("设置存储没有接上")
+	}
+	out := []map[string]any{}
+	for _, f := range a.confStore.Describe() {
+		if group != "" && f.Group != group {
+			continue
+		}
+		item := map[string]any{"key": f.Key, "group": f.Group, "label": f.Label, "type": f.Type, "value": f.Value, "source": f.Source}
+		if f.Section != "" {
+			item["section"] = f.Section
+		}
+		if f.Help != "" {
+			item["help"] = f.Help
+		}
+		if len(f.Options) > 0 {
+			item["options"] = f.Options
+		}
+		if f.Type == "secret" {
+			item["is_set"] = f.IsSet
+			delete(item, "value")
+		}
+		if ok, why := settingChangeable(f.Field); !ok {
+			item["changeable"] = false
+			item["why"] = why
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("没有 %q 这一组设置", group)
+	}
+	return out, nil
+}
+
+// setSetting 是 GatewayAdmin settings_set：和网页设置页改一项一样，写进 data/config.json，立即生效
+func (a *App) setSetting(key string, value any) (string, error) {
+	if a.confStore == nil {
+		return "", errors.New("设置存储没有接上")
+	}
+	f, ok := config.FieldByKey(key)
+	if !ok {
+		return "", fmt.Errorf("没有这个设置项：%s（先用 Gateway settings 查）", key)
+	}
+	if ok, why := settingChangeable(f); !ok {
+		return "", fmt.Errorf("「%s」%s", f.Label, why)
+	}
+	if err := a.confStore.Set(map[string]any{key: value}); err != nil {
+		return "", err
+	}
+	a.publish(events.Event{T: "config"})
+	switch {
+	case value == nil:
+		return fmt.Sprintf("已恢复「%s」为配置文件里的值", f.Label), nil
+	case f.Type == "secret":
+		return fmt.Sprintf("已保存「%s」（加密存储）", f.Label), nil
+	}
+	b, _ := json.Marshal(value)
+	return fmt.Sprintf("已把「%s」改成 %s", f.Label, b), nil
 }

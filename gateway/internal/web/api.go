@@ -392,7 +392,6 @@ func (s *Server) reloadConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"fields": s.conf.Describe()})
 }
 
-// testModel 用一个模型发一个很小的请求，看接口通不通、多快。body 里的 id 为空表示默认模型。
 // testSearch 真的搜一次（按次计费，一次 0.005 元），看搜索 key 和网络通不通
 func (s *Server) testSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -406,6 +405,7 @@ func (s *Server) testSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "results": n, "ms": time.Since(start).Milliseconds()})
 }
 
+// testModel 用一个模型发一个很小的请求，看接口通不通、多快。body 里的 id 为空表示默认模型。
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`

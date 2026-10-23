@@ -62,6 +62,7 @@
 - 修法：档位在打开时由 `FilterView` 通过 `SetShow` 告诉流式窗口（快照里的 `Show`），不再从状态行推断；只有简洁档才清状态行。飞书卡片按档位排版：详细档“思考和工具调用”，过程档只有“工具调用”，简洁档没有面板；简洁档结束时删掉状态行，不再更新成空。转发到别的窗口（mirror）先不发，等档位定下再建卡片。
 - 测试：飞书假接口拒绝空内容更新；新增过程档和简洁档经过 `FilterView` 的飞书、Telegram 测试。在 v0.3.0 代码上用同样的假接口能复现截图里的现象（卡片停在“正在回复”，再补发一条“正文 + 用量”）。
 - 设置和拓扑补齐（用户反馈“记忆、搜索都找不到设置，希望有节点”）：设置页拆出「上下文与记忆」（`memory` 组：context.* 和高级的 llm.trim_to）、「网络搜索」（`search` 组），剩下的请求参数叫「模型请求」（`llm` 组）。拓扑图右边一列从上到下是记忆、搜索、模型（网关用的服务），左边渠道下面是定时任务（连到 `cron:` 会话）；搜索工具调用时 网关→搜索 的连线有光点。三个节点各有面板（搜索可以“测试搜索”，真的计费一次）。概况接口多了 `search`（是否启用、key 来源 settings / endpoint:<接口名>、今天次数，不含 key）、`schedules`（任务数、下次时间）、`memory`（整理过的会话、归档份数）；`search`、`schedules` 事件带这些数据，网页直接更新。
+- 技能和聊天里的设置：v0.3 的功能当时没写技能，聊天里也改不了搜索、上下文这些设置。新增技能 `web-search`、`scheduled-tasks`、`context-and-history`、`gateway-settings`；`Gateway` 加 `turns`（删历史前查轮次编号，从 0 起，标出正在执行的一轮和已整理进摘要的）、`search`、`settings`（可按组，密钥只给 is_set，改不了的标 changeable=false 和原因）；`GatewayAdmin` 加 `settings_set`（和网页设置页同一条路：`config.Store.Set`，发 config 事件），要重启才生效的、只读的、除搜索 key 以外的密钥不开放；审批卡片上密钥类设置的值打星。测试 `settings_tool_test.go`。
 - 设置页里“没写就默认开”的开关（search.enabled、session.timestamps、update.check、cli.* 等 *bool）以前显示成关着；现在没写时报告为开。
 
 ### 验收修正（2026-10-23）
@@ -126,7 +127,7 @@ gateway/               Go 网关
   internal/web         网页接口 + 嵌入的前端（dist/）
   web/                 前端源码：Svelte 5 + Vite（make web 构建到 internal/web/dist）
 scripts/               install-gateway.sh（安装到用户目录，支持源码和离线包）、install-kernel.sh（Linux/macOS 内核安装，离线包优先，make installer 打成单文件）、install-kernel.ps1（Windows 离线安装）、run-local.sh（make run）、e2e.sh、e2e-win.py（Windows 内核端到端）、test-install-linux.py / test-install-win.py（离线安装测试）、zipdir.py、fetch-zig.sh、fetch-rg.sh
-skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）
+skills/device-connections/  接入和排查的技能（给聊天 agent 看的说明）；同级还有 model-setup、web-search、scheduled-tasks、context-and-history、gateway-settings
 docs/                  ARCHITECTURE.md、protocol.md、本文件、DESIGN-agent-gateway-admin.md
 ```
 
