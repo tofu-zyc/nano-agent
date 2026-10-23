@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Windows 内核离线安装测试：在临时 USERPROFILE 里跑 install-kernel.ps1。
 
-覆盖：安装（不注册服务）、启动配对、升级保留 paired.token、卸载。
-NANO_TEST_SERVICE=1 时再测注册任务计划程序（GitHub Actions 的 Windows runner 上跑；
-WSL interop 里注册任务会被拒绝）。网关是 Python 假实现，只需要配对和 welcome；不联网。
+覆盖：安装（不注册服务）、启动配对、升级保留 paired.token、卸载、「启动」文件夹自启（-NoTask，
+启动文件夹换成临时目录）。
+NANO_TEST_SERVICE=1 时再测注册任务计划程序并加进用户 PATH（GitHub Actions 的 Windows runner 上跑）；
+NANO_TEST_SERVICE=local 也注册任务（任务名 nano-agent-kernel-test，测完删掉），但不碰 PATH，
+用来在本机普通用户（不是管理员）下确认任务建得起来。网关是 Python 假实现，只需要配对和 welcome；不联网。
 WSL 里通过 interop 跑，或者直接在 Windows 上跑。
 """
 import json
@@ -27,8 +29,10 @@ else:
     POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
     WIN_CWD = "/mnt/c"
 PAIRED = "paired-install-test"
-SERVICE = os.environ.get("NANO_TEST_SERVICE") == "1"
+SERVICE = os.environ.get("NANO_TEST_SERVICE") in ("1", "local")
+SERVICE_PATH = os.environ.get("NANO_TEST_SERVICE") == "1"   # 也检查加进 / 去掉用户 PATH
 TASK = "nano-agent-kernel-test"
+SCHTASKS = "schtasks" if NATIVE else "/mnt/c/Windows/System32/schtasks.exe"
 
 
 def wslpath(flag, p):
@@ -130,9 +134,14 @@ class FakeGateway(threading.Thread):
                 pass
 
 
-def ps(script, *args):
+def ps(script, *args, env=None):
+    full = None
+    if env:
+        full = dict(os.environ, **env)
+        if not NATIVE:   # 环境变量经 WSLENV 传给 Windows 程序
+            full["WSLENV"] = ":".join(x for x in [os.environ.get("WSLENV", "")] + list(env) if x)
     return subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *args],
-                          cwd=WIN_CWD, capture_output=True, text=True, errors="replace")
+                          cwd=WIN_CWD, capture_output=True, text=True, errors="replace", env=full)
 
 
 def nk(*args):
@@ -257,12 +266,20 @@ try:
     r = nk("status")
     assert r.returncode == 3 and "没有运行" in nk_out(r), nk_out(r)
     assert not os.path.exists(os.path.join(INST_L, "kernel.stop")), "stop 文件没被处理"
+    # 安装记的是任务计划、任务却不存在（以前的安装脚本用普通用户建不了任务）：status 提醒，start 直接拉起
+    service = os.path.join(INST_L, "service")
+    with open(service, "w") as f:
+        f.write("task:nano-agent-kernel-missing-test\n")
+    r = nk("status")
+    assert r.returncode == 3 and "任务计划里没有" in nk_out(r), nk_out(r)
     r = nk("start")
-    assert r.returncode == 0 and "已启动" in nk_out(r), nk_out(r)
+    assert r.returncode == 0 and "已启动" in nk_out(r) and "直接启动" in nk_out(r), nk_out(r)
     r = nk("stop")
     assert r.returncode == 0, nk_out(r)
+    with open(service, "w") as f:
+        f.write("none\n")
     gw.hold = False
-    print("  ok   nano-kernel status / stop / start")
+    print("  ok   nano-kernel status / stop / start；任务计划里没有任务时直接启动")
 
     old_token = open(TOKEN, encoding="ascii").read().strip()
     cleanup_kernel()
@@ -284,29 +301,52 @@ try:
     print("  ok   卸载（用安装目录里留的脚本）")
     passed = 6
 
+    # 「启动」文件夹（任务计划建不了时的退路，-NoTask 直接走这条）：放快捷方式、直接拉起内核、
+    # nano-kernel status 认得、卸载时删掉快捷方式
+    gw.paired.clear()
+    gw.accepted.clear()
+    startup_l = os.path.join(TMP_L, "Startup")
+    os.makedirs(startup_l)
+    senv = {"NANO_STARTUP_DIR": TMP_W + "\\Startup"}
+    r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "startuppc", "-Yes", "-NoTask", "-NoPath",
+           "-Dir", INST_W, "-TaskName", TASK, env=senv)
+    assert r.returncode == 0 and gw.accepted.wait(30), r.stdout + r.stderr
+    assert os.path.exists(os.path.join(startup_l, TASK + ".lnk")), os.listdir(startup_l)
+    assert open(os.path.join(INST_L, "service")).read().strip() == "startup:" + TASK
+    r = nk("status")
+    assert r.returncode == 0 and "Windows 启动文件夹" in nk_out(r), nk_out(r)
+    r = ps(INST_W + "\\install-kernel.ps1", "-Uninstall", "-Yes", "-NoPath", "-Dir", INST_W, "-TaskName", TASK, env=senv)
+    assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
+    assert not os.listdir(startup_l), "卸载后快捷方式还在：" + str(os.listdir(startup_l))
+    print("  ok   「启动」文件夹自启（-NoTask）：安装、启动、nano-kernel status、卸载")
+    passed += 1
+
     if SERVICE:
         gw.paired.clear()
         gw.accepted.clear()
         r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "servicepc", "-Yes", "-Dir", INST_W,
-               "-TaskName", TASK)
+               "-TaskName", TASK, *([] if SERVICE_PATH else ["-NoPath"]))
         assert r.returncode == 0, r.stdout + r.stderr
         assert wait_file(TOKEN, 60), "任务计划程序启动的内核没有拿到 paired.token：" + r.stdout + r.stderr
         assert gw.accepted.wait(30), "任务计划程序启动的内核没有连上假网关"
-        q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
+        q = subprocess.run([SCHTASKS, "/Query", "/TN", TASK], cwd=WIN_CWD, capture_output=True, text=True, errors="replace")
         assert q.returncode == 0, q.stdout + q.stderr
-        upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
-                               capture_output=True, text=True).stdout
-        assert INST_W.lower() in upath.lower(), "安装目录没有加进用户 PATH：" + upath
+        if SERVICE_PATH:
+            upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
+                                   capture_output=True, text=True).stdout
+            assert INST_W.lower() in upath.lower(), "安装目录没有加进用户 PATH：" + upath
+        assert open(os.path.join(INST_L, "service")).read().strip() == "task:" + TASK, "没有用任务计划：" + r.stdout
         r = nk("status")
         assert r.returncode == 0 and "Windows 任务计划" in nk_out(r), nk_out(r)
         print("  ok   注册任务计划程序并由它启动内核；加进 PATH；nano-kernel status 认出任务计划")
-        r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W, "-TaskName", TASK)
+        r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W, "-TaskName", TASK, *([] if SERVICE_PATH else ["-NoPath"]))
         assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
-        q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
+        q = subprocess.run([SCHTASKS, "/Query", "/TN", TASK], cwd=WIN_CWD, capture_output=True, text=True, errors="replace")
         assert q.returncode != 0, "卸载后任务还在"
-        upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
-                               capture_output=True, text=True).stdout
-        assert INST_W.lower() not in upath.lower(), "卸载后 PATH 里还有安装目录"
+        if SERVICE_PATH:
+            upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
+                                   capture_output=True, text=True).stdout
+            assert INST_W.lower() not in upath.lower(), "卸载后 PATH 里还有安装目录"
         print("  ok   卸载时删掉任务")
         passed += 2
     print(f"install-win: {passed} passed")
@@ -317,5 +357,7 @@ finally:
         except Exception:
             pass
     cleanup_kernel()
+    if SERVICE:
+        subprocess.run([SCHTASKS, "/Delete", "/TN", TASK, "/F"], cwd=WIN_CWD, capture_output=True)
     gw.close()
     shutil.rmtree(TMP_L, ignore_errors=True)

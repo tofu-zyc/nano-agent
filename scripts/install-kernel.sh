@@ -293,9 +293,9 @@ if [ "$OLD_DIR" != "$DIR" ]; then
 		[ -f "$f" ] || continue
 		grep -qF "$PROFILE_MARK" "$f" || continue
 		tmp="$f.nano-tmp"
-		sed -e "s|$OLD_DIR/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" \
-			-e "s|$HOME/.local/bin/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" \
-			-e "s|~/.local/bin/nano-kernel-ctl|$DIR/nano-kernel-ctl|g" "$f" >"$tmp"
+		sed -e "s|$OLD_DIR/nano-kernel-ctl|$DIR/nano-kernel|g" \
+			-e "s|$HOME/.local/bin/nano-kernel-ctl|$DIR/nano-kernel|g" \
+			-e "s|~/.local/bin/nano-kernel-ctl|$DIR/nano-kernel|g" "$f" >"$tmp"
 		if ! cmp -s "$f" "$tmp"; then
 			cat "$tmp" >"$f"
 			changed=1
@@ -390,28 +390,20 @@ fi
 }
 rm -f "$DIR/check.log"
 
-# 控制脚本：启动、停止、看日志。没有 systemd / launchd 的机器靠它在后台跑
-cat >"$DIR/nano-kernel-ctl" <<'EOF'
-#!/bin/sh
-# 兼容旧用法：管理命令现在是 nano-kernel 自己的子命令（nano-kernel status / start / stop / connect …）
-SELF=$0
-case "$SELF" in /*) ;; *) SELF=$PWD/$SELF ;; esac
-while [ -L "$SELF" ]; do
-	link=$(readlink "$SELF")
-	case "$link" in /*) SELF=$link ;; *) SELF=$(dirname "$SELF")/$link ;; esac
+# 管理命令是 nano-kernel 自己的子命令（nano-kernel status / start / stop / connect …）；去掉旧版本的 nano-kernel-ctl
+rm -f "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
+case "$(readlink "$HOME/.local/bin/nano-kernel-ctl" 2>/dev/null)" in "$NANO_HOME"/*) rm -f "$HOME/.local/bin/nano-kernel-ctl" ;; esac
+for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+	[ -f "$f" ] && grep -qF "$PROFILE_MARK" "$f" && grep -qF nano-kernel-ctl "$f" || continue
+	sed -e "/$PROFILE_MARK/s|nano-kernel-ctl|nano-kernel|g" "$f" >"$f.nano-tmp" && cat "$f.nano-tmp" >"$f"
+	rm -f "$f.nano-tmp"
 done
-DIR=$(cd "$(dirname "$SELF")" && pwd)
-[ $# -gt 0 ] || set -- status
-exec "$DIR/nano-kernel" "$@"
-EOF
 # 留一份安装脚本在内核目录里，nano-kernel uninstall 用（单文件安装包去掉后面的程序数据）
 sed '/^__NANO_PAYLOAD__$/,$d' "$0" >"$DIR/install-kernel.sh.new" && chmod 755 "$DIR/install-kernel.sh.new" &&
 	mv -f "$DIR/install-kernel.sh.new" "$DIR/install-kernel.sh"
-chmod 755 "$DIR/nano-kernel-ctl"
 mkdir -p "$NANO_HOME/bin"
-ln -sf "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
 ln -sf "$DIR/nano-kernel" "$NANO_HOME/bin/nano-kernel"
-add_to_path "$NANO_HOME/bin" nano-kernel nano-kernel-ctl
+add_to_path "$NANO_HOME/bin" nano-kernel
 
 if [ "$SERVICE" = 0 ]; then
 	say ""

@@ -115,7 +115,7 @@ SOCK = os.path.join(TMP, "g.sock")
 KERNEL_DIR = os.path.join(HOME, ".nano-agent", "kernel")
 CONF = os.path.join(KERNEL_DIR, "kernel.conf")
 TOKEN = os.path.join(KERNEL_DIR, "paired.token")
-CTL = os.path.join(KERNEL_DIR, "nano-kernel-ctl")
+CTL = os.path.join(KERNEL_DIR, "nano-kernel")
 env = dict(os.environ, HOME=HOME, PATH=BIN + ":" + os.environ.get("PATH", ""))
 env.pop("NANO_HOME", None)
 
@@ -127,7 +127,17 @@ try:
     assert os.path.exists(CONF) and os.path.exists(os.path.join(KERNEL_DIR, "nano-kernel")), r.stdout + r.stderr
     assert os.path.exists(os.path.join(KERNEL_DIR, "rg")), "离线包里的 rg 没有装"
     assert not os.path.exists(TOKEN)
+    assert not os.path.exists(os.path.join(KERNEL_DIR, "nano-kernel-ctl")), "不该再有 nano-kernel-ctl"
     print("  ok   安装（离线包，临时 HOME）")
+
+    # 帮助：nano-kernel --help 列出管理命令；命令 --help 只看用法，不会真的执行
+    r = subprocess.run([CTL, "--help"], env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "nano-kernel connect" in r.stdout, r.stdout + r.stderr
+    r = subprocess.run([CTL, "start", "--help"], env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.startswith("用法：nano-kernel start") and not os.path.exists(os.path.join(KERNEL_DIR, "kernel.pid")), r.stdout + r.stderr
+    r = subprocess.run([CTL, "status", "extra"], env=env, capture_output=True, text=True)
+    assert r.returncode == 2 and "不认识的参数" in r.stderr, r.stdout + r.stderr
+    print("  ok   nano-kernel --help / 命令 --help")
 
     r = subprocess.run([CTL, "start", "--quiet"], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -177,7 +187,7 @@ try:
                        env=env, capture_output=True, text=True, errors="replace")
     assert r.returncode == 0 and not os.path.exists(KERNEL_DIR), r.stdout + r.stderr
     print("  ok   卸载")
-    print("install-linux: 5 passed")
+    print("install-linux: 6 passed")
 finally:
     try:
         subprocess.run([CTL, "stop"], env=env, capture_output=True)

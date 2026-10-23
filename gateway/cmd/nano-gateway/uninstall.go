@@ -55,7 +55,7 @@ func runUninstall(args []string) int {
 	fmt.Println("网关已卸载。")
 	switch {
 	case kernel:
-		fmt.Println("这台机器上的内核还在：nano-kernel-ctl status 查看，nano-kernel-ctl uninstall 卸载。")
+		fmt.Println("这台机器上的内核还在：nano-kernel status 查看，nano-kernel uninstall 卸载。")
 	case *keepData:
 		fmt.Println("配置和数据在 " + home + "，重新运行安装命令就能接着用。")
 	}
@@ -86,7 +86,7 @@ func uninstallGateway(home string, keepData, kernel bool) error {
 	stopBackground(true)
 	removeWSLKeepalive()
 
-	// 2. shell 启动文件：自启行总是去掉；PATH 行只在没有内核时去掉（内核的 nano-kernel-ctl 也在 bin/ 里）
+	// 2. shell 启动文件：自启行总是去掉；PATH 行只在没有内核时去掉（内核的 nano-kernel 也在 bin/ 里）
 	marks := []string{autostartMark}
 	if !kernel {
 		marks = append(marks, pathMark)
@@ -97,8 +97,8 @@ func uninstallGateway(home string, keepData, kernel bool) error {
 	}
 	removeLocalBinLink("nano-gateway", home)
 	if !kernel {
-		removeLocalBinLink("nano-kernel-ctl", home)
 		removeLocalBinLink("nano-kernel", home)
+		removeLocalBinLink("nano-kernel-ctl", home) // 旧版本装的
 	}
 
 	// 3. 文件

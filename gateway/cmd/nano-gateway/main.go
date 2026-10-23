@@ -49,6 +49,13 @@ func newClient(c config.LLM) (llm.Client, error) {
 func main() {
 	if len(os.Args) > 1 {
 		arg := os.Args[1]
+		if arg == "help" || isHelpFlag(arg) {
+			os.Exit(runHelp(os.Args[2:], os.Stdout))
+		}
+		if c := findCommand(arg); c != nil && wantsHelp(os.Args[2:]) {
+			printCommandHelp(os.Stdout, c)
+			os.Exit(0)
+		}
 		switch arg {
 		case "chat":
 			os.Exit(runChat(os.Args[2:]))
@@ -82,13 +89,13 @@ func main() {
 			os.Exit(runSupervisor(os.Args[2:]))
 		}
 		if !strings.HasPrefix(arg, "-") {
-			fmt.Fprintf(os.Stderr, "不认识的子命令：%s\n", arg)
-			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|update|uninstall|chat|export|import")
+			fmt.Fprintf(os.Stderr, "不认识的子命令：%s（nano-gateway help 看全部命令）\n", arg)
 			os.Exit(2)
 		}
 	}
 	cfgPath := flag.String("c", "", "配置文件路径（默认 $NANO_HOME/gateway.toml）")
 	verbose := flag.Bool("v", false, "输出调试日志")
+	flag.Usage = func() { printUsage(os.Stderr) }
 	flag.Parse()
 	if *cfgPath == "" {
 		*cfgPath = paths.Config()

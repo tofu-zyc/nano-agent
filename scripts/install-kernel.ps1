@@ -9,6 +9,7 @@
 #   -Name my-pc                    这台电脑的名字（默认计算机名）
 #   -Dir C:\Users\me\.nano-agent\kernel
 #   -NoService                     只安装，不注册开机自启，也不启动
+#   -NoTask                        不用任务计划程序，在「启动」文件夹里放快捷方式（任务计划建不了时自动退到这个）
 #   -Yes                           不提问（必须给 -Gateway）
 #   -NoPath                        不把安装目录加进当前用户的 PATH（测试用）
 #   -Uninstall                     停止并删除
@@ -18,6 +19,7 @@ param(
     [string]$Dir = "",
     [string]$TaskName = "nano-agent-kernel",
     [switch]$NoService,
+    [switch]$NoTask,
     [switch]$NoPath,
     [switch]$Yes,
     [switch]$Uninstall
@@ -35,6 +37,10 @@ $Conf = Join-Path $Dir "kernel.conf"
 $Log = Join-Path $Dir "kernel.log"
 $Runner = Join-Path $Dir "run-kernel.ps1"
 $Schtasks = Join-Path $env:SystemRoot "System32\schtasks.exe"
+# 「启动」文件夹里的快捷方式（NANO_STARTUP_DIR 给测试用）
+$StartupDir = $env:NANO_STARTUP_DIR
+if (-not $StartupDir) { $StartupDir = [Environment]::GetFolderPath("Startup") }
+$StartupLink = Join-Path $StartupDir "$TaskName.lnk"
 
 function Say($s) { Write-Host $s }
 function Die($s) { Write-Host "错误：$s" -ForegroundColor Red; exit 1 }
@@ -67,6 +73,7 @@ function Remove-UserPath($d) {
 
 function Remove-Task {
     try { & $Schtasks /Delete /TN $TaskName /F 2>$null | Out-Null } catch { }
+    Remove-Item -Force $StartupLink -ErrorAction SilentlyContinue
 }
 
 if ($Uninstall) {
@@ -207,27 +214,57 @@ if ($NoService) {
     Say "装好了，没有注册开机自启，也没有启动。启动：nano-kernel start（新开的终端里能用；nano-kernel help 看全部命令）"
     exit 0
 }
-[System.IO.File]::WriteAllText((Join-Path $Dir "service"), "task:$TaskName`n")
-
 Say ""
-Say "==> 注册任务计划程序（登录时启动，失败自动重启）"
+Say "==> 设置登录时自动启动"
 $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Runner`""
-$registered = $false
-try {
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
-    $registered = $true
-} catch { }
-if (-not $registered) {
-    # 有的环境不允许用 ScheduledTasks 模块注册普通用户的任务，退回 schtasks（同样不需要管理员）
-    try { & $Schtasks /Create /TN $TaskName /SC ONLOGON /TR "powershell.exe $arg" /RL LIMITED /F | Out-Null } catch { }
+$service = ""
+if (-not $NoTask) {
+    try {
+        # 触发器和运行身份都限定为当前用户：普通用户（不是管理员）建不了「任何用户登录时」触发的任务
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $Dir
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+        $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+        $service = "task:$TaskName"
+        Remove-Item -Force $StartupLink -ErrorAction SilentlyContinue
+        Say "任务计划程序：$TaskName（登录时启动）"
+    } catch {
+        Say "任务计划程序建不了任务（$($_.Exception.Message.Trim())），改用「启动」文件夹"
+    }
 }
-try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch { & $Schtasks /Run /TN $TaskName | Out-Null }
+if (-not $service) {
+    # 退路：「启动」文件夹里放快捷方式，登录时运行 run-kernel.ps1（不需要任何权限）
+    try { & $Schtasks /Delete /TN $TaskName /F 2>$null | Out-Null } catch { }
+    try {
+        New-Item -ItemType Directory -Force -Path $StartupDir | Out-Null
+        $shell = New-Object -ComObject WScript.Shell
+        $lnk = $shell.CreateShortcut($StartupLink)
+        $lnk.TargetPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $lnk.Arguments = $arg
+        $lnk.WorkingDirectory = $Dir
+        $lnk.WindowStyle = 7
+        $lnk.Description = "nano-agent kernel"
+        $lnk.Save()
+        $service = "startup:$TaskName"
+        Say "「启动」文件夹：$StartupLink"
+    } catch {
+        Say "「启动」文件夹也放不进快捷方式（$($_.Exception.Message.Trim())），这次先直接启动，登录后要手动 nano-kernel start"
+        $service = "none"
+    }
+}
+[System.IO.File]::WriteAllText((Join-Path $Dir "service"), "$service`n")
 
+# 启动：任务计划就运行任务，其他情况直接在后台拉起 run-kernel.ps1；nano-kernel start 等到内核进程起来才返回
 if (-not (Test-Path $Log)) { New-Item -ItemType File -Path $Log | Out-Null }
 $start = (Get-Item $Log).Length
+& $Kernel start --quiet
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $Log -Tail 20 -ErrorAction SilentlyContinue
+    Die "内核没有启动起来（上面是日志）"
+}
+
 function New-Log {
     if (-not (Test-Path $Log)) { return "" }
     $fs = [System.IO.File]::Open($Log, 'Open', 'Read', 'ReadWrite')
@@ -269,8 +306,13 @@ while ($true) {
 if ($code) {
     Say "还没等到网关确认。内核在后台继续等，点了允许就会接上。"
 } else {
-    Say "暂时没连上网关，内核会在后台一直重试。最近的日志："
-    New-Log | Select-Object -Last 5
+    $alive = Get-Process nano-kernel -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Kernel }
+    if (-not $alive) {
+        Get-Content $Log -Tail 20 -ErrorAction SilentlyContinue
+        Die "内核启动后又退出了（上面是日志）"
+    }
+    Say "暂时没连上网关，内核会在后台一直重试。现在的状态："
+    & $Kernel status
     Say "检查：网关地址对不对（$Gateway）、网页「设备」里电脑接入有没有启用、防火墙是否放行端口。"
     Say "看状态：nano-kernel status；看日志：nano-kernel logs -f（新开的终端里）"
 }

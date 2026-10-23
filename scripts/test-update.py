@@ -5,7 +5,7 @@
 2. nano-gateway update --check / update：换成 0.0.2；自带的人格改过的放成 .new，没改过的技能直接更新。
 3. 0.0.3 是启动必失败的测试构建：update 后自动退回 0.0.2。
 4. 内核 0.0.1 连上网关 0.0.2：网关自动推送，内核换成 0.0.2。
-5. 网关和内核装在一起：nano-gateway uninstall 只卸网关；nano-kernel-ctl uninstall 再卸内核，PATH 行去掉，不留进程。
+5. 网关和内核装在一起：nano-gateway uninstall 只卸网关；nano-kernel uninstall 再卸内核，PATH 行去掉，不留进程。
 不会碰真实的 ~/.nano-agent。
 """
 import functools
@@ -237,12 +237,12 @@ try:
         assert os.path.exists(os.path.join(kdir, "install-kernel.sh")), "内核目录里没有留安装脚本"
         with open(os.path.join(kdir, "kernel.conf"), "a") as f:
             f.write("token = tok\n")
-        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel-ctl"), "start"], env=ENV, capture_output=True)
+        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel"), "start"], env=ENV, capture_output=True)
         assert r.returncode == 0, out(r)
         ver = lambda: subprocess.run([os.path.join(kdir, "nano-kernel"), "--version"], capture_output=True, text=True).stdout.strip()
         wait(lambda: ver() == "0.0.2", 60, "内核换成 0.0.2：" + open(os.path.join(kdir, "kernel.log")).read()[-800:])
         wait(lambda: "kpc（linux 0.0.2）" in status(), 30, "网关看到内核 0.0.2：" + status())
-        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel-ctl"), "version"], env=ENV, capture_output=True, text=True)
+        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel"), "version"], env=ENV, capture_output=True, text=True)
         assert r.stdout.strip() == "0.0.2", r.stdout + r.stderr
 
     @case("网关和内核在一起：nano-gateway uninstall 只卸网关")
@@ -257,9 +257,9 @@ try:
         left = [p for p in leftover() if "nano-gateway" in os.readlink(f"/proc/{p}/exe")]
         assert not left, f"网关进程还在：{left}"
 
-    @case("nano-kernel-ctl uninstall：卸内核，PATH 行和链接都去掉，不留进程")
+    @case("nano-kernel uninstall：卸内核，PATH 行和链接都去掉，不留进程")
     def _():
-        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel-ctl"), "uninstall", "--yes"], env=ENV, capture_output=True)
+        r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel"), "uninstall", "--yes"], env=ENV, capture_output=True)
         assert r.returncode == 0, out(r)
         assert not os.path.exists(os.path.join(NANO, "kernel")) and not os.path.exists(os.path.join(NANO, "bin")), \
             os.listdir(NANO) if os.path.exists(NANO) else ""

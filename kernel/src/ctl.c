@@ -3,7 +3,8 @@
  * 安装后内核目录里有：nano-kernel、kernel.conf、kernel.log，运行中的内核还会写：
  *   kernel.pid          自己的 pid（文件名跟着配置文件：kernel.conf → kernel.*）
  *   kernel.status.json  和网关的连接状态（连接中 / 已连接 / 等确认 / 被拒绝）
- * 安装脚本写 service（systemd / launchd / task:任务名 / none），告诉这里内核是怎么在后台运行的。
+ * 安装脚本写 service（systemd / launchd / task:任务名 / startup:名字 / none），告诉这里内核是怎么在后台运行的；
+ * startup 是 Windows 上建不了任务计划时的退路：「启动」文件夹里放一个快捷方式，登录时运行 run-kernel.ps1。
  * Windows 上 stop 在没有服务管理器时写一个 kernel.stop 文件，内核看到后正常退出（Windows 上 run-kernel.ps1 也就不再拉起）。 */
 #include "ctl.h"
 #include "cJSON.h"
@@ -22,7 +23,7 @@
 #define DEFAULT_TASK "nano-agent-kernel"
 #define SYSTEMD_UNIT "nano-kernel.service"
 
-typedef enum { SVC_NONE, SVC_SYSTEMD, SVC_LAUNCHD, SVC_TASK } svc_kind;
+typedef enum { SVC_NONE, SVC_SYSTEMD, SVC_LAUNCHD, SVC_TASK, SVC_STARTUP } svc_kind;
 
 typedef struct {
     char    *conf;     /* kernel.conf */
@@ -180,6 +181,9 @@ static void detect_service(ctl_t *c)
         else if (!strncmp(v, "task:", 5) && v[5]) {
             c->svc = SVC_TASK;
             snprintf(c->task, sizeof c->task, "%s", v + 5);
+        } else if (!strncmp(v, "startup", 7)) {
+            c->svc = SVC_STARTUP;
+            if (v[7] == ':' && v[8]) snprintf(c->task, sizeof c->task, "%s", v + 8);
         }
         free(s);
         return;
@@ -197,12 +201,19 @@ static void detect_service(ctl_t *c)
     free(plist);
 }
 
+static bool task_exists(const ctl_t *c)
+{
+    char *argv[] = { "schtasks.exe", "/Query", "/TN", (char *)c->task, NULL };
+    return plat_system(argv, true) == 0;
+}
+
 static const char *svc_label(const ctl_t *c)
 {
     switch (c->svc) {
     case SVC_SYSTEMD: return "systemd 用户服务";
     case SVC_LAUNCHD: return "launchd";
     case SVC_TASK:    return "Windows 任务计划";
+    case SVC_STARTUP: return "Windows 启动文件夹";
     default:          return "后台进程";
     }
 }
@@ -297,6 +308,8 @@ static int cmd_status(ctl_t *c)
     long pid = running_pid(c);
     if (pid) printf("运行：运行中（pid %ld，%s）\n", pid, svc_label(c));
     else printf("运行：没有运行（nano-kernel start 启动）\n");
+    if (c->svc == SVC_TASK && !task_exists(c))
+        printf("自启：任务计划里没有 %s，登录后不会自动启动（重新运行一次安装命令修好）\n", c->task);
     free(print_connection(c, pid));
     cJSON *st = pid ? read_status(c) : NULL;
     const cJSON *ll = cJSON_GetObjectItemCaseSensitive(st, "landlock");
@@ -366,10 +379,17 @@ static int cmd_start(ctl_t *c)
         char *argv[] = { "launchctl", "load", "-w", plist, NULL };
         rc = plat_system(argv, false);
         free(plist);
-    } else if (c->svc == SVC_TASK) {
+    }
+    bool direct = c->svc == SVC_NONE || c->svc == SVC_STARTUP;
+    if (c->svc == SVC_TASK) {
         char *argv[] = { "schtasks.exe", "/Run", "/TN", c->task, NULL };
-        rc = plat_system(argv, true);
-    } else {
+        if (plat_system(argv, true) != 0) {
+            /* 任务没建成（比如以前的安装脚本用普通用户建不了）：不靠它，直接拉起 run-kernel.ps1 */
+            if (!c->quiet) printf("任务计划里没有 %s（登录后不会自动启动，重新运行安装命令修好），这次直接启动\n", c->task);
+            direct = true;
+        }
+    }
+    if (direct) {
         char *runner = in_dir(c, "run-kernel.ps1");
         char *log = in_dir(c, "kernel.log");
         char *self = plat_join(c->dir, !strcmp(plat_os(), "windows") ? "nano-kernel.exe" : "nano-kernel");
@@ -422,7 +442,7 @@ static int cmd_stop(ctl_t *c)
         if (!c->quiet) printf("内核没有在运行\n");
         return 0;
     }
-    if (c->svc == SVC_NONE || c->svc == SVC_TASK) {
+    if (c->svc == SVC_NONE || c->svc == SVC_TASK || c->svc == SVC_STARTUP) {
         if (!strcmp(plat_os(), "windows")) {
             /* Windows 没有 SIGTERM：写 stop 文件请内核自己正常退出，run-kernel.ps1 看到退出码 0 就不再拉起 */
             char *stop = ctl_sidecar(c->conf, ".stop");
@@ -590,6 +610,13 @@ static int cmd_logs(ctl_t *c, int argc, char **argv)
 
 static int cmd_update(ctl_t *c, int argc, char **argv)
 {
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--version") && i + 1 < argc) i++;
+        else {
+            fprintf(stderr, "用法：nano-kernel update [--version x.y.z]\n");
+            return 2;
+        }
+    }
     const char *base = getenv("NANO_DOWNLOAD_URL");
     if (!base || !*base) base = DEFAULT_BASE;
     if (!strcmp(plat_os(), "windows")) {
@@ -602,7 +629,8 @@ static int cmd_update(ctl_t *c, int argc, char **argv)
         buf_puts(&cmd, "'");
         if (gw) { buf_puts(&cmd, " -Gateway '"); buf_puts(&cmd, gw); buf_puts(&cmd, "'"); }
         if (node) { buf_puts(&cmd, " -Name '"); buf_puts(&cmd, node); buf_puts(&cmd, "'"); }
-        if (c->svc == SVC_TASK) { buf_puts(&cmd, " -TaskName '"); buf_puts(&cmd, c->task); buf_puts(&cmd, "'"); }
+        if (c->svc == SVC_TASK || c->svc == SVC_STARTUP) { buf_puts(&cmd, " -TaskName '"); buf_puts(&cmd, c->task); buf_puts(&cmd, "'"); }
+        if (c->svc == SVC_STARTUP) buf_puts(&cmd, " -NoTask");
         if (c->svc == SVC_NONE) buf_puts(&cmd, " -NoService");
         for (int i = 0; i + 1 < argc; i++)
             if (!strcmp(argv[i], "--version")) { buf_puts(&cmd, " -Version '"); buf_puts(&cmd, argv[i + 1]); buf_puts(&cmd, "'"); }
@@ -672,6 +700,62 @@ static int cmd_uninstall(ctl_t *c)
 static const char *const COMMANDS[] = { "status", "start", "stop", "restart", "connect", "logs", "log",
                                          "version", "update", "uninstall", "help", NULL };
 
+/* 单个命令的帮助：nano-kernel 命令 --help、nano-kernel help 命令 */
+static const struct {
+    const char *name, *usage, *text;
+} HELP[] = {
+    { "status", "nano-kernel status",
+      "运行状态：在不在跑、怎么跑的（systemd / launchd / 任务计划 / 后台进程）、和网关的连接\n"
+      "（已连接多久 / 正在连接和连不上的原因 / 等网关确认时的确认码 / 被拒绝）、版本、沙箱。\n"
+      "没有在运行时退出码是 3。" },
+    { "start", "nano-kernel start [--quiet]",
+      "在后台启动：装了服务（systemd / launchd / 任务计划 / 启动文件夹）就照它的方式启动，否则作为后台进程运行。\n"
+      "启动后等几秒，显示和网关的连接情况。\n"
+      "  --quiet  不打印提示" },
+    { "stop", "nano-kernel stop [--quiet]",
+      "停止。下次开机（登录）时还会自动启动。\n"
+      "  --quiet  不打印提示" },
+    { "restart", "nano-kernel restart",
+      "重启（手动改了 kernel.conf 之后用）。" },
+    { "connect", "nano-kernel connect [网关地址] [--name 名字]",
+      "改连哪个网关、改这台电脑的名字，然后重启。\n"
+      "  网关地址     192.168.1.2、192.168.1.2:7700、tcp:主机:端口 或 unix:/路径（只写主机时端口是 7700）\n"
+      "  --name 名字  这台电脑在网关里显示的名字\n"
+      "不带参数时显示现在连的网关。\n"
+      "换了网关的话，新网关不认原来的配对口令：内核会自动重新申请接入，到新网关网页的「设备」里点允许。" },
+    { "logs", "nano-kernel logs [-f] [-n 行数]",
+      "看日志。\n"
+      "  -f       持续输出新日志（Ctrl-C 退出）\n"
+      "  -n 行数  显示最后几行，默认 50" },
+    { "version", "nano-kernel version", "版本号。" },
+    { "update", "nano-kernel update [--version x.y.z]",
+      "下载新版本重新安装，配置和配对口令保留。\n"
+      "一般用不着：连上网关后，内核会自动换成和网关一样的版本。\n"
+      "  --version x.y.z  装指定版本" },
+    { "uninstall", "nano-kernel uninstall [--yes]",
+      "停止并删除内核（包括配置和配对口令），去掉开机自启和 PATH。\n"
+      "  --yes  不提问" },
+    { NULL, NULL, NULL },
+};
+
+static int command_help(const char *name)
+{
+    if (!strcmp(name, "log")) name = "logs";
+    for (int i = 0; HELP[i].name; i++) {
+        if (!strcmp(HELP[i].name, name)) {
+            printf("用法：%s\n\n%s\n  -c 配置文件  默认是程序旁边的 kernel.conf\n", HELP[i].usage, HELP[i].text);
+            return 0;
+        }
+    }
+    ctl_usage(stdout);
+    return 0;
+}
+
+static bool is_help_flag(const char *a)
+{
+    return !strcmp(a, "-h") || !strcmp(a, "--help") || !strcmp(a, "-help");
+}
+
 bool ctl_is_command(const char *s)
 {
     for (int i = 0; s && COMMANDS[i]; i++)
@@ -693,6 +777,7 @@ void ctl_usage(FILE *out)
             "  nano-kernel update [--version x.y.z]  手动更新（一般不用：连上网关会自动换成网关的版本）\n"
             "  nano-kernel uninstall [--yes]\n"
             "  以上都可以加 -c kernel.conf 指定配置（默认是程序旁边的 kernel.conf）\n"
+            "  nano-kernel help 命令（或 nano-kernel 命令 --help）看单个命令的用法\n"
             "\n"
             "运行（服务管理器用）：\n"
             "  nano-kernel -c kernel.conf [-v] [--log 文件]  在前台运行（--log：日志追加写到文件）\n"
@@ -703,9 +788,12 @@ int ctl_main(int argc, char **argv)
 {
     const char *cmd = argv[1];
     if (!strcmp(cmd, "help")) {
+        if (argc > 2) return command_help(argv[2]);
         ctl_usage(stdout);
         return 0;
     }
+    for (int i = 2; i < argc; i++)
+        if (is_help_flag(argv[i])) return command_help(cmd);
     if (!strcmp(cmd, "version")) {
         printf("%s\n", NA_VERSION);
         return 0;
@@ -719,6 +807,13 @@ int ctl_main(int argc, char **argv)
         else if (!strcmp(argv[i], "--quiet") || !strcmp(argv[i], "-q")) c.quiet = true;
         else if (!strcmp(argv[i], "--yes") || !strcmp(argv[i], "-y")) c.yes = true;
         else rest[nrest++] = argv[i];
+    }
+    if (nrest > 0 && strcmp(cmd, "connect") != 0 && strcmp(cmd, "logs") != 0 && strcmp(cmd, "log") != 0 &&
+        strcmp(cmd, "update") != 0) {
+        fprintf(stderr, "%s 不认识的参数：%s（nano-kernel %s --help 看用法）\n", cmd, rest[0], cmd);
+        free(rest);
+        free(c.conf);
+        return 2;
     }
     if (!c.conf) {
         char *d = plat_exe_dir();

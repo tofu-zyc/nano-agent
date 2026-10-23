@@ -66,13 +66,15 @@ nano-gateway uninstall --keep-data    # 只删程序，配置和数据留着，�
 
 ```sh
 nano-kernel status                    # 运行状态、和网关的连接（已连接多久 / 正在连接的报错 / 等确认的确认码）、版本
-nano-kernel start | stop | restart    # 自动认出 systemd / launchd / Windows 任务计划 / 后台进程
+nano-kernel start | stop | restart    # 自动认出 systemd / launchd / Windows 任务计划或启动文件夹 / 后台进程
 nano-kernel connect 192.168.1.2:7700 [--name 名字]   # 改连别的网关并重启；换了网关会自动重新申请接入
 nano-kernel logs -f
 nano-kernel update | uninstall
 ```
 
-安装时会把 `nano-kernel` 加进 PATH（Windows 加进当前用户的 PATH，要新开一个终端）。旧的 `nano-kernel-ctl` 还能用，就是转给 `nano-kernel`。
+`nano-kernel help` 看全部命令，`nano-kernel 命令 --help` 看单个命令的用法。安装时会把 `nano-kernel` 加进 PATH（Windows 加进当前用户的 PATH，要新开一个终端）；以前的 `nano-kernel-ctl` 已经去掉，重新运行安装命令时会删掉。
+
+Windows 上开机自启用任务计划程序（只对当前用户，不需要管理员）；建不了任务时（比如公司电脑的策略）自动改用「启动」文件夹里的快捷方式，`-NoTask` 也可以直接用这种方式。
 
 `--old-local-as` 把旧网关“本机”上的工作目录改记到这个机器名下：之后在旧机器上装内核、用这个名字连过来，工作目录和会话都能接着用。配对过的电脑要改连新地址（在那台电脑上重新运行安装命令，配对口令保留）。
 
@@ -121,6 +123,7 @@ nano-gateway logs -f -n 100      # 看日志，-f 跟着滚
 nano-gateway url                 # 打印带密码的网页登录链接
 nano-gateway doctor              # 检查配置、密钥和目录权限、端口、执行器/内核、服务、WSL 保活
 nano-gateway version             # 编译时写进去的版本号
+nano-gateway help                # 全部命令；nano-gateway 命令 --help 看单个命令
 ```
 
 聊天里管理员可以用 `/status` 和 `/restart`；网页设置顶部在改动了需要重启的配置时会出现“重启网关”按钮，重启期间页面显示“重启中”并自动重连；AI 可以在管理员会话里用 `Gateway {"what":"logs"}` 看脱敏日志，用 `GatewayAdmin {"action":"restart"}` 重启（要审批）。重启会先重新加载 `gateway.toml` 和 `data/config.json`，加载失败不会停掉正在运行的网关；成功后会给发起的会话回一句“网关已重启”。
@@ -411,7 +414,7 @@ sh nano-kernel-install.sh --gateway 192.168.1.2:7700   # 拷到那台电脑上�
 脚本检查编译工具，缺了就用包管理器装（apt / dnf / pacman / zypper / apk，用 sudo 之前先问）；编译后装到 `~/.nano-agent/kernel/`，写好 `kernel.conf`，注册 systemd 用户服务（开机自启、退出了自动重启；没有 systemd 的 WSL 用后台进程，可以选择登录时自动启动），然后连上网关请求接入，显示一个 6 位确认码。用 `Gateway {"what":"pairing"}` 看确认码，再用 `GatewayAdmin {"action":"pair_allow","id":"…"}` 允许（网页“设备”里也能点），网关给这台电脑发一个专用口令（存在 `paired.token`），之后自动重连。配对的口令只能用这台电脑的名字，冒充不了别的机器；用 `pair_remove` 或在“设备”里移除，口令就作废。
 
 - 再运行一次就是升级（保留配置和口令）；`--uninstall` 卸载；`--name` 改名字；`--no-service` 只装不启动。
-- 装好后用 `nano-kernel-ctl start|stop|restart|status|log` 管理（在 `~/.nano-agent/bin` 里）。
+- 装好后用 `nano-kernel status|start|stop|restart|connect|logs` 管理（已加进 PATH；`nano-kernel help` 看全部）。
 - 源码目录里可以直接运行 `./scripts/install-kernel.sh`（或者 `make install-kernel`），不用生成安装包。
 - 电脑接入要先在“设备”里启用（默认端口 7700，也就是 `kernel.device_listen`）。协议本身不加密，跨网络请走 WireGuard / Tailscale / SSH 隧道。
 - Windows 上在 WSL2 里安装，工作目录用 `/mnt/c/...`、`/mnt/d/...`。

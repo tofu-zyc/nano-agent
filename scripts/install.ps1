@@ -8,6 +8,7 @@
 #   -Dir 目录         安装目录（默认 %USERPROFILE%\.nano-agent\kernel）
 #   -Version x.y.z    装指定版本（默认最新）
 #   -NoService        只安装，不注册开机自启，也不启动
+#   -NoTask           不用任务计划程序，开机自启放进「启动」文件夹
 #   -Yes              不提问（必须给 -Gateway）
 #   -Uninstall        停止并删除
 # 环境变量 NANO_DOWNLOAD_URL 可以换下载地址（镜像）。
@@ -18,6 +19,7 @@ param(
     [string]$Version = "",
     [string]$TaskName = "",
     [switch]$NoService,
+    [switch]$NoTask,
     [switch]$NoPath,
     [switch]$Yes,
     [switch]$Uninstall
@@ -79,6 +81,7 @@ try {
     if ($Dir) { $a += @("-Dir", $Dir) }
     if ($TaskName) { $a += @("-TaskName", $TaskName) }
     if ($NoService) { $a += "-NoService" }
+    if ($NoTask) { $a += "-NoTask" }
     if ($NoPath) { $a += "-NoPath" }
     if ($Yes) { $a += "-Yes" }
     if ($Uninstall) { $a += "-Uninstall" }

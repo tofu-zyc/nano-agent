@@ -48,7 +48,7 @@ sh nano-kernel-install.sh --gateway 192.168.1.2:7700
 
 - 脚本会：检查并安装 cc / make（用 sudo 前先问）→ 编译 → 装到 `~/.nano-agent/kernel/` → 写 `kernel.conf` → 注册 systemd 用户服务（没有 systemd 时后台运行）→ 连网关，显示 6 位确认码。
 - 用 `Gateway {"what":"pairing"}` 看确认码，再用 `GatewayAdmin {"action":"pair_allow","id":"…"}` 允许（或 `pair_deny`）；不要让用户去网页点。口令存在那台电脑的 `paired.token`，之后自动重连。
-- 再运行一次是升级；`--name 新名字` 改名；`--uninstall` 卸载；`nano-kernel-ctl status|log|restart` 管理。
+- 再运行一次是升级；`--name 新名字` 改名；`--uninstall` 卸载；`nano-kernel status|logs|restart|connect 网关地址` 管理（`nano-kernel help` 看全部）。
 - 网关那边要先启用电脑接入（默认端口 7700）。Windows 在 WSL2 里装，工作目录用 `/mnt/c/...`、`/mnt/d/...`。
 
 ## 常见问题
@@ -58,7 +58,8 @@ sh nano-kernel-install.sh --gateway 192.168.1.2:7700
 - 提示服务器上没有 `cc`：架构和网关不一样，要在服务器上装编译器（Debian/Ubuntu `build-essential`，Fedora `gcc make`）后重连。
 - 安装脚本说“暂时没连上网关”：网关地址对不对（别的电脑访问不了 `127.0.0.1`，用网关的局域网 IP）、“设备”里电脑接入有没有启用、防火墙放没放行端口；网关在 WSL 里时，Windows 还要做端口转发或开镜像网络。
 - 提示“名字已经有电脑配对过了”：换个名字（重新运行安装脚本加 `--name`），或者用 `GatewayAdmin {"action":"pair_remove","node":"旧名字"}` 移除旧的。
-- 被拒绝后内核退出；`nano-kernel-ctl restart` 重新申请。移除过的电脑会自动重新申请。
+- 被拒绝后内核退出；`nano-kernel restart` 重新申请。移除过的电脑会自动重新申请。
+- 内核没在运行（`nano-kernel status` 显示“没有运行”）：`nano-kernel start`。Windows 上 status 提示“任务计划里没有 …”时，是旧版安装脚本用普通用户建任务失败了：重新运行一次安装命令就好（新版只给当前用户建任务，建不了自动改用「启动」文件夹）。
 - 机器在线但工具被拒：看会话选的工作目录对不对、目录存不存在、权限模式是不是只读；写工作目录外要 `elevated: true` 并审批。
 - Windows 盘目录读写报没有权限：旧版执行器 DrvFS 的问题，更新后重试，不需要 chmod 777 或关沙箱。
 - 内核和协议本身不加密，跨网络请用 WireGuard / Tailscale / SSH 隧道。

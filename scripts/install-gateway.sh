@@ -180,7 +180,12 @@ if [ "$UNINSTALL" = 1 ]; then
       cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
     fi
   done
-  remove_from_path "$BIN" nano-gateway nano-kernel-ctl
+  if [ -x "$NANO_HOME/kernel/nano-kernel" ]; then
+    # 内核的 nano-kernel 也在 bin/ 里，PATH 行留着
+    case "$(readlink "$HOME/.local/bin/nano-gateway" 2>/dev/null)" in "$BIN"/*) rm -f "$HOME/.local/bin/nano-gateway" ;; esac
+  else
+    remove_from_path "$BIN" nano-gateway nano-kernel nano-kernel-ctl
+  fi
   if [ -x "$NANO_HOME/kernel/nano-kernel" ]; then
     # 同一个目录里还装着内核：只删网关的部分
     confirm "删除网关的程序、配置和数据（保留 $NANO_HOME/kernel 里的内核）？" || { say "已取消"; exit 0; }
