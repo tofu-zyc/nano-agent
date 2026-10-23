@@ -136,6 +136,12 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - 卸载：`nano-gateway uninstall [--keep-data] [--yes]`：停 systemd 或后台进程（连看护进程）、删服务文件、WSL 保活脚本、`.profile` 自启行；同一个 NANO_HOME 里有 `kernel/` 时只删网关的部分、PATH 行留着。`install-gateway.sh --uninstall` 交给它（旧版本程序没有这个命令时用脚本里的逻辑，也保留内核）。内核：安装时把安装脚本留在内核目录里，`nano-kernel version|update|uninstall`；Windows 同样留一份 `install-kernel.ps1`。
 - 测试：`scripts/test-update.py`（本地编出 0.0.1/0.0.2/0.0.3，0.0.3 启动必失败：更新、退回、内核自动升级、两种卸载）、`app/update_test.go`、`release/release_test.go`；`test-install-win.py` 加了 Windows 内核自更新（exe 改名、退出码 75、run-kernel.ps1 拉起）和用留下的脚本卸载。
 
+## 分支（2026-10-23 起）
+
+- `main` 是稳定分支：只放发布过的版本和小修。大版本在 `dev/<版本>` 分支上开发（v0.3 → `dev/v0.3`），做完、用户同意后 `--no-ff` 合并回 main，再在 main 上打标签发布。main 上的小修合并进开发分支，不 rebase 已推送的开发分支。
+- CI 在 `main` 和 `dev/**` 上都跑。`release.yml` 先有一个 `guard` 任务：标签指向的提交不在 main 上就拒绝发布，防止开发版变成“最新版本”被所有机器自动更新上去。
+- 详见 [PLAN-roadmap.md](PLAN-roadmap.md) 的「分支」。
+
 ## 发布、一行安装、内核自我更新、搬家（2026-10-22）
 
 - 仓库公开在 https://github.com/tofu-zyc/nano-agent （Apache-2.0）。提交身份是 `tofu-zyc <286995380+tofu-zyc@users.noreply.github.com>`（仓库本地 git config 已设，历史改写过；改写前的历史留在本地 ref `refs/backup/before-email-rewrite`，不推送）。**第一次推送之后不再改写历史、不强推。**

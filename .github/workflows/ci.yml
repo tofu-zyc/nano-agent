@@ -1,10 +1,10 @@
 # 每次推送和 PR：Linux 上跑全部测试；Windows 和 macOS 在真机上跑各自平台的测试。
-# 发布（release.yml）也先跑这里。
+# main 是稳定分支，大版本在 dev/<版本> 分支上开发，两边都跑。发布（release.yml）也先跑这里。
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "dev/**"]
   pull_request:
   workflow_call:
 
