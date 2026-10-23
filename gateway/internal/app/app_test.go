@@ -227,8 +227,8 @@ func TestFinalAnswer(t *testing.T) {
 	}
 	req := e.llm.lastReq()
 	// 没有工作目录：HOME 模式，工具仍然给；管理员还有 Gateway / GatewayAdmin
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 3 ||
-		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "echo" {
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 4 ||
+		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "Schedule" || req.Tools[3].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -318,7 +318,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 3 {
+	if n := len(e.llm.lastReq().Tools); n != 4 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }

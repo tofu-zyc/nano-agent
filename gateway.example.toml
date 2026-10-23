@@ -29,10 +29,27 @@ send_reasoning = false         # 把当前这一轮的推理内容回传给模�
 
 # 旧版单模型配置（provider/base_url/api_key/model/context_window/...）会在升级后第一次启动时
 # 一次性导入成普通模型，之后可以像别的模型一样修改、删除；新装用户不用写。
+[context]
+compact_at = 0.75
+compact_to = 0.4
+keep_turns = 4
+idle_compact = "30m"          # "0" 关闭
+idle_compact_min = 0.3
+archive_days = 90             # 0 永久保留
+
+[channels]
+show = "过程"                 # 详细 / 过程 / 简洁；telegram.show / feishu.show 可覆盖
+
+[search]
+enabled = true
+provider = "deepseek"
+# api_key = ""               # 留空时回退到 api.deepseek.com 模型接口的 key；加密保存
+count = 6
+
 [persona]
 # 人格（系统提示词）目录：default.md 是默认人格；
 # 放一个 <会话ID>.md（比如 main.md 是主会话，tg:123456789.md 是某个人私聊的会话）就能给某个会话单独设定。
-# 改完保存，下一条消息就生效，不用重启。
+# 改完保存，在新会话、/reset 或上下文整理后刷新，保持请求前缀稳定。
 dir = "personas"
 
 [session]
@@ -47,11 +64,11 @@ allow_chats = []
 # 只有管理员能用写文件、执行命令这类工具，能改工作目录和权限模式，能审批。
 admins = []
 # 其他人能用的工具：none（只聊天，默认）| readonly（可以读工作目录里的文件、搜索）
-guest = "none"
+guest = "none"               # 启用的 WebSearch/WebFetch 不受此限制
 
 [skills]
 # 技能目录：每个技能一个子目录，里面是 SKILL.md 和附带的脚本、资料。放在网关上，所有内核共用；
-# 调用时附带文件放到执行工具的机器的 ~/.nano-agent/skills/<技能名>/ 下。改动下一轮自动生效
+# 调用时附带文件放到执行工具的机器的 ~/.nano-agent/skills/<技能名>/ 下。定义在新会话、/reset 或上下文整理后刷新；技能正文按需读取
 # dir = "skills"
 
 [workspace]

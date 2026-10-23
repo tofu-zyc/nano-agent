@@ -286,6 +286,9 @@ func (a *App) Maintain() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, sid := range a.sessionIDs() {
+		if strings.HasPrefix(sid, "cron:") {
+			continue
+		} // 下次任务会归档并清空，无需空闲摘要
 		s := a.sessOf(sid)
 		if s.lastActivity.IsZero() {
 			for _, m := range a.store.History(sid) {

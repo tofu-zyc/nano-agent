@@ -212,6 +212,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.auth(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]bool{"ok": true}) }))
+	mux.HandleFunc("GET /api/schedules", s.auth(s.getSchedules))
+	mux.HandleFunc("POST /api/schedules", s.auth(s.scheduleAction))
 	mux.HandleFunc("GET /api/overview", s.auth(s.overview))
 	mux.HandleFunc("POST /api/restart", s.auth(s.restart))
 	mux.HandleFunc("GET /api/update", s.auth(s.updateStatus))

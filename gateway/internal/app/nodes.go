@@ -112,6 +112,7 @@ func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
 		tools = append(tools, toolOf(spec))
 	}
 	if admin {
+		tools = append(tools, toolOf(scheduleTool()))
 		for _, spec := range a.gatewayTools() {
 			tools = append(tools, toolOf(spec))
 		}

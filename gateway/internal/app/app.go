@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
@@ -40,6 +41,7 @@ type Command struct {
 
 var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
+	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
@@ -81,6 +83,9 @@ var helpText = func() string {
 }()
 
 type App struct {
+	schedules         *schedule.Store
+	schedulesErr      error
+	schedulerStarted  bool
 	searchClient      search.Provider
 	searchFingerprint string
 	searchUsage       SearchUsage
@@ -141,6 +146,7 @@ type App struct {
 }
 
 type sess struct {
+	scheduled           *schedule.Task
 	sid                 string
 	compacting          bool
 	compactCancel       context.CancelFunc
@@ -177,6 +183,7 @@ type out struct {
 }
 
 type run struct {
+	scheduled  *schedule.Task
 	id         uint64
 	node       string // 跑这一轮的内核
 	from       string // 触发者身份，内核据此判断权限
@@ -265,12 +272,14 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.migrate()
 	a.loadEndpoints()
 	a.loadWorkspaces()
+	a.loadSchedules()
 	a.skills.Scan()
 	go a.maintenance()
+	go a.scheduleLoop()
 	return a
 }
 
-func (a *App) SetHub(h *kernel.Hub) { a.hub = h }
+func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
 
 // Bus 是事件总线，网页界面从这里订阅。
 func (a *App) Bus() *events.Bus { return a.bus }
@@ -404,6 +413,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "session":
 		a.cmdSession(c, arg)
+		return
+	case "cron":
+		a.cmdCron(c, arg)
 		return
 	case "compact":
 		a.cmdCompact(c, arg)
@@ -675,7 +687,9 @@ func (a *App) startRun(s *sess) {
 		}
 	}
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
-	a.catchUp(head.ep, s.sid)
+	if s.scheduled == nil {
+		a.catchUp(head.ep, s.sid)
+	}
 	a.remember(s, batch, a.histEnd(s.sid))
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
@@ -683,10 +697,10 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
-	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
+	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil {
 		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
 	}
 	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
@@ -696,7 +710,7 @@ func (a *App) startRun(s *sess) {
 	}
 	for key, rec := range a.eps {
 		ep := parseEndpoint(key)
-		if rec.Session != s.sid || ep == head.ep {
+		if r.scheduled != nil || rec.Session != s.sid || ep == head.ep {
 			continue
 		}
 		if wt, ok := a.chans[ep.ch].(channel.Watcher); ok {
@@ -711,9 +725,22 @@ func (a *App) startRun(s *sess) {
 	if len(images) > 0 && !r.withImages {
 		a.notify(s, "（这个模型不能接收图片：图片已保存在历史里，但没有发给它。需要的话用 /model 换一个支持图片的模型）")
 	}
-	r.stopTyping = a.startTyping(head.ep)
+	r.stopTyping = func() {}
+	if r.scheduled == nil {
+		r.stopTyping = a.startTyping(head.ep)
+	} else {
+		r.outs = nil
+		for _, key := range r.scheduled.Deliver {
+			r.outs = append(r.outs, out{ep: parseEndpoint(key)})
+		}
+	}
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
+	if r.scheduled != nil {
+		limit, _ := schedule.Timeout(*r.scheduled)
+		in.RunTimeoutMs = int(limit / time.Millisecond)
+		in.ApprovalTimeoutMs = int((30 * time.Minute) / time.Millisecond)
+	}
 	for _, m := range rt.mounts {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
@@ -764,6 +791,16 @@ func (a *App) endRun(s *sess, note string) {
 		v.Close()
 	}
 	s.run = nil
+	s.scheduled = nil
+	if r.scheduled != nil {
+		why := note
+		if why == "" {
+			why = "任务运行中断"
+		}
+		a.completeSchedule(r.scheduled, false, why)
+		r.scheduled = nil
+		note = ""
+	}
 	for n, ap := range a.approvals {
 		if ap.sid == s.sid {
 			a.dropApproval(n, "这一轮已经结束，不用审批了")
@@ -815,7 +852,7 @@ func (a *App) reset(c in) {
 func (a *App) decide(c in, arg string, ok bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
 	ap := a.approvals[n]
-	if err != nil || ap == nil || ap.sid != c.s.sid {
+	if err != nil || ap == nil || !a.canApproveFrom(c, ap) {
 		a.answer(c, "没有这个编号的待审批请求")
 		return
 	}
@@ -823,7 +860,7 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
-	if a.hub.Send(c.s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
+	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
 		who := c.who
 		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
 			who = c.name
@@ -949,6 +986,11 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
 		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
+	if r.scheduled != nil {
+		a.completeSchedule(r.scheduled, status == proto.StatusOK, strings.TrimSpace(body+"\n"+note))
+		r.scheduled = nil
+		body, note = "", ""
+	}
 	a.endRun(s, "")
 	// 这一轮显示到的窗口都看到了这里
 	end := a.histEnd(s.sid)
@@ -970,7 +1012,7 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)
-	if s.run == nil {
+	if s.run == nil && !strings.HasPrefix(s.sid, "cron:") {
 		a.maybeCompact(s, false)
 	}
 }

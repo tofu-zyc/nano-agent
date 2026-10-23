@@ -61,6 +61,7 @@ func TestGuestWebSearchToolAndFrozenPrefix(t *testing.T) {
 		t.Fatal("default count")
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: "ok"})
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[in.SID].run == nil })
 	e.a.mu.Lock()
 	e.a.cfg.Search.APIKey = ""
 	_, tools, _, _ := e.a.contextParts(in.SID)

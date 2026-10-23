@@ -118,3 +118,22 @@ func (a *App) decided(ok bool, who string) string {
 	}
 	return verb + " · " + who
 }
+
+// A scheduled run's approval belongs to its own session, but arrives in its delivery windows.
+func (a *App) canApproveFrom(c in, ap *approval) bool {
+	s := a.sessions[ap.sid]
+	if s == nil || s.run == nil {
+		return false
+	}
+	if ap.sid == c.s.sid {
+		return true
+	}
+	if s.run.scheduled != nil {
+		for _, o := range s.run.outs {
+			if o.ep == c.ep {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -426,7 +426,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin") || !strcmp(c->name,"WebSearch") || !strcmp(c->name,"WebFetch")) {
+    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin") || !strcmp(c->name,"WebSearch") || !strcmp(c->name,"WebFetch") || !strcmp(c->name,"Schedule")) {
         send_exec(k, c, args, NULL);
         return;
     }
@@ -796,6 +796,8 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
+ const cJSON *rt=cJSON_GetObjectItemCaseSensitive(m,"run_timeout_ms"), *at=cJSON_GetObjectItemCaseSensitive(m,"approval_timeout_ms");
+ ev.run_timeout_ms=cJSON_IsNumber(rt) ? rt->valueint : 0;ev.approval_timeout_ms=cJSON_IsNumber(at) ? at->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
         policy = build_policy(m, ev.mode);
         ev.policy = policy;
@@ -831,9 +833,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             }
             if (calls[i].args_ok && cJSON_IsObject(args))
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
+            calls[i].action=sget(args,"action");
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
             if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") &&
-                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && strcmp(calls[i].name,"WebSearch") && strcmp(calls[i].name,"WebFetch") && run_pol) {
+                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && strcmp(calls[i].name,"WebSearch") && strcmp(calls[i].name,"WebFetch") && strcmp(calls[i].name,"Schedule") && run_pol) {
                 char err[1024];
                 const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
                 if (!ws) {

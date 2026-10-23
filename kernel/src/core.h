@@ -23,6 +23,7 @@ typedef enum {
     NA_TOOL_READ,    /* 只读：Read、Grep */
     NA_TOOL_WRITE,   /* 改文件：Write、Edit */
     NA_TOOL_SHELL,   /* 任意命令 */
+    NA_TOOL_SCHEDULE, /* 管理员定时任务，按 action 和模式审批 */
     NA_TOOL_ADMIN,   /* 网关管理工具：任何模式都要审批 */
 } na_tool_kind;
 
@@ -81,6 +82,7 @@ typedef struct {
     na_sandbox sandbox; /* 这个调用在哪台机器上执行，那里有没有沙箱（宿主按参数里的工作目录判断） */
     const char *error;  /* 宿主预先检查出的问题（比如工作目录写错了）：非空时直接以此失败，不执行 */
     bool elevated;      /* 模型要求提权写工作目录外（每次都要审批） */
+ const char *action; /* 宿主从参数读取，只有网关管理类工具使用 */
 } na_call;
 
 typedef struct {
@@ -88,6 +90,7 @@ typedef struct {
     const char *sid;
     const char *from;
     na_mode mode;
+ int run_timeout_ms, approval_timeout_ms; /* INPUT 可选覆盖；0 用默认值 */
     bool elevate;         /* INPUT：这个身份的会话能不能提权（访客不能） */
     na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */

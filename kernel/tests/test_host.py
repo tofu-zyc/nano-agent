@@ -137,6 +137,35 @@ def leftover(tag):
     return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
 
 
+@case("定时任务策略：管理员 ask 创建需审批、readonly 可列出；网络工具访客可用", approvals=True)
+def t_schedule(gw):
+    gw.send(t="input", sid="cron-policy", mode="ask", elevate=True, workspaces=[],
+            run_timeout_ms=4000000, approval_timeout_ms=1800000, **{"from":"tg:admin"})
+    gw.expect("model", sid="cron-policy")
+    call(gw,"cron-policy",("s1","Schedule",{"action":"create","name":"demo"}))
+    gw.expect("approve_req",sid="cron-policy",id="s1")
+    gw.send(t="approve",sid="cron-policy",id="s1",ok=True)
+    gw.expect("notice",sid="cron-policy")
+    gw.expect("exec",sid="cron-policy",name="Schedule",id="s1")
+    gw.send(t="exec_result",sid="cron-policy",id="s1",ok=True,content="created")
+    gw.expect("result",sid="cron-policy",id="s1")
+    finish(gw,"cron-policy")
+    gw.send(t="input",sid="cron-ro",mode="readonly",elevate=True,workspaces=[],**{"from":"tg:admin"})
+    gw.expect("model",sid="cron-ro")
+    call(gw,"cron-ro",("l","Schedule",{"action":"list"}))
+    gw.expect("exec",sid="cron-ro",id="l",name="Schedule")
+    gw.send(t="exec_result",sid="cron-ro",id="l",ok=True,content="[]")
+    gw.expect("result",sid="cron-ro",id="l")
+    finish(gw,"cron-ro")
+    gw.send(t="input",sid="public-web",mode="none",workspaces=[],**{"from":"visitor"})
+    gw.expect("model",sid="public-web")
+    call(gw,"public-web",("w","WebSearch",{"query":"example"}))
+    gw.expect("exec",sid="public-web",id="w",name="WebSearch")
+    gw.send(t="exec_result",sid="public-web",id="w",ok=True,content="fake")
+    gw.expect("result",sid="public-web",id="w")
+    finish(gw,"public-web")
+
+
 @case("技能在网关上：Skill 交给网关，不带工作目录")
 def t_skill(gw):
     start_run(gw, "sk")
@@ -467,7 +496,7 @@ def main():
             gw.send(t="welcome", v=5)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve,
+            for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_gateway_cancel, t_reconnect):
                 t(gw)

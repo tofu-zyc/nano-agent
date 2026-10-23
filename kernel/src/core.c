@@ -24,6 +24,7 @@ typedef struct run {
     bool elevate;        /* 这个身份能不能提权 */
     bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
+    int approval_timeout_ms;
     int steps;            /* 已请求模型的次数 */
     int64_t deadline;     /* 整个 run 的截止时刻 */
     call_t *calls; size_t ncalls;  /* 当前这一轮的工具调用 */
@@ -307,7 +308,8 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->mode = ev->mode;
     r->elevate = ev->elevate;
     r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
-    r->deadline = now + c->cfg.run_timeout_ms;
+    r->deadline = now + (ev->run_timeout_ms>0 ? ev->run_timeout_ms : c->cfg.run_timeout_ms);
+ r->approval_timeout_ms=ev->approval_timeout_ms>0 ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
     r->next = c->runs;
     c->runs = r;
     step(c, r);
@@ -343,7 +345,13 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         const char *why = NULL;
         bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
         k->elevated = in->elevated;
-        decision d = k->tool ? decide(sandbox, r->mode, k->tool->kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
+        na_tool_kind kind=k->tool ? k->tool->kind : NA_TOOL_WRITE;
+        bool schedule_admin=kind==NA_TOOL_SCHEDULE;
+        bool history_delete=kind==NA_TOOL_ADMIN && in->action && !strcmp(in->action,"history_delete");
+        if (schedule_admin) kind=in->action && (!strcmp(in->action,"list") || !strcmp(in->action,"run_now")) ? NA_TOOL_READ : NA_TOOL_WRITE;
+        decision d = k->tool ? decide(sandbox, r->mode, kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
+        if (schedule_admin && !r->elevate) {d=DECIDE_DENY;why="只有管理员能管理定时任务";}
+        if (history_delete && r->elevate) d=DECIDE_ASK; /* 删除历史在所有模式都必须审批 */
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);
@@ -362,7 +370,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             m->args = dupstr(k->args);
             m->from = dupstr(r->from);
             k->st = CALL_WAIT_APPROVAL;
-            k->deadline = now + c->cfg.approval_timeout_ms;
+            k->deadline = now + r->approval_timeout_ms;
         } else {
             exec_call(c, now, r, k);
         }

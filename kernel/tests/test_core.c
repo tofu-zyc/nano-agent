@@ -18,12 +18,13 @@ static na_tool_policy tools[] = {
     { "Shell", NA_TOOL_SHELL, 30000 },
     { "GatewayAdmin", NA_TOOL_ADMIN, 610000 },
     { "WebSearch", NA_TOOL_PUBLIC_READ, 70000 },
+ {"Schedule",NA_TOOL_SCHEDULE,70000},
 };
 
 static na_core *mk_sb(int max_steps, bool sandbox)
 {
     na_core_config cfg = {
-        .tools = tools, .ntools = 5,
+        .tools = tools, .ntools = 6,
         .sandbox = sandbox,
         .max_steps = max_steps,
         .run_timeout_ms = 600000,
@@ -487,8 +488,49 @@ static void test_public_read_all_modes(void)
     }
 }
 
+static void test_schedule_policy_and_deadlines(void)
+{
+    na_mode modes[]={NA_MODE_READONLY,NA_MODE_ASK,NA_MODE_AUTO};
+    const char *wants[]={
+        "EXEC(l,Schedule,70000) RESULT(w,err,当前是只读模式，只能用 Read 和 Grep) EXEC(r,Schedule,70000)",
+        "EXEC(l,Schedule,70000) APPROVE_REQ(w,Schedule,tg:1) EXEC(r,Schedule,70000)",
+        "EXEC(l,Schedule,70000) EXEC(w,Schedule,70000) EXEC(r,Schedule,70000)"
+    };
+    for (size_t i=0;i<3;i++) {
+        na_core *c=mk(16);
+        na_event ev={.type=NA_EV_INPUT,.sid="s",.from="tg:1",.mode=modes[i],.elevate=true};
+        na_core_feed(c,0,&ev);drain(c);
+        na_call calls[]={
+            {.id="l",.name="Schedule",.args="{}",.args_ok=true,.action="list"},
+            {.id="w",.name="Schedule",.args="{}",.args_ok=true,.action="create"},
+            {.id="r",.name="Schedule",.args="{}",.args_ok=true,.action="run_now"}
+        };
+        turn(c,1,"s",NA_TURN_TOOL_USE,calls,3);
+        EXPECT(c,wants[i]);na_core_free(c);
+    }
+    na_core *c=mk(16);
+    na_event ev={.type=NA_EV_INPUT,.sid="s",.from="tg:1",.mode=NA_MODE_ASK,.elevate=true,
+                 .run_timeout_ms=4000000,.approval_timeout_ms=1800000};
+    na_core_feed(c,0,&ev);drain(c);
+    CHECK(na_core_next_deadline(c)==4000000);
+    na_call call={.id="w",.name="Write",.args="{}",.args_ok=true};
+    turn(c,10,"s",NA_TURN_TOOL_USE,&call,1);drain(c);
+    CHECK(na_core_next_deadline(c)==1800010);
+    simple(c,1800010,NA_EV_TICK,NULL);
+    EXPECT(c,"RESULT(w,err,审批超时，未执行) MODEL(s)");
+    na_core_free(c);
+    c=mk(16);
+    ev=(na_event){.type=NA_EV_INPUT,.sid="s",.from="tg:1",.mode=NA_MODE_READONLY,.elevate=true};
+    na_core_feed(c,0,&ev);drain(c);
+    call=(na_call){.id="d",.name="GatewayAdmin",.args="{}",.args_ok=true,.action="history_delete"};
+    turn(c,1,"s",NA_TURN_TOOL_USE,&call,1);
+    EXPECT(c,"APPROVE_REQ(d,GatewayAdmin,tg:1)");
+    na_core_free(c);
+}
+
 int main(void)
 {
+    test_schedule_policy_and_deadlines();
     test_public_read_all_modes();
     test_final_answer();
     test_tool_roundtrip();

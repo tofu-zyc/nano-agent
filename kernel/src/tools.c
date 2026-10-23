@@ -19,6 +19,7 @@ typedef struct {
 
 /* timeout_ms 是内核这边的兜底：执行器自己会先按工具的超时结束 */
 static const builtin BUILTINS[] = {
+    { { "Schedule", NA_TOOL_SCHEDULE, 70000 }, NULL, NULL },
     { { "WebSearch", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },
     { { "WebFetch", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },
     { { "Edit", NA_TOOL_WRITE, 30 * 1000 },

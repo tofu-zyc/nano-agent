@@ -229,3 +229,11 @@ export type Target =
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
 export type PersonaPreset = { id: string; name: string; desc: string; text: string };
+
+export type ScheduleResult = { at: string; ok: boolean; summary: string };
+export type ScheduleTask = {
+ id: string; name: string; when: string; agent: string; prompt: string; deliver: string[]; workspaces: string[];
+ mode: string; creator_mode: string; enabled: boolean; catch_up: boolean; created_by: string; timeout?: string;
+ next: string; running: boolean; last?: ScheduleResult; results: ScheduleResult[];
+};
+export type ScheduleView = { tasks: ScheduleTask[]; timezone: string; error?: string };

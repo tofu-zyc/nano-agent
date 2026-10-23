@@ -29,6 +29,21 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		a.webTool(s, m, reply)
 		return
 	}
+	if m.Name == "Schedule" {
+		var args ScheduleRequest
+		if err := json.Unmarshal(m.Args, &args); err != nil {
+			reply(false, "定时任务参数格式不正确")
+			return
+		}
+		result, err := a.scheduleAction(s.sid, r.from, args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			b, _ := json.Marshal(result)
+			reply(true, string(b))
+		}
+		return
+	}
 	if m.Name == "Skill" {
 		a.skillTool(r, s.sid, m, reply)
 		return
