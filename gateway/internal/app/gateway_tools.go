@@ -29,8 +29,8 @@ const gatewaySchema = `{
     "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings"],
       "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态，或设置项（当前值和说明）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
-    "group":{"type":"string","enum":["memory","search","llm","gateway","workspace","telegram","feishu","cli","kernel"],
-      "description":"settings 只看这一组：memory 上下文与记忆、search 网络搜索、llm 模型请求、gateway 网关（含消息显示档位）……不填就是全部"}
+    "group":{"type":"string","enum":["memory","search","chat","llm","gateway","workspace","telegram","feishu","cli","kernel"],
+      "description":"settings 只看这一组：memory 上下文与记忆、search 网络搜索、chat 消息与显示（显示档位、消息时间、时区）、llm 模型请求、gateway 网关（访问控制、代理、更新）……不填就是全部"}
   }
 }`
 

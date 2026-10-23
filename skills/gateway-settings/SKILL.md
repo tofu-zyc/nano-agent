@@ -9,7 +9,7 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 
 ## 先查
 
-`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看一组：`memory`（上下文与记忆）、`search`（网络搜索）、`llm`（模型请求）、`gateway`（访问控制、消息、网络、更新）、`workspace`、`telegram`、`feishu`、`cli`、`kernel`。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因（要重启才生效的、网页密码和渠道 token 这类密钥），让用户去网页设置页改。
+`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看一组：`memory`（上下文与记忆）、`search`（网络搜索）、`chat`（消息与显示：显示档位、消息时间、时区）、`llm`（模型请求）、`gateway`（访问控制、代理、更新）、`workspace`、`telegram`、`feishu`、`cli`、`kernel`。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因（要重启才生效的、网页密码和渠道 token 这类密钥），让用户去网页设置页改。
 
 ## 再改
 

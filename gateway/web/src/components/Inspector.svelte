@@ -556,6 +556,9 @@
         {/if}
       {/if}
       <FieldGroup group={target.name} focus={store.focus} />
+      {#if target.name !== 'web'}
+        <FieldGroup group="chat" title="消息与显示（所有机器人和终端）" focus={store.focus} />
+      {/if}
     {:else if target.type === 'session'}
       {#if sess}
         <div class="actions">

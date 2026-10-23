@@ -31,7 +31,7 @@
 
 {#if fields.length}
   <div class="group">
-    <h4>{title}</h4>
+    <h4>{title}<span class="auto">改完按回车或点到别处就自动保存</span></h4>
     {#each sections as s}
       {#if s.name && sections.length > 1}<div class="sec">{s.name}</div>{/if}
       <div class="box">
@@ -59,6 +59,12 @@
 <style>
   .group {
     margin-top: 18px;
+  }
+  h4 .auto {
+    margin-left: 8px;
+    font-weight: 400;
+    letter-spacing: 0;
+    opacity: 0.8;
   }
   h4 {
     margin: 0 0 8px 2px;

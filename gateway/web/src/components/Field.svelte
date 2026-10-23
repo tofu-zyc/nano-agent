@@ -14,6 +14,8 @@
     'llm.provider': { openai: 'OpenAI 兼容', mock: '假模型' },
     'llm.modalities': { text: '文字', image: '图片' },
     'feishu.domain': { feishu: '飞书', lark: 'Lark' },
+    'telegram.show': { '': '跟随默认' },
+    'feishu.show': { '': '跟随默认' },
   };
   const sourceLabel = { web: '网页里改过', file: '配置文件', env: '环境变量', default: '默认值' };
 
@@ -37,6 +39,8 @@
   }
 
   function commit() {
+    // 数字输入框的 bind:value 给的是数字（清空时是 null），统一成文本再处理
+    if (typeof draft !== 'string') draft = draft == null ? '' : String(draft);
     if (f.type === 'secret') {
       if (draft.trim()) save(draft.trim()).then(() => (draft = ''));
       return;

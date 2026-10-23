@@ -3,7 +3,7 @@ package config
 // Field 描述一个配置项，网页界面据此生成控件、做搜索。所有说明都集中在这里。
 type Field struct {
 	Key      string   `json:"key"`               // 比如 "llm.model"
-	Group    string   `json:"group"`             // 归属的对象：gateway、llm、memory、search、kernel、workspace、cli、telegram、feishu
+	Group    string   `json:"group"`             // 归属的对象：gateway、chat、llm、memory、search、kernel、workspace、cli、telegram、feishu
 	Section  string   `json:"section,omitempty"` // 对象内的小标题
 	Label    string   `json:"label"`
 	Help     string   `json:"help,omitempty"`
@@ -22,9 +22,10 @@ var Fields = []Field{
 	{Key: "search.provider", Group: "search", Label: "搜索服务", Type: "enum", Options: []string{"deepseek"}},
 	{Key: "search.api_key", Group: "search", Label: "搜索 API key", Type: "secret", Help: "DeepSeek 的 API key。留空时借用模型接口里地址是 api.deepseek.com 的那个 key；按次计费，每千次成功请求 5 元"},
 	{Key: "search.count", Group: "search", Label: "默认搜索条数", Type: "int", Help: "模型没说要几条时返回几条，1–10，默认 6"},
-	{Key: "channels.show", Group: "gateway", Section: "消息", Label: "默认显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"}, Help: "详细含思考，过程只显示工具，简洁只保留答案"},
-	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
-	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
+	{Key: "channels.show", Group: "chat", Label: "显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"},
+		Help: "Telegram、飞书、终端里显示多少过程：详细 = 思考 + 工具 + 正文，过程 = 工具 + 正文，简洁 = 只有正文（处理中一行状态）。每个机器人可以在自己的设置里单独选，每个聊天窗口可以发 /show 单独设；网页始终显示全部", Keywords: "显示 思考 工具 过程 简洁 详细 show"},
+	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "只管这个机器人；跟随默认就用「消息与显示」里的显示档位。某个聊天窗口还可以发 /show 单独设"},
+	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "只管这个机器人；跟随默认就用「消息与显示」里的显示档位。某个聊天窗口还可以发 /show 单独设"},
 	{Key: "context.compact_at", Group: "memory", Section: "上下文整理", Label: "自动整理阈值", Type: "float", Help: "上下文到模型窗口的这个比例时自动整理（旧的工具输出换成占位，更早的对话合成摘要），默认 0.75", Keywords: "压缩 compact 记忆"},
 	{Key: "context.compact_to", Group: "memory", Section: "上下文整理", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
 	{Key: "context.keep_turns", Group: "memory", Section: "上下文整理", Label: "原样保留最近几轮", Type: "int", Help: "整理时最近这几轮对话一字不动，默认 4"},
@@ -52,9 +53,9 @@ var Fields = []Field{
 		Help: "只响应这些聊天窗口（窗口 ID 用 /whoami 查，比如 tg:123456789），空表示不限制。终端和网页总是允许", Keywords: "白名单 群 会话"},
 	{Key: "network.proxy", Group: "gateway", Section: "网络", Label: "默认代理", Type: "proxy",
 		Help: "模型和各个聊天渠道的代理留空时用这里的设置", Keywords: "proxy 代理 网络 翻墙"},
-	{Key: "session.timestamps", Group: "gateway", Section: "消息", Label: "消息带时间", Type: "bool",
+	{Key: "session.timestamps", Group: "chat", Label: "消息带时间", Type: "bool",
 		Help: "在用户消息前加上发送时间，模型不用调工具就知道现在几点"},
-	{Key: "session.timezone", Group: "gateway", Section: "消息", Label: "时区", Type: "string",
+	{Key: "session.timezone", Group: "chat", Label: "时区", Type: "string",
 		Help: "比如 Asia/Shanghai；空表示系统时区", Keywords: "时间"},
 	{Key: "update.check", Group: "gateway", Section: "更新", Label: "检查新版本", Type: "bool",
 		Help: "每天查一次有没有新版本，有的话在状态里提示；更新要你自己发起（网页按钮、/update 或 nano-gateway update）", Keywords: "update 升级 版本"},

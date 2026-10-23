@@ -7,10 +7,11 @@
 
   const groups: { id: string; label: string; icon: string; color: string; desc: string; target?: Target }[] = [
     { id: 'memory', label: '上下文与记忆', icon: 'brain', color: 'var(--c-memory)', desc: '上下文什么时候整理、整理到多少、空闲整理、归档保留多久', target: { type: 'memory' } },
+    { id: 'chat', label: '消息与显示', icon: 'chat', color: 'var(--c-session)', desc: '聊天里显示多少过程（思考、工具）、消息带不带时间、时区' },
     { id: 'search', label: '网络搜索', icon: 'search', color: 'var(--c-search)', desc: '让模型能搜网页、读网页（DeepSeek 官方接口，按次计费）', target: { type: 'search' } },
     { id: 'llm', label: '模型请求', icon: 'sparkles', color: 'var(--c-model)', desc: '请求超时、思考回传、默认温度、额外参数（模型和接口在拓扑图的「模型」节点）', target: { type: 'model' } },
     { id: 'workspace', label: '工作目录与沙箱', icon: 'folder', color: 'var(--c-dir)', desc: '工具能碰到的范围、默认权限模式', target: { type: 'workspace' } },
-    { id: 'gateway', label: '网关', icon: 'hub', color: 'var(--c-gateway)', desc: '管理员、访客权限、消息时间、网页登录', target: { type: 'gateway' } },
+    { id: 'gateway', label: '网关', icon: 'hub', color: 'var(--c-gateway)', desc: '管理员、访客权限、代理、更新、网页登录', target: { type: 'gateway' } },
     { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理', target: { type: 'channel', name: 'telegram' } },
     { id: 'feishu', label: '飞书', icon: 'feishu', color: 'var(--c-feishu)', desc: '扫码创建机器人、应用凭证、代理', target: { type: 'channel', name: 'feishu' } },
     { id: 'cli', label: '命令行', icon: 'terminal', color: 'var(--c-cli)', desc: '终端里显示什么', target: { type: 'channel', name: 'cli' } },
@@ -64,6 +65,7 @@
       <div><i class="file"></i>来自配置文件</div>
       <div><i class="env"></i>来自环境变量</div>
       <div><i></i>默认值</div>
+      <p class="autosave">改完按回车或点到别处就自动保存，旁边会出现“已保存”</p>
     </div>
   </nav>
 
@@ -204,6 +206,10 @@
     height: 6px;
     border-radius: 50%;
     background: var(--accent);
+  }
+  .autosave {
+    margin: 6px 0 0;
+    line-height: 1.5;
   }
   .legend {
     margin-top: auto;
