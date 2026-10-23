@@ -42,6 +42,7 @@ func parseEndpoint(key string) endpoint {
 
 // epRec 是记下来的一个窗口
 type epRec struct {
+	Show    string `json:"show,omitempty"`
 	Name    string `json:"name,omitempty"` // 聊天的名字（私聊对方的名字）
 	Who     string `json:"who,omitempty"`  // 最近在这个窗口说话的人的身份，网页里设管理员用
 	Session string `json:"session"`        // 接着的会话
@@ -52,6 +53,7 @@ type epRec struct {
 
 // EndpointInfo 是一个聊天窗口，网页用。
 type EndpointInfo struct {
+	Show    string `json:"show"`
 	Key     string `json:"key"`
 	Channel string `json:"channel"` // 拓扑图里的渠道：cli、telegram、feishu
 	Name    string `json:"name"`
@@ -97,7 +99,7 @@ func (a *App) loadEndpoints() {
 	}
 }
 
-func (a *App) saveEndpoints() {
+func (a *App) saveEndpoints() error {
 	b, _ := json.MarshalIndent(a.eps, "", "  ")
 	tmp := a.epFile() + ".tmp"
 	err := os.WriteFile(tmp, b, 0o600)
@@ -107,6 +109,7 @@ func (a *App) saveEndpoints() {
 	if err != nil {
 		a.log.Warn("保存聊天窗口的接线失败", "err", err)
 	}
+	return err
 }
 
 // migrate 升级旧版本的数据：以前命令行有自己的会话 cli:local，现在命令行接在主会话上，
@@ -215,13 +218,13 @@ func (a *App) endpointsOf(sid string) []EndpointInfo {
 	for key, r := range a.eps {
 		if r.Session == sid {
 			ep := parseEndpoint(key)
-			out = append(out, EndpointInfo{Key: key, Channel: chanName(ep.ch), Name: r.Name, Who: r.Who,
+			out = append(out, EndpointInfo{Show: a.showOf(ep), Key: key, Channel: chanName(ep.ch), Name: r.Name, Who: r.Who,
 				Admin: ep.ch == "cli" || a.isAdmin(r.Who), Session: sid})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	if sid == mainSID || a.store.Settings(sid).Web {
-		out = append(out, EndpointInfo{Key: "web", Channel: "web", Who: "web:admin", Admin: true, Session: sid})
+		out = append(out, EndpointInfo{Show: "详细", Key: "web", Channel: "web", Who: "web:admin", Admin: true, Session: sid})
 	}
 	return out
 }

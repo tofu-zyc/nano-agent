@@ -42,6 +42,7 @@ var Commands = []Command{
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
+	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
 	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
 	{Name: "history", Args: "[轮数]", Desc: "查看这个会话最近的对话"},
 	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
@@ -403,6 +404,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "compact":
 		a.cmdCompact(c, arg)
 		return
+	case "show":
+		a.cmdShow(c, arg)
+		return
 	case "context":
 		a.answer(c, a.contextText(c.s.sid))
 		return
@@ -679,7 +683,7 @@ func (a *App) startRun(s *sess) {
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
-		r.outs[0].view = st.OpenRun(head.ep.chat, "")
+		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
 	}
 	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
 	via := sourceOf(head.ep.ch)
@@ -697,7 +701,7 @@ func (a *App) startRun(s *sess) {
 			if mirrorText == "" && len(images) > 0 {
 				mirrorText = fmt.Sprintf("（%d 张图片）", len(images))
 			}
-			r.outs = append(r.outs, out{ep: ep, view: wt.OpenMirror(ep.chat, via, mirrorText)})
+			r.outs = append(r.outs, out{ep: ep, view: a.filterView(ep, wt.OpenMirror(ep.chat, via, mirrorText))})
 		}
 	}
 	if len(images) > 0 && !r.withImages {

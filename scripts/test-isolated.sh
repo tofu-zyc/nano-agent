@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the full Linux suite without user configuration or Windows interop.
 set -euo pipefail
+export ZIG_GLOBAL_CACHE_DIR="$(pwd)/build/zig-cache"
 export GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
 test_root=$(mktemp -d /tmp/nano-test.XXXXXX)
 trap 'rm -rf "$test_root"' EXIT

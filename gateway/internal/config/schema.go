@@ -18,6 +18,9 @@ type Field struct {
 
 // Fields 是全部可以在网页里查看、修改的配置项。
 var Fields = []Field{
+	{Key: "channels.show", Group: "gateway", Section: "消息", Label: "默认显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"}, Help: "详细含思考，过程只显示工具，简洁只保留答案"},
+	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
+	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
 	{Key: "context.compact_at", Group: "context", Section: "上下文", Label: "自动整理阈值", Type: "float", Help: "达到模型窗口的这个比例时整理，默认 0.75"},
 	{Key: "context.compact_to", Group: "context", Section: "上下文", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
 	{Key: "context.keep_turns", Group: "context", Section: "上下文", Label: "原样保留最近几轮", Type: "int"},

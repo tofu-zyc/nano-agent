@@ -753,15 +753,15 @@ func TestStreamingView(t *testing.T) {
 	for _, x := range ev {
 		kinds += x.kind + ","
 	}
-	want := "reasoning,end,tool,result,reasoning,content,end,note,close,"
+	want := "end,tool,result,content,end,note,close,"
 	if kinds != want {
 		t.Fatalf("events:\n got %s\nwant %s\n%+v", kinds, want, ev)
 	}
-	if ev[2].text != "Shell ls -la" || ev[3].text != "true a.txt（共 2 行）" || ev[5].text != "（mock）工具结果：a.txt\nb.txt\n" {
+	if ev[1].text != "Shell ls -la" || ev[2].text != "true a.txt（共 2 行）" || ev[3].text != "（mock）工具结果：a.txt\nb.txt\n" {
 		t.Fatalf("details: %+v", ev)
 	}
-	if !strings.Contains(ev[7].text, "2 次模型调用") || !strings.Contains(ev[7].text, "缓存命中 90%") {
-		t.Fatalf("usage: %q", ev[7].text)
+	if !strings.Contains(ev[5].text, "2 次模型调用") || !strings.Contains(ev[5].text, "缓存命中 90%") {
+		t.Fatalf("usage: %q", ev[5].text)
 	}
 	// 正文已经流式显示过，不会再用 Send 发一遍
 	select {

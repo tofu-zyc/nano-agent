@@ -100,11 +100,12 @@ CHATPID=$!
 exec 3>"$TMP/in"   # 一直开着写端，chat 的 stdin 就不会 EOF
 
 pass=0 fail=0
-send() { echo "$1" >&3; }
+output_start=0
+send() { output_start=$(wc -c < "$TMP/out"); echo "$1" >&3; }
 expect() {
   local desc=$1 want=$2
   for _ in $(seq 50); do
-    if grep -qF -- "$want" "$TMP/out"; then echo "  ok   $desc"; pass=$((pass + 1)); return; fi
+    if tail -c +$((output_start + 1)) "$TMP/out" | grep -qF -- "$want"; then echo "  ok   $desc"; pass=$((pass + 1)); return; fi
     sleep 0.1
   done
   echo "  FAIL $desc（没等到：$want）"; fail=$((fail + 1))
@@ -154,7 +155,7 @@ send '!call Shell {"command":"cat ~/.profile"}';       expect "HOME 会话 Shell
 send '!call Write {"path":"~/.nano-e2e-readonly","content":"x"}'; expect "HOME 会话写外面要提权" "elevated"
 send '!call Shell {"command":"echo x > ~/.nano-e2e-readonly"}'; expect "HOME 会话 Shell 不能写 HOME" "Permission denied"
 send '!call Write {"path":"~/.nano-e2e-elevated.txt","content":"elevated-ok","elevated":true}'; expect "提权要审批" "需要审批 #4"
-send "/approve 4";                                    expect "批准提权后写入" "elevated-ok"
+send "/approve 4";                                    expect "批准提权后写入" "（mock）工具结果：已创建"
 send '!call Read {"path":"~/.nano-e2e-elevated.txt"}'; expect "提权写到了工作目录外" "elevated-ok"
 # 网关管理工具：查询不审批，修改要审批；结果和日志里没有密钥
 send '!call Gateway {"what":"status"}';                 expect "Gateway 查询状态" "\"kernels\""

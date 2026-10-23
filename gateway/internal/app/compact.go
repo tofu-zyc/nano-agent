@@ -227,7 +227,7 @@ func (a *App) beginCompact(s *sess, high, low int, focus string, background bool
 		a.publishSession(s.sid)
 		if background {
 			for _, ep := range a.endpointsOf(s.sid) {
-				if ep.Channel != "web" {
+				if ep.Channel != "web" && a.showOf(parseEndpoint(ep.Key)) != "简洁" {
 					a.deliver(parseEndpoint(ep.Key), text, "")
 				}
 			}

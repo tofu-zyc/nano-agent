@@ -18,6 +18,7 @@ import (
 
 type Config struct {
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
+	Channels  Channels  `toml:"channels" json:"channels"`
 	Context   Context   `toml:"context" json:"context"`
 	LLM       LLM       `toml:"llm" json:"llm"`
 	Persona   Persona   `toml:"persona" json:"persona"`
@@ -34,6 +35,10 @@ type Config struct {
 	Update    Update    `toml:"update" json:"update"`
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
+}
+
+type Channels struct {
+	Show string `toml:"show" json:"show"`
 }
 
 type Context struct {
@@ -174,6 +179,7 @@ type CLI struct {
 func On(b *bool) bool { return b == nil || *b }
 
 type Telegram struct {
+	Show          string `toml:"show" json:"show"`
 	Enabled       bool   `toml:"enabled" json:"enabled"`
 	Token         string `toml:"token" json:"token"`
 	Proxy         string `toml:"proxy" json:"proxy"`
@@ -187,6 +193,7 @@ type Web struct {
 }
 
 type Feishu struct {
+	Show          string `toml:"show" json:"show"`
 	Enabled       bool   `toml:"enabled" json:"enabled"`
 	AppID         string `toml:"app_id" json:"app_id"`
 	AppSecret     string `toml:"app_secret" json:"app_secret"`
@@ -278,6 +285,9 @@ func (c *Config) applyEnv() {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Channels.Show == "" {
+		c.Channels.Show = "过程"
+	}
 	def := func(p *string, v string) {
 		if *p == "" {
 			*p = v
@@ -321,6 +331,11 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	for _, show := range []string{c.Channels.Show, c.Telegram.Show, c.Feishu.Show} {
+		if show != "" && show != "详细" && show != "过程" && show != "简洁" {
+			errs = append(errs, errors.New("显示档位只能是详细、过程或简洁"))
+		}
+	}
 	if c.Context.CompactAt <= 0 || c.Context.CompactAt >= 1 || c.Context.CompactTo <= 0 || c.Context.CompactTo >= c.Context.CompactAt || c.Context.KeepTurns < 1 || c.Context.IdleCompactMin < 0 || c.Context.IdleCompactMin >= 1 || c.Context.ArchiveDays < 0 {
 		errs = append(errs, errors.New("context：比例需在 0 到 1 之间，compact_to 小于 compact_at，keep_turns 至少 1，archive_days 非负"))
 	}

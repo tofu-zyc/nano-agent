@@ -11,6 +11,8 @@ import (
 // 过程与正文分别保存，平台自己决定折叠和布局。网络请求不占调度锁。
 type streamSnapshot struct {
 	Reasoning, Content, Notes, Source string
+	Transient                         string
+	Concise                           bool
 	Tools                             []toolEntry
 	Closed                            bool
 	ver                               int // 每次变化加一，没变就不发请求
@@ -32,6 +34,8 @@ func (s streamSnapshot) status() string {
 	switch {
 	case s.Closed:
 		return "完成"
+	case s.Transient != "":
+		return s.Transient
 	case len(s.Tools) > 0 && !s.Tools[len(s.Tools)-1].Done:
 		return "正在执行 " + s.Tools[len(s.Tools)-1].Name
 	case s.Content != "":
@@ -53,6 +57,8 @@ type streamRun struct {
 	notes               []string
 	tools               []toolEntry
 	source              string
+	transient           string
+	concise             bool
 	closed              bool
 	ver                 int
 	wake, closing, done chan struct{}
@@ -84,6 +90,7 @@ func (r *streamRun) change(f func()) {
 	}
 }
 
+func (r *streamRun) Status(text string) { r.change(func() { r.transient = text; r.concise = true }) }
 func (r *streamRun) Reasoning(text string) {
 	if text != "" {
 		r.change(func() { r.reasoning.WriteString(text) })
@@ -140,7 +147,7 @@ func (r *streamRun) snapshot() streamSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return streamSnapshot{Reasoning: r.reasoning.String(), Content: strings.TrimSpace(r.content.String()),
-		Tools: append([]toolEntry(nil), r.tools...), Notes: strings.Join(r.notes, "\n"), Source: r.source, Closed: r.closed, ver: r.ver}
+		Tools: append([]toolEntry(nil), r.tools...), Notes: strings.Join(r.notes, "\n"), Source: r.source, Transient: r.transient, Concise: r.concise, Closed: r.closed, ver: r.ver}
 }
 
 func (r *streamRun) loop() {

@@ -284,3 +284,19 @@ func TestFeishuApprovalCard(t *testing.T) {
 		t.Fatalf("处理后的卡片：%v", m.patched)
 	}
 }
+
+func TestFeishuConciseRemovesStatus(t *testing.T) {
+	f, m := mockFeishu(t, false)
+	s := &feishuStream{f: f, chat: "123"}
+	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Transient: "正在执行 Shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Content: "答案", Closed: true}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.deleted[s.cards[0].id+"/foot"] {
+		t.Fatal(m.deleted)
+	}
+}
