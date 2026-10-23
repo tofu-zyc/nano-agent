@@ -36,5 +36,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "nano-agent $VERSION" --generate-notes \
-            *-"$VERSION"-*.tar.gz *-"$VERSION"-*.zip install.sh install.ps1 VERSION SHA256SUMS
+          files="$(ls *-"$VERSION"-*.tar.gz *-"$VERSION"-*.zip) install.sh install.ps1 VERSION SHA256SUMS"
+          # 重跑时 Release 已经在了：覆盖上传附件
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber $files
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "nano-agent $VERSION" --generate-notes $files
+          fi
