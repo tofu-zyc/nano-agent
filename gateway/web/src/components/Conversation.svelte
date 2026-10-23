@@ -9,6 +9,7 @@
   import ToolCard from './ToolCard.svelte';
   import WorkspacePicker from './WorkspacePicker.svelte';
   import Icon from './Icon.svelte';
+ import HistoryManager from './HistoryManager.svelte';
 
   let { sid }: { sid: string } = $props();
 
@@ -332,9 +333,11 @@
       <div>人格 {c.persona} · 工具定义 {c.tools} · 摘要 {c.summary}（已整理 {c.compacted} 条）</div>
       <div>对话 {c.dialogue}（{c.messages} 条，工具结果 {c.tool_results}）</div>
       <div>上次输入 {c.last.prompt_tokens} · 缓存命中 {Math.round((c.last.cached_tokens ?? 0) / Math.max(1, c.last.prompt_tokens) * 100)}% · 输出 {c.last.completion_tokens}</div>
+      <div>到 {c.auto_at} 时自动整理 · 空闲 {c.idle_for} 后整理 · /compact 现在整理</div>
     </details>
   {/if}
 
+  <HistoryManager {sid} {summary} busy={!!phase} onchanged={load} />
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="inner">
       {#if summary}

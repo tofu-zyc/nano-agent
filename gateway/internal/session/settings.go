@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"nano-agent/gateway/internal/llm"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -9,7 +10,13 @@ import (
 )
 
 // Settings 是单个会话覆盖默认值的设置，存在 data/sessions/<会话ID>.settings.json。
+type Prefix struct {
+	System string     `json:"system"`
+	Tools  []llm.Tool `json:"tools"`
+}
 type Settings struct {
+	Prefix  *Prefix        `json:"prefix,omitempty"`
+	Omitted map[int]string `json:"omitted,omitempty"`
 	// Workspaces 是挂载的工作目录（工作目录列表里的 ID，app/workspaces.go），可以有好几个、在不同的机器上。
 	// WorkspacesSet 为 false 时用新会话的默认工作目录，第一次说话时定下来；为 true 而列表为空表示只聊天。
 	Workspaces    []string `json:"workspaces,omitempty"`

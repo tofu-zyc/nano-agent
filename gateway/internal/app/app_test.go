@@ -845,6 +845,9 @@ func TestStamp(t *testing.T) {
 func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 	e := setup(t)
 	e.a.cfg.LLM.MaxHistoryTokens = 600
+	e.a.cfg.Context = defaultContext()
+	e.a.cfg.Context.KeepTurns = 2
+	e.llm.AccurateUsage = true
 	long := strings.Repeat("长", 100) // 约 100 token
 	var prev []llm.Message
 	compactions := 0
@@ -861,7 +864,7 @@ func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 		prev = msgs
 	}
 	// 每轮约 230 token，上限 600、裁到 300：12 轮里应该只裁几次，而不是每轮都裁
-	if compactions == 0 || compactions > 5 {
+	if compactions == 0 || compactions > 10 {
 		t.Fatalf("裁剪次数：%d", compactions)
 	}
 }

@@ -18,6 +18,7 @@ import (
 
 type Config struct {
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
+	Context   Context   `toml:"context" json:"context"`
 	LLM       LLM       `toml:"llm" json:"llm"`
 	Persona   Persona   `toml:"persona" json:"persona"`
 	Skills    Skills    `toml:"skills" json:"skills"`
@@ -34,6 +35,17 @@ type Config struct {
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
+
+type Context struct {
+	CompactAt      float64 `toml:"compact_at" json:"compact_at"`
+	CompactTo      float64 `toml:"compact_to" json:"compact_to"`
+	KeepTurns      int     `toml:"keep_turns" json:"keep_turns"`
+	IdleCompact    string  `toml:"idle_compact" json:"idle_compact"`
+	IdleCompactMin float64 `toml:"idle_compact_min" json:"idle_compact_min"`
+	ArchiveDays    int     `toml:"archive_days" json:"archive_days"`
+}
+
+func DefaultContext() Context { return Context{.75, .4, 4, "30m", .3, 90} }
 
 type Kernel struct {
 	Listen       string `toml:"listen" json:"listen"`               // unix:/path 或 tcp:host:port
@@ -206,7 +218,7 @@ func parseCheck(path string, overlay []byte, check bool) (*Config, toml.MetaData
 	if err != nil {
 		return nil, toml.MetaData{}, nil, fmt.Errorf("读取 %s：%w", path, err)
 	}
-	var c Config
+	c := Config{Context: DefaultContext()}
 	md, err := toml.Decode(string(b), &c)
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("读取 %s：%w", path, err)
@@ -309,6 +321,12 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	if c.Context.CompactAt <= 0 || c.Context.CompactAt >= 1 || c.Context.CompactTo <= 0 || c.Context.CompactTo >= c.Context.CompactAt || c.Context.KeepTurns < 1 || c.Context.IdleCompactMin < 0 || c.Context.IdleCompactMin >= 1 || c.Context.ArchiveDays < 0 {
+		errs = append(errs, errors.New("context：比例需在 0 到 1 之间，compact_to 小于 compact_at，keep_turns 至少 1，archive_days 非负"))
+	}
+	if d, err := time.ParseDuration(c.Context.IdleCompact); err != nil || d < 0 {
+		errs = append(errs, errors.New("context.idle_compact 要写成 30m 或 0"))
+	}
 	if c.Kernel.Token == "" {
 		errs = append(errs, errors.New("kernel.token 不能为空"))
 	}

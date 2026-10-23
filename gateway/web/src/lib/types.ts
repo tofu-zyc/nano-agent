@@ -77,7 +77,7 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
 
 export type SessionInfo = {
-  context: { total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
+  context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
   endpoints: EndpointInfo[] | null;

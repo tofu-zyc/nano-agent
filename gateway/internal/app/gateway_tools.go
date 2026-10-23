@@ -37,7 +37,7 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove","restart","update"
+      "pair_allow","pair_deny","pair_remove","restart","update","history_delete"
     ],"description":"要做什么"},
     "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
@@ -63,6 +63,9 @@ const gatewayAdminSchema = `{
     "modalities":{"type":"array","items":{"type":"string"},"description":"能接收的输入类型：text、image"},
     "path":{"type":"string","description":"工作目录路径，或者 ssh_setup 时要添加并挂载的目录"},
     "default":{"type":"boolean","description":"设为新会话默认"},
+    "all":{"type":"boolean","description":"history_delete：删除全部历史和归档"},
+    "from":{"type":"integer","description":"history_delete：起始轮次（从 0 开始）"},
+    "to":{"type":"integer","description":"history_delete：结束轮次（含）"},
     "mount":{"type":"boolean","description":"workspace_mount：true 挂上，false 取下"}
   },
   "required":["action"]
@@ -192,6 +195,8 @@ type hostAdmin interface {
 }
 
 type gatewayArgs struct {
+	HistoryDelete
+
 	Action, ID, Node, Name, Host, User, Password, IdentityFile           string
 	Port, ContextWindow, MaxTokens, MaxHistory                           int
 	AutoConnect, Default                                                 bool
@@ -417,6 +422,11 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 			return "", err
 		}
 		return "已移除配对：" + args.Node, nil
+	case "history_delete":
+		a.mu.Lock()
+		err := a.deleteHistory(sid, args.HistoryDelete, true)
+		a.mu.Unlock()
+		return "指定历史已删除；摘要可能保留概要，可在网页清空摘要", err
 	case "restart":
 		if err := a.RequestRestart(RestartRequest{By: "gateway-admin", SID: sid}); err != nil {
 			return "", err

@@ -12,6 +12,8 @@ type Meter struct {
 	Signature string    `json:"signature"`
 }
 type ContextInfo struct {
+	AutoAt      int       `json:"auto_at"`
+	IdleFor     string    `json:"idle_for"`
 	Total       int       `json:"total"`
 	Window      int       `json:"window"`
 	Persona     int       `json:"persona"`

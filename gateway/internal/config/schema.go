@@ -18,6 +18,12 @@ type Field struct {
 
 // Fields 是全部可以在网页里查看、修改的配置项。
 var Fields = []Field{
+	{Key: "context.compact_at", Group: "context", Section: "上下文", Label: "自动整理阈值", Type: "float", Help: "达到模型窗口的这个比例时整理，默认 0.75"},
+	{Key: "context.compact_to", Group: "context", Section: "上下文", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
+	{Key: "context.keep_turns", Group: "context", Section: "上下文", Label: "原样保留最近几轮", Type: "int"},
+	{Key: "context.idle_compact", Group: "context", Section: "上下文", Label: "空闲整理间隔", Type: "string", Help: "例如 30m，0 关闭"},
+	{Key: "context.idle_compact_min", Group: "context", Section: "上下文", Label: "空闲整理最低占比", Type: "float"},
+	{Key: "context.archive_days", Group: "context", Section: "上下文", Label: "归档保留天数", Type: "int", Help: "0 永久保留，默认 90"},
 	// ---- 模型的全局默认（接口和模型都在网页的模型节点里配置） ----
 	{Key: "llm.timeout", Group: "context", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true,
 		Help: "所有模型接口的请求超时", Keywords: "超时 timeout"},

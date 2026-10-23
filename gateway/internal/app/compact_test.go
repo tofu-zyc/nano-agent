@@ -44,6 +44,8 @@ func seedCompaction(t *testing.T, e *env) {
 	e.a.mu.Lock()
 	defer e.a.mu.Unlock()
 	e.a.cfg.LLM.MaxHistoryTokens = 1000
+	e.a.cfg.Context = defaultContext()
+	e.a.cfg.Context.KeepTurns = 2
 	e.a.cfg.LLM.ThinkingLevels = []string{"none", "high"}
 	st := e.a.store.Settings(e.sid)
 	st.Summary = "[系统] 更早对话的摘要：\n已决定使用 C 内核和 Go 网关。"

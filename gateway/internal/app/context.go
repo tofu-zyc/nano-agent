@@ -30,6 +30,10 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if n := a.nodes[rt.kernel]; n != nil && !noTools {
 		tools = a.toolsFor(n, false, admin)
 	}
+	st := a.store.Settings(sid)
+	if st.Prefix != nil {
+		system, tools = st.Prefix.System, st.Prefix.Tools
+	}
 	m, _, _ := a.modelOf(sid)
 	window := m.ContextWindow
 	if window <= 0 {
@@ -40,12 +44,23 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 }
 func (a *App) contextInfo(sid string) session.ContextInfo {
 	system, tools, sig, window := a.contextParts(sid)
-	c := session.Measure(a.store.Settings(sid), a.store.History(sid), system, tools, sig, window)
+	c := session.Measure(a.store.Settings(sid), a.store.EffectiveHistory(sid), system, tools, sig, window)
 	m, _, _ := a.modelOf(sid)
 	c.Model = modelLabel(m)
+	c.AutoAt, _, _ = a.compactLimits(sid)
+	c.IdleFor = a.cfg.Context.IdleCompact
+	if c.IdleFor == "" {
+		c.IdleFor = "30m"
+	}
 	return c
 }
 func (a *App) contextText(sid string) string {
 	c := a.contextInfo(sid)
-	return fmt.Sprintf("上下文 %d / %d（%.0f%%）· %s\n人格 %d · 工具定义 %d · 摘要 %d（已整理 %d 条）\n对话 %d（%d 条，工具结果占 %d）\n上次请求：输入 %d（缓存命中 %.0f%%）· 输出 %d", c.Total, c.Window, float64(c.Total)*100/float64(c.Window), c.Model, c.Persona, c.Tools, c.Summary, c.Compacted, c.Dialogue, c.Messages, c.ToolResults, c.Last.PromptTokens, float64(c.Last.CachedTokens)*100/float64(max(1, c.Last.PromptTokens)), c.Last.CompletionTokens)
+	text := fmt.Sprintf("上下文 %d / %d（%.0f%%）· %s\n人格 %d · 工具定义 %d · 摘要 %d（已整理 %d 条）\n对话 %d（%d 条，工具结果占 %d）\n上次请求：输入 %d（缓存命中 %.0f%%）· 输出 %d", c.Total, c.Window, float64(c.Total)*100/float64(c.Window), c.Model, c.Persona, c.Tools, c.Summary, c.Compacted, c.Dialogue, c.Messages, c.ToolResults, c.Last.PromptTokens, float64(c.Last.CachedTokens)*100/float64(max(1, c.Last.PromptTokens)), c.Last.CompletionTokens)
+	high, _, _ := a.compactLimits(sid)
+	idle := a.cfg.Context.IdleCompact
+	if idle == "" {
+		idle = "30m"
+	}
+	return text + fmt.Sprintf("\n到 %d 时自动整理；空闲 %s 后整理；/compact 现在整理", high, idle)
 }

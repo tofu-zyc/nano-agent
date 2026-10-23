@@ -267,7 +267,7 @@ func (a *App) ResetSession(sid string) error {
 		a.cancelRun(s)
 		return nil
 	}
-	if err := a.store.Reset(sid); err != nil {
+	if err := a.resetHistory(a.sessOf(sid)); err != nil {
 		return err
 	}
 	a.publish(events.Event{T: "session", SID: sid, Data: a.sessionInfo(sid)})
@@ -288,6 +288,12 @@ func (a *App) StopSession(sid string) error {
 }
 
 func (a *App) cancelRun(s *sess) {
+	if s.compactCancel != nil {
+		s.compactCancel()
+		s.compactCancel = nil
+		s.compacting = false
+		a.publish(events.Event{T: "context", SID: s.sid, Kind: "end"})
+	}
 	if s.run.cancelLLM != nil {
 		s.run.cancelLLM()
 		s.run.cancelLLM = nil
@@ -359,4 +365,10 @@ func (a *App) Approve(n int, ok bool) error {
 	}
 	a.resolveApproval(ap, a.decided(ok, "web:admin"))
 	return nil
+}
+
+func (a *App) FullHistory(sid string) []session.Msg {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.store.Archive(sid))
 }

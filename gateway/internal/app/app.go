@@ -41,6 +41,7 @@ var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
 	{Name: "history", Args: "[轮数]", Desc: "查看这个会话最近的对话"},
 	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
@@ -78,15 +79,16 @@ var helpText = func() string {
 }()
 
 type App struct {
-	ctx     context.Context
-	cfg     *config.Config
-	llm     llm.Client
-	store   *session.Store
-	persona *persona.Loader
-	hub     *kernel.Hub
-	log     *slog.Logger
-	bus     *events.Bus
-	started time.Time
+	ctx              context.Context
+	cfg              *config.Config
+	llm              llm.Client
+	store            *session.Store
+	persona          *persona.Loader
+	hub              *kernel.Hub
+	log              *slog.Logger
+	bus              *events.Bus
+	started          time.Time
+	lastArchiveClean time.Time
 
 	version        string
 	mode           string
@@ -134,12 +136,18 @@ type App struct {
 }
 
 type sess struct {
-	sid        string
-	queue      []queued
-	run        *run
-	resetAfter bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
-	undoAfter  bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
-	recent     []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
+	sid                 string
+	compacting          bool
+	compactCancel       context.CancelFunc
+	lastActivity        time.Time
+	idleCompacted       bool
+	deleteAfter         bool
+	deleteArchivesAfter bool
+	queue               []queued
+	run                 *run
+	resetAfter          bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
+	undoAfter           bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
+	recent              []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
 }
 
 // queued 是排队等处理的一条消息
@@ -253,6 +261,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.loadEndpoints()
 	a.loadWorkspaces()
 	a.skills.Scan()
+	go a.maintenance()
 	return a
 }
 
@@ -391,6 +400,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "session":
 		a.cmdSession(c, arg)
 		return
+	case "compact":
+		a.cmdCompact(c, arg)
+		return
 	case "context":
 		a.answer(c, a.contextText(c.s.sid))
 		return
@@ -451,6 +463,11 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.undo(c)
 		return
 	case "reset":
+		if arg == "删除" && !a.isAdmin(c.who) {
+			a.answer(c, "只有管理员能删除历史")
+			return
+		}
+		c.s.deleteAfter = arg == "删除"
 		a.reset(c)
 		return
 	case "approve", "deny":
@@ -476,13 +493,18 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	}
 	s := c.s
+	s.lastActivity = a.now()
+	s.idleCompacted = false
+	if s.compacting {
+		a.deliver(ep, "正在整理上下文…，这条消息已排队", "")
+	}
 	data := map[string]any{"from": who, "via": sourceOf(ep.ch), "channel": chanName(ep.ch)}
 	if len(m.Images) > 0 {
 		data["images"] = m.Images
 	}
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
 	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
-	if s.run == nil {
+	if s.run == nil && !s.compacting {
 		a.startRun(s)
 	}
 }
@@ -560,7 +582,7 @@ func (a *App) startTyping(ep endpoint) func() {
 
 // startRun 取出队首的消息（连同同一个人在同一个窗口紧接着发的几条）开一个 run。调用方持有锁。
 func (a *App) startRun(s *sess) {
-	if len(s.queue) == 0 || s.run != nil {
+	if len(s.queue) == 0 || s.run != nil || s.compacting {
 		return
 	}
 	head := s.queue[0]
@@ -748,6 +770,15 @@ func (a *App) endRun(s *sess, note string) {
 }
 
 func (a *App) stop(c in) {
+	if c.s.compacting && c.s.run == nil {
+		c.s.compactCancel()
+		c.s.compactCancel = nil
+		c.s.compacting = false
+		c.s.queue = nil
+		a.publish(events.Event{T: "context", SID: c.s.sid, Kind: "end"})
+		a.answer(c, "已停止整理上下文")
+		return
+	}
 	s := c.s
 	s.queue = nil
 	if s.run == nil {
@@ -767,7 +798,7 @@ func (a *App) reset(c in) {
 		a.cancelRun(s)
 		return
 	}
-	if err := a.store.Reset(s.sid); err != nil {
+	if err := a.resetHistory(s); err != nil {
 		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 	}
 	a.answer(c, "上下文已清空")
@@ -929,7 +960,11 @@ func (a *App) finish(s *sess, status, detail string) {
 			a.deliver(o.ep, text, "")
 		}
 	}
+	s.lastActivity = a.now()
 	a.startRun(s)
+	if s.run == nil {
+		a.maybeCompact(s, false)
+	}
 }
 
 // callModel 发起一次模型请求。调用方持有锁；请求本身在协程里跑。
@@ -939,10 +974,9 @@ func (a *App) callModel(s *sess) {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
 	}
-	high := a.historyLimit(s.sid)
-	low := int(float64(high) * a.cfg.LLM.TrimTo)
-	h := a.store.History(s.sid)
-	if session.Estimate(h) > high && session.CutPoint(h, low) > 0 {
+	high, low, keep := a.compactLimits(s.sid)
+	h := a.store.EffectiveHistory(s.sid)
+	if a.contextInfo(s.sid).Total > high && session.PlanCut(h, low, keep) > 0 {
 		a.compact(s, high, low)
 		return
 	}
@@ -952,14 +986,20 @@ func (a *App) callModel(s *sess) {
 // generateModel 用准备好的上下文请求本轮回复，调用方持有锁。
 func (a *App) generateModel(s *sess) {
 	r := s.run
-	system, _ := a.persona.For(s.sid)
+	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
+	if st.Prefix == nil {
+		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools}
+		if err := a.store.SaveSettings(s.sid, st); err != nil {
+			a.log.Warn("保存提示快照失败", "err", err)
+		}
+	}
 	var images session.ImageLoader
 	if r.withImages {
 		images = a.imageLoader()
 	}
 	req := llm.Request{
-		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning, images),
+		Messages: session.BuildMessages(system, st.Summary, a.store.EffectiveHistory(s.sid), a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if a.cfg.Security.Redact != "off" {
@@ -975,7 +1015,7 @@ func (a *App) generateModel(s *sess) {
 		}
 	}
 	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = a.toolsFor(n, r.readOnly, a.isAdmin(r.from))
+		req.Tools = snapshotTools
 	}
 	_, _, meterSignature, _ := a.contextParts(s.sid)
 	meterPosition := st.Base + len(a.store.History(s.sid))

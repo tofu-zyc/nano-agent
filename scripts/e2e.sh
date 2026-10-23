@@ -37,6 +37,8 @@ dir = "$TMP/skills"
 [llm]
 provider = "mock"
 max_history_tokens = 4000
+[context]
+keep_turns = 1
 [persona]
 dir = "$ROOT/personas"
 [session]
@@ -210,7 +212,7 @@ send "/dir -3";                                       expect "取下服务器上
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"
 long=$(printf '旧%.0s' {1..1800})
 send "摘要第一轮-$long";                              expect "累积待整理的历史" "（mock）收到：摘要第一轮-"
-send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理较早的对话"
+send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理上下文"
 echo "compaction-e2e-ok" > "$TMP/work/summary.txt"
 send '!call Read {"path":"summary.txt"}';             expect "压缩之后照常调用工具" "compaction-e2e-ok"
 if python3 - "$TMP/data/sessions" <<'PY'

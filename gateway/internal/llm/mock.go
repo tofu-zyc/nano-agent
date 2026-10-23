@@ -16,7 +16,8 @@ import (
 //
 // 流式请求时把回复切成几段依次输出；开了思考（Thinking 不是空或 none）时先输出一段假的思考。
 type Mock struct {
-	n atomic.Int64
+	n             atomic.Int64
+	AccurateUsage bool
 }
 
 var mockStamp = regexp.MustCompile(`(?m)^\[\d{4}-\d{2}-\d{2} [^\]]*\] `)
@@ -34,6 +35,14 @@ func (m *Mock) Chat(ctx context.Context, req Request, onDelta func(Delta)) (*Res
 		}
 	}
 	res.Usage = Usage{PromptTokens: 100, CompletionTokens: 10, CachedTokens: 90}
+	if m.AccurateUsage {
+		n := 0
+		for _, msg := range req.Messages {
+			n += len(msg.Content)/3 + 8
+		}
+		res.Usage.PromptTokens = n
+		res.Usage.CachedTokens = n * 9 / 10
+	}
 	return res, nil
 }
 

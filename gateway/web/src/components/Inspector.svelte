@@ -145,7 +145,7 @@
   }
   async function sessionAction(action: 'reset' | 'stop') {
     if (target.type !== 'session') return;
-    if (action === 'reset' && !confirm('清空这个会话的上下文？工作目录等设置会保留。')) return;
+    if (action === 'reset' && !confirm('归档当前历史并清空上下文？工作目录等设置会保留。')) return;
     try {
       await api.post(`${sidPath(target.sid)}/${action}`);
       store.toast({ kind: 'ok', text: action === 'reset' ? '上下文已清空' : '已停止' });
@@ -465,7 +465,7 @@
         <div class="actions">
           <a class="btn primary" href="#/sessions/{encodeURIComponent(sess.sid)}" onclick={() => (store.inspector = null)}><Icon name="chat" size={14} />打开对话</a>
           {#if sess.running}<button class="btn" onclick={() => sessionAction('stop')}><Icon name="stop" size={14} />停止</button>{/if}
-          <button class="btn danger" onclick={() => sessionAction('reset')}><Icon name="trash" size={14} />清空上下文</button>
+          <button class="btn danger" onclick={() => sessionAction('reset')}><Icon name="trash" size={14} />归档并重置上下文</button>
         </div>
         <input class="title" value={sess.title} maxlength="40" placeholder="会话的名字" title="改名字，回车保存"
           onchange={(e) => rename(e.currentTarget.value)} onkeydown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />

@@ -410,6 +410,14 @@ func TestGatewaySkills(t *testing.T) {
 	e.say("技能删掉了")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
+	if len(e.llm.lastReq().Tools) != 4 {
+		t.Fatal("两次整理之间工具快照改变")
+	}
+	e.say("/reset")
+	e.ch.wait(t, "上下文已清空")
+	e.say("刷新后再看技能")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
 	if got := e.llm.lastReq().Tools; len(got) != 3 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" || got[2].Function.Name != "echo" {
 		t.Fatalf("模型仍然带着已经删除的技能：%+v", got)
 	}
