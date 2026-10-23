@@ -25,6 +25,8 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/schedule"
+	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
 )
@@ -39,8 +41,12 @@ type Command struct {
 
 var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
+	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
+	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
+	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
 	{Name: "history", Args: "[轮数]", Desc: "查看这个会话最近的对话"},
 	{Name: "sync", Desc: "补上其他窗口的聊天记录（同一会话内也会自动同步）"},
 	{Name: "dir", Args: "[编号 | -编号 | add 机器:路径 | none]", Desc: "查看、挂载、取下工作目录（可以同时挂好几个，在不同的机器上）", Admin: true},
@@ -77,15 +83,22 @@ var helpText = func() string {
 }()
 
 type App struct {
-	ctx     context.Context
-	cfg     *config.Config
-	llm     llm.Client
-	store   *session.Store
-	persona *persona.Loader
-	hub     *kernel.Hub
-	log     *slog.Logger
-	bus     *events.Bus
-	started time.Time
+	schedules         *schedule.Store
+	schedulesErr      error
+	schedulerStarted  bool
+	searchClient      search.Provider
+	searchFingerprint string
+	searchUsage       SearchUsage
+	ctx               context.Context
+	cfg               *config.Config
+	llm               llm.Client
+	store             *session.Store
+	persona           *persona.Loader
+	hub               *kernel.Hub
+	log               *slog.Logger
+	bus               *events.Bus
+	started           time.Time
+	lastArchiveClean  time.Time
 
 	version        string
 	mode           string
@@ -133,12 +146,19 @@ type App struct {
 }
 
 type sess struct {
-	sid        string
-	queue      []queued
-	run        *run
-	resetAfter bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
-	undoAfter  bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
-	recent     []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
+	scheduled           *schedule.Task
+	sid                 string
+	compacting          bool
+	compactCancel       context.CancelFunc
+	lastActivity        time.Time
+	idleCompacted       bool
+	deleteAfter         bool
+	deleteArchivesAfter bool
+	queue               []queued
+	run                 *run
+	resetAfter          bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
+	undoAfter           bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
+	recent              []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
 }
 
 // queued 是排队等处理的一条消息
@@ -163,6 +183,7 @@ type out struct {
 }
 
 type run struct {
+	scheduled  *schedule.Task
 	id         uint64
 	node       string // 跑这一轮的内核
 	from       string // 触发者身份，内核据此判断权限
@@ -251,11 +272,14 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.migrate()
 	a.loadEndpoints()
 	a.loadWorkspaces()
+	a.loadSchedules()
 	a.skills.Scan()
+	go a.maintenance()
+	go a.scheduleLoop()
 	return a
 }
 
-func (a *App) SetHub(h *kernel.Hub) { a.hub = h }
+func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
 
 // Bus 是事件总线，网页界面从这里订阅。
 func (a *App) Bus() *events.Bus { return a.bus }
@@ -390,6 +414,18 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "session":
 		a.cmdSession(c, arg)
 		return
+	case "cron":
+		a.cmdCron(c, arg)
+		return
+	case "compact":
+		a.cmdCompact(c, arg)
+		return
+	case "show":
+		a.cmdShow(c, arg)
+		return
+	case "context":
+		a.answer(c, a.contextText(c.s.sid))
+		return
 	case "history":
 		a.cmdHistory(c, arg)
 		return
@@ -447,6 +483,11 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.undo(c)
 		return
 	case "reset":
+		if arg == "删除" && !a.isAdmin(c.who) {
+			a.answer(c, "只有管理员能删除历史")
+			return
+		}
+		c.s.deleteAfter = arg == "删除"
 		a.reset(c)
 		return
 	case "approve", "deny":
@@ -472,13 +513,18 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	}
 	s := c.s
+	s.lastActivity = a.now()
+	s.idleCompacted = false
+	if s.compacting {
+		a.deliver(ep, "正在整理上下文…，这条消息已排队", "")
+	}
 	data := map[string]any{"from": who, "via": sourceOf(ep.ch), "channel": chanName(ep.ch)}
 	if len(m.Images) > 0 {
 		data["images"] = m.Images
 	}
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
 	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
-	if s.run == nil {
+	if s.run == nil && !s.compacting {
 		a.startRun(s)
 	}
 }
@@ -556,7 +602,7 @@ func (a *App) startTyping(ep endpoint) func() {
 
 // startRun 取出队首的消息（连同同一个人在同一个窗口紧接着发的几条）开一个 run。调用方持有锁。
 func (a *App) startRun(s *sess) {
-	if len(s.queue) == 0 || s.run != nil {
+	if len(s.queue) == 0 || s.run != nil || s.compacting {
 		return
 	}
 	head := s.queue[0]
@@ -641,7 +687,9 @@ func (a *App) startRun(s *sess) {
 		}
 	}
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
-	a.catchUp(head.ep, s.sid)
+	if s.scheduled == nil {
+		a.catchUp(head.ep, s.sid)
+	}
 	a.remember(s, batch, a.histEnd(s.sid))
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
 		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
@@ -649,11 +697,11 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
-	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok {
-		r.outs[0].view = st.OpenRun(head.ep.chat, "")
+	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil {
+		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
 	}
 	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
 	via := sourceOf(head.ep.ch)
@@ -662,7 +710,7 @@ func (a *App) startRun(s *sess) {
 	}
 	for key, rec := range a.eps {
 		ep := parseEndpoint(key)
-		if rec.Session != s.sid || ep == head.ep {
+		if r.scheduled != nil || rec.Session != s.sid || ep == head.ep {
 			continue
 		}
 		if wt, ok := a.chans[ep.ch].(channel.Watcher); ok {
@@ -671,15 +719,28 @@ func (a *App) startRun(s *sess) {
 			if mirrorText == "" && len(images) > 0 {
 				mirrorText = fmt.Sprintf("（%d 张图片）", len(images))
 			}
-			r.outs = append(r.outs, out{ep: ep, view: wt.OpenMirror(ep.chat, via, mirrorText)})
+			r.outs = append(r.outs, out{ep: ep, view: a.filterView(ep, wt.OpenMirror(ep.chat, via, mirrorText))})
 		}
 	}
 	if len(images) > 0 && !r.withImages {
 		a.notify(s, "（这个模型不能接收图片：图片已保存在历史里，但没有发给它。需要的话用 /model 换一个支持图片的模型）")
 	}
-	r.stopTyping = a.startTyping(head.ep)
+	r.stopTyping = func() {}
+	if r.scheduled == nil {
+		r.stopTyping = a.startTyping(head.ep)
+	} else {
+		r.outs = nil
+		for _, key := range r.scheduled.Deliver {
+			r.outs = append(r.outs, out{ep: parseEndpoint(key)})
+		}
+	}
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
+	if r.scheduled != nil {
+		limit, _ := schedule.Timeout(*r.scheduled)
+		in.RunTimeoutMs = int(limit / time.Millisecond)
+		in.ApprovalTimeoutMs = int((30 * time.Minute) / time.Millisecond)
+	}
 	for _, m := range rt.mounts {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
@@ -730,6 +791,16 @@ func (a *App) endRun(s *sess, note string) {
 		v.Close()
 	}
 	s.run = nil
+	s.scheduled = nil
+	if r.scheduled != nil {
+		why := note
+		if why == "" {
+			why = "任务运行中断"
+		}
+		a.completeSchedule(r.scheduled, false, why)
+		r.scheduled = nil
+		note = ""
+	}
 	for n, ap := range a.approvals {
 		if ap.sid == s.sid {
 			a.dropApproval(n, "这一轮已经结束，不用审批了")
@@ -744,6 +815,15 @@ func (a *App) endRun(s *sess, note string) {
 }
 
 func (a *App) stop(c in) {
+	if c.s.compacting && c.s.run == nil {
+		c.s.compactCancel()
+		c.s.compactCancel = nil
+		c.s.compacting = false
+		c.s.queue = nil
+		a.publish(events.Event{T: "context", SID: c.s.sid, Kind: "end"})
+		a.answer(c, "已停止整理上下文")
+		return
+	}
 	s := c.s
 	s.queue = nil
 	if s.run == nil {
@@ -763,7 +843,7 @@ func (a *App) reset(c in) {
 		a.cancelRun(s)
 		return
 	}
-	if err := a.store.Reset(s.sid); err != nil {
+	if err := a.resetHistory(s); err != nil {
 		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 	}
 	a.answer(c, "上下文已清空")
@@ -772,7 +852,7 @@ func (a *App) reset(c in) {
 func (a *App) decide(c in, arg string, ok bool) {
 	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
 	ap := a.approvals[n]
-	if err != nil || ap == nil || ap.sid != c.s.sid {
+	if err != nil || ap == nil || !a.canApproveFrom(c, ap) {
 		a.answer(c, "没有这个编号的待审批请求")
 		return
 	}
@@ -780,7 +860,7 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
-	if a.hub.Send(c.s.run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
+	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
 		who := c.who
 		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
 			who = c.name
@@ -906,6 +986,11 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
 		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
+	if r.scheduled != nil {
+		a.completeSchedule(r.scheduled, status == proto.StatusOK, strings.TrimSpace(body+"\n"+note))
+		r.scheduled = nil
+		body, note = "", ""
+	}
 	a.endRun(s, "")
 	// 这一轮显示到的窗口都看到了这里
 	end := a.histEnd(s.sid)
@@ -925,7 +1010,11 @@ func (a *App) finish(s *sess, status, detail string) {
 			a.deliver(o.ep, text, "")
 		}
 	}
+	s.lastActivity = a.now()
 	a.startRun(s)
+	if s.run == nil && !strings.HasPrefix(s.sid, "cron:") {
+		a.maybeCompact(s, false)
+	}
 }
 
 // callModel 发起一次模型请求。调用方持有锁；请求本身在协程里跑。
@@ -935,10 +1024,9 @@ func (a *App) callModel(s *sess) {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
 	}
-	high := a.historyLimit(s.sid)
-	low := int(float64(high) * a.cfg.LLM.TrimTo)
-	h := a.store.History(s.sid)
-	if session.Estimate(h) > high && session.CutPoint(h, low) > 0 {
+	high, low, keep := a.compactLimits(s.sid)
+	h := a.store.EffectiveHistory(s.sid)
+	if a.contextInfo(s.sid).Total > high && session.PlanCut(h, low, keep) > 0 {
 		a.compact(s, high, low)
 		return
 	}
@@ -948,14 +1036,20 @@ func (a *App) callModel(s *sess) {
 // generateModel 用准备好的上下文请求本轮回复，调用方持有锁。
 func (a *App) generateModel(s *sess) {
 	r := s.run
-	system, _ := a.persona.For(s.sid)
+	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
+	if st.Prefix == nil || st.Prefix.System != system {
+		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools}
+		if err := a.store.SaveSettings(s.sid, st); err != nil {
+			a.log.Warn("保存提示快照失败", "err", err)
+		}
+	}
 	var images session.ImageLoader
 	if r.withImages {
 		images = a.imageLoader()
 	}
 	req := llm.Request{
-		Messages: session.BuildMessages(system, st.Summary, a.store.History(s.sid), a.cfg.LLM.SendReasoning, images),
+		Messages: session.BuildMessages(system, st.Summary, a.store.EffectiveHistory(s.sid), a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if a.cfg.Security.Redact != "off" {
@@ -970,9 +1064,9 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 	}
-	if n := a.nodes[r.node]; n != nil && !r.noTools {
-		req.Tools = a.toolsFor(n, r.readOnly, a.isAdmin(r.from))
-	}
+	req.Tools = snapshotTools
+	_, _, meterSignature, _ := a.contextParts(s.sid)
+	meterPosition := st.Base + len(a.store.History(s.sid))
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
 	r.calls++
@@ -1028,6 +1122,13 @@ func (a *App) generateModel(s *sess) {
 			return
 		}
 		u := res.Usage
+		if u.PromptTokens > 0 {
+			st := a.store.Settings(s.sid)
+			st.Meter = session.Meter{Position: meterPosition, Usage: u, Signature: meterSignature}
+			if err := a.store.SaveSettings(s.sid, st); err != nil {
+				a.log.Warn("保存上下文计量失败", "err", err)
+			}
+		}
 		a.addUsage(r, u)
 		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})

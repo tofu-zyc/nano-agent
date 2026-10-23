@@ -77,6 +77,7 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
 
 export type SessionInfo = {
+  context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
   endpoints: EndpointInfo[] | null;
@@ -228,3 +229,11 @@ export type Target =
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
 export type PersonaPreset = { id: string; name: string; desc: string; text: string };
+
+export type ScheduleResult = { at: string; ok: boolean; summary: string };
+export type ScheduleTask = {
+ id: string; name: string; when: string; agent: string; prompt: string; deliver: string[]; workspaces: string[];
+ mode: string; creator_mode: string; enabled: boolean; catch_up: boolean; created_by: string; timeout?: string;
+ next: string; running: boolean; last?: ScheduleResult; results: ScheduleResult[];
+};
+export type ScheduleView = { tasks: ScheduleTask[]; timezone: string; error?: string };

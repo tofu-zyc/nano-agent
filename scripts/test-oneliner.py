@@ -206,7 +206,7 @@ try:
             assert "nano-agent" not in open(os.path.join(HOME, rc)).read(), rc
         assert not os.path.lexists(os.path.join(LOCALBIN, "nano-gateway"))
 
-    if os.path.exists(WIN_ZIP) and (os.name == "nt" or os.path.exists("/mnt/c/Windows/System32/cmd.exe")):
+    if os.environ.get("NANO_TEST_NO_WINDOWS") != "1" and os.path.exists(WIN_ZIP) and (os.name == "nt" or os.path.exists("/mnt/c/Windows/System32/cmd.exe")):
         @case("Windows 一行安装（install.ps1）：下载、校验、安装、卸载")
         def _():
             ps = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"

@@ -134,7 +134,7 @@ func (a *App) afterRun(s *sess) (string, bool) {
 	switch {
 	case s.resetAfter:
 		s.resetAfter, s.undoAfter = false, false
-		if err := a.store.Reset(s.sid); err != nil {
+		if err := a.resetHistory(s); err != nil {
 			a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 		}
 		return "上下文已清空", true

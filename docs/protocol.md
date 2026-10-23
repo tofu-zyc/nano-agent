@@ -149,3 +149,10 @@ K→G {"t":"update_result","ok":true,"version":"0.1.1"}
 - `files[].path` 只能是 `nano-kernel`、`nano-exec`、`rg`（Windows 上带 `.exe`），必须有内核和执行器。内核和执行器要在同一个目录（安装脚本装的布局），否则回 `ok:false`。
 - 内核先把所有文件写成 `.new`，再把旧的改名成 `.old`、新的改名过来，写下 `update-pending.json`，回 `update_result` 后重启自己（POSIX 上 exec 同样的参数；Windows 上以退出码 75 退出，由 `run-kernel.ps1` 重新拉起）。
 - 新版本启动后 90 秒内被网关接受（收到 `welcome`）就算成功；启动超过 3 次或 90 秒内没被接受，就把 `.old` 换回来，写下 `update-failed`（之后的 `hello` 带 `update_failed`），再重启成旧版本。
+
+### v0.3 网关工具和定时运行（协议 v9 的可选字段）
+
+- input 可带 run_timeout_ms、approval_timeout_ms（正整数，毫秒）；缺省/0 仍用内核配置。定时任务默认都为 1800000，普通聊天不覆盖。
+- WebSearch/WebFetch 是公开只读策略：含 none/readonly 在内均可执行，内核通过 exec 交给网关，不附工作目录，不接收搜索密钥。
+- Schedule 只允许管理员（input.elevate=true）。list/run_now 走只读策略，create/update/delete 走写策略：ask 审批、auto 直接、readonly 拒绝。网关再次验证身份和任务权限上限。
+- GatewayAdmin 的 history_delete 在 readonly 下也要求审批，其他管理动作沿用既有规则。

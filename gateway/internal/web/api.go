@@ -553,3 +553,22 @@ func defaultModelInfo(s *Server, cfg *config.Config) modelInfo {
 	return modelInfo{Provider: e.Kind, Model: m.Name, BaseURL: e.BaseURL, Thinking: m.Thinking,
 		Levels: m.ThinkingLevels, ContextWindow: m.ContextWindow, MaxHistory: m.MaxHistory}
 }
+
+func (s *Server) archives(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.app.Archives(r.PathValue("sid")))
+}
+func (s *Server) historyDelete(w http.ResponseWriter, r *http.Request) {
+	var p app.HistoryDelete
+	if !readJSON(w, r, &p) {
+		return
+	}
+	if err := s.app.DeleteHistory(r.PathValue("sid"), p); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) fullHistory(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.app.FullHistory(r.PathValue("sid")))
+}

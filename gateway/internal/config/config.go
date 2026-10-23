@@ -17,7 +17,10 @@ import (
 )
 
 type Config struct {
+	Search    Search    `toml:"search" json:"search"`
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
+	Channels  Channels  `toml:"channels" json:"channels"`
+	Context   Context   `toml:"context" json:"context"`
 	LLM       LLM       `toml:"llm" json:"llm"`
 	Persona   Persona   `toml:"persona" json:"persona"`
 	Skills    Skills    `toml:"skills" json:"skills"`
@@ -34,6 +37,27 @@ type Config struct {
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
+
+type Search struct {
+	Enabled  *bool  `toml:"enabled" json:"enabled"`
+	Provider string `toml:"provider" json:"provider"`
+	APIKey   string `toml:"api_key" json:"api_key"`
+	Count    int    `toml:"count" json:"count"`
+}
+type Channels struct {
+	Show string `toml:"show" json:"show"`
+}
+
+type Context struct {
+	CompactAt      float64 `toml:"compact_at" json:"compact_at"`
+	CompactTo      float64 `toml:"compact_to" json:"compact_to"`
+	KeepTurns      int     `toml:"keep_turns" json:"keep_turns"`
+	IdleCompact    string  `toml:"idle_compact" json:"idle_compact"`
+	IdleCompactMin float64 `toml:"idle_compact_min" json:"idle_compact_min"`
+	ArchiveDays    int     `toml:"archive_days" json:"archive_days"`
+}
+
+func DefaultContext() Context { return Context{.75, .4, 4, "30m", .3, 90} }
 
 type Kernel struct {
 	Listen       string `toml:"listen" json:"listen"`               // unix:/path 或 tcp:host:port
@@ -92,7 +116,7 @@ type Update struct {
 
 // Secrets 是网关自己保存的密钥原文（给脱敏用，不要写日志）。
 func (c *Config) Secrets() []string {
-	return []string{c.Kernel.Token, c.Web.Password, c.Telegram.Token, c.Feishu.AppSecret, c.LLM.APIKey}
+	return []string{c.Kernel.Token, c.Web.Password, c.Telegram.Token, c.Feishu.AppSecret, c.LLM.APIKey, c.Search.APIKey}
 }
 
 // ProxyFor 是某个组件实际用的代理：组件自己没设置就用网关的默认代理。
@@ -162,6 +186,7 @@ type CLI struct {
 func On(b *bool) bool { return b == nil || *b }
 
 type Telegram struct {
+	Show          string `toml:"show" json:"show"`
 	Enabled       bool   `toml:"enabled" json:"enabled"`
 	Token         string `toml:"token" json:"token"`
 	Proxy         string `toml:"proxy" json:"proxy"`
@@ -175,6 +200,7 @@ type Web struct {
 }
 
 type Feishu struct {
+	Show          string `toml:"show" json:"show"`
 	Enabled       bool   `toml:"enabled" json:"enabled"`
 	AppID         string `toml:"app_id" json:"app_id"`
 	AppSecret     string `toml:"app_secret" json:"app_secret"`
@@ -206,7 +232,7 @@ func parseCheck(path string, overlay []byte, check bool) (*Config, toml.MetaData
 	if err != nil {
 		return nil, toml.MetaData{}, nil, fmt.Errorf("读取 %s：%w", path, err)
 	}
-	var c Config
+	c := Config{Context: DefaultContext()}
 	md, err := toml.Decode(string(b), &c)
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("读取 %s：%w", path, err)
@@ -266,6 +292,15 @@ func (c *Config) applyEnv() {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Search.Provider == "" {
+		c.Search.Provider = "deepseek"
+	}
+	if c.Search.Count == 0 {
+		c.Search.Count = 6
+	}
+	if c.Channels.Show == "" {
+		c.Channels.Show = "过程"
+	}
 	def := func(p *string, v string) {
 		if *p == "" {
 			*p = v
@@ -309,6 +344,20 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	if c.Search.Provider != "deepseek" || c.Search.Count < 1 || c.Search.Count > 10 {
+		errs = append(errs, errors.New("search：provider 只能是 deepseek，count 为 1–10"))
+	}
+	for _, show := range []string{c.Channels.Show, c.Telegram.Show, c.Feishu.Show} {
+		if show != "" && show != "详细" && show != "过程" && show != "简洁" {
+			errs = append(errs, errors.New("显示档位只能是详细、过程或简洁"))
+		}
+	}
+	if c.Context.CompactAt <= 0 || c.Context.CompactAt >= 1 || c.Context.CompactTo <= 0 || c.Context.CompactTo >= c.Context.CompactAt || c.Context.KeepTurns < 1 || c.Context.IdleCompactMin < 0 || c.Context.IdleCompactMin >= 1 || c.Context.ArchiveDays < 0 {
+		errs = append(errs, errors.New("context：比例需在 0 到 1 之间，compact_to 小于 compact_at，keep_turns 至少 1，archive_days 非负"))
+	}
+	if d, err := time.ParseDuration(c.Context.IdleCompact); err != nil || d < 0 {
+		errs = append(errs, errors.New("context.idle_compact 要写成 30m 或 0"))
+	}
 	if c.Kernel.Token == "" {
 		errs = append(errs, errors.New("kernel.token 不能为空"))
 	}

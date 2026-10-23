@@ -293,10 +293,11 @@ func (c *CLI) OpenMirror(chat, via, text string) RunView {
 }
 
 type cliRun struct {
-	c       *CLI
-	state   int // 0 没在输出，1 正在输出思考，2 正在输出正文
-	pending int // 还没输出的换行：等后面有内容再输出，消息末尾的换行就不会多出空行
-	closed  bool
+	c         *CLI
+	state     int // 0 没在输出，1 正在输出思考，2 正在输出正文
+	pending   int // 还没输出的换行：等后面有内容再输出，消息末尾的换行就不会多出空行
+	closed    bool
+	transient bool
 }
 
 var cliPrefix = map[int]struct{ head, indent string }{
@@ -337,6 +338,22 @@ func (r *cliRun) end() {
 	r.state, r.pending = 0, 0
 }
 
+func (r *cliRun) Status(text string) {
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	if r.closed {
+		return
+	}
+	if r.transient {
+		r.c.write("\r\x1b[2K")
+		r.transient = false
+	}
+	if text != "" && r.c.color {
+		r.end()
+		r.c.write(text)
+		r.transient = true
+	}
+}
 func (r *cliRun) Reasoning(text string) {
 	r.c.mu.Lock()
 	defer r.c.mu.Unlock()

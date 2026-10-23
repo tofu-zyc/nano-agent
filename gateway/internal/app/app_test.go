@@ -227,8 +227,8 @@ func TestFinalAnswer(t *testing.T) {
 	}
 	req := e.llm.lastReq()
 	// 没有工作目录：HOME 模式，工具仍然给；管理员还有 Gateway / GatewayAdmin
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 3 ||
-		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "echo" {
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 4 ||
+		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "Schedule" || req.Tools[3].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -318,7 +318,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 3 {
+	if n := len(e.llm.lastReq().Tools); n != 4 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }
@@ -753,15 +753,15 @@ func TestStreamingView(t *testing.T) {
 	for _, x := range ev {
 		kinds += x.kind + ","
 	}
-	want := "reasoning,end,tool,result,reasoning,content,end,note,close,"
+	want := "end,tool,result,content,end,note,close,"
 	if kinds != want {
 		t.Fatalf("events:\n got %s\nwant %s\n%+v", kinds, want, ev)
 	}
-	if ev[2].text != "Shell ls -la" || ev[3].text != "true a.txt（共 2 行）" || ev[5].text != "（mock）工具结果：a.txt\nb.txt\n" {
+	if ev[1].text != "Shell ls -la" || ev[2].text != "true a.txt（共 2 行）" || ev[3].text != "（mock）工具结果：a.txt\nb.txt\n" {
 		t.Fatalf("details: %+v", ev)
 	}
-	if !strings.Contains(ev[7].text, "2 次模型调用") || !strings.Contains(ev[7].text, "缓存命中 90%") {
-		t.Fatalf("usage: %q", ev[7].text)
+	if !strings.Contains(ev[5].text, "2 次模型调用") || !strings.Contains(ev[5].text, "缓存命中 90%") {
+		t.Fatalf("usage: %q", ev[5].text)
 	}
 	// 正文已经流式显示过，不会再用 Send 发一遍
 	select {
@@ -845,6 +845,9 @@ func TestStamp(t *testing.T) {
 func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 	e := setup(t)
 	e.a.cfg.LLM.MaxHistoryTokens = 600
+	e.a.cfg.Context = defaultContext()
+	e.a.cfg.Context.KeepTurns = 2
+	e.llm.AccurateUsage = true
 	long := strings.Repeat("长", 100) // 约 100 token
 	var prev []llm.Message
 	compactions := 0
@@ -861,7 +864,7 @@ func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 		prev = msgs
 	}
 	// 每轮约 230 token，上限 600、裁到 300：12 轮里应该只裁几次，而不是每轮都裁
-	if compactions == 0 || compactions > 5 {
+	if compactions == 0 || compactions > 10 {
 		t.Fatalf("裁剪次数：%d", compactions)
 	}
 }

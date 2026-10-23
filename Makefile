@@ -18,7 +18,7 @@ test: all
 	cd gateway && go test -race ./...
 	./scripts/e2e.sh
 	python3 scripts/e2e-control.py
-	@if [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
+	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  python3 scripts/e2e-win.py; \
 	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
 	$(MAKE) test-install
@@ -39,7 +39,7 @@ test-install:
 	@if [ -x $(ZIG) ]; then $(MAKE) --no-print-directory release VERSION=test >/dev/null && \
 	  python3 scripts/test-install-linux.py && python3 scripts/test-oneliner.py && python3 scripts/test-update.py; \
 	else echo "（没有 zig，跳过 Linux 离线安装测试和一行安装测试）"; fi
-	@if [ -x $(ZIG) ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then python3 scripts/test-install-win.py; \
+	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -x $(ZIG) ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then python3 scripts/test-install-win.py; \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 离线安装测试）"; fi
 
 # 本机一键运行，在终端里直接聊天

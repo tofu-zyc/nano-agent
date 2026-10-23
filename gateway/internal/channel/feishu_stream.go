@@ -164,6 +164,9 @@ func feishuTools(s streamSnapshot) string {
 }
 
 func feishuFoot(s streamSnapshot) string {
+	if s.Concise && s.Closed {
+		return ""
+	}
 	var head string
 	if s.Closed {
 		head = "✅ 完成"
@@ -229,6 +232,11 @@ func (s *feishuStream) Write(ctx context.Context, snap streamSnapshot) error {
 			}
 			c.parts["reply"] = chunks[i]
 		} else if err := s.update(ctx, s.cards[i], "reply", chunks[i]); err != nil {
+			return err
+		}
+	}
+	if snap.Concise && snap.Closed {
+		if err := s.remove(ctx, s.cards[0], "foot"); err != nil {
 			return err
 		}
 	}

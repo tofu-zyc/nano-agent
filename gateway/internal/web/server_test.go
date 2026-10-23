@@ -287,7 +287,7 @@ func TestMakeAdmin(t *testing.T) {
 		t.Fatalf("admins: %v", admins)
 	}
 	_, out := c.do("GET", "/api/sessions/main", nil, false)
-	if !strings.Contains(mustJSON(out["info"]), `{"admin":true,"channel":"fs","key":"fs:c9","name":"我","session":"main","who":"fs:u9"}`) {
+	if !strings.Contains(mustJSON(out["info"]), `{"admin":true,"channel":"fs","key":"fs:c9","name":"我","session":"main","show":"过程","who":"fs:u9"}`) {
 		t.Fatalf("窗口应该接到主会话：%v", out["info"])
 	}
 	// 再点一次不会重复添加
@@ -298,3 +298,30 @@ func TestMakeAdmin(t *testing.T) {
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func TestSchedulesAPI(t *testing.T) {
+	srv, s, _ := setup(t)
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/schedules", nil, false); code != 401 {
+		t.Fatal(code)
+	}
+	c.do("POST", "/api/login", map[string]string{"password": "pw"}, true)
+	s.app.NewSession("测试")
+	code, res := c.do("POST", "/api/schedules", map[string]any{"action": "create", "name": "早报", "when": "0 8 * * *", "prompt": "新闻", "deliver": []string{"web:main"}}, true)
+	if code != 200 {
+		t.Fatal(code, res)
+	}
+	id := res["result"].(map[string]any)["id"].(string)
+	if code, res = c.do("GET", "/api/schedules", nil, false); code != 200 || len(res["tasks"].([]any)) != 1 {
+		t.Fatal(code, res)
+	}
+	if code, res = c.do("POST", "/api/schedules", map[string]any{"action": "update", "id": id, "enabled": false}, true); code != 200 {
+		t.Fatal(code, res)
+	}
+	if code, _ = c.do("POST", "/api/schedules", map[string]any{"action": "delete", "id": id}, false); code != 403 {
+		t.Fatal("guard", code)
+	}
+	if code, res = c.do("POST", "/api/schedules", map[string]any{"action": "delete", "id": id}, true); code != 200 {
+		t.Fatal(code, res)
+	}
+}

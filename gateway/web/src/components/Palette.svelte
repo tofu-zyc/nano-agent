@@ -39,6 +39,7 @@
   const items = $derived.by(() => {
     const out: Item[] = [
       { id: 'v:topology', icon: 'graph', title: '拓扑', sub: '网关、渠道、会话、模型、内核的全貌', kind: '页面', text: '拓扑 首页 topology graph', run: go('#/') },
+      { id:'v:schedules',icon:'clock',title:'定时任务',sub:'查看下次运行、结果，创建和编辑任务',kind:'页面',text:'定时任务 cron schedule 提醒',run:go('#/schedules') },
       { id: 'v:sessions', icon: 'chat', title: '会话', sub: '所有对话，网页聊天', kind: '页面', text: '会话 对话 聊天 sessions chat', run: go('#/sessions') },
       { id:'v:devices',icon:'terminal',title:'设备与服务器',sub:'下载电脑启动包，添加和连接 SSH 服务器',kind:'页面',text:'设备 服务器 安装包 启动器 SSH Windows Linux 连接',run:go('#/devices') },
       { id: 'v:personas', icon: 'persona', title: '人格', sub: '编辑系统提示词', kind: '页面', text: '人格 系统提示词 persona prompt', run: go('#/personas') },

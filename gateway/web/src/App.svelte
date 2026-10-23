@@ -13,6 +13,7 @@
   import Personas from './views/Personas.svelte';
   import Settings from './views/Settings.svelte';
   import Devices from './views/Devices.svelte';
+ import Schedules from './views/Schedules.svelte';
 
   onMount(() => {
     store.boot();
@@ -51,7 +52,9 @@
           <Personas />
         {:else if store.route.view === 'settings'}
           <Settings />
-        {:else if store.route.view === 'devices'}
+        {:else if store.route.view === 'schedules'}
+ <Schedules />
+ {:else if store.route.view === 'devices'}
           <Devices />
         {:else}
           <Topology />

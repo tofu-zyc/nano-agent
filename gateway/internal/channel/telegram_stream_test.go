@@ -261,3 +261,23 @@ func TestTelegramApprovalButtons(t *testing.T) {
 		t.Fatalf("拒绝按钮：%+v", m)
 	}
 }
+
+func TestTelegramConciseDeletesStatus(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.URL.Path)
+		io.WriteString(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer srv.Close()
+	tg, _ := NewTelegram(config.Telegram{Token: "test", APIBase: srv.URL, Proxy: "none"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := &telegramStream{t: tg, chat: "123"}
+	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Transient: "正在执行 Shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write(context.Background(), streamSnapshot{Concise: true, Content: "答案", Closed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 3 || !strings.HasSuffix(methods[1], "deleteMessage") || s.processID != 0 {
+		t.Fatal(methods, s.processID)
+	}
+}

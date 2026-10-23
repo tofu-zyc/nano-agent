@@ -422,11 +422,20 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
     return j;
 }
 
+/* 由网关执行的工具：内核只转给网关，不挑工作目录、不交给执行器 */
+static bool gateway_tool(const char *name)
+{
+    static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(name, names[i])) return true;
+    return false;
+}
+
 static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
-    if (!strcmp(c->name, "Skill") || !strcmp(c->name, "Gateway") || !strcmp(c->name, "GatewayAdmin")) {
+    if (gateway_tool(c->name)) {
         send_exec(k, c, args, NULL);
         return;
     }
@@ -796,6 +805,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
+        const cJSON *rt = cJSON_GetObjectItemCaseSensitive(m, "run_timeout_ms");
+        const cJSON *at = cJSON_GetObjectItemCaseSensitive(m, "approval_timeout_ms");
+        ev.run_timeout_ms = cJSON_IsNumber(rt) ? rt->valueint : 0;
+        ev.approval_timeout_ms = cJSON_IsNumber(at) ? at->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
         policy = build_policy(m, ev.mode);
         ev.policy = policy;
@@ -831,9 +844,9 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             }
             if (calls[i].args_ok && cJSON_IsObject(args))
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
+            calls[i].action = sget(args, "action");
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
-            if (calls[i].args_ok && calls[i].name && strcmp(calls[i].name, "Skill") &&
-                strcmp(calls[i].name, "Gateway") && strcmp(calls[i].name, "GatewayAdmin") && run_pol) {
+            if (calls[i].args_ok && calls[i].name && !gateway_tool(calls[i].name) && run_pol) {
                 char err[1024];
                 const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
                 if (!ws) {

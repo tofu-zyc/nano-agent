@@ -219,7 +219,7 @@ func writeFileAtomic(path, content string) error {
 
 // parseText 用一大段 TOML 代替文件（给迁移时的“改完再读一遍”用）。
 func parseText(path, content string, overlay []byte) (*Config, toml.MetaData, []string, error) {
-	var c Config
+	c := Config{Context: DefaultContext()}
 	md, err := toml.Decode(content, &c)
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("读取 %s：%w", path, err)

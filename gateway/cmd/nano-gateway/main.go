@@ -43,7 +43,7 @@ func newClient(c config.LLM) (llm.Client, error) {
 	if c.Provider == "openai" {
 		return llm.NewOpenAI(c)
 	}
-	return &llm.Mock{}, nil
+	return &llm.Mock{AccurateUsage: true}, nil
 }
 
 func main() {

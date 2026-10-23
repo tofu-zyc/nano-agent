@@ -13,6 +13,7 @@ import (
 
 // Status 是 `nano-gateway status`、聊天 /status 和网页用的运行概况。
 type Status struct {
+	Search         SearchUsage   `json:"search"`
 	Running        bool          `json:"running"`
 	PID            int           `json:"pid"`
 	Version        string        `json:"version"`
@@ -81,7 +82,9 @@ func (a *App) Status() Status {
 // statusLocked 在持有 a.mu 时取基础字段；调用方再补渠道、待重启和日志。
 func (a *App) statusLocked() Status {
 	now := time.Now()
+	a.loadSearchUsage()
 	st := Status{
+		Search:       a.searchUsage,
 		Running:      true,
 		PID:          os.Getpid(),
 		Version:      a.version,
@@ -116,6 +119,7 @@ func (a *App) StatusBrief() string {
 
 func formatStatusBrief(st Status) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "今日网络搜索 %d 次 · 网页抓取 %d 次\n", st.Search.Search, st.Search.Fetch)
 	fmt.Fprintf(&b, "网关运行中：版本 %s，已运行 %s，运行方式 %s，pid %d", st.Version, shortDuration(st.UptimeMS), st.Mode, st.PID)
 	if st.WebURL != "" {
 		fmt.Fprintf(&b, "\n网页：%s", st.WebURL)

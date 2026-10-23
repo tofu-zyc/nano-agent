@@ -192,3 +192,32 @@ func TestLongUnixListenFallsBackToShortSocket(t *testing.T) {
 		t.Fatal("同一个配置要算出同一个 socket")
 	}
 }
+
+func TestSearchKeyEncryptedAndHidden(t *testing.T) {
+	if err := secret.Init(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(secret.Reset)
+	path := writeConf(t)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("\n[search]\napi_key = \"test-search-key\"\n")
+	f.Close()
+	st, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Current().Search.APIKey != "test-search-key" {
+		t.Fatal("migration lost key")
+	}
+	b, _ := os.ReadFile(filepath.Join(filepath.Dir(path), "data", "config.json"))
+	if !strings.Contains(string(b), "enc:v1:") || strings.Contains(string(b), "test-search-key") {
+		t.Fatal("plaintext search key")
+	}
+	fkey := find(st.Describe(), "search.api_key")
+	if !fkey.IsSet || fkey.Value != "" {
+		t.Fatalf("secret descriptor: %+v", fkey)
+	}
+}

@@ -118,3 +118,22 @@ func (a *App) decided(ok bool, who string) string {
 	}
 	return verb + " · " + who
 }
+
+// canApproveFrom：审批单属于它自己的会话；定时任务的审批单属于 cron 会话，但发到任务的投递窗口，在那里也能批
+func (a *App) canApproveFrom(c in, ap *approval) bool {
+	s := a.sessions[ap.sid]
+	if s == nil || s.run == nil {
+		return false
+	}
+	if ap.sid == c.s.sid {
+		return true
+	}
+	if s.run.scheduled != nil {
+		for _, o := range s.run.outs {
+			if o.ep == c.ep {
+				return true
+			}
+		}
+	}
+	return false
+}

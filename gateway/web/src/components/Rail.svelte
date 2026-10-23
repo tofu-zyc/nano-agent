@@ -5,6 +5,7 @@
   const items: { view: View; icon: string; label: string; hash: string }[] = [
     { view: 'topology', icon: 'graph', label: '拓扑', hash: '#/' },
     { view: 'sessions', icon: 'chat', label: '会话', hash: '#/sessions' },
+    { view: 'schedules', icon: 'clock', label: '定时任务', hash: '#/schedules' },
     { view: 'devices', icon: 'terminal', label: '设备', hash: '#/devices' },
     { view: 'personas', icon: 'persona', label: '人格', hash: '#/personas' },
     { view: 'settings', icon: 'sliders', label: '设置', hash: '#/settings' },

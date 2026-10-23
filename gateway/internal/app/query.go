@@ -55,10 +55,11 @@ type SessionInfo struct {
 	ModelUsed      string         `json:"model_used"`      // 实际用的模型 ID
 	ModelLabel     string         `json:"model_label"`     // 实际用的模型的名字
 
-	Persona     string    `json:"persona"`      // 用的人格文件名
-	PersonaFile string    `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
-	Usage       llm.Usage `json:"usage"`        // 历史里记下的累计用量
-	Compacted   int       `json:"compacted"`
+	Persona     string              `json:"persona"`      // 用的人格文件名
+	PersonaFile string              `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
+	Usage       llm.Usage           `json:"usage"`        // 历史里记下的累计用量
+	Context     session.ContextInfo `json:"context"`
+	Compacted   int                 `json:"compacted"`
 }
 
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
@@ -117,7 +118,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	w := a.workspaceOf(sid)
 	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
-		Model: st.Model, Compacted: st.Base}
+		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
 	if m, _, ok := a.modelOf(sid); ok {
 		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
 	}
@@ -266,7 +267,7 @@ func (a *App) ResetSession(sid string) error {
 		a.cancelRun(s)
 		return nil
 	}
-	if err := a.store.Reset(sid); err != nil {
+	if err := a.resetHistory(a.sessOf(sid)); err != nil {
 		return err
 	}
 	a.publish(events.Event{T: "session", SID: sid, Data: a.sessionInfo(sid)})
@@ -287,6 +288,12 @@ func (a *App) StopSession(sid string) error {
 }
 
 func (a *App) cancelRun(s *sess) {
+	if s.compactCancel != nil {
+		s.compactCancel()
+		s.compactCancel = nil
+		s.compacting = false
+		a.publish(events.Event{T: "context", SID: s.sid, Kind: "end"})
+	}
 	if s.run.cancelLLM != nil {
 		s.run.cancelLLM()
 		s.run.cancelLLM = nil
@@ -358,4 +365,10 @@ func (a *App) Approve(n int, ok bool) error {
 	}
 	a.resolveApproval(ap, a.decided(ok, "web:admin"))
 	return nil
+}
+
+func (a *App) FullHistory(sid string) []session.Msg {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.store.Archive(sid))
 }

@@ -38,4 +38,31 @@ func TestPersonaCommand(t *testing.T) {
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatal("会话人格文件还在")
 	}
+	// 上面已经请求过、存下了提示快照，换回默认人格照样下一条消息生效
+	e.say("再问")
+	e.k.expect(proto.TInput)
+	if msgs := e.roundTrip(t); msgs[0].Content != "你是测试机器人" {
+		t.Fatalf("改回默认后模型收到的人格：%q", msgs[0].Content)
+	}
+}
+
+// 人格文件改了（网页保存、直接改文件）就刷新提示快照，工具定义一起刷新；人格没变时工具定义保持快照
+func TestPersonaEditRefreshesPrefix(t *testing.T) {
+	e := setup(t)
+	e.say("你好")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	before := len(e.llm.lastReq().Tools)
+	e.addSkill(t, "demo")
+	e.say("加了技能")
+	e.k.expect(proto.TInput)
+	if msgs := e.roundTrip(t); len(e.llm.lastReq().Tools) != before || msgs[0].Content != "你是测试机器人" {
+		t.Fatal("人格没变时提示快照不该变")
+	}
+	os.WriteFile(filepath.Join(e.dir, "personas", "default.md"), []byte("你是改过的机器人"), 0o644)
+	e.say("改了人格")
+	e.k.expect(proto.TInput)
+	if msgs := e.roundTrip(t); msgs[0].Content != "你是改过的机器人" || len(e.llm.lastReq().Tools) != before+1 {
+		t.Fatalf("改人格后：%q，%d 个工具", msgs[0].Content, len(e.llm.lastReq().Tools))
+	}
 }

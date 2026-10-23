@@ -99,9 +99,11 @@ type Msg struct {
 	Calls  []Call `json:"calls,omitempty"`
 
 	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权
-	Mode       string          `json:"mode,omitempty"`
-	Elevate    bool            `json:"elevate,omitempty"`
-	Workspaces []WorkspaceSpec `json:"workspaces,omitempty"`
+	RunTimeoutMs      int             `json:"run_timeout_ms,omitempty"`
+	ApprovalTimeoutMs int             `json:"approval_timeout_ms,omitempty"`
+	Mode              string          `json:"mode,omitempty"`
+	Elevate           bool            `json:"elevate,omitempty"`
+	Workspaces        []WorkspaceSpec `json:"workspaces,omitempty"`
 
 	// exec：在哪个工作目录上执行（Skill 没有）、工具的时限和输出上限
 	Workspace string `json:"workspace,omitempty"`

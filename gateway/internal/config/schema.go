@@ -18,6 +18,19 @@ type Field struct {
 
 // Fields 是全部可以在网页里查看、修改的配置项。
 var Fields = []Field{
+	{Key: "search.enabled", Group: "gateway", Section: "网络搜索", Label: "启用搜索", Type: "bool", Help: "没有可用的 DeepSeek key 时不提供搜索工具"},
+	{Key: "search.provider", Group: "gateway", Section: "网络搜索", Label: "搜索服务", Type: "enum", Options: []string{"deepseek"}},
+	{Key: "search.api_key", Group: "gateway", Section: "网络搜索", Label: "搜索 API key", Type: "secret", Help: "空时使用模型接口中 api.deepseek.com 的 key"},
+	{Key: "search.count", Group: "gateway", Section: "网络搜索", Label: "默认搜索条数", Type: "int", Help: "1–10，默认 6"},
+	{Key: "channels.show", Group: "gateway", Section: "消息", Label: "默认显示档位", Type: "enum", Options: []string{"详细", "过程", "简洁"}, Help: "详细含思考，过程只显示工具，简洁只保留答案"},
+	{Key: "telegram.show", Group: "telegram", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
+	{Key: "feishu.show", Group: "feishu", Label: "显示档位", Type: "enum", Options: []string{"", "详细", "过程", "简洁"}, Help: "空表示跟随全局；窗口可用 /show 覆盖"},
+	{Key: "context.compact_at", Group: "context", Section: "上下文", Label: "自动整理阈值", Type: "float", Help: "达到模型窗口的这个比例时整理，默认 0.75"},
+	{Key: "context.compact_to", Group: "context", Section: "上下文", Label: "整理后目标比例", Type: "float", Help: "默认 0.4，最近保留的轮次较大时可能超过目标"},
+	{Key: "context.keep_turns", Group: "context", Section: "上下文", Label: "原样保留最近几轮", Type: "int"},
+	{Key: "context.idle_compact", Group: "context", Section: "上下文", Label: "空闲整理间隔", Type: "string", Help: "例如 30m，0 关闭"},
+	{Key: "context.idle_compact_min", Group: "context", Section: "上下文", Label: "空闲整理最低占比", Type: "float"},
+	{Key: "context.archive_days", Group: "context", Section: "上下文", Label: "归档保留天数", Type: "int", Help: "0 永久保留，默认 90"},
 	// ---- 模型的全局默认（接口和模型都在网页的模型节点里配置） ----
 	{Key: "llm.timeout", Group: "context", Section: "接口", Label: "请求超时（秒）", Type: "int", Advanced: true,
 		Help: "所有模型接口的请求超时", Keywords: "超时 timeout"},

@@ -24,6 +24,7 @@ SKILL
 echo "skill-e2e-data" > "$TMP/skills/demo/data.txt"
 echo "hello e2e" > "$TMP/work/hello.txt"
 echo "secret-profile" > "$TMP/home/.profile"
+export NANO_HOME="$TMP/home/.nano-agent"
 export HOME="$TMP/home"   # 执行器的临时目录和缓存放在 HOME 下，别弄脏真实的 HOME
 
 cat > "$TMP/gateway.toml" <<CONF
@@ -36,6 +37,8 @@ dir = "$TMP/skills"
 [llm]
 provider = "mock"
 max_history_tokens = 4000
+[context]
+keep_turns = 1
 [persona]
 dir = "$ROOT/personas"
 [session]
@@ -97,11 +100,12 @@ CHATPID=$!
 exec 3>"$TMP/in"   # 一直开着写端，chat 的 stdin 就不会 EOF
 
 pass=0 fail=0
-send() { echo "$1" >&3; }
+output_start=0
+send() { output_start=$(wc -c < "$TMP/out"); echo "$1" >&3; }
 expect() {
   local desc=$1 want=$2
   for _ in $(seq 50); do
-    if grep -qF -- "$want" "$TMP/out"; then echo "  ok   $desc"; pass=$((pass + 1)); return; fi
+    if tail -c +$((output_start + 1)) "$TMP/out" | grep -qF -- "$want"; then echo "  ok   $desc"; pass=$((pass + 1)); return; fi
     sleep 0.1
   done
   echo "  FAIL $desc（没等到：$want）"; fail=$((fail + 1))
@@ -151,7 +155,7 @@ send '!call Shell {"command":"cat ~/.profile"}';       expect "HOME 会话 Shell
 send '!call Write {"path":"~/.nano-e2e-readonly","content":"x"}'; expect "HOME 会话写外面要提权" "elevated"
 send '!call Shell {"command":"echo x > ~/.nano-e2e-readonly"}'; expect "HOME 会话 Shell 不能写 HOME" "Permission denied"
 send '!call Write {"path":"~/.nano-e2e-elevated.txt","content":"elevated-ok","elevated":true}'; expect "提权要审批" "需要审批 #4"
-send "/approve 4";                                    expect "批准提权后写入" "elevated-ok"
+send "/approve 4";                                    expect "批准提权后写入" "（mock）工具结果：已创建"
 send '!call Read {"path":"~/.nano-e2e-elevated.txt"}'; expect "提权写到了工作目录外" "elevated-ok"
 # 网关管理工具：查询不审批，修改要审批；结果和日志里没有密钥
 send '!call Gateway {"what":"status"}';                 expect "Gateway 查询状态" "\"kernels\""
@@ -209,7 +213,7 @@ send "/dir -3";                                       expect "取下服务器上
 send "/session new 压缩测试";                          expect "新建压缩测试会话" "已切换到会话「压缩测试」"
 long=$(printf '旧%.0s' {1..1800})
 send "摘要第一轮-$long";                              expect "累积待整理的历史" "（mock）收到：摘要第一轮-"
-send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理较早的对话"
+send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理上下文"
 echo "compaction-e2e-ok" > "$TMP/work/summary.txt"
 send '!call Read {"path":"summary.txt"}';             expect "压缩之后照常调用工具" "compaction-e2e-ok"
 if python3 - "$TMP/data/sessions" <<'PY'

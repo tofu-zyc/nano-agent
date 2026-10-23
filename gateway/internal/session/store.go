@@ -202,13 +202,17 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
-	s.hist[sid] = nil
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 {
 		st.EnvNote, st.Base, st.Summary = "", 0, ""
+		st.Meter = Meter{}
+		st.Prefix = nil
+		st.Omitted = nil
+		st.CompactedAt = 0
 		if err := s.SaveSettings(sid, st); err != nil {
 			return err
 		}
 	}
+	s.hist[sid] = nil
 	err := os.Remove(s.file(sid))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
