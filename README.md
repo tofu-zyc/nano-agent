@@ -48,6 +48,26 @@ nano-gateway export                 # 旧机器上：配置、数据、密钥文
 curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.sh | sh -s -- --import nano-agent-export-xxx.tar.gz --old-local-as 旧机器名
 ```
 
+### 更新和卸载
+
+```sh
+nano-gateway update --check       # 有没有新版本（网关每天也会查一次，只提示）
+nano-gateway update               # 下载、校验、备份，用新程序检查配置后重启；新版本起不来自动退回
+nano-gateway update --version 0.1.1   # 换成指定版本（也能退回旧版本）
+nano-gateway uninstall            # 停服务，删程序、服务文件、PATH 行；同一个目录里装着内核时只卸网关
+nano-gateway uninstall --keep-data    # 只删程序，配置和数据留着，以后重装接着用
+```
+
+聊天里管理员发 `/update`、网页设置页点「更新」、跟 AI 说“更新网关”（要批准）都行。自带的人格和技能：没改过的直接更新，改过的保留，新版本放成 `.new`。
+
+接入的电脑上的内核**自动跟网关保持同一个版本**：内核连上来时版本不一样，网关就把同版本的内核推过去，内核换掉自己后重启，起不来自动退回（`[update] kernels = false` 关掉）。手动操作：
+
+```sh
+nano-kernel-ctl version | update | uninstall      # Linux / macOS
+```
+
+Windows 上卸载：`powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.nano-agent\kernel\install-kernel.ps1" -Uninstall`，或者一行安装命令里把 `-Gateway …` 换成 `-Uninstall`。
+
 `--old-local-as` 把旧网关“本机”上的工作目录改记到这个机器名下：之后在旧机器上装内核、用这个名字连过来，工作目录和会话都能接着用。配对过的电脑要改连新地址（在那台电脑上重新运行安装命令，配对口令保留）。
 
 ## 快速开始（从源码）

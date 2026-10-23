@@ -392,7 +392,7 @@ rm -f "$DIR/check.log"
 # 控制脚本：启动、停止、看日志。没有 systemd / launchd 的机器靠它在后台跑
 cat >"$DIR/nano-kernel-ctl" <<'EOF'
 #!/bin/sh
-# nano-agent 内核：nano-kernel-ctl start|stop|restart|status|log
+# nano-agent 内核：nano-kernel-ctl start|stop|restart|status|log|version|update|uninstall
 umask 077
 SELF=$0
 case "$SELF" in /*) ;; *) SELF=$PWD/$SELF ;; esac
@@ -445,9 +445,32 @@ status)
 	if p=$(pid); then echo "运行中（pid $p）"; else echo "没有运行"; exit 3; fi
 	;;
 log) exec tail -n 50 -F "$DIR/kernel.log" ;;
-*) echo "用法：nano-kernel-ctl start|stop|restart|status|log"; exit 2 ;;
+version) exec "$DIR/nano-kernel" --version ;;
+update)
+	# 一般不用手动更新：内核连上网关后会自动换成网关的版本。这里是手动从 Release 下载最新版
+	shift
+	base=${NANO_DOWNLOAD_URL:-https://github.com/tofu-zyc/nano-agent/releases}
+	base=${base%/}
+	if command -v curl >/dev/null 2>&1; then get() { curl -fsSL --retry 3 "$1"; }; else get() { wget -qO- "$1"; }; fi
+	case " $* " in
+	*" --version "*) ;;
+	*)
+		latest=$(get "$base/latest/download/VERSION" | tr -d ' \r\n') || { echo "查不到最新版本（$base）"; exit 1; }
+		cur=$("$DIR/nano-kernel" --version 2>/dev/null)
+		if [ "$latest" = "$cur" ]; then echo "已经是最新版本 $cur"; exit 0; fi
+		echo "更新内核：$cur → $latest"
+		;;
+	esac
+	script=$(get "$base/latest/download/install.sh") || { echo "下载安装脚本失败（$base）"; exit 1; }
+	printf '%s\n' "$script" | sh -s -- --kernel --yes --dir "$DIR" "$@"
+	;;
+uninstall) shift; exec sh "$DIR/install-kernel.sh" --uninstall --dir "$DIR" "$@" ;;
+*) echo "用法：nano-kernel-ctl start|stop|restart|status|log|version|update [--version x.y.z]|uninstall [--yes]"; exit 2 ;;
 esac
 EOF
+# 留一份安装脚本在内核目录里，nano-kernel-ctl uninstall 用（单文件安装包去掉后面的程序数据）
+sed '/^__NANO_PAYLOAD__$/,$d' "$0" >"$DIR/install-kernel.sh.new" && chmod 755 "$DIR/install-kernel.sh.new" &&
+	mv -f "$DIR/install-kernel.sh.new" "$DIR/install-kernel.sh"
 chmod 755 "$DIR/nano-kernel-ctl"
 mkdir -p "$NANO_HOME/bin"
 ln -sf "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"

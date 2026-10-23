@@ -59,6 +59,37 @@ func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (s *Server) updateStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.app.UpdateStatus())
+}
+
+func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	info, err := s.app.CheckUpdate(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "查新版本失败："+err.Error())
+		return
+	}
+	writeJSON(w, info)
+}
+
+// updateRun 下载、校验、换上新版本，然后网关重启（页面像重启一样等它回来）。
+func (s *Server) updateRun(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SID string `json:"sid"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+	text, err := s.app.RunUpdate(ctx, app.RestartRequest{By: "web:local", SID: body.SID, Channel: "web", Chat: "local"})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "text": text, "update": s.app.UpdateStatus()})
+}
+
 type modelInfo struct {
 	Provider      string   `json:"provider"`
 	Model         string   `json:"model"`

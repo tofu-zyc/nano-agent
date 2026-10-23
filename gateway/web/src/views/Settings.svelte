@@ -76,6 +76,34 @@
       <label class="toggle"><input type="checkbox" bind:checked={showAdvanced} />显示高级设置</label>
     </div>
 
+    {#if store.ov?.runtime}
+      {@const rt = store.ov.runtime}
+      {@const up = rt.update}
+      <div class="version-row">
+        <Icon name="hub" size={14} />
+        <span>当前版本 <b>{rt.version}</b></span>
+        {#if up?.available}
+          <span class="new">新版本 {up.latest}</span>
+          {#if up.updatable}
+            <button class="btn sm primary" disabled={store.updating || store.restarting} onclick={() => store.updateGateway()}>
+              <Icon name="refresh" size={13} />{store.updating ? '更新中…' : `更新到 ${up.latest}`}
+            </button>
+          {:else}
+            <span class="muted" title={up.why}>这个网关不能自动更新（不是安装脚本装的）</span>
+          {/if}
+        {:else if up?.checked && !up.error}
+          <span class="muted">已经是最新版本</span>
+        {/if}
+        {#if up?.error}<span class="err">检查失败：{up.error}</span>{/if}
+        <button class="btn sm" disabled={store.checkingUpdate || store.updating} onclick={() => store.checkUpdate()}>
+          {store.checkingUpdate ? '检查中…' : '检查更新'}
+        </button>
+        <span class="muted hint">更新会备份旧版本，新版本起不来自动退回；接入的电脑上的内核会自动换成同一个版本</span>
+      </div>
+    {/if}
+    {#if store.updating && !store.restarting}
+      <div class="banner restarting"><Icon name="refresh" size={14} />正在下载并校验新版本…</div>
+    {/if}
     {#if pending}
       <div class="banner"><Icon name="refresh" size={14} />有 {pending} 项改动要重启网关才生效（重启时用同一个配置文件即可，网页里的修改会保留）。
         <button class="btn sm" disabled={store.restarting} onclick={() => store.restartGateway()}>
@@ -321,5 +349,28 @@
   .empty {
     padding: 60px;
     text-align: center;
+  }
+  .version-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    font-size: 13px;
+  }
+  .version-row .new {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .version-row .err {
+    color: var(--err);
+  }
+  .version-row .hint {
+    flex-basis: 100%;
+    font-size: 12px;
   }
 </style>

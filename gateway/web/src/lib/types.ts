@@ -14,7 +14,7 @@ export type ChannelStatus = { state: string; identity?: string; error?: string; 
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
 // 一个在线的内核（agent）。local 表示它和网关在同一台机器上，managed 表示是网关自己启动的
-export type KernelInfo = { node: string; os?: string; arch?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
+export type KernelInfo = { node: string; os?: string; arch?: string; version?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
 
 // 技能放在网关上
 export type SkillInfo = { name: string; description: string; dir: string };
@@ -111,6 +111,18 @@ export type Totals = {
   reasoning_tokens: number;
 };
 
+// 版本检查的结果
+export type UpdateInfo = {
+  current: string;
+  latest?: string;
+  available: boolean;
+  updatable: boolean;
+  why?: string;
+  checked?: number;
+  error?: string;
+  updating?: string;
+};
+
 export type RuntimeStatus = {
   running: boolean;
   pid: number;
@@ -122,6 +134,7 @@ export type RuntimeStatus = {
   kernel_listen: string;
   pending_restart: number;
   recent_errors?: string[];
+  update?: UpdateInfo;
 };
 
 export type Overview = {

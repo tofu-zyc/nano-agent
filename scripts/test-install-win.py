@@ -56,6 +56,9 @@ class FakeGateway(threading.Thread):
         self.paired = threading.Event()
         self.stop = threading.Event()
         self.clients = []
+        self.hellos = []          # 带配对口令的 hello
+        self.update_msg = None    # 下一次 hello 后推给内核的更新
+        self.update_results = []
 
     def run(self):
         while not self.stop.is_set():
@@ -74,8 +77,22 @@ class FakeGateway(threading.Thread):
                 return
             hello = json.loads(line)
             if hello.get("token") == PAIRED:
+                self.hellos.append(hello)
                 f.write((json.dumps({"t": "welcome", "v": 9}) + "\n").encode())
                 f.flush()
+                if self.update_msg:
+                    msg, self.update_msg = self.update_msg, None
+                    f.write((json.dumps(msg) + "\n").encode())
+                    f.flush()
+                    c.settimeout(30)
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            break
+                        m = json.loads(line)
+                        if m.get("t") == "update_result":
+                            self.update_results.append(m)
+                            break
                 self.accepted.set()
                 return
             f.write((json.dumps({"t": "pairing", "code": "123456"}) + "\n").encode())
@@ -166,6 +183,29 @@ try:
     assert gw.paired.wait(10) and gw.accepted.wait(10), "假网关没有收到配对和重连"
     print("  ok   启动后配对并重新连上网关")
 
+    # 网关推更新（同样的程序、同一个版本）：内核把正在运行的 exe 改名、换上新的，以 75 退出，
+    # run-kernel.ps1 立即重新拉起；新进程被网关接受后确认，update-pending.json 删掉
+    import base64
+    ver = gw.hellos[-1].get("version")
+    assert ver, gw.hellos[-1]
+    files = []
+    for n in ("nano-kernel.exe", "nano-exec.exe", "rg.exe"):
+        with open(os.path.join(PKG_L, n), "rb") as f:
+            files.append({"path": n, "data": base64.b64encode(f.read()).decode()})
+    seen = len(gw.hellos)
+    gw.update_msg = {"t": "update", "version": ver, "files": files}
+    end = time.time() + 60
+    while time.time() < end and not (gw.update_results and len(gw.hellos) > seen + 1):
+        time.sleep(0.3)
+    assert gw.update_results and gw.update_results[0].get("ok") is True, gw.update_results
+    assert len(gw.hellos) > seen + 1, "更新后内核没有重新连上（run-kernel.ps1 没把它拉起来？）"
+    assert os.path.exists(os.path.join(INST_L, "nano-kernel.exe.old")), os.listdir(INST_L)
+    end = time.time() + 30
+    while time.time() < end and os.path.exists(os.path.join(INST_L, "update-pending.json")):
+        time.sleep(0.3)
+    assert not os.path.exists(os.path.join(INST_L, "update-pending.json")), "新版本被接受后没有确认"
+    print("  ok   网关推来新版本：内核换掉自己、退出码 75、run-kernel.ps1 立即拉起")
+
     old_token = open(TOKEN, encoding="ascii").read().strip()
     cleanup_kernel()
     try:
@@ -180,10 +220,11 @@ try:
     assert os.path.exists(TOKEN) and open(TOKEN, encoding="ascii").read().strip() == old_token, "升级丢了配对口令"
     print("  ok   升级保留配置和 paired.token")
 
-    r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W)
+    assert os.path.exists(os.path.join(INST_L, "install-kernel.ps1")), "安装目录里没有留安装脚本"
+    r = ps(INST_W + "\\install-kernel.ps1", "-Uninstall", "-Yes", "-Dir", INST_W)
     assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
-    print("  ok   卸载")
-    passed = 4
+    print("  ok   卸载（用安装目录里留的脚本）")
+    passed = 5
 
     if SERVICE:
         gw.paired.clear()

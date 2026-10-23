@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, SessionInfo, Target, WorkspaceInfo } from './types';
+import type { Approval, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
 
 export type Toast = {
   id: number;
@@ -60,6 +60,8 @@ class Store {
   personaTick = $state(0);
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
   restarting = $state(false);
+  updating = $state(false);
+  checkingUpdate = $state(false);
 
   private es: EventSource | null = null;
   private listeners = new Set<(e: Ev) => void>();
@@ -154,20 +156,60 @@ class Store {
       this.toast({ kind: 'err', text: err instanceof Error ? err.message : String(err) }, 8000);
       return;
     }
-    for (let i = 0; i < 60; i++) {
+    if (await this.waitBack()) this.toast({ kind: 'ok', text: '网关已重启' }, 3000);
+  }
+
+  /** 等重启中的网关回来，回来后重新加载数据；等太久就刷新页面。 */
+  private async waitBack(): Promise<boolean> {
+    for (let i = 0; i < 120; i++) {
       await new Promise((r) => setTimeout(r, 500));
       try {
         await api.get('/api/me');
         await this.start();
         this.restarting = false;
-        this.toast({ kind: 'ok', text: '网关已重启' }, 3000);
-        return;
+        return true;
       } catch {
         /* 还在重启 */
       }
     }
     this.restarting = false;
     location.reload();
+    return false;
+  }
+
+  /** 查一次有没有新版本 */
+  async checkUpdate() {
+    this.checkingUpdate = true;
+    try {
+      const u = await api.post<UpdateInfo>('/api/update/check', {});
+      await this.refresh();
+      this.toast({ kind: 'ok', text: u.available ? `有新版本 ${u.latest}` : `已经是最新版本 ${u.current}` }, 3000);
+    } catch (err) {
+      this.toast({ kind: 'err', text: err instanceof Error ? err.message : String(err) }, 8000);
+    } finally {
+      this.checkingUpdate = false;
+    }
+  }
+
+  /** 更新网关：下载、校验、换好后网关重启；页面等它回来。新版本起不来会自动退回，聊天里会说明。 */
+  async updateGateway(sid = '') {
+    const before = this.ov?.runtime?.version ?? '';
+    this.updating = true;
+    try {
+      await api.post('/api/update', { sid });
+    } catch (err) {
+      this.updating = false;
+      this.toast({ kind: 'err', text: err instanceof Error ? err.message : String(err) }, 8000);
+      return;
+    }
+    this.restarting = true;
+    // 新版本要正常运行一会儿才算成功；先等它回来，版本号变了就是换上了
+    const back = await this.waitBack();
+    this.updating = false;
+    if (!back) return;
+    const now = this.ov?.runtime?.version ?? '';
+    if (now && now !== before) this.toast({ kind: 'ok', text: `网关已更新到 ${now}` }, 4000);
+    else this.toast({ kind: 'err', text: '新版本没能正常运行，已退回；详情看网关日志' }, 8000);
   }
 
   async loadFields() {

@@ -6,6 +6,8 @@ import (
 	"runtime"
 
 	"nano-agent/gateway/internal/host"
+	"nano-agent/gateway/internal/release"
+	"strings"
 )
 
 func (s *Server) hasDevices(w http.ResponseWriter) bool {
@@ -19,7 +21,7 @@ func (s *Server) getDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.hasDevices(w) {
 		return
 	}
-	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": host.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH,
+	writeJSON(w, map[string]any{"connections": s.devices.List(), "ssh_hosts": host.SSHHosts(), "listener": s.devices.Listener(), "primary_listener": s.conf.Current().Kernel.Listen, "platform": runtime.GOOS, "arch": runtime.GOARCH, "download_base": downloadBase(s.conf.Current().Update.URL),
 		"pairing": s.devices.PairRequests(), "paired": s.devices.PairedDevices(), "addrs": lanAddrs()})
 }
 
@@ -189,4 +191,12 @@ func (s *Server) defaultWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// downloadBase 是一行安装命令里的下载地址：配置了镜像就用镜像
+func downloadBase(mirror string) string {
+	if mirror != "" {
+		return strings.TrimRight(mirror, "/")
+	}
+	return release.DefaultBase
 }

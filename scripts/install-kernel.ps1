@@ -160,6 +160,11 @@ while (`$true) {
 "@
 [System.IO.File]::WriteAllText($Runner, $RunnerText, (New-Object System.Text.UTF8Encoding($false)))
 
+# 留一份安装脚本在安装目录里：以后卸载用 powershell -File "$Dir\install-kernel.ps1" -Uninstall
+$Self = $MyInvocation.MyCommand.Path
+$Kept = Join-Path $Dir "install-kernel.ps1"
+if ($Self -and ((Resolve-Path $Self).Path -ne $Kept)) { Copy-Item -Force $Self $Kept }
+
 $checkLog = Join-Path $Dir "check.log"
 $check = Start-Process -FilePath $Kernel -ArgumentList @('-c', $Conf, '-t') -NoNewWindow -Wait -PassThru -RedirectStandardError $checkLog
 if ($check.ExitCode -ne 0) {

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -34,6 +35,9 @@ import (
 	"nano-agent/gateway/internal/version"
 	"nano-agent/gateway/internal/web"
 )
+
+// testFailStart 只在测试构建里用 -ldflags -X 设置：模拟新版本启动失败，测试自动退回。
+var testFailStart = ""
 
 func newClient(c config.LLM) (llm.Client, error) {
 	if c.Provider == "openai" {
@@ -64,6 +68,12 @@ func main() {
 			os.Exit(runDoctor(os.Args[2:]))
 		case "version":
 			os.Exit(runVersion())
+		case "update":
+			os.Exit(runUpdate(os.Args[2:]))
+		case "uninstall":
+			os.Exit(runUninstall(os.Args[2:]))
+		case "check-config":
+			os.Exit(runCheckConfig(os.Args[2:]))
 		case "export":
 			os.Exit(runExport(os.Args[2:]))
 		case "import":
@@ -73,7 +83,7 @@ func main() {
 		}
 		if !strings.HasPrefix(arg, "-") {
 			fmt.Fprintf(os.Stderr, "不认识的子命令：%s\n", arg)
-			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|chat|export|import")
+			fmt.Fprintln(os.Stderr, "用法：nano-gateway [-c 配置文件] | status|start|stop|restart|logs|url|doctor|version|update|uninstall|chat|export|import")
 			os.Exit(2)
 		}
 	}
@@ -89,6 +99,12 @@ func main() {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	// 刚更新过：记一次启动；新版本起不来好几次就在这里退回旧版本（所以要在读配置之前）
+	upd := updateGuard(log)
+	if testFailStart != "" {
+		log.Error("测试构建：模拟新版本启动失败")
+		os.Exit(1)
+	}
 
 	if err := secret.Init(paths.Home()); err != nil {
 		log.Error("读取密钥文件失败", "err", err)
@@ -129,6 +145,15 @@ func main() {
 	a.SetRestarter(func(req app.RestartRequest) error {
 		return requestRestart(*cfgPath, cfg.Session.DataDir, req, restartCh)
 	})
+	a.SetUpdater(&gatewayUpdater{cfgPath: *cfgPath, conf: conf, log: log, restart: func(req app.RestartRequest) error {
+		// 更新后的重启不写重启标记：新进程按 update.json 回话（成功或退回）
+		select {
+		case restartCh <- req:
+			return nil
+		default:
+			return errors.New("已经在重启了")
+		}
+	}})
 	go func() {
 		if err := control.Serve(ctx, control.Socket(cfg.Session.DataDir), func() any { return a.Status() }, log); err != nil {
 			log.Warn("控制 socket 用不了", "err", err)
@@ -226,6 +251,10 @@ func main() {
 	if req, elapsed, ok := readRestartMarker(cfg.Session.DataDir); ok {
 		a.RestartDone(req, elapsed)
 	}
+	finishUpdate(ctx, a, upd, log)
+	if config.On(cfg.Update.Check) {
+		go checkUpdatesDaily(ctx, a, log)
+	}
 
 	names := []string{}
 	for _, c := range a.Channels() {
@@ -261,6 +290,28 @@ func main() {
 			log.Error("重启失败", "err", err)
 			os.Exit(1)
 		}
+	}
+}
+
+// checkUpdatesDaily 每天查一次新版本，只记下来（status、网页、/status 里提示），不自动更新。
+func checkUpdatesDaily(ctx context.Context, a *app.App, log *slog.Logger) {
+	t := time.NewTimer(2 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		info, err := a.CheckUpdate(cctx)
+		cancel()
+		if err != nil {
+			log.Debug("查新版本失败", "err", err)
+		} else if info.Available {
+			log.Info("有新版本", "current", info.Current, "latest", info.Latest)
+		}
+		t.Reset(24 * time.Hour)
 	}
 }
 

@@ -47,6 +47,7 @@
       <button class="pill" onclick={() => store.go('#/settings')} title="网关版本和运行时长；点开设置查看详情">
         <Icon name="hub" size={14} />
         v{ov.runtime.version}
+        {#if ov.runtime.update?.available}<span class="newver">→ {ov.runtime.update.latest} 可更新</span>{/if}
         <span class="muted">· {since(ov.runtime.started)}</span>
       </button>
     {/if}
@@ -140,5 +141,9 @@
     .pills {
       display: none;
     }
+  }
+  .newver {
+    color: var(--accent);
+    font-weight: 600;
   }
 </style>

@@ -30,6 +30,7 @@ type Config struct {
 	Web       Web       `toml:"web" json:"web"`
 	Network   Network   `toml:"network" json:"network"`
 	Security  Security  `toml:"security" json:"security"`
+	Update    Update    `toml:"update" json:"update"`
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
@@ -80,6 +81,13 @@ type Network struct {
 // 以及发到 Telegram/飞书时脱敏；always 发给模型时总是脱敏。
 type Security struct {
 	Redact string `toml:"redact" json:"redact"`
+}
+
+// Update 是版本更新：网关自己只提示、要用户发起；内核自动跟网关保持同一个版本。
+type Update struct {
+	Check   *bool  `toml:"check" json:"check"`     // 每天查一次有没有新版本（只提示），默认开
+	Kernels *bool  `toml:"kernels" json:"kernels"` // 内核版本和网关不一样时自动推送网关的版本，默认开
+	URL     string `toml:"url" json:"url"`         // 下载地址（镜像）；空表示 NANO_DOWNLOAD_URL 或 GitHub Release
 }
 
 // Secrets 是网关自己保存的密钥原文（给脱敏用，不要写日志）。

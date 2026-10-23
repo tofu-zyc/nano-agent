@@ -172,6 +172,7 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Unlock()
 	// 机器上线后把离线时先按原样保存的工作目录换成那台机器给的规范形式
 	go a.normalizeWorkspaces(machine)
+	a.maybeUpdateKernel(name, hello)
 }
 
 func (a *App) toolsChanged(name string, m *proto.Msg) {

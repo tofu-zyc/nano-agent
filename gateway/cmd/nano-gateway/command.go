@@ -95,7 +95,7 @@ func printStatus(st app.Status) {
 	} else {
 		parts := make([]string, 0, len(st.Kernels))
 		for _, k := range st.Kernels {
-			parts = append(parts, fmt.Sprintf("%s（%s）", k.Node, k.OS))
+			parts = append(parts, fmt.Sprintf("%s（%s %s）", k.Node, k.OS, k.Version))
 		}
 		fmt.Println("在线内核：" + strings.Join(parts, "、"))
 	}
@@ -119,6 +119,9 @@ func printStatus(st app.Status) {
 	}
 	if st.DefaultModel != "" {
 		fmt.Printf("默认模型：%s\n", st.DefaultModel)
+	}
+	if u := st.Update; u != nil && u.Available {
+		fmt.Printf("新版本：%s 可以更新（nano-gateway update）\n", u.Latest)
 	}
 	if st.PendingRestart > 0 {
 		fmt.Printf("待重启设置：%d 项\n", st.PendingRestart)

@@ -37,7 +37,7 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove","restart"
+      "pair_allow","pair_deny","pair_remove","restart","update"
     ],"description":"要做什么"},
     "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
@@ -71,7 +71,7 @@ const gatewayAdminSchema = `{
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
 		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
-		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
+		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }
 
@@ -96,7 +96,7 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 			"web_url": st.WebURL, "kernel_listen": st.KernelListen,
 			"kernels": st.Kernels, "machines": st.Machines, "channels": st.Channels,
 			"workspaces": a.Workspaces(), "default_model": st.DefaultModel,
-			"pending_restart": st.PendingRestart, "recent_errors": st.RecentErrors,
+			"pending_restart": st.PendingRestart, "recent_errors": st.RecentErrors, "update": st.Update,
 		}
 	case "logs":
 		n := args.Lines
@@ -420,6 +420,10 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 			return "", err
 		}
 		return "网关正在重启…", nil
+	case "update":
+		ctx, cancel := context.WithTimeout(a.ctx, 15*time.Minute)
+		defer cancel()
+		return a.RunUpdate(ctx, RestartRequest{By: "gateway-admin", SID: sid})
 	}
 	return "", fmt.Errorf("不认识的 action %q", args.Action)
 }

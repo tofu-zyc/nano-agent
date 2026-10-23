@@ -47,6 +47,7 @@ var Commands = []Command{
 	{Name: "node", Desc: "查看机器和在线的内核"},
 	{Name: "status", Desc: "查看网关状态：版本、运行时长、内核、渠道、待重启设置", Admin: true},
 	{Name: "restart", Desc: "检查配置后重启网关", Admin: true},
+	{Name: "update", Desc: "有新版本就更新网关（起不来自动退回）", Admin: true},
 	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
@@ -90,6 +91,9 @@ type App struct {
 	webURL         string
 	confStore      *config.Store
 	restarter      func(RestartRequest) error
+	updater        Updater
+	update         UpdateInfo
+	kernelUpdates  map[string]bool // “内核@版本”：这次运行已经自动推过
 	pendingRestart string
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
@@ -416,6 +420,24 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		if err := a.restartLocked(req); err != nil {
 			a.answer(c, "没有重启："+err.Error())
 		}
+		return
+	case "update":
+		if !a.isAdmin(c.who) {
+			a.answer(c, "只有管理员能更新网关")
+			return
+		}
+		req := RestartRequest{By: c.who, SID: c.s.sid, Channel: c.ep.ch, Chat: c.ep.chat, At: time.Now().UnixMilli()}
+		a.answer(c, "检查新版本…")
+		// 要联网下载，不能拿着锁做
+		go func() {
+			text, err := a.RunUpdate(a.ctx, req)
+			if err != nil {
+				text = "没有更新：" + a.safeToolText(err.Error())
+			}
+			a.mu.Lock()
+			a.answer(c, text)
+			a.mu.Unlock()
+		}()
 		return
 	case "stop":
 		a.stop(c)

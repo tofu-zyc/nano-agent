@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/config"
-	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/redact"
 )
 
@@ -27,6 +26,7 @@ type Status struct {
 	Channels       []ChannelInfo `json:"channels"`
 	DefaultModel   string        `json:"default_model,omitempty"`
 	PendingRestart int           `json:"pending_restart"`
+	Update         *UpdateInfo   `json:"update,omitempty"`
 	RecentErrors   []string      `json:"recent_errors,omitempty"`
 }
 
@@ -93,6 +93,11 @@ func (a *App) statusLocked() Status {
 		Machines:     a.machineList(),
 		KernelListen: a.cfg.Kernel.Listen,
 	}
+	if a.updater != nil {
+		u := a.update
+		u.Current = a.version
+		st.Update = &u
+	}
 	if a.models != nil {
 		st.DefaultModel = a.models.Default()
 	}
@@ -119,7 +124,7 @@ func formatStatusBrief(st Status) string {
 	if len(st.Kernels) > 0 {
 		parts := make([]string, 0, len(st.Kernels))
 		for _, k := range st.Kernels {
-			parts = append(parts, fmt.Sprintf("%s（%s）", k.Node, k.OS))
+			parts = append(parts, fmt.Sprintf("%s（%s %s）", k.Node, k.OS, k.Version))
 		}
 		fmt.Fprintf(&b, "\n在线内核：%s", strings.Join(parts, "、"))
 	} else {
@@ -136,6 +141,13 @@ func formatStatusBrief(st Status) string {
 	for _, c := range st.Channels {
 		if c.Enabled {
 			fmt.Fprintf(&b, "\n渠道：%s（%s）", c.Name, c.Status.State)
+		}
+	}
+	if u := st.Update; u != nil && u.Available {
+		if u.Updatable {
+			fmt.Fprintf(&b, "\n有新版本 %s（现在 %s），发 /update 更新", u.Latest, u.Current)
+		} else {
+			fmt.Fprintf(&b, "\n有新版本 %s（现在 %s）", u.Latest, u.Current)
 		}
 	}
 	if st.PendingRestart > 0 {
@@ -173,34 +185,7 @@ func (a *App) restartLocked(req RestartRequest) error {
 
 // RestartDone 在新进程启动完成后调用，给发起重启的会话回一条消息。
 func (a *App) RestartDone(req RestartRequest, elapsed time.Duration) {
-	text := fmt.Sprintf("网关已重启（用时 %s）", shortDuration(elapsed.Milliseconds()))
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if req.SID != "" {
-		if req.Channel != "" {
-			if req.Channel == "cli" && (a.cli == nil || !a.cli.Connected()) {
-				a.pendingRestart = text
-				return
-			}
-			a.tell(req.SID, endpoint{ch: req.Channel, chat: req.Chat}, text)
-			return
-		}
-		// GatewayAdmin 只有会话，没有具体窗口：发给这个会话接着的窗口
-		for key, r := range a.eps {
-			if r.Session != req.SID {
-				continue
-			}
-			ep := parseEndpoint(key)
-			if ep.ch == "cli" && (a.cli == nil || !a.cli.Connected()) {
-				a.pendingRestart = text
-				continue
-			}
-			a.deliver(ep, text, "")
-		}
-		a.publish(events.Event{T: "say", SID: req.SID, Text: text})
-		return
-	}
-	a.publish(events.Event{T: "say", Text: text})
+	a.Notify(req, fmt.Sprintf("网关已重启（用时 %s）", shortDuration(elapsed.Milliseconds())))
 }
 
 func shortDuration(ms int64) string {

@@ -751,7 +751,7 @@
             {#if k}
               <text x="62" y="24" class="t3">{k.managed ? '内核 · 网关启动的' : k.local ? '内核 · 在本机' : '内核 · 在别的电脑上'}</text>
               <text x="62" y="43" class="t1">{truncate(k.node, 18)}</text>
-              <text x="62" y="59" class="t2">{[osLabel(k.os), k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱', busyKernels.has(k.node) ? '正在跑' : ''].filter(Boolean).join(' · ')}</text>
+              <text x="62" y="59" class="t2">{[osLabel(k.os), k.version ? 'v' + k.version : '', k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱', busyKernels.has(k.node) ? '正在跑' : ''].filter(Boolean).join(' · ')}</text>
               <circle cx={n.w - 16} cy="16" r="4" class="sdot online" />
             {:else}
               <text x="62" y="31" class="t1 errt">没有内核在线</text>

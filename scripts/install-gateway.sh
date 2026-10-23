@@ -157,6 +157,12 @@ is_wsl() {
 }
 
 # ---- 卸载 ----
+# 新版本的网关自己会卸载（同一个目录里还有内核时只卸网关）；旧版本没有这个命令时用下面的脚本
+if [ "$UNINSTALL" = 1 ] && [ -x "$BIN/nano-gateway" ] &&
+  ! NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" uninstall --probe 2>&1 | grep -q '不认识的子命令'; then
+  if [ "$YES" = 1 ]; then exec env NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" uninstall --yes; fi
+  exec env NANO_HOME="$NANO_HOME" "$BIN/nano-gateway" uninstall
+fi
 if [ "$UNINSTALL" = 1 ]; then
   wsl_remove_keepalive
   if [ -f "$UNIT_DIR/$UNIT" ]; then
@@ -175,7 +181,13 @@ if [ "$UNINSTALL" = 1 ]; then
     fi
   done
   remove_from_path "$BIN" nano-gateway nano-kernel-ctl
-  if [ -d "$NANO_HOME" ]; then
+  if [ -x "$NANO_HOME/kernel/nano-kernel" ]; then
+    # 同一个目录里还装着内核：只删网关的部分
+    confirm "删除网关的程序、配置和数据（保留 $NANO_HOME/kernel 里的内核）？" || { say "已取消"; exit 0; }
+    rm -rf "$BIN/nano-gateway" "$LIB" "$NANO_HOME/run" "$NANO_HOME/backup" "$NANO_HOME/cache/releases" \
+      "$CONFIG" "$DATA" "$NANO_HOME/secret.key" "$NANO_HOME/personas" "$NANO_HOME/skills" \
+      "$NANO_HOME/update.json" "$NANO_HOME/.shipped.sha256"
+  elif [ -d "$NANO_HOME" ]; then
     confirm "删除 $NANO_HOME？里面有会话记录、模型和 SSH 连接。" || { say "已取消"; exit 0; }
     rm -rf "$NANO_HOME"
   fi
@@ -222,6 +234,12 @@ if [ -d "$ROOT/personas" ] && [ -z "$(ls -A "$NANO_HOME/personas" 2>/dev/null)" 
 fi
 if [ -d "$ROOT/skills" ] && [ -z "$(ls -A "$NANO_HOME/skills" 2>/dev/null)" ]; then
   cp -a "$ROOT/skills/." "$NANO_HOME/skills/"
+fi
+# 记下自带的人格和技能装的是哪个版本：以后 nano-gateway update 只覆盖没改过的
+if [ ! -f "$NANO_HOME/.shipped.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
+  (cd "$NANO_HOME" && find personas skills -type f ! -name '*.new' -print0 2>/dev/null | sort -z |
+    xargs -0 -r sha256sum) >"$NANO_HOME/.shipped.sha256" 2>/dev/null || rm -f "$NANO_HOME/.shipped.sha256"
+  chmod 600 "$NANO_HOME/.shipped.sha256" 2>/dev/null || true
 fi
 COPIED_CONF=0
 if [ "$MIGRATE" = 1 ] && [ -f "$ROOT/gateway.toml" ] && [ ! -f "$CONFIG" ]; then
