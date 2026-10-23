@@ -308,8 +308,9 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->mode = ev->mode;
     r->elevate = ev->elevate;
     r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
-    r->deadline = now + (ev->run_timeout_ms>0 ? ev->run_timeout_ms : c->cfg.run_timeout_ms);
- r->approval_timeout_ms=ev->approval_timeout_ms>0 ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
+    /* 定时任务会带自己的时限，普通聊天用内核配置 */
+    r->deadline = now + (ev->run_timeout_ms > 0 ? ev->run_timeout_ms : c->cfg.run_timeout_ms);
+    r->approval_timeout_ms = ev->approval_timeout_ms > 0 ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
     r->next = c->runs;
     c->runs = r;
     step(c, r);
@@ -345,13 +346,19 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         const char *why = NULL;
         bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
         k->elevated = in->elevated;
-        na_tool_kind kind=k->tool ? k->tool->kind : NA_TOOL_WRITE;
-        bool schedule_admin=kind==NA_TOOL_SCHEDULE;
-        bool history_delete=kind==NA_TOOL_ADMIN && in->action && !strcmp(in->action,"history_delete");
-        if (schedule_admin) kind=in->action && (!strcmp(in->action,"list") || !strcmp(in->action,"run_now")) ? NA_TOOL_READ : NA_TOOL_WRITE;
+        na_tool_kind kind = k->tool ? k->tool->kind : NA_TOOL_WRITE;
+        bool schedule = kind == NA_TOOL_SCHEDULE;
+        bool history_delete = kind == NA_TOOL_ADMIN && in->action && !strcmp(in->action, "history_delete");
+        /* Schedule：查看和立即运行按只读算，增删改按写算 */
+        if (schedule)
+            kind = in->action && (!strcmp(in->action, "list") || !strcmp(in->action, "run_now")) ? NA_TOOL_READ : NA_TOOL_WRITE;
         decision d = k->tool ? decide(sandbox, r->mode, kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
-        if (schedule_admin && !r->elevate) {d=DECIDE_DENY;why="只有管理员能管理定时任务";}
-        if (history_delete && r->elevate) d=DECIDE_ASK; /* 删除历史在所有模式都必须审批 */
+        if (schedule && !r->elevate) {
+            d = DECIDE_DENY;
+            why = "只有管理员能管理定时任务";
+        }
+        if (history_delete && r->elevate)
+            d = DECIDE_ASK; /* 删除历史在所有模式（包括只读）都要审批 */
 
         if (!k->tool) {
             result_err(c, r, k, "未知工具：%s", k->name);

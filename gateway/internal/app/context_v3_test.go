@@ -96,3 +96,27 @@ func TestSummaryFailureKeepsFirstLayerOnly(t *testing.T) {
 		t.Fatal("failure discarded history or first layer")
 	}
 }
+
+func TestContextText(t *testing.T) {
+	for n, want := range map[int]string{999: "999", 1000: "1k", 41234: "41.2k", 96000: "96k", 128000: "128k"} {
+		if got := tokenText(n); got != want {
+			t.Errorf("tokenText(%d) = %q，想要 %q", n, got, want)
+		}
+	}
+	if durationText(30*time.Minute) != "30 分钟" || durationText(2*time.Hour) != "2 小时" {
+		t.Error("durationText")
+	}
+	e := setup(t)
+	e.say("/context")
+	e.ch.wait(t, "上次请求：暂无（新会话或刚整理过），上面的数字是估算")
+	e.say("你好")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	e.a.mu.Lock()
+	e.a.cfg.Context.IdleCompact = "0"
+	e.a.mu.Unlock()
+	e.say("/context")
+	if got := e.ch.wait(t, "上次请求：输入 "); !strings.Contains(got, "时自动整理；空闲不自动整理；/compact 现在整理") {
+		t.Fatalf("/context：%s", got)
+	}
+}

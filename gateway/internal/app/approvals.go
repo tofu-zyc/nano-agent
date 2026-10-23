@@ -119,7 +119,7 @@ func (a *App) decided(ok bool, who string) string {
 	return verb + " · " + who
 }
 
-// A scheduled run's approval belongs to its own session, but arrives in its delivery windows.
+// canApproveFrom：审批单属于它自己的会话；定时任务的审批单属于 cron 会话，但发到任务的投递窗口，在那里也能批
 func (a *App) canApproveFrom(c in, ap *approval) bool {
 	s := a.sessions[ap.sid]
 	if s == nil || s.run == nil {

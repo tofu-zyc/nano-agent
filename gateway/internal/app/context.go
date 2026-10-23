@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/session"
+	"strconv"
+	"strings"
+	"time"
 )
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
@@ -36,9 +39,11 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			tools = append(tools, toolOf(spec))
 		}
 	}
+	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
+	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
-	if st.Prefix != nil {
-		system, tools = st.Prefix.System, st.Prefix.Tools
+	if st.Prefix != nil && st.Prefix.System == system {
+		tools = st.Prefix.Tools
 	}
 	m, _, _ := a.modelOf(sid)
 	window := m.ContextWindow
@@ -62,11 +67,46 @@ func (a *App) contextInfo(sid string) session.ContextInfo {
 }
 func (a *App) contextText(sid string) string {
 	c := a.contextInfo(sid)
-	text := fmt.Sprintf("上下文 %d / %d（%.0f%%）· %s\n人格 %d · 工具定义 %d · 摘要 %d（已整理 %d 条）\n对话 %d（%d 条，工具结果占 %d）\n上次请求：输入 %d（缓存命中 %.0f%%）· 输出 %d", c.Total, c.Window, float64(c.Total)*100/float64(c.Window), c.Model, c.Persona, c.Tools, c.Summary, c.Compacted, c.Dialogue, c.Messages, c.ToolResults, c.Last.PromptTokens, float64(c.Last.CachedTokens)*100/float64(max(1, c.Last.PromptTokens)), c.Last.CompletionTokens)
-	high, _, _ := a.compactLimits(sid)
-	idle := a.cfg.Context.IdleCompact
-	if idle == "" {
-		idle = "30m"
+	var b strings.Builder
+	fmt.Fprintf(&b, "上下文 %s / %s（%d%%）· %s", tokenText(c.Total), tokenText(c.Window), c.Total*100/max(1, c.Window), c.Model)
+	fmt.Fprintf(&b, "\n  人格 %s · 工具定义 %s · 摘要 %s", tokenText(c.Persona), tokenText(c.Tools), tokenText(c.Summary))
+	if c.CompactedAt > 0 {
+		at := time.Unix(c.CompactedAt, 0).In(a.loc)
+		layout := "15:04"
+		if at.Format("2006-01-02") != a.now().In(a.loc).Format("2006-01-02") {
+			layout = "01-02 15:04"
+		}
+		fmt.Fprintf(&b, "（%s 整理掉 %d 条）", at.Format(layout), c.Compacted)
 	}
-	return text + fmt.Sprintf("\n到 %d 时自动整理；空闲 %s 后整理；/compact 现在整理", high, idle)
+	fmt.Fprintf(&b, "\n  对话 %s（%d 条，工具结果占 %s）", tokenText(c.Dialogue), c.Messages, tokenText(c.ToolResults))
+	if c.Last.PromptTokens > 0 {
+		fmt.Fprintf(&b, "\n上次请求：输入 %s（缓存命中 %d%%）· 输出 %s", tokenText(c.Last.PromptTokens), c.Last.CachedTokens*100/c.Last.PromptTokens, tokenText(c.Last.CompletionTokens))
+	} else {
+		b.WriteString("\n上次请求：暂无（新会话或刚整理过），上面的数字是估算")
+	}
+	idle := "空闲不自动整理"
+	if d, err := time.ParseDuration(c.IdleFor); err == nil && d > 0 {
+		idle = "空闲 " + durationText(d) + "后整理"
+	}
+	fmt.Fprintf(&b, "\n到 %s（%d%%）时自动整理；%s；/compact 现在整理", tokenText(c.AutoAt), c.AutoAt*100/max(1, c.Window), idle)
+	return b.String()
+}
+
+// tokenText 把 token 数写成 41.2k、128k 这样
+func tokenText(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return strings.TrimSuffix(strconv.FormatFloat(float64(n)/1000, 'f', 1, 64), ".0") + "k"
+}
+
+// durationText 把空闲时长写成“30 分钟”“2 小时”
+func durationText(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%d 小时", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d 分钟", d/time.Minute)
+	}
+	return d.String() + " "
 }

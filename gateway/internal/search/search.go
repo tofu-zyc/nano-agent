@@ -1,4 +1,4 @@
-// Package search provides gateway-owned read-only web tools.
+// Package search 是网关自己执行的只读网络工具（WebSearch、WebFetch）背后的搜索服务。
 package search
 
 import (

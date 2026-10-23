@@ -49,6 +49,7 @@
   deliver=[...(t?.deliver??['web:main'])];workspaces=[...(t?.workspaces??store.session('main')?.workspaces.map(w=>w.id)??[])];
   error='';editing=true;
  }
+ function labelOf(key:string){return destinations.find(d=>d.key===key)?.label??key;}
  function toggle(xs:string[],key:string,on:boolean){return on?[...new Set([...xs,key])]:xs.filter(x=>x!==key);}
  async function act(action:string,t:ScheduleTask,extra:Record<string,unknown>={}) {
   if(busy)return;
@@ -80,7 +81,7 @@
   <p class="timing">{t.when} · {modes[t.mode]??t.mode}</p>
   <p class="muted">下次：{t.enabled?date(t.next):'已暂停'} · {t.catch_up?'错过一小时内补跑一次':'不补跑'}</p>
   <p class="prompt">{t.prompt}</p>
-  <p class="muted targets">投递到 {t.deliver.join('、')}</p>
+  <p class="muted targets">投递到 {t.deliver.map(labelOf).join('、')}</p>
   {#if t.last}<p class="last" class:failed={!t.last.ok}>{t.last.ok?'已完成':'未完成'} · {date(t.last.at)}<br/>{t.last.summary.slice(0,180)}</p>{/if}
   <div class="actions">
    <button disabled={busy||t.running} onclick={()=>act('run_now',t)}><Icon name="play" size={14}/>立即运行</button>
@@ -125,7 +126,7 @@
  .last{padding:12px;background:var(--bg-2);border-radius:10px;font-size:12px;line-height:1.6;white-space:pre-wrap}.failed{color:var(--warn)}
  .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.actions a{font-size:12px;color:var(--accent);margin-left:auto}
  button{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--bg-2);color:var(--text);font-size:12px}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
- .primary{background:var(--accent);color:white;border-color:transparent}.danger{color:var(--muted)}
+ .primary{background:var(--accent);color:white;border-color:transparent}.danger{color:var(--err)}
  details{margin-top:16px;font-size:12px}summary{cursor:pointer;color:var(--muted)}.result{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}.result p{white-space:pre-wrap;line-height:1.65;overflow-wrap:anywhere}
  .empty{padding:60px 24px;text-align:center;color:var(--muted)}.empty h2{margin:18px 0}.empty p{font-size:13px}
  .editor{position:fixed;inset:58px 0 0 72px;background:color-mix(in srgb,var(--bg) 70%,transparent);backdrop-filter:blur(5px);z-index:9;overflow:auto;padding:24px;display:grid;align-items:start;justify-items:center}

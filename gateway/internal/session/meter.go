@@ -5,7 +5,7 @@ import (
 	"nano-agent/gateway/internal/llm"
 )
 
-// Meter records the input boundary, not the assistant response that follows it.
+// Meter 是上一次正常模型请求的真实用量；Position 是请求时的历史位置（绝对下标，不含之后的回复），Signature 是当时的模型、人格、工具和摘要
 type Meter struct {
 	Position  int       `json:"position"`
 	Usage     llm.Usage `json:"usage"`

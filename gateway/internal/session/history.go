@@ -110,7 +110,7 @@ func (s *Store) DeleteAllHistory(sid string) error {
 	return os.RemoveAll(s.archiveDir(sid))
 }
 
-// DeleteTurns uses zero-based user-turn indices in the original journal.
+// DeleteTurns 删掉第 from 到 to 轮（按历史文件里的用户消息数，从 0 起，含已整理掉的部分），重写历史文件，并重算 Base、占位表和计量
 func (s *Store) DeleteTurns(sid string, from, to int) error {
 	h := s.Archive(sid)
 	var starts []int

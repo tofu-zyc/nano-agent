@@ -1038,7 +1038,7 @@ func (a *App) generateModel(s *sess) {
 	r := s.run
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
-	if st.Prefix == nil {
+	if st.Prefix == nil || st.Prefix.System != system {
 		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools}
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存提示快照失败", "err", err)

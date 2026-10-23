@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// EffectiveHistory applies placeholders without touching the append-only journal.
+// EffectiveHistory 是套用了“已省略”占位之后的历史；历史文件本身只追加，不改
 func (s *Store) EffectiveHistory(sid string) []Msg {
 	h := append([]Msg(nil), s.History(sid)...)
 	st := s.Settings(sid)

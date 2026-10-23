@@ -1,4 +1,4 @@
-// Package schedule stores task definitions and calculates due times. App owns execution and locking.
+// Package schedule 保存定时任务（data/schedules.json）、计算下次运行时间；执行和加锁由 app 负责。
 package schedule
 
 import (
@@ -85,7 +85,7 @@ func Next(spec string, after time.Time, loc *time.Location) (time.Time, error) {
 	return next, nil
 }
 
-// Advance skips missed repetitions in constant time for intervals, and once for cron.
+// Advance 算出下一个还没到的运行时间：every 直接跳过错过的次数，cron 从现在往后找
 func Advance(t Task, now time.Time, loc *time.Location) (time.Time, error) {
 	if strings.HasPrefix(strings.TrimSpace(t.When), "every ") && !t.Next.IsZero() {
 		d, err := time.ParseDuration(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t.When), "every ")))
@@ -100,7 +100,7 @@ func Advance(t Task, now time.Time, loc *time.Location) (time.Time, error) {
 	return Next(t.When, now, loc)
 }
 
-// LatestDue finds the most recent missed occurrence without replaying an entire outage.
+// LatestDue 找最近一次错过的运行时间（停机期间错过多次也只补最近一次）
 func LatestDue(t Task, now time.Time, loc *time.Location) time.Time {
 	spec := strings.TrimSpace(t.When)
 	if strings.HasPrefix(spec, "every ") {

@@ -241,7 +241,7 @@ func (a *App) scheduleLoop() {
 	}
 }
 
-// ScheduleTick uses the same clock as context maintenance, allowing deterministic tests.
+// ScheduleTick 每秒检查一次到点的任务和超时的运行；和上下文维护用同一个时钟（a.now），测试里可以拨
 func (a *App) ScheduleTick() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -257,7 +257,7 @@ func (a *App) ScheduleTick() {
 			}
 		}
 	}
-	// Wait for kernel/channel startup before processing downtime catch-up.
+	// 等内核和渠道连上之后，再处理停机期间错过的任务
 	if !a.schedulerStarted && (a.hub == nil || len(a.nodes) == 0) {
 		return
 	}

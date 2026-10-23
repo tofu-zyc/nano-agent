@@ -43,7 +43,7 @@ func (a *App) compactLimits(sid string) (int, int, int) {
 	return high, low, keep
 }
 
-// summaryChunks bounds the actual JSON payload and clips tool output before splitting.
+// summaryChunks 把要整理的历史切成块：每块按序列化后的请求大小算，不超过 budget；工具输出先截到 2KB 再切
 func summaryChunks(h []session.Msg, budget int) [][]llm.Message {
 	msgs := session.BuildMessages("", "", h, false, nil)
 	for i := range msgs {
@@ -61,7 +61,7 @@ func summaryChunks(h []session.Msg, budget int) [][]llm.Message {
 		for {
 			part := m
 			part.ToolCalls = nil
-			// JSON may escape content, so measure the serialized request rather than text bytes.
+			// JSON 会转义内容，所以量序列化后的请求，不量文本字节数
 			remaining := m.Content
 			if len(remaining) > max(64, budget*2) {
 				part.Content = cutUTF8(remaining, max(64, budget*2))

@@ -1,6 +1,6 @@
 package channel
 
-// StatusView is transient: writers erase the status when the answer finishes.
+// StatusView：简洁档的临时状态行（“正在执行 Shell…”），回答结束后由渠道删掉
 type StatusView interface{ Status(string) }
 type filteredView struct {
 	RunView
