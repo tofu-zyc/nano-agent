@@ -54,6 +54,7 @@ var Commands = []Command{
 	{Name: "mode", Args: "[auto | ask | readonly]", Desc: "查看、切换权限模式：自动、审批、只读", Admin: true},
 	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
 	{Name: "model", Args: "[编号 | default]", Desc: "查看、切换这个会话用的模型", Admin: true},
+	{Name: "persona", Args: "[编号 | 名字 | default]", Desc: "查看、切换这个会话的人格（自带小纳、大肥鱼）", Admin: true},
 	{Name: "approve", Args: "<编号>", Desc: "批准一次工具执行", Admin: true},
 	{Name: "deny", Args: "<编号>", Desc: "拒绝一次工具执行", Admin: true},
 }
@@ -462,6 +463,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "model":
 		a.cmdModel(c, arg)
+		return
+	case "persona":
+		a.cmdPersona(c, arg)
 		return
 	}
 	if m.Text == "" && len(m.Images) == 0 {

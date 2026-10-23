@@ -259,6 +259,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/config/reload", s.auth(s.reloadConfig))
 	mux.HandleFunc("POST /api/test/model", s.auth(s.testModel))
 	mux.HandleFunc("GET /api/personas", s.auth(s.listPersonas))
+	mux.HandleFunc("GET /api/persona-presets", s.auth(s.listPersonaPresets))
 	mux.HandleFunc("GET /api/personas/{name}", s.auth(s.getPersona))
 	mux.HandleFunc("PUT /api/personas/{name}", s.auth(s.putPersona))
 	mux.HandleFunc("DELETE /api/personas/{name}", s.auth(s.deletePersona))

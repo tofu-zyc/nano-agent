@@ -3,7 +3,7 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-23，Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹）、`nano-gateway help` / `nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」，还没发版）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-23，自带人格「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」，还没发版）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹）、`nano-gateway help` / `nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」，还没发版）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一步见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## 一句话
 
@@ -39,6 +39,7 @@ gateway/               Go 网关
     compact.go         超限后异步生成摘要，取消、失败裁剪和用量统计
     undo.go            撤回（/undo、「撤回」、平台撤回事件）和不带斜杠的「停」
     models.go          可用的模型：/model、按会话选模型、按模型建客户端、思考强度和历史上限
+    persona_cmd.go     /persona：查看、给会话换上自带人格（写会话专属人格文件）、改回默认
     gateway_tools.go   Gateway / GatewayAdmin：查询和修改网关，管理动作走审批
     images.go          图片输入：模型能力、把历史里的图片读成 data URL
   internal/host        网关能直接执行工具的机器：本机（local.go）、SSH 服务器（ssh.go：主连接、
@@ -48,6 +49,7 @@ gateway/               Go 网关
   internal/kernel      内核连接（hub，多内核；AllowToken 给网关启动的本机内核）
     pair.go            电脑配对：待确认请求、专用口令（只存 SHA-256）、移除
   internal/skills      技能（放在网关上）：扫描、Skill 工具定义、加载说明和附带文件
+  internal/persona     人格文件热加载；presets/*.md 是自带人格（小纳、大肥鱼），go:embed 进程序，开头 --- 包着 name / desc
   internal/session     历史（JSONL 只追加）、会话设置、裁剪
   internal/llm         OpenAI 兼容接口（流式）、mock
   internal/models      模型列表：接口、模型、默认模型（data/models.json，0600，API key 加密）
@@ -107,6 +109,13 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - `doctor` 检查配置（严格）、`secret.key`/数据目录权限、网页/内核/电脑接入端口、本机执行器和内核（有 `VERSION` 文件时比版本）、systemd enabled/linger 或后台 pid、WSL 保活；有 `[问题]` 时退出码 1。
 - WSL 保活：当时 Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 和 PowerShell `Register-ScheduledTask` 都返回“拒绝访问”（**后来查清：是触发器没限定用户——`/SC ONLOGON`、`New-ScheduledTaskTrigger -AtLogOn` 不带 `-User` 是“任何用户登录时”，要管理员；带 `-User 当前用户` 普通用户就能建，见「内核管理命令」**），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
 - 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway status 字段、Gateway logs 脱敏、GatewayAdmin restart 的测试。
+
+## 自带人格（2026-10-23）
+
+- `gateway/internal/persona/presets/`：`xiaona.md`（和 `personas/default.md` 正文一样，测试会比对，改一份要同步另一份）、`dafeiyu.md`（大肥鱼：网友给 DeepSeek 画的萌化形象，蓝色鲸鱼女仆，爱吃白饭、嘴上想摸鱼、带点傲娇）。编进程序跟着程序更新，不放进 `$NANO_HOME/personas`（安装脚本只在人格目录为空时才拷，老用户拿不到新文件）。
+- 套用 = 把预设正文写进 `default.md` 或会话专属人格文件，之后照常编辑。网页「人格」页左边「自带人格」点一下填进编辑框（保存才生效）；`GET /api/persona-presets`。聊天 `/persona [编号 | 名字 | default]`（切换要管理员），写 / 删 `<dir>/<会话ID>.md`。`/persona` 和网页标题会说明当前人格原样是哪个预设（`MatchPreset`）。
+- 每个预设都要带「消息格式」和「工具」两节（时间戳、群聊昵称、[系统] 行、不编造工具结果），`presets_test.go` 检查。大肥鱼的人设里专门写了“偷吃可以、偷工不行”：梗里的摸鱼、半成品交付、“我去吃饭了你测完告诉我”、偷偷写小游戏都只当口头玩笑，干活规矩不能破；被问底层模型时不确定就说不确定。
+- 资料来源：机核《对 DeepSeek 大肥鱼现象的终极解释》、腾讯新闻（2026-08-11、2026-08-21）关于“蓝色大肥鱼”的报道。
 
 ## 内核管理命令（2026-10-23）
 

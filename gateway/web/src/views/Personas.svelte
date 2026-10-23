@@ -3,7 +3,7 @@
   import { api } from '../lib/api';
   import { ago } from '../lib/format';
   import { markdown } from '../lib/markdown';
-  import type { Persona } from '../lib/types';
+  import type { Persona, PersonaPreset } from '../lib/types';
   import Icon from '../components/Icon.svelte';
 
   let items = $state<Persona[]>([]);
@@ -13,11 +13,15 @@
   let exists = $state(false);
   let preview = $state(false);
   let busy = $state(false);
+  let presets = $state<PersonaPreset[]>([]);
 
   const name = $derived(store.route.arg ?? 'default.md');
   const isNew = $derived(location.hash.includes('new=1'));
   const dirty = $derived(text !== saved || !exists);
   const current = $derived(items.find((i) => i.name === name));
+  const same = (a: string, b: string) => a.trim() === b.trim();
+  // 编辑框里的内容原样是哪个自带人格
+  const matched = $derived(presets.find((p) => same(p.text, text)));
   const sidOf = (n: string) => (n === 'default.md' ? '' : decodeURIComponent(n.replace(/\.md$/, '')));
   const titleOf = (n: string) => {
     if (n === 'default.md') return '默认人格';
@@ -51,6 +55,24 @@
         text = '';
       }
     }
+  }
+
+  async function loadPresets() {
+    try {
+      presets = (await api.get<{ items: PersonaPreset[] }>('/api/persona-presets')).items;
+    } catch {
+      presets = [];
+    }
+  }
+  loadPresets();
+
+  // 套用自带人格：填进编辑框，保存后才生效
+  function usePreset(p: PersonaPreset) {
+    if (same(p.text, text)) return;
+    if (text.trim() && !matched && !confirm(`用「${p.name}」替换编辑框里现在的内容？保存后才生效。`)) return;
+    text = p.text;
+    preview = false;
+    store.toast({ kind: 'ok', text: `已填入「${p.name}」，保存后生效` });
   }
 
   $effect(() => {
@@ -121,8 +143,20 @@
       </div>
     {/if}
     <p class="tip">
-      每个会话默认用 <code>default.md</code>。要给某个群或某个人单独设定，到它的会话设置里点“给这个会话单独设定人格”。
+      每个会话默认用 <code>default.md</code>。要给某个群或某个人单独设定，到它的会话设置里点“给这个会话单独设定人格”；聊天里也可以发 <code>/persona</code> 给那个会话换上自带人格。
     </p>
+    {#if presets.length}
+      <div class="head presets-head">
+        <strong>自带人格</strong>
+        <span class="muted small">点一下填进「{titleOf(name)}」，保存后生效</span>
+      </div>
+      {#each presets as p (p.id)}
+        <button class="preset" class:on={matched?.id === p.id} onclick={() => usePreset(p)}>
+          <div class="t">{p.name}{#if matched?.id === p.id}<span class="tag">编辑框里就是它</span>{/if}</div>
+          <div class="s">{p.desc}</div>
+        </button>
+      {/each}
+    {/if}
   </aside>
 
   <section class="editor">
@@ -132,6 +166,7 @@
         <div class="muted small">
           <code>{name}</code>
           {#if current}· {current.sessions.length} 个会话在用{/if}
+          {#if matched}· 自带人格「{matched.name}」{/if}
           {#if !exists}· <span class="warnt">新文件，保存后生效</span>{:else if dirty}· <span class="warnt">有未保存的修改</span>{/if}
         </div>
       </div>
@@ -225,6 +260,40 @@
   .s {
     font-size: 11.5px;
     color: var(--muted);
+  }
+  .presets-head {
+    margin-top: 18px;
+    padding-bottom: 6px;
+  }
+  .preset {
+    display: block;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 9px 10px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: none;
+    color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  .preset:hover {
+    background: var(--panel-2);
+  }
+  .preset.on {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .preset .s {
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .tag {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--accent-2);
   }
   .tip {
     margin: 14px 8px 0;

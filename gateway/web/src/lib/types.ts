@@ -227,3 +227,4 @@ export type Target =
   | { type: 'session'; sid: string };
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
+export type PersonaPreset = { id: string; name: string; desc: string; text: string };

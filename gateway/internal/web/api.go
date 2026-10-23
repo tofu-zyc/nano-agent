@@ -21,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
+	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -471,6 +472,11 @@ func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Name == "default.md" && items[j].Name != "default.md" })
 	writeJSON(w, map[string]any{"dir": s.persona.Dir(), "items": items})
+}
+
+// listPersonaPresets：程序自带的人格预设，网页上“套用预设”用。
+func (s *Server) listPersonaPresets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"items": persona.Presets()})
 }
 
 func (s *Server) getPersona(w http.ResponseWriter, r *http.Request) {

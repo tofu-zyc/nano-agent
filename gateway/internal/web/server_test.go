@@ -209,6 +209,12 @@ func TestPersonas(t *testing.T) {
 	if code, _ := c.do("DELETE", "/api/personas/default.md", nil, true); code != 400 {
 		t.Fatalf("默认人格不能删：%d", code)
 	}
+	code, out = c.do("GET", "/api/persona-presets", nil, false)
+	presets, _ := out["items"].([]any)
+	if code != 200 || len(presets) < 2 || presets[1].(map[string]any)["name"] != "大肥鱼" ||
+		!strings.Contains(presets[1].(map[string]any)["text"].(string), "你是「大肥鱼」") {
+		t.Fatalf("预设：%d %v", code, out)
+	}
 }
 
 func TestSessions(t *testing.T) {
