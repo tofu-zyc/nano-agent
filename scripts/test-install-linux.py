@@ -135,6 +135,35 @@ try:
     assert gw.paired.wait(10) and gw.accepted.wait(10), "假网关没有收到配对和重连"
     print("  ok   启动后配对并重新连上网关")
 
+    # nano-kernel 管理命令：在 PATH 里（~/.nano-agent/bin 的链接）、status、connect 改连另一个网关、stop、start
+    NK = os.path.join(HOME, ".nano-agent", "bin", "nano-kernel")
+    assert os.path.realpath(NK) == os.path.join(KERNEL_DIR, "nano-kernel"), os.path.realpath(NK)
+
+    def nk(*args):
+        r = subprocess.run([NK, *args], env=env, capture_output=True, text=True, errors="replace", timeout=60)
+        return r.returncode, r.stdout + r.stderr
+
+    end = time.time() + 15
+    while time.time() < end and "已连接" not in nk("status")[1]:
+        time.sleep(0.3)
+    code, text = nk("status")
+    assert code == 0 and "已连接" in text and "linpc" in text and "后台进程" in text, text
+    gw2 = FakeGateway(SOCK + "2")
+    gw2.start()
+    code, text = nk("connect", "unix:" + SOCK + "2", "--name", "linpc-b")
+    assert code == 0 and gw2.accepted.wait(15), text
+    conf = open(CONF, encoding="utf-8").read()
+    assert "gateway = unix:" + SOCK + "2" in conf and "node = linpc-b" in conf, conf
+    code, text = nk("stop")
+    assert code == 0, text
+    code, text = nk("status")
+    assert code == 3 and "没有运行" in text, text
+    assert not os.path.exists(os.path.join(KERNEL_DIR, "kernel.stop")) and not os.path.exists(os.path.join(KERNEL_DIR, "kernel.pid"))
+    code, text = nk("connect", "unix:" + SOCK, "--name", "linpc")
+    assert code == 0 and "没有在运行" in text, text
+    gw2.close()
+    print("  ok   nano-kernel status / connect / stop")
+
     old_token = open(TOKEN, encoding="ascii").read().strip()
     subprocess.run([CTL, "stop"], env=env, check=True, capture_output=True)
     r = run_install(["--gateway", "unix:" + SOCK, "--name", "linpc2", "--yes", "--no-service"], env)
@@ -148,7 +177,7 @@ try:
                        env=env, capture_output=True, text=True, errors="replace")
     assert r.returncode == 0 and not os.path.exists(KERNEL_DIR), r.stdout + r.stderr
     print("  ok   卸载")
-    print("install-linux: 4 passed")
+    print("install-linux: 5 passed")
 finally:
     try:
         subprocess.run([CTL, "stop"], env=env, capture_output=True)

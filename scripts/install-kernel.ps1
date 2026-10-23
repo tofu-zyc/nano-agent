@@ -10,6 +10,7 @@
 #   -Dir C:\Users\me\.nano-agent\kernel
 #   -NoService                     只安装，不注册开机自启，也不启动
 #   -Yes                           不提问（必须给 -Gateway）
+#   -NoPath                        不把安装目录加进当前用户的 PATH（测试用）
 #   -Uninstall                     停止并删除
 param(
     [string]$Gateway = "",
@@ -17,6 +18,7 @@ param(
     [string]$Dir = "",
     [string]$TaskName = "nano-agent-kernel",
     [switch]$NoService,
+    [switch]$NoPath,
     [switch]$Yes,
     [switch]$Uninstall
 )
@@ -49,6 +51,20 @@ function Stop-Kernel {
     Start-Sleep -Milliseconds 300
 }
 
+# 内核目录加进当前用户的 PATH（新开的终端里能直接用 nano-kernel status 之类）
+function Add-UserPath($d) {
+    $p = [Environment]::GetEnvironmentVariable("Path", "User")
+    $parts = @()
+    if ($p) { $parts = $p -split ';' | Where-Object { $_ } }
+    if ($parts -notcontains $d) { [Environment]::SetEnvironmentVariable("Path", (($parts + $d) -join ';'), "User") }
+}
+function Remove-UserPath($d) {
+    $p = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $p) { return }
+    $parts = $p -split ';' | Where-Object { $_ -and $_ -ne $d }
+    [Environment]::SetEnvironmentVariable("Path", ($parts -join ';'), "User")
+}
+
 function Remove-Task {
     try { & $Schtasks /Delete /TN $TaskName /F 2>$null | Out-Null } catch { }
 }
@@ -61,6 +77,7 @@ if ($Uninstall) {
     }
     Stop-Kernel
     Remove-Task
+    if (-not $NoPath) { Remove-UserPath $Dir }
     Remove-Item -Recurse -Force $Dir
     Say "已卸载。网关网页「设备」里配对过的这台电脑可以一并移除。"
     exit 0
@@ -147,18 +164,29 @@ max_output = 65536
 # 配对口令由内核写在 kernel.conf 旁边的 paired.token。
 
 # 退出码 75：内核换上了新版本（或退回了旧版本），马上重新拉起；0：正常退出（被网关拒绝等）；其他：崩溃，等一会儿再拉起
+# 日志超过 5 MB 就换一个文件（内核自己用 --log 追加写，换的时候没有进程拿着它）。
+# 用 .NET 直接启动内核：Start-Process 在没有控制台时拿不到可等待的句柄，WaitForExit 会立刻返回。
+# 脚本里不放中文注释，并且带 BOM 写出：PowerShell 5.1 按系统代码页读没有 BOM 的文件，路径里的中文才不会坏。
 $RunnerText = @"
-`$ErrorActionPreference = 'SilentlyContinue'
+`$ErrorActionPreference = 'Continue'
+`$log = "$Log"
 while (`$true) {
-    if (Test-Path "$Log") { Move-Item -Force "$Log" "$Log.1" }
-    `$p = Start-Process -FilePath "$Kernel" -ArgumentList @('-c', "$Conf") -NoNewWindow -PassThru -RedirectStandardError "$Log"
+    try { if ((Test-Path `$log) -and (Get-Item `$log).Length -gt 5MB) { Move-Item -Force `$log "`$log.1" } } catch { }
+    `$psi = New-Object System.Diagnostics.ProcessStartInfo
+    `$psi.FileName = "$Kernel"
+    `$psi.Arguments = '-c "$Conf" --log "' + `$log + '"'
+    `$psi.UseShellExecute = `$false
+    `$psi.CreateNoWindow = `$true
+    try { `$p = [System.Diagnostics.Process]::Start(`$psi) } catch { Start-Sleep -Seconds 5; continue }
     `$p.WaitForExit()
-    if (`$p.ExitCode -eq 75) { continue }
-    if (`$p.ExitCode -eq 0) { break }
+    `$code = `$p.ExitCode
+    `$p.Dispose()
+    if (`$code -eq 75) { continue }
+    if (`$code -eq 0) { break }
     Start-Sleep -Seconds 5
 }
 "@
-[System.IO.File]::WriteAllText($Runner, $RunnerText, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText($Runner, $RunnerText, (New-Object System.Text.UTF8Encoding($true)))
 
 # 留一份安装脚本在安装目录里：以后卸载用 powershell -File "$Dir\install-kernel.ps1" -Uninstall
 $Self = $MyInvocation.MyCommand.Path
@@ -173,10 +201,13 @@ if ($check.ExitCode -ne 0) {
 }
 Remove-Item $checkLog -ErrorAction SilentlyContinue
 
+if (-not $NoPath) { Add-UserPath $Dir }
 if ($NoService) {
-    Say "装好了，没有注册开机自启，也没有启动。手动启动：powershell -File `"$Runner`""
+    [System.IO.File]::WriteAllText((Join-Path $Dir "service"), "none`n")
+    Say "装好了，没有注册开机自启，也没有启动。启动：nano-kernel start（新开的终端里能用；nano-kernel help 看全部命令）"
     exit 0
 }
+[System.IO.File]::WriteAllText((Join-Path $Dir "service"), "task:$TaskName`n")
 
 Say ""
 Say "==> 注册任务计划程序（登录时启动，失败自动重启）"
@@ -216,10 +247,11 @@ while ($true) {
     $out = New-Log
     if ($out -match "网关已接受连接") {
         Say "已接入网关。打开网关网页，在会话里选这台电脑上的工作目录就能开始工作。"
+        Say "管理内核（新开的终端里）：nano-kernel status | stop | start | connect 网关地址 | logs -f"
         exit 0
     }
     if ($out -match "没有同意这台电脑接入") {
-        Die "网关拒绝了这台电脑。重新运行：Stop-ScheduledTask -TaskName $TaskName; Start-ScheduledTask -TaskName $TaskName"
+        Die "网关拒绝了这台电脑。要重新申请：nano-kernel restart（新开的终端里）"
     }
     if (-not $code -and $out -match "核对确认码\s*([0-9]{6})") {
         $code = $Matches[1]
@@ -240,6 +272,6 @@ if ($code) {
     Say "暂时没连上网关，内核会在后台一直重试。最近的日志："
     New-Log | Select-Object -Last 5
     Say "检查：网关地址对不对（$Gateway）、网页「设备」里电脑接入有没有启用、防火墙是否放行端口。"
-    Say "看日志：Get-Content '$Log' -Tail 50 -Wait"
+    Say "看状态：nano-kernel status；看日志：nano-kernel logs -f（新开的终端里）"
 }
 exit 0

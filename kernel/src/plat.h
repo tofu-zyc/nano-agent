@@ -128,6 +128,21 @@ int plat_probe(char *const argv[], int timeout_ms, buf_t *out);
 char *plat_shell_exe(char *const envp[]);
 const char *plat_shell_prefix(void);
 
+/* ---- 管理命令（nano-kernel status / start / stop …）用的进程操作 ---- */
+
+long plat_getpid(void);
+/* 把标准错误（日志）改成追加写到文件（nano-kernel --log 文件） */
+int  plat_log_to(const char *path);
+/* 进程还在；name 非空时还要求程序名里含有 name（防止 pid 被别的程序复用） */
+bool plat_pid_alive(long pid, const char *name);
+/* 结束进程：POSIX 上 force 为假时发 SIGTERM，为真时发 SIGKILL；Windows 上直接结束 */
+int  plat_pid_kill(long pid, bool force);
+/* 运行一个命令（在 PATH 里找）并等它结束；quiet 时丢掉它的输出，否则用当前终端。
+ * 返回退出码，启动不了返回 -1 */
+int  plat_system(char *const argv[], bool quiet);
+/* 在后台启动一个程序，脱离当前终端；标准错误追加到 log（NULL 表示丢掉）。返回 pid，失败 -1 */
+long plat_spawn_bg(char *const argv[], const char *log);
+
 /* ---- 网络、poll、唤醒（内核用；Windows 上只有 TCP） ---- */
 
 typedef intptr_t na_sock;

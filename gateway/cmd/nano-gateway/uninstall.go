@@ -98,6 +98,7 @@ func uninstallGateway(home string, keepData, kernel bool) error {
 	removeLocalBinLink("nano-gateway", home)
 	if !kernel {
 		removeLocalBinLink("nano-kernel-ctl", home)
+		removeLocalBinLink("nano-kernel", home)
 	}
 
 	// 3. 文件

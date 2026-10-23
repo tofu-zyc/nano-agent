@@ -18,6 +18,7 @@ param(
     [string]$Version = "",
     [string]$TaskName = "",
     [switch]$NoService,
+    [switch]$NoPath,
     [switch]$Yes,
     [switch]$Uninstall
 )
@@ -78,6 +79,7 @@ try {
     if ($Dir) { $a += @("-Dir", $Dir) }
     if ($TaskName) { $a += @("-TaskName", $TaskName) }
     if ($NoService) { $a += "-NoService" }
+    if ($NoPath) { $a += "-NoPath" }
     if ($Yes) { $a += "-Yes" }
     if ($Uninstall) { $a += "-Uninstall" }
     & powershell.exe @a

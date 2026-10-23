@@ -988,3 +988,86 @@ void plat_signals_remove(void)
     signal(SIGHUP, SIG_DFL);
     signal(SIGCHLD, SIG_DFL);
 }
+
+/* ---- 管理命令用的进程操作 ---- */
+
+long plat_getpid(void) { return (long)getpid(); }
+
+int plat_log_to(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    if (fd != 2) {
+        dup2(fd, 2);
+        close(fd);
+    }
+    return 0;
+}
+
+bool plat_pid_alive(long pid, const char *name)
+{
+    if (pid <= 0) return false;
+    if (kill((pid_t)pid, 0) < 0 && errno != EPERM) return false;
+#ifdef __linux__
+    if (name) {
+        char link[64], buf[PATH_MAX];
+        snprintf(link, sizeof link, "/proc/%ld/exe", pid);
+        ssize_t n = readlink(link, buf, sizeof buf - 1);
+        if (n > 0) {
+            buf[n] = 0;
+            const char *base = strrchr(buf, '/');
+            return strstr(base ? base + 1 : buf, name) != NULL;
+        }
+    }
+#else
+    (void)name;
+#endif
+    return true;
+}
+
+int plat_pid_kill(long pid, bool force)
+{
+    return kill((pid_t)pid, force ? SIGKILL : SIGTERM);
+}
+
+int plat_system(char *const argv[], bool quiet)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        if (quiet) {
+            int fd = open("/dev/null", O_RDWR);
+            if (fd >= 0) {
+                dup2(fd, 1);
+                dup2(fd, 2);
+                if (fd > 2) close(fd);
+            }
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int st;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR) return -1;
+    if (WIFEXITED(st)) return WEXITSTATUS(st) == 127 ? -1 : WEXITSTATUS(st);
+    return -1;
+}
+
+long plat_spawn_bg(char *const argv[], const char *log)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        setsid();
+        int nul = open("/dev/null", O_RDWR);
+        int err = log ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600) : -1;
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(err >= 0 ? err : nul, 2);
+        }
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    return (long)pid;
+}

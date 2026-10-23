@@ -60,13 +60,19 @@ nano-gateway uninstall --keep-data    # 只删程序，配置和数据留着，�
 
 聊天里管理员发 `/update`、网页设置页点「更新」、跟 AI 说“更新网关”（要批准）都行。自带的人格和技能：没改过的直接更新，改过的保留，新版本放成 `.new`。
 
-接入的电脑上的内核**自动跟网关保持同一个版本**：内核连上来时版本不一样，网关就把同版本的内核推过去，内核换掉自己后重启，起不来自动退回（`[update] kernels = false` 关掉）。手动操作：
+接入的电脑上的内核**自动跟网关保持同一个版本**：内核连上来时版本不一样，网关就把同版本的内核推过去，内核换掉自己后重启，起不来自动退回（`[update] kernels = false` 关掉）。
+
+### 管理内核（在装了内核的电脑上，Linux / macOS / Windows 一样）
 
 ```sh
-nano-kernel-ctl version | update | uninstall      # Linux / macOS
+nano-kernel status                    # 运行状态、和网关的连接（已连接多久 / 正在连接的报错 / 等确认的确认码）、版本
+nano-kernel start | stop | restart    # 自动认出 systemd / launchd / Windows 任务计划 / 后台进程
+nano-kernel connect 192.168.1.2:7700 [--name 名字]   # 改连别的网关并重启；换了网关会自动重新申请接入
+nano-kernel logs -f
+nano-kernel update | uninstall
 ```
 
-Windows 上卸载：`powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.nano-agent\kernel\install-kernel.ps1" -Uninstall`，或者一行安装命令里把 `-Gateway …` 换成 `-Uninstall`。
+安装时会把 `nano-kernel` 加进 PATH（Windows 加进当前用户的 PATH，要新开一个终端）。旧的 `nano-kernel-ctl` 还能用，就是转给 `nano-kernel`。
 
 `--old-local-as` 把旧网关“本机”上的工作目录改记到这个机器名下：之后在旧机器上装内核、用这个名字连过来，工作目录和会话都能接着用。配对过的电脑要改连新地址（在那台电脑上重新运行安装命令，配对口令保留）。
 

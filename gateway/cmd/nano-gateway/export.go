@@ -31,7 +31,8 @@ func skipDataFile(rel string) bool {
 	switch {
 	case strings.HasPrefix(base, "gateway.log"), strings.HasPrefix(base, "kernel.log"):
 		return true
-	case base == "web.url", base == "local-kernel.conf", base == "restart.json", base == "control.sock":
+	case base == "web.url", base == "local-kernel.conf", base == "restart.json", base == "control.sock",
+		strings.HasSuffix(base, ".pid"), strings.HasSuffix(base, ".status.json"), strings.HasSuffix(base, ".stop"): // 本机内核的运行状态
 		return true
 	case strings.HasSuffix(base, ".tmp"), strings.HasSuffix(base, ".sock"):
 		return true

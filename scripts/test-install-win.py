@@ -59,6 +59,9 @@ class FakeGateway(threading.Thread):
         self.hellos = []          # 带配对口令的 hello
         self.update_msg = None    # 下一次 hello 后推给内核的更新
         self.update_results = []
+        self.hello_times = []
+        self.result_time = 0.0
+        self.hold = False         # welcome 后保持连接（测 nano-kernel status 的“已连接”）
 
     def run(self):
         while not self.stop.is_set():
@@ -78,6 +81,7 @@ class FakeGateway(threading.Thread):
             hello = json.loads(line)
             if hello.get("token") == PAIRED:
                 self.hellos.append(hello)
+                self.hello_times.append(time.time())
                 f.write((json.dumps({"t": "welcome", "v": 9}) + "\n").encode())
                 f.flush()
                 if self.update_msg:
@@ -92,8 +96,12 @@ class FakeGateway(threading.Thread):
                         m = json.loads(line)
                         if m.get("t") == "update_result":
                             self.update_results.append(m)
+                            self.result_time = time.time()
                             break
                 self.accepted.set()
+                if self.hold:
+                    c.settimeout(None)
+                    f.readline()   # 等内核断开（停止、重启）
                 return
             f.write((json.dumps({"t": "pairing", "code": "123456"}) + "\n").encode())
             f.flush()
@@ -125,6 +133,17 @@ class FakeGateway(threading.Thread):
 def ps(script, *args):
     return subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *args],
                           cwd=WIN_CWD, capture_output=True, text=True, errors="replace")
+
+
+def nk(*args):
+    """运行安装目录里的 nano-kernel.exe 管理命令"""
+    exe = INST_W + "\\nano-kernel.exe"
+    return subprocess.run([CMD, "/d", "/c", exe, *args] if not NATIVE else [exe, *args], cwd=WIN_CWD,
+                          capture_output=True, timeout=60)
+
+
+def nk_out(r):
+    return (r.stdout + r.stderr).decode("utf-8", "replace")
 
 
 def wait_file(path, timeout=30):
@@ -160,16 +179,18 @@ runner = None
 
 
 def cleanup_kernel():
+    """结束这次测试目录下的内核和 run-kernel.ps1（在 WSL 里结束 Popen 不会结束 Windows 那边的进程）"""
     clean = os.path.join(TMP_L, "clean.ps1")
     clean_w = TMP_W + "\\clean.ps1"
     with open(clean, "w", encoding="utf-8-sig", newline="\r\n") as f:
-        f.write("Get-Process nano-kernel -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '" +
-                INST_W + "\\nano-kernel.exe' } | Stop-Process -Force\n")
+        f.write("Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -like '" + TMP_W + "*') -or "
+                "($_.CommandLine -and $_.CommandLine.Contains('" + TMP_W + "\\kernel\\run-kernel.ps1')) } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n")
     ps(clean_w)
 
 
 try:
-    r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "installpc", "-Yes", "-NoService", "-Dir", INST_W)
+    r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "installpc", "-Yes", "-NoService", "-NoPath", "-Dir", INST_W)
     assert r.returncode == 0 and os.path.exists(CONF), r.stdout + r.stderr
     conf = open(CONF, encoding="utf-8-sig").read()
     assert f"tcp:127.0.0.1:{gw.port}" in conf and "node = installpc" in conf and "exec = " in conf, conf
@@ -199,12 +220,49 @@ try:
         time.sleep(0.3)
     assert gw.update_results and gw.update_results[0].get("ok") is True, gw.update_results
     assert len(gw.hellos) > seen + 1, "更新后内核没有重新连上（run-kernel.ps1 没把它拉起来？）"
+    gap = gw.hello_times[-1] - gw.result_time
+    assert gap < 4, f"更新后过了 {gap:.1f} 秒才重新连上：run-kernel.ps1 没认出退出码 75"
     assert os.path.exists(os.path.join(INST_L, "nano-kernel.exe.old")), os.listdir(INST_L)
     end = time.time() + 30
     while time.time() < end and os.path.exists(os.path.join(INST_L, "update-pending.json")):
         time.sleep(0.3)
     assert not os.path.exists(os.path.join(INST_L, "update-pending.json")), "新版本被接受后没有确认"
     print("  ok   网关推来新版本：内核换掉自己、退出码 75、run-kernel.ps1 立即拉起")
+
+    # nano-kernel 管理命令：status、stop（run-kernel.ps1 跟着结束）、start（交给 run-kernel.ps1）
+    gw.hold = True
+    end = time.time() + 30
+    while time.time() < end:
+        r = nk("status")
+        if r.returncode == 0 and "已连接" in nk_out(r):
+            break
+        time.sleep(0.5)
+    assert r.returncode == 0 and "已连接" in nk_out(r) and "installpc" in nk_out(r), nk_out(r)
+    r = stop_r = nk("stop")
+    assert r.returncode == 0 and "已停止" in nk_out(r), nk_out(r)
+    try:
+        assert runner.wait(15) == 0, "run-kernel.ps1 没有在内核正常退出后结束"
+    except subprocess.TimeoutExpired:
+        logs = ""
+        for n in ("kernel.log", "kernel.log.1"):
+            if os.path.exists(os.path.join(INST_L, n)):
+                logs += f"--- {n}\n" + open(os.path.join(INST_L, n), encoding="utf-8", errors="replace").read()[-1500:]
+        tl = subprocess.run([CMD, "/c", "tasklist", "/FI", "IMAGENAME eq nano-kernel.exe"], cwd=WIN_CWD, capture_output=True)
+        extra = tl.stdout.decode("gbk", "replace")
+        for n in ("kernel.pid", "kernel.status.json", "kernel.stop"):
+            pth = os.path.join(INST_L, n)
+            extra += f"\n{n}: " + (open(pth, errors="replace").read() if os.path.exists(pth) else "（没有）")
+        extra += "\nstop 的输出：" + nk_out(stop_r)
+        raise AssertionError("nano-kernel stop 后 run-kernel.ps1 还在拉起内核\n" + logs + extra)
+    r = nk("status")
+    assert r.returncode == 3 and "没有运行" in nk_out(r), nk_out(r)
+    assert not os.path.exists(os.path.join(INST_L, "kernel.stop")), "stop 文件没被处理"
+    r = nk("start")
+    assert r.returncode == 0 and "已启动" in nk_out(r), nk_out(r)
+    r = nk("stop")
+    assert r.returncode == 0, nk_out(r)
+    gw.hold = False
+    print("  ok   nano-kernel status / stop / start")
 
     old_token = open(TOKEN, encoding="ascii").read().strip()
     cleanup_kernel()
@@ -213,7 +271,7 @@ try:
     except subprocess.TimeoutExpired:
         runner.kill()
 
-    r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "installpc2", "-Yes", "-NoService", "-Dir", INST_W)
+    r = ps(PKG_PS1, "-Gateway", f"tcp:127.0.0.1:{gw.port}", "-Name", "installpc2", "-Yes", "-NoService", "-NoPath", "-Dir", INST_W)
     assert r.returncode == 0, r.stdout + r.stderr
     conf = open(CONF, encoding="utf-8-sig").read()
     assert "node = installpc2" in conf and f"tcp:127.0.0.1:{gw.port}" in conf, conf
@@ -221,10 +279,10 @@ try:
     print("  ok   升级保留配置和 paired.token")
 
     assert os.path.exists(os.path.join(INST_L, "install-kernel.ps1")), "安装目录里没有留安装脚本"
-    r = ps(INST_W + "\\install-kernel.ps1", "-Uninstall", "-Yes", "-Dir", INST_W)
+    r = ps(INST_W + "\\install-kernel.ps1", "-Uninstall", "-Yes", "-NoPath", "-Dir", INST_W)
     assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
     print("  ok   卸载（用安装目录里留的脚本）")
-    passed = 5
+    passed = 6
 
     if SERVICE:
         gw.paired.clear()
@@ -236,11 +294,19 @@ try:
         assert gw.accepted.wait(30), "任务计划程序启动的内核没有连上假网关"
         q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
         assert q.returncode == 0, q.stdout + q.stderr
-        print("  ok   注册任务计划程序并由它启动内核")
+        upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
+                               capture_output=True, text=True).stdout
+        assert INST_W.lower() in upath.lower(), "安装目录没有加进用户 PATH：" + upath
+        r = nk("status")
+        assert r.returncode == 0 and "Windows 任务计划" in nk_out(r), nk_out(r)
+        print("  ok   注册任务计划程序并由它启动内核；加进 PATH；nano-kernel status 认出任务计划")
         r = ps(PKG_PS1, "-Uninstall", "-Yes", "-Dir", INST_W, "-TaskName", TASK)
         assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
         q = subprocess.run(["schtasks", "/Query", "/TN", TASK], capture_output=True, text=True, errors="replace")
         assert q.returncode != 0, "卸载后任务还在"
+        upath = subprocess.run([POWERSHELL, "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"],
+                               capture_output=True, text=True).stdout
+        assert INST_W.lower() not in upath.lower(), "卸载后 PATH 里还有安装目录"
         print("  ok   卸载时删掉任务")
         passed += 2
     print(f"install-win: {passed} passed")

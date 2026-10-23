@@ -1438,3 +1438,129 @@ void plat_signals_remove(void)
 {
     SetConsoleCtrlHandler(on_console_event, FALSE);
 }
+
+/* ---- 管理命令用的进程操作 ---- */
+
+long plat_getpid(void) { return (long)GetCurrentProcessId(); }
+
+int plat_log_to(const char *path)
+{
+    wchar_t *w = to_w(path);
+    if (!w) return -1;
+    FILE *f = _wfreopen(w, L"ab", stderr);
+    free(w);
+    if (!f) return -1;
+    setvbuf(stderr, NULL, _IONBF, 0);
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(_fileno(stderr)));
+    return 0;
+}
+
+bool plat_pid_alive(long pid, const char *name)
+{
+    if (pid <= 0) return false;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return false;
+    DWORD code = 0;
+    bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    if (alive && name) {
+        wchar_t buf[MAX_PATH * 2];
+        DWORD n = MAX_PATH * 2;
+        if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
+            char *u = to_u8(buf);
+            const char *base = u ? strrchr(u, '\\') : NULL;
+            alive = u && strstr(base ? base + 1 : u, name) != NULL;
+            free(u);
+        }
+    }
+    CloseHandle(h);
+    return alive;
+}
+
+int plat_pid_kill(long pid, bool force)
+{
+    (void)force;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (!h) return -1;
+    BOOL ok = TerminateProcess(h, 1);
+    CloseHandle(h);
+    return ok ? 0 : -1;
+}
+
+int plat_system(char *const argv[], bool quiet)
+{
+    wchar_t *line = make_cmdline(argv);
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof si);
+    si.cb = sizeof si;
+    HANDLE nul = INVALID_HANDLE_VALUE;
+    if (quiet) {
+        SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+        nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                          OPEN_EXISTING, 0, NULL);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = nul;
+        si.hStdError = nul;
+    }
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof pi);
+    BOOL ok = CreateProcessW(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    free(line);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)code;
+}
+
+long plat_spawn_bg(char *const argv[], const char *log)
+{
+    wchar_t *line = make_cmdline(argv);
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, NULL);
+    HANDLE err = INVALID_HANDLE_VALUE;
+    if (log) {
+        wchar_t *lw = to_w(log);
+        err = CreateFileW(lw, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
+                          OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        free(lw);
+    }
+    STARTUPINFOEXW si;
+    ZeroMemory(&si, sizeof si);
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = nul;
+    si.StartupInfo.hStdOutput = nul;
+    si.StartupInfo.hStdError = err != INVALID_HANDLE_VALUE ? err : nul;
+    /* 只继承这两个句柄：不然后台进程会拿着调用方终端的输出管道，调用方一直等不到结束 */
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    si.lpAttributeList = xmalloc(attr_size ? attr_size : 1);
+    bool have_attr = attr_size && InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size);
+    HANDLE keep[2] = { nul, err };
+    if (have_attr)
+        UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, keep,
+                                  (err != INVALID_HANDLE_VALUE ? 2 : 1) * sizeof(HANDLE), NULL, NULL);
+    else
+        si.StartupInfo.cb = sizeof(STARTUPINFOW);
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof pi);
+    /* 不跟着当前终端走：新进程组、没有窗口；当前进程在作业对象里时尽量脱离出来 */
+    DWORD flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | (have_attr ? EXTENDED_STARTUPINFO_PRESENT : 0);
+    BOOL ok = CreateProcessW(NULL, line, NULL, NULL, TRUE, flags | CREATE_BREAKAWAY_FROM_JOB, NULL, NULL,
+                             &si.StartupInfo, &pi);
+    if (!ok) ok = CreateProcessW(NULL, line, NULL, NULL, TRUE, flags, NULL, NULL, &si.StartupInfo, &pi);
+    if (have_attr) DeleteProcThreadAttributeList(si.lpAttributeList);
+    free(si.lpAttributeList);
+    free(line);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
+    if (!ok) return -1;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return (long)pi.dwProcessId;
+}

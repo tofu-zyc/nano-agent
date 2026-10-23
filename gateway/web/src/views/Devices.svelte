@@ -108,7 +108,7 @@
         </li>
         <li>这里会出现接入请求，核对那台电脑上显示的确认码，点允许。</li>
       </ol>
-      <p class="hint">内核会自动换成和网关一样的版本。卸载：Linux / macOS 上 <code>nano-kernel-ctl uninstall</code>，Windows 上把命令里的 <code>-Gateway …</code> 换成 <code>-Uninstall</code>。不能联网的电脑：把 Release 里对应的包拷过去，解压后运行里面的 <code>install-kernel.sh</code> 或 <code>install-kernel.ps1</code>。</p>
+      <p class="hint">内核会自动换成和网关一样的版本。在那台电脑上用 <code>nano-kernel status</code> 看状态，<code>nano-kernel connect 地址</code> 改连别的网关，<code>nano-kernel uninstall</code> 卸载（Windows 要新开一个终端）。不能联网的电脑：把 Release 里对应的包拷过去，解压后运行里面的 <code>install-kernel.sh</code> 或 <code>install-kernel.ps1</code>。</p>
       <details><summary><span class="dot {activeListener?'online':'idle'}"></span>{activeListener?'电脑接入已启用 · '+activeListener:'设置电脑接入地址'}</summary><div class="listen"><input aria-label="监听地址" bind:value={listen} placeholder="0.0.0.0:7700"/><button disabled={!!busy} onclick={()=>listener(true)}>启用</button><button disabled={!!busy||!data?.listener||primaryTCP} onclick={()=>listener(false)}>关闭</button></div><p class="hint">用网关的局域网或私有网络地址。这个端口只给装了内核的电脑用；SSH 服务器不需要它。</p></details>
     </section>
     <section class="method ssh">

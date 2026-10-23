@@ -220,14 +220,14 @@ try:
                 inst = tmp_w + "\\kernel"
                 boot = (f"$env:NANO_DOWNLOAD_URL='{BASE}'; "
                         f"& ([scriptblock]::Create((irm {BASE}/download/v{VER}/install.ps1))) "
-                        f"-Gateway tcp:127.0.0.1:9 -Name winone -Dir '{inst}' -Yes -NoService")
+                        f"-Gateway tcp:127.0.0.1:9 -Name winone -Dir '{inst}' -Yes -NoService -NoPath")
                 r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", boot],
                                    cwd="/mnt/c", capture_output=True, timeout=300)
                 assert r.returncode == 0 and "SHA256 OK" in out(r), out(r)
                 conf = open(os.path.join(tmp_l, "kernel", "kernel.conf"), encoding="utf-8-sig").read()
                 assert "node = winone" in conf, conf
                 boot = (f"$env:NANO_DOWNLOAD_URL='{BASE}'; "
-                        f"& ([scriptblock]::Create((irm {BASE}/download/v{VER}/install.ps1))) -Dir '{inst}' -Yes -Uninstall")
+                        f"& ([scriptblock]::Create((irm {BASE}/download/v{VER}/install.ps1))) -Dir '{inst}' -Yes -Uninstall -NoPath")
                 r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", boot],
                                    cwd="/mnt/c", capture_output=True, timeout=300)
                 assert r.returncode == 0 and not os.path.exists(os.path.join(tmp_l, "kernel")), out(r)

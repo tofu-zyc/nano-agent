@@ -180,10 +180,11 @@ if [ "$UNINSTALL" = 1 ]; then
 			cat "$f.nano-tmp" >"$f" && rm -f "$f.nano-tmp"
 		fi
 	done
-	rm -f "$HOME/.local/bin/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
+	rm -f "$HOME/.local/bin/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel"
+	case "$(readlink "$HOME/.local/bin/nano-kernel" 2>/dev/null)" in "$NANO_HOME"/*) rm -f "$HOME/.local/bin/nano-kernel" ;; esac
 	# 这台机器上没有网关了（bin 空了）才把 PATH 行也去掉
 	if [ -z "$(ls -A "$NANO_HOME/bin" 2>/dev/null)" ]; then
-		remove_from_path "$NANO_HOME/bin" nano-kernel-ctl
+		remove_from_path "$NANO_HOME/bin" nano-kernel nano-kernel-ctl
 		rmdir "$NANO_HOME/bin" 2>/dev/null || true
 	fi
 	rm -rf "$DIR"
@@ -392,8 +393,7 @@ rm -f "$DIR/check.log"
 # 控制脚本：启动、停止、看日志。没有 systemd / launchd 的机器靠它在后台跑
 cat >"$DIR/nano-kernel-ctl" <<'EOF'
 #!/bin/sh
-# nano-agent 内核：nano-kernel-ctl start|stop|restart|status|log|version|update|uninstall
-umask 077
+# 兼容旧用法：管理命令现在是 nano-kernel 自己的子命令（nano-kernel status / start / stop / connect …）
 SELF=$0
 case "$SELF" in /*) ;; *) SELF=$PWD/$SELF ;; esac
 while [ -L "$SELF" ]; do
@@ -401,84 +401,22 @@ while [ -L "$SELF" ]; do
 	case "$link" in /*) SELF=$link ;; *) SELF=$(dirname "$SELF")/$link ;; esac
 done
 DIR=$(cd "$(dirname "$SELF")" && pwd)
-UNIT=nano-kernel.service
-PLIST="$HOME/Library/LaunchAgents/com.nano-agent.kernel.plist"
-use_systemd() {
-	[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT" ] && [ -d /run/systemd/system ] &&
-		systemctl --user show-environment >/dev/null 2>&1
-}
-use_launchd() {
-	[ "$(uname -s)" = Darwin ] && [ -f "$PLIST" ] && command -v launchctl >/dev/null 2>&1
-}
-pid() {
-	p=$(cat "$DIR/kernel.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
-	if [ "$(uname -s)" = Darwin ]; then
-		case "$(ps -p "$p" -o comm= 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$p" ;; *) false ;; esac
-	else
-		case "$(readlink "/proc/$p/exe" 2>/dev/null)" in "$DIR/nano-kernel"*) echo "$p" ;; *) false ;; esac
-	fi
-}
-case "${1:-status}" in
-start)
-	if use_systemd; then exec systemctl --user start "$UNIT"; fi
-	if use_launchd; then launchctl load -w "$PLIST"; exit 0; fi
-	pid >/dev/null && { [ "${2:-}" = --quiet ] || echo "内核已经在运行"; exit 0; }
-	: >>"$DIR/kernel.log"
-	chmod 600 "$DIR/kernel.log"
-	nohup "$DIR/nano-kernel" -c "$DIR/kernel.conf" </dev/null >/dev/null 2>>"$DIR/kernel.log" &
-	echo $! >"$DIR/kernel.pid"
-	[ "${2:-}" = --quiet ] || echo "内核已在后台启动，日志：$DIR/kernel.log"
-	;;
-stop)
-	if use_systemd; then exec systemctl --user stop "$UNIT"; fi
-	if use_launchd; then launchctl unload "$PLIST"; exit 0; fi
-	if p=$(pid); then kill "$p"; echo "已停止"; else echo "内核没有在运行"; fi
-	rm -f "$DIR/kernel.pid"
-	;;
-restart) "$0" stop >/dev/null; sleep 0.3; exec "$0" start ;;
-status)
-	if use_systemd; then systemctl --user --no-pager status "$UNIT"; exit $?; fi
-	if use_launchd; then
-		if launchctl list | grep -q com.nano-agent.kernel; then echo "运行中（launchd）"; exit 0; fi
-		echo "没有运行"; exit 3
-	fi
-	if p=$(pid); then echo "运行中（pid $p）"; else echo "没有运行"; exit 3; fi
-	;;
-log) exec tail -n 50 -F "$DIR/kernel.log" ;;
-version) exec "$DIR/nano-kernel" --version ;;
-update)
-	# 一般不用手动更新：内核连上网关后会自动换成网关的版本。这里是手动从 Release 下载最新版
-	shift
-	base=${NANO_DOWNLOAD_URL:-https://github.com/tofu-zyc/nano-agent/releases}
-	base=${base%/}
-	if command -v curl >/dev/null 2>&1; then get() { curl -fsSL --retry 3 "$1"; }; else get() { wget -qO- "$1"; }; fi
-	case " $* " in
-	*" --version "*) ;;
-	*)
-		latest=$(get "$base/latest/download/VERSION" | tr -d ' \r\n') || { echo "查不到最新版本（$base）"; exit 1; }
-		cur=$("$DIR/nano-kernel" --version 2>/dev/null)
-		if [ "$latest" = "$cur" ]; then echo "已经是最新版本 $cur"; exit 0; fi
-		echo "更新内核：$cur → $latest"
-		;;
-	esac
-	script=$(get "$base/latest/download/install.sh") || { echo "下载安装脚本失败（$base）"; exit 1; }
-	printf '%s\n' "$script" | sh -s -- --kernel --yes --dir "$DIR" "$@"
-	;;
-uninstall) shift; exec sh "$DIR/install-kernel.sh" --uninstall --dir "$DIR" "$@" ;;
-*) echo "用法：nano-kernel-ctl start|stop|restart|status|log|version|update [--version x.y.z]|uninstall [--yes]"; exit 2 ;;
-esac
+[ $# -gt 0 ] || set -- status
+exec "$DIR/nano-kernel" "$@"
 EOF
-# 留一份安装脚本在内核目录里，nano-kernel-ctl uninstall 用（单文件安装包去掉后面的程序数据）
+# 留一份安装脚本在内核目录里，nano-kernel uninstall 用（单文件安装包去掉后面的程序数据）
 sed '/^__NANO_PAYLOAD__$/,$d' "$0" >"$DIR/install-kernel.sh.new" && chmod 755 "$DIR/install-kernel.sh.new" &&
 	mv -f "$DIR/install-kernel.sh.new" "$DIR/install-kernel.sh"
 chmod 755 "$DIR/nano-kernel-ctl"
 mkdir -p "$NANO_HOME/bin"
 ln -sf "$DIR/nano-kernel-ctl" "$NANO_HOME/bin/nano-kernel-ctl"
-add_to_path "$NANO_HOME/bin" nano-kernel-ctl
+ln -sf "$DIR/nano-kernel" "$NANO_HOME/bin/nano-kernel"
+add_to_path "$NANO_HOME/bin" nano-kernel nano-kernel-ctl
 
 if [ "$SERVICE" = 0 ]; then
 	say ""
-	say "装好了，没有启动。启动：nano-kernel-ctl start（已加进 PATH，新开的终端生效）"
+	echo none >"$DIR/service"
+	say "装好了，没有启动。启动：nano-kernel start（nano-kernel 已加进 PATH，新开的终端生效；nano-kernel help 看全部命令）"
 	exit 0
 fi
 
@@ -509,6 +447,7 @@ StandardError=append:$LOG
 [Install]
 WantedBy=default.target
 EOF
+	echo systemd >"$DIR/service"
 	systemctl --user daemon-reload
 	systemctl --user enable "$UNIT" >/dev/null 2>&1
 	systemctl --user restart "$UNIT"
@@ -536,14 +475,16 @@ elif has_launchd; then
 </dict>
 </plist>
 EOF
+	echo launchd >"$DIR/service"
 	launchctl unload "$PLIST" 2>/dev/null || true
 	launchctl load -w "$PLIST"
 else
 	step "这台机器没有 systemd / launchd，用后台进程运行"
-	"$DIR/nano-kernel-ctl" start
+	echo none >"$DIR/service"
+	"$DIR/nano-kernel" start --quiet
 	if ! grep -qsF "$PROFILE_MARK" "$HOME/.profile" &&
 		confirm "每次登录（打开终端）时自动启动内核？会在 ~/.profile 里加一行"; then
-		printf '"%s" start --quiet %s\n' "$DIR/nano-kernel-ctl" "$PROFILE_MARK" >>"$HOME/.profile"
+		printf '"%s" start --quiet %s\n' "$DIR/nano-kernel" "$PROFILE_MARK" >>"$HOME/.profile"
 	fi
 	case "$(uname -r)" in *[Mm]icrosoft*)
 		say "提示：WSL 关掉所有窗口一段时间后会停下来，内核也跟着停。想一直在线，可以在 /etc/wsl.conf 里开启 systemd 后重新运行本脚本。" ;;
@@ -560,7 +501,7 @@ while [ $i -lt 150 ]; do
 	out=$(new_log)
 	case "$out" in
 	*网关已接受连接*) say "已接入网关。打开网关网页，在会话里选这台电脑上的工作目录就能开始工作。"; exit 0 ;;
-	*没有同意这台电脑接入*) die "网关拒绝了这台电脑。要重新申请：nano-kernel-ctl restart" ;;
+	*没有同意这台电脑接入*) die "网关拒绝了这台电脑。要重新申请：nano-kernel restart" ;;
 	*网关报错：*)
 		if [ -z "$code" ]; then
 			why=$(printf '%s\n' "$out" | sed -n 's/.*网关报错：//p' | tail -n 1)
@@ -593,6 +534,6 @@ else
 	say "暂时没连上网关，内核会在后台一直重试。最近的日志："
 	new_log | tail -n 5
 	say "检查：网关地址对不对（$GATEWAY）、网关网页「设备」里电脑接入有没有启用、防火墙是否放行端口。"
-	say "看日志：nano-kernel-ctl log"
+	say "看状态：nano-kernel status；看日志：nano-kernel logs -f"
 fi
 exit 0

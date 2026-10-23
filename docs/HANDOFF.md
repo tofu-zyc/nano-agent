@@ -108,6 +108,14 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - WSL 保活：Windows 任务计划程序在 WSL interop 下 `schtasks /Create` 和 PowerShell `Register-ScheduledTask` 都返回“拒绝访问”（即使是当前用户 ONLOGON 任务），所以改用 **Windows 启动文件夹里的隐藏 VBS**：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\nano-agent-wsl-keepalive.vbs`，内容用 `wsl.exe -d <发行版> --exec /bin/sh -c "... start --quiet ...; exec /bin/sleep 2147483647"`。在真实 Windows 上从启动文件夹运行过、写 marker 验证过，随后删除；安装脚本在 WSL 里询问或 `--wsl-keepalive`，卸载时删除。不改 `.wslconfig`。
 - 测试：`scripts/e2e-control.py` 12 项（临时 `NANO_HOME`/`XDG_CONFIG_HOME`、mock 模型、后台模式）：version/start/status/logs/url/restart/stop、聊天 `/status` `/help` `/restart`（含重启后回话）、网页重启后同一 Cookie 仍有效、坏配置拒绝重启且网关保持运行、`kill -9` 后看护进程拉起。Go 新增 config.Check、pid 文件/进程判断、Gateway status 字段、Gateway logs 脱敏、GatewayAdmin restart 的测试。
 
+## 内核管理命令（2026-10-23）
+
+- `nano-kernel` 自己有子命令（`kernel/src/ctl.c`）：`status`、`start`、`stop`、`restart`、`connect 地址 [--name]`、`logs [-f] [-n]`、`version`、`update`、`uninstall`、`help`；`-c` 指定配置，默认是程序旁边的 kernel.conf。不带参数且当前目录没有 kernel.conf 时显示用法（不会误启动第二个内核）。
+- 运行中的内核在配置文件旁边写 `<配置名>.pid` 和 `<配置名>.status.json`（kernel.conf → kernel.pid；同一个目录可以有好几份配置）（connecting / connected / pairing / denied / rejected，带确认码、出错原因、版本、沙箱），退出时删掉；同一份配置已经有内核在跑时拒绝启动。Windows 上 `stop` 写 `kernel.stop` 文件、内核每秒看一次、正常退出（退出码 0，run-kernel.ps1 不再拉起）；POSIX 用 SIGTERM；启动时清掉残留的 stop 文件。
+- 安装脚本写 `service`（systemd / launchd / task:任务名 / none），`nano-kernel` 按它决定 start / stop 怎么做（旧安装没有这个文件时按服务文件猜）。`$NANO_HOME/bin/nano-kernel` 链接到内核；`nano-kernel-ctl` 只是转给它的壳。Windows 把内核目录加进当前用户 PATH（`-NoPath` 不加，测试用），卸载时去掉。
+- **Windows run-kernel.ps1 的坑**（v0.2.0 及以前都有）：① `Start-Process -PassThru` 在没有控制台时（被后台进程拉起）拿不到可等待的句柄，`WaitForExit` 立刻返回，配合 `SilentlyContinue` 看不出错，runner 会再拉一个内核；② 有句柄时也要先取 `.Handle`，否则 `ExitCode` 为空；③ 不带 BOM 的脚本里有中文，PowerShell 5.1 按 GBK 读，注释吃掉换行、下一行代码失效。现在 runner 用 `System.Diagnostics.Process` 启动内核、内核自己 `--log` 追加写日志、脚本只有 ASCII 并带 BOM 写出。
+- 用户的 Windows 机器上内核是 v0.1.0、没有在运行、计划任务也不存在（当时注册失败），需要用新版本重装一次。
+
 ## 更新和卸载（2026-10-23）
 
 - 下载和校验：`internal/release`（`Latest` 读 `latest/download/VERSION`，`Fetch` 按 `SHA256SUMS` 校验、缓存在 `$NANO_HOME/cache/releases/<版本>/`，`Unpack` 读 tar.gz / zip 去掉顶层目录）。下载地址：配置 `[update] url` → `NANO_DOWNLOAD_URL` → GitHub。

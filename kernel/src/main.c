@@ -6,6 +6,7 @@
  */
 #include "cJSON.h"
 #include "conf.h"
+#include "ctl.h"
 #include "core.h"
 #include "link.h"
 #include "plat.h"
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "version.h"
 
@@ -58,6 +60,10 @@ typedef struct {
     int64_t         next_connect;
     int             backoff;
     bool            restart;          /* 换上了新版本：退出主循环后重启自己 */
+    char           *pid_file;         /* 配置目录下的 kernel.pid、status.json、stop：给 nano-kernel status / stop 用 */
+    char           *status_file;
+    char           *stop_file;
+    char            state[16];        /* 写进 status.json 的连接状态 */
     int64_t         update_deadline;  /* 刚更新完：这之前要被网关接受，否则退回旧版本 */
 } kernel_t;
 
@@ -96,6 +102,27 @@ static void send_hello(kernel_t *k)
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
     link_send(&k->link, m);
+}
+
+/* 连接状态写进 status.json（nano-kernel status 读）：connecting / connected / pairing / denied / rejected */
+static void set_state(kernel_t *k, const char *state, const char *detail, const char *code)
+{
+    if (!k->status_file) return;
+    snprintf(k->state, sizeof k->state, "%s", state);
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddNumberToObject(m, "pid", (double)plat_getpid());
+    cJSON_AddStringToObject(m, "state", state);
+    if (detail) cJSON_AddStringToObject(m, "detail", detail);
+    if (code) cJSON_AddStringToObject(m, "code", code);
+    cJSON_AddStringToObject(m, "gateway", k->conf.gateway);
+    cJSON_AddStringToObject(m, "node", k->conf.node);
+    cJSON_AddStringToObject(m, "version", NA_VERSION);
+    cJSON_AddNumberToObject(m, "landlock", k->landlock);
+    cJSON_AddNumberToObject(m, "since", (double)time(NULL));
+    char *s = cJSON_PrintUnformatted(m);
+    plat_write_atomic(k->status_file, s, strlen(s), 0600);
+    cJSON_free(s);
+    cJSON_Delete(m);
 }
 
 /* ---- 命令 → 外部动作 ---- */
@@ -692,6 +719,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     if (!strcmp(t, "welcome")) {
         k->backoff = 1000;
         log_info("网关已接受连接");
+        set_state(k, "connected", NULL, NULL);
         if (k->update_deadline) {
             update_confirm();
             k->update_deadline = 0;
@@ -708,12 +736,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         log_error("网关报错：%s", sget(m, "detail") ? sget(m, "detail") : "（无详情）");
         if (!strcmp(reason, "denied")) {
             log_error("网关没有同意这台电脑接入，内核退出。要重新申请，再启动一次即可");
+            set_state(k, "denied", NULL, NULL);
             g_stop = 1;
         } else if (!strcmp(reason, "auth") && k->conf.paired) {
             log_warn("网关不认这台电脑的配对口令了（可能在网页里移除了它），重新请求配对");
             plat_unlink(k->conf.token_file);
             k->conf.token[0] = 0;
             k->conf.paired = false;
+        } else {
+            set_state(k, "rejected", sget(m, "detail"), NULL);
         }
         return;
     }
@@ -721,6 +752,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         k->backoff = 1000;
         log_info("等待网关确认接入：打开网关网页的「设备」页面，核对确认码 %s 后点「允许」",
                  sget(m, "code") ? sget(m, "code") : "?");
+        set_state(k, "pairing", NULL, sget(m, "code"));
         return;
     }
     if (!strcmp(t, "paired")) {
@@ -850,6 +882,7 @@ static void try_connect(kernel_t *k, int64_t now)
     char err[256];
     if (link_connect(&k->link, k->conf.gateway, CONNECT_TIMEOUT_MS, err, sizeof err) < 0) {
         log_warn("%s，%d 秒后重试", err, k->backoff / 1000);
+        set_state(k, "connecting", err, NULL);
         k->next_connect = now_ms() + k->backoff;
         k->backoff = k->backoff * 2 > MAX_BACKOFF_MS ? MAX_BACKOFF_MS : k->backoff * 2;
         return;
@@ -863,6 +896,8 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
 {
     if (k->link.fd == NA_SOCK_NONE) return;
     log_warn("与网关断开：%s", why);
+    /* 被拒绝、等确认这些状态比“断开”更有用，留着 */
+    if (!strcmp(k->state, "connected") || !k->state[0]) set_state(k, "connecting", why, NULL);
     link_close(&k->link);
     na_event ev = { .type = NA_EV_RESET };
     na_core_feed(k->core, now, &ev);
@@ -917,6 +952,12 @@ static void loop(kernel_t *k)
 
     while (!g_stop) {
         int64_t now = now_ms();
+        plat_stat_t stop_st;
+        if (k->stop_file && plat_stat(k->stop_file, &stop_st) && stop_st.exists) {
+            plat_unlink(k->stop_file);
+            log_info("收到停止请求（nano-kernel stop）");
+            break;
+        }
         if (k->update_deadline && now >= k->update_deadline) {
             if (update_rollback("更新后一直没能连上网关") == 0) {
                 k->restart = true;
@@ -939,6 +980,7 @@ static void loop(kernel_t *k)
 
         int64_t wake = next_wakeup(k, now);
         int timeout = wake > now ? (int)(wake - now) : 0;
+        if (timeout > 1000) timeout = 1000;   /* 至少每秒看一次有没有 nano-kernel stop 的请求 */
         if (plat_poll(pfds, np, timeout) < 0 && errno != EINTR) {
             log_error("poll 失败：%s", strerror(errno));
             break;
@@ -1045,13 +1087,24 @@ int main(int argc, char **argv)
     plat_init();
     int nargs = 0;
     char **args = plat_args(argc, argv, &nargs);
+    if (nargs > 1 && ctl_is_command(args[1])) return ctl_main(nargs, args);
+    if (nargs == 1) {
+        plat_stat_t st;
+        if (!plat_stat("kernel.conf", &st) || !st.exists) {
+            ctl_usage(stdout);
+            return 0;
+        }
+    }
     const char *conf_path = "kernel.conf";
     bool check_only = false;
     for (int i = 1; i < nargs; i++) {
         if (!strcmp(args[i], "-c") && i + 1 < nargs) conf_path = args[++i];
         else if (!strcmp(args[i], "-t")) check_only = true;
+        else if (!strcmp(args[i], "--log") && i + 1 < nargs) {
+            if (plat_log_to(args[++i]) < 0) fprintf(stderr, "打不开日志文件 %s\n", args[i]);
+        }
         else if (!strcmp(args[i], "-v")) na_log_level = NA_LOG_DEBUG;
-        else if (!strcmp(args[i], "-h")) { usage(nargs > 0 ? args[0] : "nano-kernel"); return 0; }
+        else if (!strcmp(args[i], "-h") || !strcmp(args[i], "--help")) { ctl_usage(stdout); return 0; }
         else if (!strcmp(args[i], "--version")) { printf("%s\n", NA_VERSION); return 0; }
         else { usage(nargs > 0 ? args[0] : "nano-kernel"); return 2; }
     }
@@ -1094,6 +1147,28 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* 跟着配置文件命名：同一个目录里可以有好几份配置、跑好几个内核 */
+    k.pid_file = ctl_sidecar(conf_path, ".pid");
+    k.status_file = ctl_sidecar(conf_path, ".status.json");
+    k.stop_file = ctl_sidecar(conf_path, ".stop");
+    plat_unlink(k.stop_file);   /* 停止请求只对当时在运行的内核有效，残留的作废 */
+    {
+        buf_t pb = {0};
+        long other = 0;
+        if (plat_read_file(k.pid_file, &pb, 64) == 0 && pb.len) other = strtol(buf_cstr(&pb), NULL, 10);
+        buf_free(&pb);
+        if (other > 0 && other != plat_getpid() && plat_pid_alive(other, "nano-kernel")) {
+            log_error("这份配置已经有一个内核在运行（pid %ld）；要重启用 nano-kernel restart", other);
+            free(k.exec_real);
+            kconf_free(&k.conf);
+            return 1;
+        }
+        char *line = xasprintf("%ld\n", plat_getpid());
+        plat_write_atomic(k.pid_file, line, strlen(line), 0600);
+        free(line);
+    }
+    set_state(&k, "connecting", NULL, NULL);
+
     na_core_config cc = {
         .tools = k.tools, .ntools = k.ntools,
         .sandbox = k.landlock > 0,
@@ -1110,6 +1185,10 @@ int main(int argc, char **argv)
     loop(&k);
 
     log_info(k.restart ? "重启" : "退出");
+    if (!k.restart) {   /* 更新后的重启（exec）还是同一个进程，pid 不变，文件留着 */
+        plat_unlink(k.status_file);
+        plat_unlink(k.pid_file);
+    }
     plat_signals_remove();
     runner_shutdown(&k.runner, 2500);
     if (k.restart && k.link.fd != NA_SOCK_NONE) link_flush(&k.link);   /* 把 update_result 发出去 */
@@ -1121,6 +1200,9 @@ int main(int argc, char **argv)
     kconf_free(&k.conf);
     plat_wake_close(&g_wake);
     plat_shutdown();
+    free(k.pid_file);
+    free(k.status_file);
+    free(k.stop_file);
     if (k.restart) {
         update_reexec(args);   /* POSIX 上不返回 */
         return NA_EXIT_RESTART;
