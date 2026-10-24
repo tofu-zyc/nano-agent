@@ -11,6 +11,8 @@
   import AgentsPanel from './panels/AgentsPanel.svelte';
   import BotPanel from './panels/BotPanel.svelte';
   import BotsPanel from './panels/BotsPanel.svelte';
+  import RoomPanel from './panels/RoomPanel.svelte';
+  import RoomsPanel from './panels/RoomsPanel.svelte';
   import ChannelPanel from './panels/ChannelPanel.svelte';
   import SessionPanel from './panels/SessionPanel.svelte';
   import SearchPanel from './panels/SearchPanel.svelte';
@@ -56,6 +58,13 @@
         return { icon: b?.kind === 'feishu' ? 'feishu' : 'send', color: b?.kind === 'feishu' ? 'var(--c-feishu)' : 'var(--c-telegram)',
           title: b?.name ?? target.id, sub: b ? b.channel + ' · 绑给 ' + (store.agent(b.agent)?.name ?? b.agent) : '这个机器人不在了' };
       }
+      case 'room': {
+        const r = store.room(target.id);
+        return { icon: 'chat', color: 'var(--accent-2)', title: r ? '群 · ' + r.name : target.id,
+          sub: r ? r.members.length + ' 个 agent' + (r.paused ? ' · 已暂停' : '') + ' · ' + r.count + ' 条消息' : '这个群不在了' };
+      }
+      case 'rooms':
+        return { icon: 'chat', color: 'var(--accent-2)', title: '创建群', sub: '网关内部的群：几个 agent 一起聊，人也能在网页里发言' };
       case 'bots':
         return { icon: 'plus', color: 'var(--c-telegram)', title: '添加机器人', sub: '一个机器人只绑一个 agent；内置的 Telegram、飞书也能换绑' };
       case 'model': {
@@ -152,6 +161,10 @@
         <BotPanel id={target.id} />
       {:else if target.type === 'bots'}
         <BotsPanel />
+      {:else if target.type === 'room'}
+        <RoomPanel id={target.id} />
+      {:else if target.type === 'rooms'}
+        <RoomsPanel />
       {:else if target.type === 'model'}
         <ModelPanel />
         <FieldGroup group="model" title="所有模型共用的请求参数" focus={store.focus} />

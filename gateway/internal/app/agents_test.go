@@ -10,6 +10,9 @@ import (
 	"nano-agent/gateway/internal/llm"
 )
 
+// testAgent 是测试里新建 agent 的快捷写法。
+func testAgent(id string) agents.Agent { return agents.Agent{ID: id, Name: id} }
+
 // withAgents 给测试环境接上 agent 列表和机器人，并跑一次升级迁移。
 func withAgents(t *testing.T, e *env) (*agents.Store, *agents.Bots) {
 	t.Helper()

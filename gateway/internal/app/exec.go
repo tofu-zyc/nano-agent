@@ -44,6 +44,14 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		}
 		return
 	}
+	if m.Name == "Message" {
+		raw := string(m.Args)
+		if raw == "" {
+			raw = "{}"
+		}
+		go a.messageTool(s.sid, raw, reply)
+		return
+	}
 	if m.Name == "Skill" {
 		a.skillTool(r, s.sid, m, reply)
 		return

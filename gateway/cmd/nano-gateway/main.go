@@ -31,6 +31,7 @@ import (
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/paths"
 	"nano-agent/gateway/internal/persona"
+	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/secret"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/version"
@@ -161,6 +162,12 @@ func main() {
 		os.Exit(1)
 	}
 	a.SetAgents(agentStore, botStore, filepath.Join(cfg.Dir, "agents"))
+	roomStore, err := rooms.Open(filepath.Join(cfg.Session.DataDir, "rooms.json"))
+	if err != nil {
+		log.Error("读取群聊列表失败", "err", err)
+		os.Exit(1)
+	}
+	a.SetRooms(roomStore)
 	if err := a.MigrateAgents(); err != nil {
 		log.Error("升级 agent 数据失败", "err", err)
 		os.Exit(1)

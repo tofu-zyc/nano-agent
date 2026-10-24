@@ -38,6 +38,7 @@
       node('n:gateway', { type: 'gateway' }, 'hub', 'var(--c-gateway)', '网关', '版本和更新、重启、代理、改过的设置', '网关 版本 更新 升级 重启 代理 update restart proxy'),
       node('n:agent', { type: 'agentDefaults' }, 'persona', 'var(--c-agent)', 'Agent 默认值', '所有 agent 没覆盖的设置：上限、权限、显示档位', 'agent 默认值 人格 系统提示词 prompt 上限 权限 管理员 显示'),
       node('n:agents', { type: 'agents' }, 'plus', 'var(--c-agent)', '添加 agent', '多一个一直存在的 agent，可以绑自己的机器人', 'agent 新建 添加 多个 bot 机器人'),
+      node('n:rooms', { type: 'rooms' }, 'plus', 'var(--c-agent)', '创建群', '网关内部的群：选几个 agent 进去，它们在那儿互相说话', '群 房间 room 群聊 多 agent 私聊 dm'),
       node('n:model', { type: 'model' }, 'sparkles', 'var(--c-model)', '模型', '接口、模型、默认模型、请求参数', '模型 接口 model endpoint'),
       node('n:search', { type: 'search' }, 'search', 'var(--c-search)', '网络搜索', '开关、key、今天搜了几次', '网络搜索 联网 上网 搜索 web search deepseek'),
       node('n:memory', { type: 'memory' }, 'brain', 'var(--c-memory)', '上下文与记忆', '自动整理、空闲整理、归档', '上下文 记忆 整理 压缩 归档 memory context compact'),

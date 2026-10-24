@@ -26,6 +26,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
@@ -100,6 +101,8 @@ type App struct {
 	agentStore        *agents.Store   // agent 列表（data/agents.json）
 	botStore          *agents.Bots    // 机器人（data/bots.json）
 	agentRoot         string          // agents 目录
+	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
+	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
 	log               *slog.Logger
 	bus               *events.Bus
@@ -284,6 +287,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		skills:       skills.New(cfg.Skills.Dir),
 		outboxes:     map[string]chan outItem{},
 		sessions:     map[string]*sess{},
+		roomRuns:     map[string]*roomRun{},
 		approvals:    map[int]*approval{},
 		nodes:        map[string]*node{},
 	}
@@ -423,6 +427,20 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	}
 	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who, name: m.SenderName}
+	// 在房间的记录会话里说话：记进群记录、转给群里所有成员，被叫到的会回；这里不跑普通的一轮
+	if room, ok := a.roomOfSession(c.s.sid); ok && c.s.sid == roomLogSID(room.ID) {
+		name := c.name
+		if name == "" {
+			name = "有人"
+		}
+		if text := strings.TrimSpace(m.Text); text != "" {
+			_ = a.store.Append(c.s.sid, session.Msg{Role: "user", Content: "[" + name + "] " + text})
+			a.publish(events.Event{T: "message", SID: c.s.sid, Name: m.SenderName, Text: text})
+		}
+		a.roomHumanLine(room.ID)
+		a.roomHumanSay(room, name, m.Text)
+		return
+	}
 	if m.Action == channel.ActionStop {
 		if c.s.run != nil || len(c.s.queue) > 0 {
 			a.stop(c)
@@ -1057,6 +1075,7 @@ func (a *App) finish(s *sess, status, detail string) {
 		a.publish(events.Event{T: "say", SID: s.sid, Text: note})
 	}
 	group := a.isGroupSession(s.sid)
+	roomOf, inRoom := a.roomOfSession(s.sid)
 	for _, o := range r.outs {
 		text := note
 		if body != "" && (o.view == nil || !r.streamed) {
@@ -1065,11 +1084,18 @@ func (a *App) finish(s *sess, status, detail string) {
 		if text == "" {
 			continue
 		}
+		if group && o.ep.ch == "room" {
+			continue // 房间里的发言由 roomAgentSay 记进群记录
+		}
 		if group {
 			a.sendGroup(s, o.ep, text)
 			continue
 		}
 		a.deliver(o.ep, text, "")
+	}
+	// agent 在房间里的回复：记进群记录，转给其他成员
+	if inRoom && roomLogSID(roomOf.ID) != s.sid && strings.TrimSpace(body) != "" {
+		a.roomAgentSay(roomOf, roomSender(s.sid), body)
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)

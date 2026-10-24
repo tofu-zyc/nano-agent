@@ -10,9 +10,9 @@
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
-  import type { AgentInfo, Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
+  import type { AgentInfo, Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, RoomInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
+  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'room' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
   type Col = 'in' | 'sess' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
   type N = { id: string; kind: Kind; col: Col; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
@@ -143,6 +143,20 @@
       target: { type: 'agentDefaults' }, data: null });
     nodes.push({ id: 'add:agent', kind: 'add', col: 'agent', x: X.agent, y: below + 54, w: 210, h: 44, color: 'var(--c-agent)',
       target: { type: 'agents' }, data: { icon: 'plus', title: '添加 agent', sub: '多一个一直存在的它' } });
+    // 网关内部的群（房间）：每个群一个节点，连着它的成员 agent
+    const roomsList = ov.rooms ?? [];
+    const rTop = aTop - roomsList.length * 54 - 8;
+    roomsList.forEach((r: RoomInfo, i: number) => {
+      nodes.push({ id: 'rm:' + r.id, kind: 'room', col: 'agent', x: X.agent, y: rTop + i * 54, w: 210, h: 46, color: 'var(--accent-2)',
+        target: { type: 'room', id: r.id }, data: r });
+      for (const m of r.members) {
+        if (agents.some((a) => a.id === m)) {
+          edges.push({ id: 'rm:' + r.id + '>ag:' + m, from: 'rm:' + r.id, to: 'ag:' + m, color: 'var(--accent-2)', dashed: r.paused });
+        }
+      }
+    });
+    nodes.push({ id: 'add:room', kind: 'add', col: 'agent', x: X.agent, y: below + 106, w: 210, h: 44, color: 'var(--accent-2)',
+      target: { type: 'rooms' }, data: { icon: 'chat', title: '创建群', sub: '几个 agent 一起聊' } });
     nodes.push({ id: 'gw', kind: 'gateway', col: 'gw', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
 
     // 能力：网关用的服务，从上到下是记忆、搜索、技能、模型（模型离中间最近，光点最多）
@@ -620,6 +634,15 @@
       }
       case 'schedule':
         return { title: '定时任务', items: [open, { label: '新建任务…', icon: 'plus', run: () => { store.scheduleNew = true; store.open({ type: 'schedules' }); } }] };
+      case 'room': {
+        const rm = n.data as RoomInfo;
+        return { title: '群 · ' + rm.name, items: [
+          open,
+          { label: '打开聊天', icon: 'chat', run: () => (location.hash = '#/sessions/' + encodeURIComponent(rm.sid)) },
+          { label: rm.paused ? '恢复' : '暂停', icon: rm.paused ? 'play' : 'stop',
+            run: () => act(() => api.patch('/api/rooms/' + encodeURIComponent(rm.id), { paused: !rm.paused }), rm.paused ? '已恢复' : '已暂停') },
+        ] };
+      }
       case 'agent': {
         const ag = n.data as AgentInfo;
         return { title: 'Agent · ' + ag.name, items: [
@@ -697,6 +720,7 @@
       case 'add':
       case 'agentdefaults':
       case 'botadd':
+      case 'agentdefaults':
         return n.target ? { title: '', items: [open] } : null;
       case 'more':
         return { title: '会话', items: [{ label: '查看全部会话', icon: 'chat', run: () => (location.hash = '#/sessions') }] };
@@ -984,6 +1008,13 @@
             <g class="ico small"><Icon name="folder" x={13} y={12} size={20} /></g>
             <text x="42" y="20" class="t1 mono">{shortPath(homeShort(w.path), 22)}</text>
             <text x="42" y="35" class="t2">{w.default ? '默认 · ' : ''}{w.sessions} 个会话</text>
+          {:else if n.kind === 'room'}
+            {@const rm = n.data as RoomInfo}
+            <rect class="card" width={n.w} height={n.h} rx="14" />
+            <circle class="disc" cx="26" cy="23" r="14" />
+            <g class="ico"><Icon name="chat" x={18} y={15} size={16} /></g>
+            <text x="48" y="21" class="t1">{truncate(rm.name, 12)}</text>
+            <text x="48" y="36" class="t2">{rm.members.length} 个 agent{rm.paused ? ' · 已暂停' : ''} · {rm.count} 条</text>
           {:else if n.kind === 'add' || n.kind === 'agentdefaults' || n.kind === 'botadd'}
             {@const a = n.kind === 'agentdefaults' ? { icon: 'sliders', title: 'Agent 默认值', sub: '所有 agent 没覆盖的项' } : n.data}
             <rect class="card ghost" width={n.w} height={n.h} rx="14" />

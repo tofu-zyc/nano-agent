@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { AgentInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import type { AgentInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
 import { HOMES } from './nodes';
 
 export type Toast = {
@@ -347,6 +347,15 @@ class Store {
     return this.ov?.bots ?? [];
   }
 
+  /** 网关内部的群聊（房间） */
+  get rooms(): RoomInfo[] {
+    return this.ov?.rooms ?? [];
+  }
+
+  room(id: string | undefined): RoomInfo | undefined {
+    return id ? this.rooms.find((r) => r.id === id) : undefined;
+  }
+
   agent(id: string | undefined): AgentInfo | undefined {
     return id ? this.agents.find((a) => a.id === id) : undefined;
   }
@@ -453,6 +462,7 @@ class Store {
         break;
       case 'agents':
       case 'bots':
+      case 'rooms':
         // agent 或机器人列表变了：拓扑图和面板跟着重新读一遍
         clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 300);

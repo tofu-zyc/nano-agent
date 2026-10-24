@@ -114,6 +114,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"channels":   s.app.Channels(),
 		"agents":     s.app.AgentList(),
 		"bots":       s.app.Bots(),
+		"rooms":      s.app.Rooms(),
 		"sessions":   snap.Sessions,
 		"approvals":  snap.Approvals,
 		"totals":     snap.Totals,

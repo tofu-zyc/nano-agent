@@ -169,6 +169,7 @@ export type Overview = {
   memory?: MemoryInfo;
   agents?: AgentInfo[]; // 所有 agent（v0.5 起）
   bots?: BotInfo[]; // 所有机器人
+  rooms?: RoomInfo[]; // 网关内部的群聊
 };
 
 /** 网络搜索的状态；key 是 settings（设置里填的）、endpoint:<接口名>（借用模型接口的）或空（没有可用的 key） */
@@ -267,6 +268,19 @@ export type AgentInfo = {
 };
 
 // 一个机器人：绑一个 agent，凭据只回传有没有（不返回明文）
+// 网关内部的群聊（房间）：成员是 agent，聊天记录是一个会话（sid）
+export type RoomInfo = {
+  id: string;
+  name: string;
+  members: string[];
+  mode: 'mention' | 'free';
+  paused: boolean;
+  muted: string[];
+  dm: boolean;
+  sid: string;
+  count: number;
+};
+
 export type BotInfo = {
   id: string;
   kind: 'telegram' | 'feishu';
@@ -292,6 +306,8 @@ export type Target =
   | { type: 'agentDefaults' } // Agent 的全局默认值：所有 agent 没覆盖的项
   | { type: 'agents' } // ＋ 添加 agent
   | { type: 'bot'; id: string } // 一个机器人
+  | { type: 'room'; id: string } // 网关内部的群聊（房间）
+  | { type: 'rooms' } // ＋ 创建群
   | { type: 'bots' } // ＋ 添加机器人
   | { type: 'model' }
   | { type: 'kernel'; node?: string } // 在线的内核（node 是某一个）
