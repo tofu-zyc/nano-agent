@@ -122,6 +122,8 @@ expect_n() {
 
 expect "终端连上网关" "已连上网关。这个终端接在会话「主会话」上"
 send "你好";                                          expect "普通对话" "（mock）收到：你好"
+# 回复正文先流式显示，这一轮写进历史要等到结束（用量那一行之后）；先等它，/history 才看得到这一轮
+expect "这一轮结束" "次模型调用"
 send "/history";                                      expect "查看最近的对话" "你：你好"
 send '!call Read {"path":"hello.txt"}';               expect "读工作目录里的文件" "1	hello e2e"
 send '!call Shell {"command":"echo e2e-$((6*7))"}';   expect "审批模式下命令先要审批" "需要审批 #1"
