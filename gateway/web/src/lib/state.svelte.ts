@@ -181,6 +181,16 @@ class Store {
 
   private async start() {
     await Promise.all([this.refresh(), this.loadFields()]);
+    // 因为网关换了版本而自动刷新的：告诉一声
+    try {
+      const v = sessionStorage.getItem('nano.updated');
+      if (v) {
+        sessionStorage.removeItem('nano.updated');
+        this.toast({ kind: 'ok', text: `网关已经是 ${v}，页面已刷新成新版本` }, 4000);
+      }
+    } catch {
+      /* 忽略 */
+    }
     const { legacy } = parseHash();
     if (legacy) this.openLegacy(legacy);
     this.connect();
@@ -189,8 +199,24 @@ class Store {
 
   private reloadTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // 这个页面加载时网关的版本。网关更新以后（这个标签页一直开着），页面代码还是旧的，
+  // 新版本加的设置项、节点在旧页面上看不到：发现版本变了就自己刷新一次。
+  private loadedVersion = '';
+
   async refresh() {
-    this.ov = await api.get<Overview>('/api/overview');
+    const ov = await api.get<Overview>('/api/overview');
+    const v = ov.runtime?.version ?? '';
+    if (v && this.loadedVersion && v !== this.loadedVersion) {
+      try {
+        sessionStorage.setItem('nano.updated', v);
+      } catch {
+        /* 忽略 */
+      }
+      location.reload();
+      return;
+    }
+    if (v) this.loadedVersion = v;
+    this.ov = ov;
   }
 
   /** 重启网关。成功后页面等它回来，自动刷新；配置有问题时 API 会直接报错，网关保持运行。 */

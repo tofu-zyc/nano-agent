@@ -245,11 +245,11 @@ def run(page, url, nano):
     # ---- 网关节点：改过的设置一览 ----
     open_node(page, "gw")
     text = page.locator(".insp").inner_text()
-    if "网页里改过的设置" in text and "最多请求模型几次" in text:
+    if "网页里改过的设置" in text and "工具调用轮数上限" in text:
         ok("网关节点列出网页里改过的设置")
     else:
         fail("网关节点没列出改过的设置")
-    page.locator(".insp .p-srow", has_text="最多请求模型几次").click()
+    page.locator(".insp .p-srow", has_text="工具调用轮数上限").click()
     page.wait_for_timeout(500)
     if page.locator(".insp header h3").inner_text() == "Agent" and page.locator("#f-agent\\.max_steps.hl").count():
         ok("点改过的设置跳到它所在的节点并高亮")
@@ -300,6 +300,20 @@ def run(page, url, nano):
         h = page.locator(".insp header h3").inner_text() if page.locator(".insp").count() else "（没有面板）"
         fail(f"⌘K 搜设置没跳对：面板 {h}，路由 {page.url}")
 
+    # 用户自己的说法也要搜得到
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    page.keyboard.press("Control+k")
+    page.wait_for_selector(".pal input")
+    page.fill(".pal input", "工具调用上限")
+    page.wait_for_timeout(200)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(600)
+    if page.locator("#f-agent\\.max_steps.hl").count():
+        ok("搜“工具调用上限”找到 Agent 节点里的工具调用轮数上限")
+    else:
+        fail("搜“工具调用上限”没找到对应的设置")
+
     # ---- 定时任务：在节点面板里新建、删除 ----
     open_node(page, "sched")
     page.click(".insp button:has-text('新建任务')")
@@ -321,6 +335,33 @@ def run(page, url, nano):
             fail("任务没删掉")
     else:
         fail(f"新建任务没成功：{tasks}")
+
+    # ---- 网关换了版本：开着的页面自己刷新成新版本（不然新加的设置在旧页面上找不到） ----
+    def bump(route):
+        resp = route.fetch()
+        data = resp.json()
+        data.setdefault("runtime", {})["version"] = "9.9.9"
+        route.fulfill(response=resp, json=data)
+    page.route("**/api/overview", bump)
+    with page.expect_navigation(timeout=8000):
+        page.evaluate("window.__nano.refresh()")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(500)
+    if page.locator(".toast", has_text="页面已刷新成新版本").count() or "页面已刷新成新版本" in page.locator("body").inner_text():
+        ok("网关换了版本，开着的页面自己刷新并提示")
+    else:
+        fail("网关换了版本以后页面没有提示")
+    navs = []
+    page.on("framenavigated", lambda f: f == page.main_frame and navs.append(f.url))
+    page.evaluate("window.__nano.refresh()")
+    page.wait_for_timeout(800)
+    if not navs:
+        ok("刷新以后版本没再变，就不再刷新")
+    else:
+        fail(f"版本没变也刷新了页面：{navs}")
+    page.unroute("**/api/overview")
+    page.reload()  # 换回真实的版本号
+    page.wait_for_selector("g.node.gateway")
 
     # ---- 窄一点的窗口也能用 ----
     page.set_viewport_size({"width": 1280, "height": 760})

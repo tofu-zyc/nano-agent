@@ -41,9 +41,9 @@ var Nodes = []Node{
 // Fields 是全部可以在网页里查看、修改的配置项，按节点排列（同一节点里按小标题第一次出现的顺序分节）。
 var Fields = []Field{
 	// ---- Agent：每条消息怎么跑、谁能用、怎么回复 ----
-	{Key: "agent.max_steps", Group: "agent", Section: "每条消息", Label: "最多请求模型几次", Type: "int",
-		Help:     "一条消息里模型每调一轮工具算一次，到了就先停下（发「继续」接着做）。0 表示不限，默认 200",
-		Keywords: "工具 轮次 上限 步数 次数 budget max_steps"},
+	{Key: "agent.max_steps", Group: "agent", Section: "每条消息", Label: "工具调用轮数上限", Type: "int",
+		Help:     "一条消息里最多请求模型几次（模型每调一轮工具算一次），到了就先停下，发「继续」接着做。0 表示不限，默认 200",
+		Keywords: "工具调用 调用次数 轮数 轮次 上限 步数 次数 请求模型 budget max_steps"},
 	{Key: "agent.run_timeout", Group: "agent", Section: "每条消息", Label: "最长处理多久", Type: "string",
 		Help:     "一条消息从开始到回复最多处理多久，例如 30m、2h；0 表示不限（默认），随时可以发 /stop 停下",
 		Keywords: "超时 时限 timeout"},

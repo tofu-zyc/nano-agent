@@ -47,7 +47,7 @@
   <p class="p-note lead">Agent 就是回复你的那个“它”：人格决定它是谁、怎么说话，下面的设置决定它怎么干活、谁能用它。以后可以有好几个 agent，各自绑自己的机器人，每个都是图上的一个节点。</p>
 
   <div class="p-grid">
-    <div class="p-stat"><b>{steps > 0 ? steps : '不限'}</b><span>每条消息最多请求模型</span></div>
+    <div class="p-stat"><b>{steps > 0 ? steps : '不限'}</b><span>工具调用轮数上限</span></div>
     <div class="p-stat"><b>{limit(field('agent.run_timeout'), '不限')}</b><span>每条消息最长</span></div>
     <div class="p-stat"><b>{modeMeta[mode]?.label ?? mode}</b><span>新会话的权限</span></div>
   </div>

@@ -967,7 +967,7 @@ func (a *App) finish(s *sess, status, detail string) {
 			note = "（回复太长，被截断了）"
 		}
 	case proto.StatusBudget:
-		note = fmt.Sprintf("（这条消息已经请求了 %d 次模型，到了上限，先停在这里。发「继续」接着做；上限在网页拓扑图的 Agent 节点里改，0 表示不限）", r.calls)
+		note = fmt.Sprintf("（这条消息已经请求了 %d 次模型，到了工具调用轮数上限，先停在这里。发「继续」接着做；上限在网页拓扑图的 Agent 节点里改，0 表示不限）", r.calls)
 	case proto.StatusTimeout:
 		note = "（这条消息处理的时间到了上限，先停在这里。发「继续」接着做；时限在网页拓扑图的 Agent 节点里改，0 表示不限）"
 		if r.scheduled != nil {
