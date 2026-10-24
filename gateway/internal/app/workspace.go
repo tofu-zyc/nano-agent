@@ -48,7 +48,8 @@ func (a *App) workspaceOf(sid string) workspace {
 				w.wss = append(w.wss, x)
 			}
 		}
-	} else {
+	} else if !st.Group {
+		// 群聊默认不挂工作目录（管理员可以在会话节点里单独给它挂）
 		w.wss = a.defaultWorkspaces()
 	}
 	return w

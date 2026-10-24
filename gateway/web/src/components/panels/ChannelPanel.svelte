@@ -125,7 +125,7 @@
         <li>找 <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> 发 <code>/newbot</code>，拿到 token，填到下面；</li>
         <li>国内一般要设代理，比如 <code>http://127.0.0.1:7890</code>（或者在网关节点设默认代理）；</li>
         <li>打开“启用”，几秒后这里会显示机器人的名字；</li>
-        <li>私聊机器人就能用了。目前只支持私聊，群聊以后再做。</li>
+        <li>私聊机器人就能用了。要让它看得见群里的所有消息：在 BotFather 里 <code>/setprivacy</code> 关掉 privacy mode，或者把它设成群管理员；不然它只收得到 @ 它的消息。</li>
       </ol>
     </details>
   {/if}
@@ -138,7 +138,8 @@
         <li>把 App ID 和 App Secret 填到下面，打开“启用”；</li>
         <li>在“事件与回调”里选“使用长连接接收事件”，添加 <code>im.message.receive_v1</code>、<code>im.message.recalled_v1</code>；</li>
         <li>“回调配置”里同样选长连接，添加 <code>card.action.trigger</code>（卡片上的停止、批准 / 拒绝按钮要用）；</li>
-        <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code>、<code>cardkit:card:write</code> 权限，发布版本。</li>
+        <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code>、<code>cardkit:card:write</code> 权限，发布版本；</li>
+        <li>要在群里用：再开“获取群组中所有消息”的权限，不然只收得到 @ 它的消息。</li>
       </ol>
     </details>
   {/if}

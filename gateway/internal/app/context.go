@@ -13,6 +13,12 @@ import (
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
+	// 群聊：人格后面加上群聊守则（agents/<id>/group.md 或内置的），内容对这个群保持不变
+	if a.isGroupSession(sid) {
+		if g := a.groupGuide(a.agentOf(sid).ID); g != "" {
+			system = strings.TrimSpace(system + "\n\n" + g)
+		}
+	}
 	var tools []llm.Tool
 	rt := a.route(a.workspaceOf(sid))
 	admin := sid == mainSID
@@ -30,17 +36,29 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		noTools = s.run.noTools
 	}
-	if n := a.nodes[rt.kernel]; n != nil && !noTools {
-		tools = a.toolsFor(n, false, admin)
-	}
-	if noTools {
-		tools = nil
+	if a.isGroupSession(sid) {
+		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
+		var all []llm.Tool
 		for _, spec := range a.searchTools() {
-			tools = append(tools, toolOf(spec))
+			all = append(all, toolOf(spec))
 		}
+		if spec, ok := a.skills.ToolSpec(); ok {
+			all = append(all, toolOf(spec))
+		}
+		tools = a.groupTools(sid, all)
+	} else {
+		if n := a.nodes[rt.kernel]; n != nil && !noTools {
+			tools = a.toolsFor(n, false, admin)
+		}
+		if noTools {
+			tools = nil
+			for _, spec := range a.searchTools() {
+				tools = append(tools, toolOf(spec))
+			}
+		}
+		// agent 可以限定这个会话能用哪些工具（空表示全部）
+		tools = a.filterAgentTools(sid, tools)
 	}
-	// agent 可以限定这个会话能用哪些工具（空表示全部）
-	tools = a.filterAgentTools(sid, tools)
 	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)

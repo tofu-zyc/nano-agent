@@ -267,20 +267,6 @@ func TestInvalidToolArgsAreForwardedAsString(t *testing.T) {
 	}
 }
 
-func TestGroupIgnored(t *testing.T) {
-	e := setup(t)
-	e.say("随便聊聊", group(false))
-	e.say("@机器人 几点了", group(true))
-	e.ch.wait(t, "暂时只支持私聊")
-	e.say("@机器人 在吗", group(true)) // 只提醒一次
-	e.k.none()
-	select {
-	case m := <-e.ch.sent:
-		t.Fatalf("不该再回复：%q", m)
-	case <-time.After(200 * time.Millisecond):
-	}
-}
-
 func TestHomeWithoutWorkspace(t *testing.T) {
 	e := setup(t)
 	// 换一套带读写工具的真实工具列表；没有工作目录时工具都给，写入靠 elevated 审批

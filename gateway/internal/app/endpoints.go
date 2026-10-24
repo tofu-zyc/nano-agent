@@ -164,8 +164,9 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	changed := false
 	// 这个渠道（机器人）归哪个 agent：窗口接到的会话跟着它，一个机器人只属于一个 agent
 	agentID := a.agentForChannel(ep.ch)
+	// 群聊：每个群一个会话，管理员在群里也不接到主会话
 	base := key
-	if a.isAdmin(who) {
+	if a.isAdmin(who) && !m.Group {
 		base = mainSID
 	}
 	want := agents.SessionFor(agentID, base)
@@ -175,14 +176,16 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 		changed = true
 		a.log.Info("新的聊天窗口", "endpoint", key, "session", r.Session)
 		// 接到的会话里已经有对话了（比如管理员的新窗口接到主会话）：说一声，附上最近的对话
-		if ts, _ := a.turnsFrom(r.Session, 0); len(ts) > 0 {
-			lead := fmt.Sprintf("这个窗口接在会话「%s」上。/history 查看历史，/sync 补上其他窗口的对话。", a.sessionInfo(r.Session).Title)
-			if r.Session == mainSID {
-				lead = "这个窗口接在主会话上，在这里说话和终端、网页是同一段上下文。/history 查看历史，/sync 补上其他窗口的对话。"
+		if !m.Group {
+			if ts, _ := a.turnsFrom(r.Session, 0); len(ts) > 0 {
+				lead := fmt.Sprintf("这个窗口接在会话「%s」上。/history 查看历史，/sync 补上其他窗口的对话。", a.sessionInfo(r.Session).Title)
+				if r.Session == mainSID {
+					lead = "这个窗口接在主会话上，在这里说话和终端、网页是同一段上下文。/history 查看历史，/sync 补上其他窗口的对话。"
+				}
+				a.introduce(ep, r.Session, lead)
+			} else {
+				a.markSeen(ep, r.Session, a.histEnd(r.Session), false)
 			}
-			a.introduce(ep, r.Session, lead)
-		} else {
-			a.markSeen(ep, r.Session, a.histEnd(r.Session), false)
 		}
 	}
 	if agents.SessionAgent(r.Session) != agentID {

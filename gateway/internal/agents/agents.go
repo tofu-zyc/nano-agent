@@ -45,9 +45,16 @@ type Agent struct {
 	IdleCompact     *string  `json:"idle_compact,omitempty"`
 	IdleCompactMin  *float64 `json:"idle_compact_min,omitempty"`
 
-	// Tools 是干活时能用的工具白名单，空表示全部；GroupTools 是群聊里能用的工具（阶段 7）
+	// Tools 是干活时能用的工具白名单，空表示全部；GroupTools 是群聊里能用的工具（默认只有搜索）
 	Tools      []string `json:"tools,omitempty"`
 	GroupTools []string `json:"group_tools,omitempty"`
+
+	// 群聊行为（阶段 7）：插话积极度、群里安静多久才插话、回复多长、拆几条、两次发言最短间隔
+	GroupEagerness *string `json:"group_eagerness,omitempty"` // off | low | normal | high
+	GroupQuiet     *string `json:"group_quiet,omitempty"`
+	GroupMaxLen    *int    `json:"group_max_len,omitempty"`
+	GroupParts     *int    `json:"group_parts,omitempty"`
+	GroupMinGap    *string `json:"group_min_gap,omitempty"`
 
 	Created int64 `json:"created,omitempty"`
 }

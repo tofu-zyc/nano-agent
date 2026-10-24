@@ -28,6 +28,19 @@ v0.5 是多 agent、机器人绑定、群聊（[PLAN-roadmap.md](PLAN-roadmap.md
 - **测试**：`agents` 包单测（ID 校验、默认 agent 不能删、持久化、会话 ID 前缀）；`app` 里测迁移、人格查找顺序、覆盖优先级（会话 > agent > 全局）、工具白名单、机器人路由和换绑、agent 增删改；`check-web-ui.py` 加：每个 agent 都有节点、Agent 默认值 / 添加 agent / 添加机器人节点在图上、agent 面板能存覆盖设置、Telegram 节点能换绑。
 - **坑**：面板里 `onclick={() => store.open({ type: 'bots' })}` 手写时少一个 `}` 会让 svelte-check 报「Expected token }」；改成在 script 里写一个函数再 `onclick={openBots}` 最稳。Agent 列节点变多以后列会变长，拓扑图会自动缩放适配；拖过节点的偏移量还记在 `nano.layout2`。
 
+### 阶段 7：群聊行为（2026-10-24）
+
+- 用户的要求：群聊像真人——不在群里展示思考和工具过程、不长篇大论、不是每句都回、只能用少量工具。
+- **会话**：每个外部群在每个 agent 下一个会话（默认 agent 是 `tg:<群ID>`，别的是 `@bob/tg:<群ID>`），会话设置里标 `group`。群聊默认不挂工作目录，工具只有 agent 的群聊白名单（默认 WebSearch、WebFetch、Skill），权限按访客算（`access.guest`）。
+- **听着**：群里每条消息都记进历史，格式 `[15:08][张三] 内容`，不触发模型（`listenGroup`）。
+- **什么时候说话**：被 @、回复了机器人（渠道给的 `Mentioned`）、或者消息里叫到 agent 的名字 → 等 2 秒（`groupReply` 的定时器）把这期间的几条一起交给模型；这一轮不再追加用户消息（`queued.trigger`）。
+- **插话**：`groupTick` 每秒看一遍——群里安静够久（默认 20s）、有新消息、最短间隔（10s）和每小时额度（off/low/normal/high = 0/2/6/15）都允许时，让模型决定要不要说；不想说就回 `[不回复]`（这一轮只在请求里补一句提醒，不改历史）。
+- **怎么说话**：系统提示 = 人格 + 群聊守则（`agents/<id>/group.md`，没有就用内置的）；回复按空行拆成最多 3 条、每条最多 300 字，之间停 0.3–3 秒；不发思考、工具过程和用量（群聊这一轮不开流式窗口）。
+- **设置**：插话积极度、安静多久、最短间隔、一条多长、最多几条，都在 agent 自己节点的「覆盖的设置」里（`group_*`，存 agents.json）。
+- **平台前提**：Telegram 要关掉 privacy mode 或者当群管理员；飞书要开「获取群组中所有消息」。写进了 Telegram / 飞书节点的接入说明。
+- **测试**：`group_test.go`——只听不回、被 @ 才回（回复里没有用量）、`[不回复]` 什么都不发、拆条和长度上限、安静期 / 最短间隔 / 积极度 off、群聊工具白名单和群聊守则、群聊默认不挂工作目录。
+- **坑**：以前群消息会被当成管理员的窗口接进主会话；现在 `attach` 对群消息一律用这个群自己的会话，群名显示在会话标题上。
+
 ## v0.4 开发进度（dev/v0.4，已合并 main，v0.4.0 发布）
 
 v0.4 是“拓扑图就是控制台”（原来 v0.4 的多 agent 顺延到 v0.5，见 [PLAN-roadmap.md](PLAN-roadmap.md)）。设计见 [DESIGN-topology-config.md](DESIGN-topology-config.md)。

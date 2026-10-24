@@ -40,6 +40,7 @@ func (t *Totals) add(u llm.Usage) {
 type SessionInfo struct {
 	SID            string         `json:"sid"`
 	Agent          string         `json:"agent"`     // 这个会话属于哪个 agent
+	Group          bool           `json:"group"`     // 这是某个群聊里的会话
 	Channel        string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints      []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title          string         `json:"title"`
@@ -118,7 +119,7 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
-	info := SessionInfo{SID: sid, Agent: agents.SessionAgent(sid), Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
+	info := SessionInfo{SID: sid, Agent: agents.SessionAgent(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
 		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
 	if m, _, ok := a.modelOf(sid); ok {

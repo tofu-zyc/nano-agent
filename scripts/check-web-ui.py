@@ -211,6 +211,10 @@ def run(page, url, nano):
         ok("agent 节点里有它自己的人格和绑定的机器人")
     else:
         fail("agent 节点里看不到人格或机器人：" + text[:200])
+    if "群里插话积极度" in text:
+        ok("agent 节点里有群聊行为（插话积极度等）")
+    else:
+        fail("agent 节点里没有群聊设置：" + text[:200])
     # 在 agent 节点里改一条覆盖设置：存进去的是它自己的值
     first = page.locator(".insp .setting input, .insp .setting select").first
     if first.count():

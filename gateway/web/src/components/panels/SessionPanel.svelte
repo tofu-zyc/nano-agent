@@ -97,6 +97,10 @@
       <div class="p-stat"><b>{num(sess.usage.prompt_tokens)}</b><span>累计输入</span></div>
     </div>
 
+    {#if sess.group}
+      <div class="p-warn">这是在群聊里的会话：每条群消息都记进历史，被 @ 或叫到名字才回；群里安静够了、额度也够时可以插一句。默认不挂工作目录，工具只有群聊白名单里的。</div>
+    {/if}
+
     <h5 class="p-h">属于哪个 agent <span class="muted p-small">换 agent 就是换个机器人聊</span></h5>
     <div class="p-card">
       <div class="p-row">

@@ -319,6 +319,28 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 			Global:    c.Context.IdleCompactMin,
 			Value:     ptrAny(ag.IdleCompactMin),
 			Effective: pickPositiveFloat(ag.IdleCompactMin, c.Context.IdleCompactMin)},
+		{Key: "group_eagerness", Label: "群里插话积极度", Type: "enum", Options: []string{"off", "low", "normal", "high"},
+			Help:      "off 只回被叫到的；low 每小时最多主动说 2 次；normal 6 次；high 15 次",
+			Global:    "low",
+			Value:     ptrAny(ag.GroupEagerness),
+			Effective: pickString(ag.GroupEagerness, "low")},
+		{Key: "group_quiet", Label: "群里安静多久才插话", Type: "string",
+			Help:      "群里安静这么久以后才可能主动说一句，例如 20s、1m",
+			Global:    "20s",
+			Value:     ptrAny(ag.GroupQuiet),
+			Effective: pickString(ag.GroupQuiet, "20s")},
+		{Key: "group_min_gap", Label: "两次发言最短间隔", Type: "string",
+			Global:    "10s",
+			Value:     ptrAny(ag.GroupMinGap),
+			Effective: pickString(ag.GroupMinGap, "10s")},
+		{Key: "group_max_len", Label: "群聊一条回复最多（字）", Type: "int",
+			Global:    300,
+			Value:     ptrAny(ag.GroupMaxLen),
+			Effective: pickPositive(ag.GroupMaxLen, 300)},
+		{Key: "group_parts", Label: "最多拆成几条发", Type: "int",
+			Global:    3,
+			Value:     ptrAny(ag.GroupParts),
+			Effective: pickPositive(ag.GroupParts, 3)},
 	}
 	return out
 }
@@ -542,6 +564,27 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 		return nil
 	}
 	switch key {
+	case "group_max_len", "group_parts":
+		if v == nil {
+			if key == "group_max_len" {
+				ag.GroupMaxLen = nil
+			} else {
+				ag.GroupParts = nil
+			}
+			return nil
+		}
+		n, ok := toInt(v)
+		if !ok || n <= 0 {
+			return fmt.Errorf("%s 要填大于 0 的整数", key)
+		}
+		if key == "group_max_len" {
+			ag.GroupMaxLen = &n
+		} else {
+			if n > 5 {
+				return errors.New("最多拆成 5 条")
+			}
+			ag.GroupParts = &n
+		}
 	case "max_steps", "keep_turns", "max_output_kb":
 		n, ok := toInt(v)
 		if !ok || n < 0 {
@@ -567,6 +610,38 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 			ag.CompactTo = &f
 		default:
 			ag.IdleCompactMin = &f
+		}
+	case "group_eagerness":
+		if v == nil {
+			ag.GroupEagerness = nil
+			return nil
+		}
+		s, ok := v.(string)
+		if !ok || !slices.Contains([]string{"off", "low", "normal", "high"}, s) {
+			return errors.New("插话积极度只能是 off、low、normal、high")
+		}
+		ag.GroupEagerness = &s
+	case "group_quiet", "group_min_gap":
+		if v == nil {
+			if key == "group_quiet" {
+				ag.GroupQuiet = nil
+			} else {
+				ag.GroupMinGap = nil
+			}
+			return nil
+		}
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("%s 要填时长，比如 20s", key)
+		}
+		s = strings.TrimSpace(s)
+		if _, err := time.ParseDuration(s); err != nil {
+			return fmt.Errorf("%s 的写法不对，比如 20s、1m", key)
+		}
+		if key == "group_quiet" {
+			ag.GroupQuiet = &s
+		} else {
+			ag.GroupMinGap = &s
 		}
 	case "run_timeout", "approval_timeout", "idle_compact":
 		s, ok := v.(string)

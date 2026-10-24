@@ -78,6 +78,7 @@ export type EndpointInfo = { key: string; channel: string; name: string; who?: s
 
 export type SessionInfo = {
   agent: string; // 这个会话属于哪个 agent
+  group?: boolean; // 群聊里的会话
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用

@@ -136,6 +136,10 @@ func exportTo(cfgPath, out string) (int, error) {
 	if err := addTree(cfg.Persona.Dir, "personas", nil); err != nil {
 		return 0, err
 	}
+	// 每个 agent 自己的人格（agents/<id>/persona.md、group.md）
+	if err := addTree(filepath.Join(cfg.Dir, "agents"), "agents", nil); err != nil {
+		return 0, err
+	}
 	if err := addTree(cfg.Skills.Dir, "skills", nil); err != nil {
 		return 0, err
 	}
@@ -223,7 +227,7 @@ func runImport(args []string) int {
 func importFrom(file, home string, force bool, oldLocal string) (string, error) {
 	var b strings.Builder
 	existing := []string{}
-	for _, name := range []string{"gateway.toml", "secret.key", "data", "personas", "skills"} {
+	for _, name := range []string{"gateway.toml", "secret.key", "data", "agents", "personas", "skills"} {
 		p := filepath.Join(home, name)
 		if st, err := os.Stat(p); err == nil && (!st.IsDir() || !dirEmpty(p)) {
 			existing = append(existing, name)
