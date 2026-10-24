@@ -41,14 +41,33 @@
       node('n:rooms', { type: 'rooms' }, 'plus', 'var(--c-agent)', '创建群', '网关内部的群：选几个 agent 进去，它们在那儿互相说话', '群 房间 room 群聊 多 agent 私聊 dm'),
       // 每个 agent、每个群一个条目：⌘K 里能直接搜到名字
       ...store.agents.map((a) => node('n:agent:' + a.id, { type: 'agent', id: a.id } as Target, 'persona', 'var(--c-agent)',
-        (a.emoji ? a.emoji + ' ' : '') + a.name, a.default ? '默认 agent' : 'agent · ' + a.id + ' · ' + a.sessions + ' 个会话',
-        'agent ' + a.name + ' ' + a.id + ' 人格 模型 机器人')),
+        (a.emoji ? a.emoji + ' ' : '') + a.name, (a.default ? '默认 agent' : 'agent · ' + a.id) + (a.style === 'life' ? ' · 拟人型' : ' · 工具型') + ' · ' + a.sessions + ' 个会话',
+        'agent ' + a.name + ' ' + a.id + ' 人格 模型 机器人 类型 工具型 拟人型 拟人 作息')),
+      // 每个 agent 的记忆；拟人型还能直接看内心、叫醒
+      ...store.agents.map((a) => node('n:mem:' + a.id, { type: 'memory', agent: a.id }, 'brain', 'var(--c-memory)',
+        a.name + '的记忆', a.memory?.on ? `${a.memory.total} 条 · ${a.memory.people} 个人` : '长期记忆关着',
+        '记忆 长期记忆 知识库 人物 画像 梦 整理记忆 ' + a.name)),
+      ...store.agents.filter((a) => a.style === 'life').flatMap((a): Item[] => [
+        { id: 'a:inner:' + a.id, icon: 'sparkles', color: 'var(--accent-2)', title: '看' + a.name + '的内心', sub: '它自己醒来时想的、做的', kind: '操作',
+          text: '内心 内心活动 近况 ' + a.name, run: () => { location.hash = '#/sessions/' + encodeURIComponent('@' + a.id + '/life'); close(); } },
+        { id: 'a:wake:' + a.id, icon: 'sparkles', color: 'var(--accent-2)', title: '叫醒' + a.name, sub: '让它自己待一会儿：冲浪、想事情、找人聊天', kind: '操作',
+          text: '叫醒 醒来 wake 内心 ' + a.name,
+          run: async () => {
+            close();
+            try {
+              await api.post('/api/agents/' + encodeURIComponent(a.id) + '/wake', {});
+              store.toast({ kind: 'ok', text: '叫醒了，它在想事情' }, 2000);
+            } catch (err) {
+              store.fail(err);
+            }
+          } },
+      ]),
       ...store.rooms.map((r) => node('n:room:' + r.id, { type: 'room', id: r.id } as Target, 'chat', 'var(--accent-2)',
         '群 · ' + r.name, r.members.length + ' 个 agent' + (r.paused ? ' · 已暂停' : '') + ' · ' + r.count + ' 条',
         '群 房间 room ' + r.name)),
       node('n:model', { type: 'model' }, 'sparkles', 'var(--c-model)', '模型', '接口、模型、默认模型、请求参数', '模型 接口 model endpoint'),
       node('n:search', { type: 'search' }, 'search', 'var(--c-search)', '网络搜索', '开关、key、今天搜了几次', '网络搜索 联网 上网 搜索 web search deepseek'),
-      node('n:memory', { type: 'memory' }, 'brain', 'var(--c-memory)', '上下文与记忆', '自动整理、空闲整理、归档', '上下文 记忆 整理 压缩 归档 memory context compact'),
+      node('n:memory', { type: 'memory' }, 'brain', 'var(--c-memory)', '上下文与记忆', '每个 agent 的长期记忆；上下文自动整理、归档', '上下文 记忆 长期记忆 知识库 整理 压缩 归档 做梦 memory context compact'),
       node('n:skills', { type: 'skills' }, 'book', 'var(--c-skill)', '技能', '技能列表和目录', '技能 skill'),
       node('n:schedules', { type: 'schedules' }, 'clock', 'var(--c-cron)', '定时任务', '查看、新建、编辑、立即运行', '定时任务 cron schedule 提醒'),
       node('n:machines', { type: 'machines' }, 'laptop', 'var(--c-kernel)', '接入机器', '别的电脑装内核连进来、添加 SSH 服务器、确认配对', '设备 电脑 服务器 安装 配对 SSH Windows Linux 连接 devices'),

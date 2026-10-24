@@ -36,8 +36,11 @@
   async function load() {
     err = '';
     try {
+      const first = view === null || view.agent !== agentID;
       view = await api.get<MemoryView>('/api/agents/' + enc(agentID) + '/memory');
       selfText = view.self;
+      // 第一次打开（或者换了 agent）：还不认识谁、但记了别的，就先看“记忆”那栏
+      if (first && (tab === 'people' || tab === 'items')) tab = view.people > 0 || !view.entries.length ? 'people' : 'items';
     } catch (e) {
       view = null;
       err = e instanceof Error ? e.message : String(e);
@@ -122,11 +125,11 @@
     }
   }
 
+  // 标过时不问原因（网关写上“主人在网页上标的”和日期）；恢复一下就回来
   async function invalidate(it: MemoryItem, restore: boolean) {
-    const reason = restore ? '' : prompt('为什么过时了？（可以不写）', '') ?? null;
-    if (reason === null) return;
     try {
-      await api.post('/api/agents/' + enc(agentID) + '/memory/invalidate?path=' + enc(it.path), { reason, restore });
+      await api.post('/api/agents/' + enc(agentID) + '/memory/invalidate?path=' + enc(it.path), { restore });
+      store.toast({ kind: 'ok', text: restore ? '恢复了' : '标成过时了：以后不会再想起，点「恢复」能找回' }, 2200);
       await load();
       if (hits) onSearch();
     } catch (e) {

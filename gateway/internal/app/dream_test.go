@@ -295,3 +295,13 @@ func waitIdle(t *testing.T, e *env, sid string) {
 	}
 	t.Fatal("这一轮一直没结束")
 }
+
+// 手动整理：没有新的聊天就直接说，不白跑一次模型。
+func TestDreamNothingNew(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	if err := e.a.Dream("default"); err == nil || !strings.Contains(err.Error(), "没有新的聊天") {
+		t.Fatalf("没有新聊天时：%v", err)
+	}
+	e.k.none()
+}

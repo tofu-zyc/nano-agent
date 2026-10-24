@@ -560,6 +560,9 @@ func (a *App) startDream(agentID string, manual bool) error {
 	for _, d := range sources {
 		pending += d.left()
 	}
+	if pending == 0 {
+		return errors.New("上次整理之后还没有新的聊天，没什么要整理的")
+	}
 	text := fmt.Sprintf("[系统] 现在是 %s %s %s。你要睡了：开始整理记忆。\n%s\n%s\n没整理的日记：%d 段、共 %d 条。先 Diary list。",
 		now.Format("2006-01-02"), weekdayCN(now), now.Format("15:04"), kind, prev, len(sources), pending)
 	if !manual {

@@ -38,6 +38,11 @@
         {:else if t.detail}
           <div class="who">{t.detail}</div>
         {/if}
+        {#if t.open}
+          <div class="acts">
+            <a class="btn sm primary" href="#/sessions/{encodeURIComponent(t.open)}" onclick={() => store.dismiss(t.id)}><Icon name="chat" size={13} />去看看</a>
+          </div>
+        {/if}
       </div>
       {#if !t.approval && !t.pair}
         <button class="close" onclick={() => store.dismiss(t.id)} aria-label="关闭"><Icon name="x" size={13} /></button>

@@ -287,6 +287,7 @@ def run(page, url, nano):
     open_node(page, "add:agent")
     page.locator(".insp input").first.fill("测试人格")
     page.locator(".insp select").first.select_option(index=2)  # 自己写 / 小纳 / 大肥鱼
+    page.locator(".insp button.style:has-text('拟人型')").first.click()  # 建的时候就能选类型
     page.locator(".insp button:has-text('创建')").first.click()
     page.wait_for_timeout(1200)
     made = [a for a in api(page, "GET", "/api/agents")[1]["items"] if a["name"] == "测试人格"]
@@ -295,6 +296,10 @@ def run(page, url, nano):
     else:
         made = made[0]
         pfile = os.path.join(nano, "agents", made["id"], "persona.md")
+        if made.get("style") == "life" and made.get("life", {}).get("next"):
+            ok("新建 agent 时能直接选拟人型（建好就定下了第一次醒来的时间）")
+        else:
+            fail("新建时选的拟人型没生效：" + json.dumps({k: made.get(k) for k in ("style", "life")}, ensure_ascii=False))
         if os.path.exists(pfile) and "大肥鱼" in open(pfile, encoding="utf-8").read():
             ok("新建 agent 时能直接选自带人格（大肥鱼 写进了它的人格文件）")
         else:

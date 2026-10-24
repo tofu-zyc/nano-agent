@@ -282,3 +282,31 @@ func TestAgentSettingsReset(t *testing.T) {
 		t.Fatal("不认识的类型")
 	}
 }
+
+// 新建时选拟人型：马上定下第一次醒来的时间；内心会话在列表里叫“X的内心”；醒来时说清楚上不了网。
+func TestLifeCreateAndLabels(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	e.a.mu.Lock()
+	e.a.rnd = func() float64 { return 0 }
+	e.a.mu.Unlock()
+	life := "life"
+	info, err := e.a.CreateAgent(AgentPatch{Name: strp("小鲍"), Style: &life})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Style != "life" || info.Life == nil || info.Life.Next != e.a.now().Add(5*time.Minute).UnixMilli() {
+		t.Fatalf("新建拟人型：%+v", info.Life)
+	}
+	e.a.mu.Lock()
+	si := e.a.sessionInfo(lifeSID(info.ID))
+	ag, _ := e.a.agentByID(info.ID)
+	note := e.a.wakeNote(ag, e.a.lifeOf(info.ID), e.a.now(), false)
+	e.a.mu.Unlock()
+	if si.Title != "小鲍的内心" || si.Channel != "life" {
+		t.Fatalf("内心会话的名字和图标：%q %q", si.Title, si.Channel)
+	}
+	if !strings.Contains(note, "网络搜索没开") || strings.Contains(note, "（agent:小纳）：") {
+		t.Fatalf("醒来说明：%q", note)
+	}
+}

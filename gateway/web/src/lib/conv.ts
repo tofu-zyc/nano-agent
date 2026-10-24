@@ -7,6 +7,7 @@ export type ToolView = { id: string; name: string; detail: string; args: string;
 export type Block =
   | { type: 'env'; text: string }
   | { type: 'note'; kind: NoteKind; text: string }
+  | { type: 'wake'; text: string } // agent 自己的会话里，网关放的整段说明（醒来时看到的情况、昨晚整理了什么）
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
   | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number };
 
@@ -40,11 +41,17 @@ export function prettyArgs(args: string): string {
   }
 }
 
-export function buildBlocks(history: Msg[]): Block[] {
+export function buildBlocks(history: Msg[], inner = false): Block[] {
   const out: Block[] = [];
   const byId = new Map<string, ToolView>();
   for (const m of history) {
-    if (m.role === 'user') {
+    if (m.role === 'user' && inner) {
+      // 内心活动、整理记忆：没有人在说话，“用户消息”都是网关放的说明，整段显示
+      const p = parseUser(m.content ?? '');
+      for (const n of p.notes) out.push({ type: 'note', kind: n.kind, text: n.text });
+      const text = [...p.env, p.text].filter((x) => x.trim()).join('\n');
+      if (text) out.push({ type: 'wake', text });
+    } else if (m.role === 'user') {
       const p = parseUser(m.content ?? '');
       for (const e of p.env) out.push({ type: 'env', text: e });
       for (const n of p.notes) out.push({ type: 'note', kind: n.kind, text: n.text });

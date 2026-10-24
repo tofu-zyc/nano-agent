@@ -8,6 +8,9 @@
   import Icon from '../Icon.svelte';
 
   let { sid }: { sid: string } = $props();
+  // agent 自己的会话（拟人型的内心活动、整理记忆）：只能看，工作目录、权限这些对它没意义
+  const innerKind = $derived(/^@[^/]+\/life$/.test(sid) ? 'life' : /^@[^/]+\/dream$/.test(sid) ? 'dream' : '');
+  const innerAgent = $derived(store.agent(sid.replace(/^@([^/]+)\/.*$/, '$1')));
 
   const ov = $derived(store.ov!);
   const sess = $derived(store.session(sid));
@@ -89,8 +92,17 @@
     <div class="p-actions">
       <a class="btn primary" href="#/sessions/{encodeURIComponent(sess.sid)}" onclick={() => (store.inspector = null)}><Icon name="chat" size={14} />打开对话</a>
       {#if sess.running}<button class="btn" onclick={() => action('stop')}><Icon name="stop" size={14} />停止</button>{/if}
-      <button class="btn" onclick={() => action('reset')}><Icon name="undo" size={14} />归档并重置上下文</button>
+      {#if !innerKind}<button class="btn" onclick={() => action('reset')}><Icon name="undo" size={14} />归档并重置上下文</button>{/if}
     </div>
+    {#if innerKind}
+      <div class="p-card">
+        <p class="p-note">{innerKind === 'life' ? `这是${innerAgent?.name ?? '它'}的内心活动：它自己醒来时想的、做的、上网看到的，只能看。多久醒一次、醒着的时间、主动找谁，在它的节点里改。` : `这是${innerAgent?.name ?? '它'}最近一次整理记忆的过程，只能看。整理出来的记忆和梦境日志在「上下文与记忆」节点里。`}</p>
+        <div class="p-actions tight">
+          {#if innerAgent}<button class="btn sm" onclick={() => store.open({ type: 'agent', id: innerAgent!.id })}><Icon name="persona" size={13} />去{innerAgent.name}的节点</button>{/if}
+          {#if innerAgent}<button class="btn sm" onclick={() => store.open({ type: 'memory', agent: innerAgent!.id })}><Icon name="brain" size={13} />看它的记忆</button>{/if}
+        </div>
+      </div>
+    {:else}
     <input class="p-input title" value={sess.title} maxlength="40" placeholder="会话的名字" title="改名字，回车保存"
       onchange={(e) => rename(e.currentTarget.value)} onkeydown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
     <div class="p-grid">
@@ -222,6 +234,7 @@
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={remove}><Icon name="trash" size={13} />删除这个会话</button>
       </div>
+    {/if}
     {/if}
   {:else if gone}
     <p class="p-note">没有这个会话，可能已经删掉了。</p>

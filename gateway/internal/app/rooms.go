@@ -808,6 +808,9 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		return "", fmt.Errorf("保存消息失败：%w", err)
 	}
 	a.publish(events.Event{T: "say", SID: target, Text: text})
+	if fromLife {
+		a.publish(events.Event{T: "reach", SID: target, Name: ag.Name, Text: cutRunes(text, 120)}) // 网页上弹一条“来找你了”
+	}
 	where := "网页上"
 	if ep, ok := a.lastEndpoint(target); ok {
 		a.deliver(ep, text, "")

@@ -993,7 +993,7 @@
             <text x="62" y="43" class="t1">{memTotal ? `记住了 ${memTotal} 条 · ${memPeople} 个人` : '长期记忆还是空的'}</text>
             <text x="62" y="60" class="t2">到 {pctOf('context.compact_at', 0.75)} 整理上下文 · {mi?.summarized ?? 0} 个会话整理过</text>
           {:else if n.kind === 'skills'}
-            {@const list = n.data?.list ?? []}
+            {@const list = (n.data?.list ?? []).filter((s: { name: string }) => s.name !== 'dream' && s.name !== 'life')}
             <rect class="card" width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="34" cy="36" r="18" />
             <g class="ico"><Icon name="book" x={23} y={25} size={22} /></g>

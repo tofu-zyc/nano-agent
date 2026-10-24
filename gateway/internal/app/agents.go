@@ -768,6 +768,7 @@ func (a *App) CreateAgent(p AgentPatch) (AgentInfo, error) {
 		a.log.Warn("建 agent 目录失败", "id", ag.ID, "err", err)
 	}
 	a.log.Info("新建 agent", "id", ag.ID, "name", ag.Name)
+	a.lifeBegin(ag)
 	a.publishAgents()
 	got, _ := a.agentStore.Get(ag.ID)
 	return a.agentInfo(got), nil
@@ -841,6 +842,7 @@ func (a *App) UpdateAgent(id string, p AgentPatch) (AgentInfo, error) {
 		return AgentInfo{}, err
 	}
 	a.log.Info("改了 agent", "id", id)
+	a.lifeBegin(ag)
 	a.publishAgents()
 	got, _ := a.agentStore.Get(id)
 	return a.agentInfo(got), nil
@@ -989,6 +991,21 @@ func (a *App) cmdAgent(c in) {
 	}
 	if m, _, ok := a.modelFor(ag); ok {
 		b.WriteString("\n它用的模型：" + modelLabel(m))
+	}
+	if ag.Life() {
+		b.WriteString("\n类型：拟人型（有作息，没事时自己上网、想事情、找人聊天；")
+		if lb := a.lifeBrief(ag); lb != nil {
+			b.WriteString(map[string]string{"sleeping": "现在在睡觉", "awake": "现在醒着", "thinking": "现在正在想事情"}[lb.State])
+		}
+		b.WriteString("）")
+	} else {
+		b.WriteString("\n类型：工具型（有人找才干活）")
+	}
+	if a.memoryOn(ag) {
+		total, people, _ := a.memStore(ag.ID).Counts()
+		fmt.Fprintf(&b, "\n长期记忆：%d 条，认识 %d 个人（/memory 看）", total, people)
+	} else if a.agentRoot != "" {
+		b.WriteString("\n长期记忆：关着")
 	}
 	if bot, ok := a.botForChannel(c.ep.ch); ok {
 		b.WriteString("\n这个窗口的机器人：" + bot.Name + "（" + agents.ChannelName(bot) + "）")

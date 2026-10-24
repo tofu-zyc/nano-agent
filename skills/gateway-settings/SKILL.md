@@ -9,7 +9,7 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 
 ## 先查
 
-`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看拓扑图上一个节点的：`agent`（每条消息的上限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、`gateway`（代理、更新、脱敏、内核连接、存储）、`web`（网页地址、密码）、`cli`、`telegram`、`feishu`、`model`（模型请求参数）、`memory`（上下文与记忆）、`search`（网络搜索）、`skills`、`local`（本机内核）、`machines`（电脑接入地址）。每一项还带 `node`：它在哪个节点上，让用户去网页改时就说这个节点。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因和该去哪个节点改（要重启才生效的、网页密码和渠道 token 这类密钥）。
+`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看拓扑图上一个节点的：`agent`（每条消息的上限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、`gateway`（代理、更新、脱敏、内核连接、存储）、`web`（网页地址、密码）、`cli`、`telegram`、`feishu`、`model`（模型请求参数）、`memory`（上下文整理和归档；每个 agent 的长期记忆、拟人型的作息这些设置在 agent 自己那里，见 `agents` 技能）、`search`（网络搜索）、`skills`、`local`（本机内核）、`machines`（电脑接入地址）。每一项还带 `node`：它在哪个节点上，让用户去网页改时就说这个节点。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因和该去哪个节点改（要重启才生效的、网页密码和渠道 token 这类密钥）。
 
 ## 再改
 

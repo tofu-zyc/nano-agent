@@ -10,6 +10,7 @@ export type Toast = {
   detail?: string;
   approval?: Approval;
   pair?: PairRequest;
+  open?: string; // 点“去看看”打开的会话（拟人型主动找你时）
 };
 
 export type { PairRequest };
@@ -460,6 +461,12 @@ class Store {
         break;
       case 'models':
         this.reloadModels();
+        break;
+      case 'reach':
+        // 拟人型主动发来一条私聊：正在看那个会话就不用弹了
+        if (!(this.route.view === 'sessions' && this.route.arg === sid)) {
+          this.toast({ kind: 'info', text: `${e.name ?? '它'} 来找你了`, detail: e.text ?? '', open: sid }, 12000);
+        }
         break;
       case 'memory':
       case 'dream':

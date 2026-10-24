@@ -383,7 +383,7 @@ func (a *App) knowledgeCall(sid, who string, raw []byte) (string, error) {
 			out = "（自我认知在 self.md）\n" + out
 		}
 		if strings.TrimSpace(out) == "" {
-			return "知识库还是空的。", nil
+			return "知识库还是空的（说“记住……”会马上记下；平时空闲或睡着时会把最近的聊天整理进来）。", nil
 		}
 		return out, nil
 	case "search":

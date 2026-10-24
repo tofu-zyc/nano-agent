@@ -199,9 +199,7 @@ func (a *App) lifeTick() {
 		ls := a.lifeOf(ag.ID)
 		a.followUpTick(ag, ls, now)
 		if ls.Next == 0 {
-			// 刚变成拟人型（或者第一次启动）：过一会儿先醒一次
-			ls.Next = now.Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))).Unix()
-			a.saveLife()
+			a.lifeBegin(ag) // 第一次启动：过一会儿先醒一次
 			continue
 		}
 		if now.Unix() < ls.Next || a.lifeBlocked(ag, ls, now) != "" {
@@ -213,6 +211,21 @@ func (a *App) lifeTick() {
 			a.saveLife()
 		}
 	}
+}
+
+// lifeBegin：刚变成拟人型（新建时选的、或者改过来的）还没定过醒来时间，就定在 5–15 分钟后，
+// 网页上马上能看到“大约几点醒”。不是拟人型、已经定过的什么都不做。调用方持有锁。
+func (a *App) lifeBegin(ag agents.Agent) {
+	if !ag.Life() || a.agentRoot == "" {
+		return
+	}
+	ls := a.lifeOf(ag.ID)
+	if ls.Next != 0 {
+		return
+	}
+	ls.Next = a.now().Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))).Unix()
+	a.saveLife()
+	a.publish(events.Event{T: "life", Name: ag.ID, Kind: "next"})
 }
 
 // startLife 让 agent 醒一下。manual 是主人叫醒的（/wake、网页按钮），不算每天的次数。调用方持有锁。
@@ -232,7 +245,7 @@ func (a *App) startLife(agentID string, manual bool) error {
 		return errors.New("还没有配置模型")
 	}
 	st := a.store.Settings(s.sid)
-	st.Title = ag.Name + " 的内心"
+	st.Title = ag.Name + "的内心"
 	st.Workspaces, st.WorkspacesSet = nil, true
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		return err
@@ -399,7 +412,10 @@ func (a *App) wakeNote(ag agents.Agent, ls *lifeState, now time.Time, manual boo
 	if targets := a.lifeTargets(ag); len(targets) > 0 {
 		b.WriteString("\n最近的聊天（Message 的 to 写括号里的）：")
 		for _, t := range targets {
-			fmt.Fprintf(&b, "\n- %s（%s）：%s", t.Name, t.To, t.Last)
+			fmt.Fprintf(&b, "\n- %s（%s）", t.Name, t.To)
+			if t.Last != "" {
+				b.WriteString("：" + t.Last)
+			}
 			if t.At > 0 {
 				b.WriteString("，" + agoText(now, t.At))
 			}
@@ -410,6 +426,13 @@ func (a *App) wakeNote(ag agents.Agent, ls *lifeState, now time.Time, manual boo
 	}
 	if !a.awakeOf(ag).contains(now) {
 		b.WriteString("\n现在是你睡觉的时间，别去打扰别人。")
+	}
+	// 能做什么要说实话：没开搜索就上不了网，记忆关着就记不了东西，别编
+	if len(a.searchTools()) == 0 {
+		b.WriteString("\n（网络搜索没开，这次上不了网。）")
+	}
+	if !a.memoryOn(ag) {
+		b.WriteString("\n（长期记忆关着，这次记不了东西。）")
 	}
 	b.WriteString("\n想做点什么就做，不想做就歇着。最后用一两句话写下这会儿你做了什么、心情怎样。")
 	return b.String()

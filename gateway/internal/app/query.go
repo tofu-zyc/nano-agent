@@ -152,10 +152,16 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	if len(info.Endpoints) > 0 {
 		info.Channel = info.Endpoints[0].Channel
 	}
+	if isLifeSID(sid) {
+		info.Channel = "life" // 拟人型的内心活动：网页上单独的图标，只能看
+	}
 	if info.Title == "" {
 		switch {
 		case sid == mainSID:
 			info.Title = "主会话"
+		case isLifeSID(sid):
+			ag := a.agentOf(sid)
+			info.Title = ag.Name + "的内心"
 		case a.eps[sid] != nil && a.eps[sid].Name != "":
 			info.Title = a.eps[sid].Name // 某个人自己的会话：用聊天的名字
 		default:

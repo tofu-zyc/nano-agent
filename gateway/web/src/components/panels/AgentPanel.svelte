@@ -182,7 +182,7 @@
         <div class="p-actions tight">
           <button class="btn sm primary" disabled={busy || L.state === 'thinking'} onclick={() => post('/wake', '叫醒了，它在想事情')}><Icon name="sparkles" size={13} />现在叫醒它</button>
           {#if L.recent.length || L.wakes}
-            <button class="btn sm" onclick={() => store.open({ type: 'session', sid: sessionOf('life') })}><Icon name="chat" size={13} />看它的内心</button>
+            <a class="btn sm" href="#/sessions/{encodeURIComponent(sessionOf('life'))}" onclick={() => (store.inspector = null)}><Icon name="chat" size={13} />看它的内心</a>
           {/if}
         </div>
       </div>
@@ -190,11 +190,15 @@
 
     <div class="p-card">
       <div class="p-row">
-        <span class="p-k">长期记忆</span>
+        <span class="p-k">记忆</span>
         <span class="p-grow">{#if !a.memory.on}关着{:else}{a.memory.total} 条，{a.memory.people} 个人{/if}</span>
         {#if a.memory.dreaming}<span class="tag accent">🌙 在整理</span>{/if}
       </div>
-      {#if a.memory.on}
+      {#if !a.memory.on}
+        <div class="p-actions tight">
+          <button class="btn sm" disabled={busy} onclick={() => saveSetting('memory', null)}><Icon name="brain" size={13} />打开长期记忆</button>
+        </div>
+      {:else}
         <div class="p-note p-small">{#if a.memory.last_dream}上次整理：{when(a.memory.last_dream)}{#if a.memory.last_note}。{a.memory.last_note}{/if}{:else}还没整理过：{life ? '睡着时' : '所有聊天都安静一阵以后'}会读最近的聊天，把值得记住的人和事记下来。{/if}</div>
         <div class="p-actions tight">
           <button class="btn sm" onclick={() => store.open({ type: 'memory', agent: id })}><Icon name="brain" size={13} />看记忆</button>

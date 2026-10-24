@@ -30,7 +30,7 @@ const gatewaySchema = `{
       "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明），或者 agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
     "group":{"type":"string","enum":["agent","gateway","web","cli","telegram","feishu","model","memory","search","skills","local","machines"],
-      "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
+      "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档；每个 agent 的长期记忆设置在它自己的 settings 里，用 agent_save 改）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
   }
 }`
 

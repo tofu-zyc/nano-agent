@@ -81,6 +81,7 @@ export const channelMeta: Record<string, { label: string; color: string; icon: s
   web: { label: '网页', color: 'var(--c-web)', icon: 'globe' },
   telegram: { label: 'Telegram', color: 'var(--c-telegram)', icon: 'send' },
   feishu: { label: '飞书', color: 'var(--c-feishu)', icon: 'feishu' },
+  life: { label: '内心', color: 'var(--accent-2)', icon: 'sparkles' }, // 拟人型的内心活动（只能看）
 };
 
 export const stateLabel: Record<string, string> = {

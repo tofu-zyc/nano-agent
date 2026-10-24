@@ -111,7 +111,7 @@
         const lastUser = hist.map((m) => m.role).lastIndexOf('user');
         if (lastUser >= 0) hist = hist.slice(0, lastUser);
       }
-      blocks = buildBlocks(hist);
+      blocks = buildBlocks(hist, !!innerKind);
       summary = r.summary;
       missing = false;
       store.upsertSession(r.info);
@@ -325,6 +325,8 @@
             {#each info.workspaces as mt (mt.id)}
               <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击挂载 / 取下" onclick={() => (picking = true)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
             {/each}
+          {:else if innerKind}
+            <span class="tag">{innerKind === 'life' ? '内心活动 · 只能看' : '整理记忆 · 只能看'}</span>
           {:else}
             <button class="tag" onclick={() => (picking = true)} title="没有挂载工作目录：在 HOME 下工作，只能写临时目录；写外面要提权。点这里挂一个">未挂目录</button>
           {/if}
@@ -333,7 +335,7 @@
         {/if}
       </div>
     </div>
-    <button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>
+    {#if !innerKind}<button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>{/if}
     <button class="btn sm ghost" onclick={() => store.open({ type: 'session', sid })} title="会话设置"><Icon name="sliders" size={14} /></button>
   </header>
   {#if info?.context}
@@ -371,6 +373,8 @@
       {#each blocks as b, i}
         {#if b.type === 'env'}
           <div class="sys"><Icon name="folder" size={13} />{b.text}</div>
+        {:else if b.type === 'wake'}
+          <div class="wake"><Icon name={innerKind === 'dream' ? 'brain' : 'sparkles'} size={13} /><div>{b.text}</div></div>
         {:else if b.type === 'note'}
           <details class="memnote k-{b.kind}">
             <summary><Icon name={b.kind === 'life' ? 'sparkles' : 'brain'} size={12} />{noteTitle[b.kind]}<span class="muted">（网关放进这一轮的，点开看）</span></summary>
@@ -555,10 +559,37 @@
   .innerbar span {
     flex: 1;
   }
+  .wake {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 10px 14px;
+    border-radius: 12px;
+    border: 1px dashed color-mix(in srgb, var(--accent-2) 40%, var(--line));
+    background: color-mix(in srgb, var(--accent-2) 6%, transparent);
+    color: var(--text-2);
+    font-size: 12.5px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+  .wake :global(svg) {
+    flex: none;
+    margin-top: 3px;
+  }
+  /* 网关放在用户消息前面的说明：跟着下面那条用户消息，靠右 */
   .memnote {
     margin: 4px 0 2px;
     font-size: 12px;
     color: var(--muted);
+    align-self: flex-end;
+    max-width: 85%;
+    text-align: left;
+  }
+  .memnote summary {
+    float: right;
+  }
+  .memnote[open] summary {
+    float: none;
   }
   .memnote summary {
     display: inline-flex;
