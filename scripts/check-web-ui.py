@@ -281,10 +281,13 @@ def run(page, url, nano):
         else:
             fail("Telegram 节点里没有绑定 agent 的地方")
 
+    check_living(page, url, nano)
+
     # ---- 新建 agent 时直接挑一个自带人格：人格文件里就是它 ----
     open_node(page, "add:agent")
     page.locator(".insp input").first.fill("测试人格")
     page.locator(".insp select").first.select_option(index=2)  # 自己写 / 小纳 / 大肥鱼
+    page.locator(".insp button.style:has-text('拟人型')").first.click()  # 建的时候就能选类型
     page.locator(".insp button:has-text('创建')").first.click()
     page.wait_for_timeout(1200)
     made = [a for a in api(page, "GET", "/api/agents")[1]["items"] if a["name"] == "测试人格"]
@@ -293,6 +296,10 @@ def run(page, url, nano):
     else:
         made = made[0]
         pfile = os.path.join(nano, "agents", made["id"], "persona.md")
+        if made.get("style") == "life" and made.get("life", {}).get("next"):
+            ok("新建 agent 时能直接选拟人型（建好就定下了第一次醒来的时间）")
+        else:
+            fail("新建时选的拟人型没生效：" + json.dumps({k: made.get(k) for k in ("style", "life")}, ensure_ascii=False))
         if os.path.exists(pfile) and "大肥鱼" in open(pfile, encoding="utf-8").read():
             ok("新建 agent 时能直接选自带人格（大肥鱼 写进了它的人格文件）")
         else:
@@ -608,6 +615,111 @@ def run(page, url, nano):
         ok("接入机器面板（1280 宽）")
     else:
         fail("接入机器面板内容不对")
+
+
+def check_living(page, url, nano):
+    """v0.6：两种 agent（工具型 / 拟人型）、拟人型的状态和设置、记忆节点、内心会话只读、记忆说明折叠显示。"""
+    # 默认是工具型：拟人那组设置不显示
+    open_node(page, "ag:default")
+    page.wait_for_selector(".insp .styles")
+    text = page.locator(".insp").inner_text()
+    if "工具型" in text and "拟人型" in text and "主动找谁聊天" not in text and "长期记忆" in text:
+        ok("agent 节点：有工具型 / 拟人型可选，工具型不显示拟人的设置，有长期记忆")
+    else:
+        fail("agent 节点的类型和记忆不对：" + text[:400])
+    # 改成拟人型：状态卡、拟人的设置都出来
+    page.locator(".insp button.style:has-text('拟人型')").first.click()
+    page.wait_for_timeout(900)
+    me = [a for a in api(page, "GET", "/api/agents")[1]["items"] if a["id"] == "default"][0]
+    text = page.locator(".insp").inner_text()
+    page.screenshot(path=os.path.join(SHOTS, "agent-life.png"))
+    if me.get("style") == "life" and "现在叫醒它" in text and "醒着的时间" in text and "主动找谁聊天" in text:
+        ok("点「拟人型」：存成拟人型，面板里有状态卡（叫醒它）和拟人的设置")
+    else:
+        fail("改成拟人型以后面板不对：" + json.dumps(me.get("style")) + " " + text[:400])
+    card = page.eval_on_selector('g.node[data-id="ag:default"]', "e => e.textContent")
+    if "拟人" in card:
+        ok("拓扑图的 agent 卡片上标了「拟人」和它的状态")
+    else:
+        fail("agent 卡片上没标拟人：" + card)
+    # 记忆：写一个人、一条事、自我认知，记忆节点里能看能搜能改
+    api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 张三\ntype: 人物\nsummary: 产品经理，养了两只猫\n---\n说话直。"})
+    api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 国庆去成都\ntype: 事件\n---\n吃了三次火锅。"})
+    api(page, "PUT", "/api/agents/default/memory/self", {"text": "我叫小纳，喜欢看星星。"})
+    open_node(page, "memory")
+    page.wait_for_timeout(500)
+    text = page.locator(".insp").inner_text()
+    if all(k in text for k in ["人物", "记忆", "自我认知", "梦境日志", "张三", "产品经理"]):
+        ok("记忆节点：人物、记忆、自我认知、梦境日志四栏，能看到记下的人")
+    else:
+        fail("记忆节点不对：" + text[:400])
+    page.locator(".insp .p-seg button:has-text('记忆')").first.click()
+    page.wait_for_timeout(300)
+    if "国庆去成都" in page.locator(".insp").inner_text():
+        ok("记忆栏里有记下的事")
+    else:
+        fail("记忆栏里没有记下的事")
+    page.locator(".insp input[placeholder^='搜记忆']").fill("火锅")
+    page.wait_for_timeout(700)
+    if "国庆去成都" in page.locator(".insp .items").inner_text():
+        ok("记忆能按关键词搜（火锅 → 国庆去成都）")
+    else:
+        fail("搜不到记忆")
+    page.locator(".insp .item button.head").first.click()
+    page.wait_for_timeout(400)
+    raw = page.locator(".insp .item textarea").first.input_value()
+    page.locator(".insp .item textarea").first.fill(raw.replace("三次", "五次"))
+    page.locator(".insp .item button:has-text('保存')").first.click()
+    page.wait_for_timeout(600)
+    page.screenshot(path=os.path.join(SHOTS, "memory.png"))
+    st, got = api(page, "GET", "/api/agents/default/memory/item?path=" + urllib.request.quote("国庆去成都.md"))
+    if st == 200 and "五次" in got.get("raw", ""):
+        ok("记忆节点里改一条记忆能保存")
+    else:
+        fail(f"改记忆没存上：{st} {got}")
+    page.locator(".insp .p-seg button:has-text('自我认知')").first.click()
+    page.wait_for_timeout(300)
+    if "看星星" in page.locator(".insp textarea").first.input_value():
+        ok("自我认知能看到")
+    else:
+        fail("自我认知没显示")
+    # 会话里：网关放进消息前面的记忆说明折叠显示，不把 [记忆] 原样摊出来
+    sess = os.path.join(nano, "data", "sessions")
+    os.makedirs(sess, exist_ok=True)
+    with open(os.path.join(sess, "memtest.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"role": "user", "ts": 1792800000, "content": "[系统] 这个会话没有挂载工作目录\n[记忆]\n这是你的长期记忆\n## 对方：主人\n喜欢手冲\n[/记忆]\n[近况]\n- 10-24 14:00 看了篇讲猫的文章\n[/近况]\n[2026-10-24 周五 15:08 · 网页] 你好呀"}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"role": "assistant", "ts": 1792800001, "content": "你好"}, ensure_ascii=False) + "\n")
+    with open(os.path.join(sess, "@default%2Flife.jsonl"), "w", encoding="utf-8") as f:  # 和网关的 url.PathEscape 一样
+        f.write(json.dumps({"role": "user", "ts": 1792800000, "content": "[系统] 现在是 10-24 周五 15:20。你醒着，手头没事。"}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"role": "assistant", "ts": 1792800001, "content": "看了会儿星星的资料，心情不错。"}, ensure_ascii=False) + "\n")
+    page.goto(url + "#/sessions/memtest")
+    page.wait_for_selector(".memnote", timeout=8000)
+    conv = page.locator(".conv").inner_text()
+    if "带上了长期记忆" in conv and "它最近自己做的事" in conv and "[记忆]" not in conv and "你好呀" in conv:
+        ok("会话里：记忆说明、近况折叠成小标签，正文照常显示")
+    else:
+        fail("会话里记忆说明没折叠：" + conv[:300])
+    page.screenshot(path=os.path.join(SHOTS, "conv-memory.png"))
+    page.goto(url + "#/sessions/" + urllib.request.quote("@default/life", safe=""))
+    page.wait_for_timeout(1500)
+    page.screenshot(path=os.path.join(SHOTS, "conv-life.png"))
+    if page.locator(".composer").count() == 0 and "内心活动" in page.locator(".innerbar").first.inner_text(timeout=3000):
+        ok("内心会话只能看：没有输入框，顶上说明是它的内心活动")
+    else:
+        fail("内心会话还有输入框")
+    page.screenshot(path=os.path.join(SHOTS, "conv-life.png"))
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(600)
+    if not page.locator('g.node[data-id="s:@default/life"]').count():
+        ok("内心会话不占拓扑图的会话列")
+    else:
+        fail("内心会话出现在会话列里")
+    # 收拾：改回工具型、删掉测试记忆
+    api(page, "PATCH", "/api/agents/default", {"style": "tool"})
+    for pth in ["people/张三.md", "国庆去成都.md"]:
+        api(page, "DELETE", "/api/agents/default/memory/item?path=" + urllib.request.quote(pth))
+    api(page, "PUT", "/api/agents/default/memory/self", {"text": ""})
 
 
 if __name__ == "__main__":

@@ -171,6 +171,13 @@ send "/session 1";                                    expect "回到主会话" "
 send "撤回";                                          expect "撤回最近一轮" "已撤回：「回到主会话」"
 if ! grep -qF "回到主会话" "$TMP/data/sessions/main.jsonl"; then echo "  ok   撤回的一轮从历史文件里删掉"; pass=$((pass + 1)); else echo "  FAIL 撤回的一轮从历史文件里删掉"; fail=$((fail + 1)); fi
 send "撤回之后";                                      expect "撤回后照常对话" "（mock）收到：撤回之后"
+# 长期记忆（v0.6）：Knowledge 由内核转给网关执行（任何权限模式都转）；/memory 能搜到；/sleep 整理记忆写梦境日志
+send '!call Knowledge {"action":"write","title":"端到端测试的人","type":"人物","body":"喜欢喝茶"}'; expect "Knowledge 由内核转给网关执行" "记下了：[人物] 端到端测试的人"
+send "/memory 喝茶";                                   expect "/memory 搜得到刚记下的" "端到端测试的人"
+send "/sleep";                                        expect "/sleep 开始整理记忆" "去整理记忆了"
+dreamlog() { find "$TMP" -path '*/agents/default/dreams/*.md' 2>/dev/null | head -1; }
+for _ in $(seq 80); do [ -n "$(dreamlog)" ] && break; sleep 0.1; done
+if [ -n "$(dreamlog)" ] && grep -q "（mock）" "$(dreamlog)"; then echo "  ok   整理记忆跑完写了梦境日志"; pass=$((pass + 1)); else echo "  FAIL 整理记忆跑完写了梦境日志"; grep -E "整理记忆|dream" "$TMP/gateway.log" | tail -5; fail=$((fail + 1)); fi
 
 # 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &

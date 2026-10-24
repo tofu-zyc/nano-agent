@@ -19,7 +19,7 @@
 
 /* 工具按会不会改动东西分三类，权限模式据此决定直接执行、先审批还是拒绝 */
 typedef enum {
-    NA_TOOL_PUBLIC_READ, /* 网关网络只读工具，访客也可用 */
+    NA_TOOL_PUBLIC_READ, /* 网关执行、权限由网关判断的工具（搜索、记忆、发消息……），任何模式都交给网关 */
     NA_TOOL_READ,    /* 只读：Read、Grep */
     NA_TOOL_WRITE,   /* 改文件：Write、Edit */
     NA_TOOL_SHELL,   /* 任意命令 */

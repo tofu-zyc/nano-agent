@@ -47,6 +47,7 @@ type epRec struct {
 	Name    string `json:"name,omitempty"` // 聊天的名字（私聊对方的名字）
 	Who     string `json:"who,omitempty"`  // 最近在这个窗口说话的人的身份，网页里设管理员用
 	Session string `json:"session"`        // 接着的会话
+	Last    int64  `json:"last,omitempty"` // 最近一次有人在这个窗口说话（拟人型主动找人时发到最近用的窗口）
 
 	// Seen 是这个窗口在各个会话里看到了哪里（历史里的位置），用来补上没看到的对话（recap.go）
 	Seen map[string]int `json:"seen,omitempty"`
@@ -200,6 +201,7 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	if r.Who != who {
 		r.Who, changed = who, true
 	}
+	r.Last = a.now().Unix() // 一轮结束时会一起存盘
 	if changed {
 		a.saveEndpoints()
 		a.publishSession(r.Session)

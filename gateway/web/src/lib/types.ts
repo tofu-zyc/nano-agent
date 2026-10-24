@@ -233,8 +233,9 @@ export type LiveItem =
 // 一个 agent 可以覆盖的全局设置：全局值（global）、自己的值（value，null 表示跟随全局）、实际生效的值
 export type AgentSetting = {
   key: string;
+  group: 'work' | 'group' | 'life' | 'memory';
   label: string;
-  type: 'int' | 'float' | 'string' | 'enum';
+  type: 'int' | 'float' | 'string' | 'enum' | 'model';
   unit?: string;
   help?: string;
   options?: string[] | null;
@@ -265,7 +266,42 @@ export type AgentInfo = {
   persona_file: string;
   persona_chars: number;
   settings: AgentSetting[];
+  style: 'tool' | 'life'; // 工具型 / 拟人型
+  memory: MemoryBrief;
+  life?: LifeBrief; // 拟人型的内心活动
 };
+
+// agent 长期记忆的概况
+export type MemoryBrief = { on: boolean; total: number; people: number; dreaming: boolean; last_dream?: number; last_note?: string };
+
+// 拟人型的内心活动：睡着 / 醒着 / 正在想事情，下次醒来，今天的次数，近况
+export type LifeBrief = {
+  state: 'sleeping' | 'awake' | 'thinking';
+  next?: number;
+  wake_at?: number;
+  wakes: number;
+  reaches: number;
+  tokens: number;
+  max_wakes: number;
+  recent: { at: number; text: string }[];
+  waiting?: string[];
+};
+
+// /api/agents/{id}/memory：一个 agent 的知识库
+export type MemoryItem = {
+  path: string;
+  title: string;
+  type: string;
+  line: string;
+  people?: string[];
+  visible?: string;
+  source?: string;
+  updated?: string;
+  invalid?: string;
+  shared?: boolean;
+  snippet?: string;
+};
+export type MemoryView = { agent: string; on: boolean; self: string; entries: MemoryItem[]; total: number; people: number; invalid: number; dir: string };
 
 // 一个机器人：绑一个 agent，凭据只回传有没有（不返回明文）
 // 网关内部的群聊（房间）：成员是 agent，聊天记录是一个会话（sid）
@@ -318,7 +354,7 @@ export type Target =
   | { type: 'channel'; name: string }
   | { type: 'session'; sid: string }
   | { type: 'search' }
-  | { type: 'memory' }
+  | { type: 'memory'; agent?: string } // 上下文整理和长期记忆；agent 是要看谁的记忆
   | { type: 'skills' }
   | { type: 'schedules' };
 

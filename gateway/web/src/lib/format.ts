@@ -81,6 +81,7 @@ export const channelMeta: Record<string, { label: string; color: string; icon: s
   web: { label: '网页', color: 'var(--c-web)', icon: 'globe' },
   telegram: { label: 'Telegram', color: 'var(--c-telegram)', icon: 'send' },
   feishu: { label: '飞书', color: 'var(--c-feishu)', icon: 'feishu' },
+  life: { label: '内心', color: 'var(--accent-2)', icon: 'sparkles' }, // 拟人型的内心活动（只能看）
 };
 
 export const stateLabel: Record<string, string> = {
@@ -106,19 +107,36 @@ export const toolIcon: Record<string, string> = {
   Shell: 'terminal',
 };
 
-/** 拆开网关加在用户消息前面的东西：[系统] 环境说明、[时间 · 来源]、群聊里的 [昵称] */
-export function parseUser(content: string): { env: string[]; time?: string; via?: string; sender?: string; text: string } {
+export type NoteKind = 'memory' | 'recall' | 'life';
+const noteBlocks: [NoteKind, string, string][] = [
+  ['memory', '[记忆]', '[/记忆]'],
+  ['recall', '[想起来的]', '[/想起来的]'],
+  ['life', '[近况]', '[/近况]'],
+];
+
+/** 拆开网关加在用户消息前面的东西：[系统] 环境说明、记忆说明（[记忆]…[/记忆] 等多行块）、[时间 · 来源]、群聊里的 [昵称] */
+export function parseUser(content: string): { env: string[]; notes: { kind: NoteKind; text: string }[]; time?: string; via?: string; sender?: string; text: string } {
   const env: string[] = [];
+  const notes: { kind: NoteKind; text: string }[] = [];
   let rest = content;
-  while (rest.startsWith('[系统] ')) {
-    const i = rest.indexOf('\n');
-    if (i < 0) {
-      env.push(rest.slice(5));
-      rest = '';
-      break;
+  for (let guard = 0; guard < 20; guard++) {
+    if (rest.startsWith('[系统] ')) {
+      const i = rest.indexOf('\n');
+      if (i < 0) {
+        env.push(rest.slice(5));
+        rest = '';
+        break;
+      }
+      env.push(rest.slice(5, i));
+      rest = rest.slice(i + 1);
+      continue;
     }
-    env.push(rest.slice(5, i));
-    rest = rest.slice(i + 1);
+    const nb = noteBlocks.find(([, open]) => rest.startsWith(open));
+    if (!nb) break;
+    const end = rest.indexOf(nb[2]);
+    if (end < 0) break;
+    notes.push({ kind: nb[0], text: rest.slice(nb[1].length, end).trim() });
+    rest = rest.slice(end + nb[2].length).replace(/^\n/, '');
   }
   let time: string | undefined;
   let via: string | undefined;
@@ -134,7 +152,7 @@ export function parseUser(content: string): { env: string[]; time?: string; via?
     sender = g[1];
     rest = rest.slice(g[0].length);
   }
-  return { env, time, via, sender, text: rest };
+  return { env, notes, time, via, sender, text: rest };
 }
 
 /** 消息来源（时间戳里写的）对应的渠道 */

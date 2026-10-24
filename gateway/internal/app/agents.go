@@ -220,6 +220,7 @@ func (a *App) botShow(ch string) string {
 // 实际生效的值。网页的 agent 面板按它渲染，聊天里的 Gateway 工具也用它。
 type AgentSetting struct {
 	Key       string   `json:"key"`
+	Group     string   `json:"group"` // work 干活、group 群聊、life 拟人、memory 记忆
 	Label     string   `json:"label"`
 	Type      string   `json:"type"` // int | float | string | enum
 	Unit      string   `json:"unit,omitempty"`
@@ -259,6 +260,19 @@ type AgentInfo struct {
 	PersonaFile    string         `json:"persona_file"`
 	PersonaChars   int            `json:"persona_chars"`
 	Settings       []AgentSetting `json:"settings"`
+	Style          string         `json:"style"` // tool | life
+	Memory         MemoryBrief    `json:"memory"`
+	Life           *LifeBrief     `json:"life,omitempty"` // 拟人型的内心活动状态
+}
+
+// MemoryBrief 是 agent 长期记忆的概况：多少条、多少人、上次整理。
+type MemoryBrief struct {
+	On        bool   `json:"on"`
+	Total     int    `json:"total"`
+	People    int    `json:"people"`
+	Dreaming  bool   `json:"dreaming"`
+	LastDream int64  `json:"last_dream,omitempty"` // 上次整理结束（毫秒）
+	LastNote  string `json:"last_note,omitempty"`
 }
 
 // botBrief 是机器人的概况（渠道状态网页从概况接口里读）。调用方持有锁。
@@ -266,7 +280,8 @@ func (a *App) botBrief(b agents.Bot) BotBrief {
 	return BotBrief{ID: b.ID, Kind: b.Kind, Name: b.Name, Channel: agents.ChannelName(b), Enabled: b.Enabled}
 }
 
-// agentSettings 是一个 agent 可以覆盖的项，带全局值、自己的值和实际生效的值。调用方持有锁。
+// agentSettings 是一个 agent 可以覆盖的项，带全局值（或默认值）、自己的值和实际生效的值，按组排：
+// work 干活、group 群聊、life 拟人（只有拟人型用）、memory 记忆。调用方持有锁。
 func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 	c := a.cfg
 	at, to, keep := a.contextConfig()
@@ -276,75 +291,130 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 		}
 		return s
 	}
+	eagerDef, eagerHelp := "low", "low 每小时最多主动说 2 次；normal 6 次；high 15 次；off 只回被叫到的。要不要说话的判断本身也是一次模型调用，所以判断次数也有上限"
+	if !ag.Life() {
+		eagerDef, eagerHelp = "off", "工具型 agent 在群里只回被叫到的，不主动插话；改成拟人型才用这一项"
+	}
+	models := []string{""}
+	if a.models != nil {
+		for _, m := range a.models.Models() {
+			models = append(models, m.ID)
+		}
+	}
 	out := []AgentSetting{
-		{Key: "max_steps", Label: "工具调用轮数上限", Type: "int", Global: c.Agent.Steps(),
+		{Key: "max_steps", Group: "work", Label: "工具调用轮数上限", Type: "int", Global: c.Agent.Steps(),
 			Help:      "一条消息里最多请求模型几次，0 表示不限",
 			Value:     ptrAny(ag.MaxSteps),
 			Effective: pickInt(ag.MaxSteps, c.Agent.Steps())},
-		{Key: "run_timeout", Label: "最长处理多久", Type: "string",
+		{Key: "run_timeout", Group: "work", Label: "最长处理多久", Type: "string",
 			Help:      "例如 30m、2h；0 表示不限",
 			Global:    strOrEmpty(c.Agent.RunTimeout),
 			Value:     ptrAny(ag.RunTimeout),
 			Effective: durText(pickDuration(ag.RunTimeout, c.Agent.RunLimit()))},
-		{Key: "approval_timeout", Label: "等审批多久", Type: "string",
+		{Key: "approval_timeout", Group: "work", Label: "等审批多久", Type: "string",
 			Help:      "例如 30m；0 表示一直等",
 			Global:    strOrEmpty(c.Agent.ApprovalTimeout),
 			Value:     ptrAny(ag.ApprovalTimeout),
 			Effective: durText(pickDuration(ag.ApprovalTimeout, c.Agent.ApprovalLimit()))},
-		{Key: "max_output_kb", Label: "工具结果最多保留（KB）", Type: "int",
+		{Key: "max_output_kb", Group: "work", Label: "工具结果最多保留（KB）", Type: "int",
 			Help:      "一次工具输出超过这么多就截断",
 			Global:    c.Agent.OutputBytes() >> 10,
 			Value:     ptrAny(ag.MaxOutputKB),
 			Effective: pickPositive(ag.MaxOutputKB, c.Agent.OutputBytes()>>10)},
-		{Key: "mode", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},
+		{Key: "mode", Group: "work", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},
 			Help:      "新会话用的权限模式，会话里还能单独改",
 			Global:    c.Workspace.Mode,
 			Value:     ptrAny(ag.Mode),
 			Effective: pickString(ag.Mode, c.Workspace.Mode)},
-		{Key: "compact_at", Label: "自动整理阈值", Type: "float",
+		{Key: "compact_at", Group: "work", Label: "自动整理阈值", Type: "float",
 			Help:      "上下文到模型窗口的这个比例时自动整理",
 			Global:    at,
 			Value:     ptrAny(ag.CompactAt),
 			Effective: pickRatio(ag.CompactAt, at)},
-		{Key: "compact_to", Label: "整理后压到多少", Type: "float", Help: "整理完把上下文压到模型窗口的这个比例，给后面的对话留地方",
+		{Key: "compact_to", Group: "work", Label: "整理后压到多少", Type: "float", Help: "整理完把上下文压到模型窗口的这个比例，给后面的对话留地方",
 			Global:    to,
 			Value:     ptrAny(ag.CompactTo),
 			Effective: pickRatio(ag.CompactTo, to)},
-		{Key: "keep_turns", Label: "最近几轮保留原文", Type: "int", Help: "最近几轮对话一个字不改地留着，更早的才压成摘要",
+		{Key: "keep_turns", Group: "work", Label: "最近几轮保留原文", Type: "int", Help: "最近几轮对话一个字不改地留着，更早的才压成摘要",
 			Global:    keep,
 			Value:     ptrAny(ag.KeepTurns),
 			Effective: pickPositive(ag.KeepTurns, keep)},
-		{Key: "idle_compact", Label: "空闲整理间隔", Type: "string",
+		{Key: "idle_compact", Group: "work", Label: "空闲整理间隔", Type: "string",
 			Help:      "会话空闲这么久后在后台整理一次，例如 30m；0 关闭",
 			Global:    strOrEmpty(c.Context.IdleCompact),
 			Value:     ptrAny(ag.IdleCompact),
 			Effective: pickString(ag.IdleCompact, c.Context.IdleCompact)},
-		{Key: "idle_compact_min", Label: "空闲整理要压掉多少", Type: "float", Help: "会话空闲时顺手整理，上下文至少占这么多才动手，免得白忙",
+		{Key: "idle_compact_min", Group: "work", Label: "空闲整理要压掉多少", Type: "float", Help: "会话空闲时顺手整理，上下文至少占这么多才动手，免得白忙",
 			Global:    c.Context.IdleCompactMin,
 			Value:     ptrAny(ag.IdleCompactMin),
 			Effective: pickPositiveFloat(ag.IdleCompactMin, c.Context.IdleCompactMin)},
-		{Key: "group_eagerness", Label: "群里插话积极度", Type: "enum", Options: []string{"off", "low", "normal", "high"},
-			Help:      "off 只回被叫到的；low 每小时最多主动说 2 次；normal 6 次；high 15 次；要不要说话的判断本身也是一次模型调用，所以每小时最多判断三倍这么多次、两次判断至少隔一分钟",
-			Global:    "low",
+		{Key: "group_eagerness", Group: "group", Label: "群里插话积极度", Type: "enum", Options: []string{"off", "low", "normal", "high"},
+			Help:      eagerHelp,
+			Global:    eagerDef,
 			Value:     ptrAny(ag.GroupEagerness),
-			Effective: pickString(ag.GroupEagerness, "low")},
-		{Key: "group_quiet", Label: "群里安静多久才插话", Type: "string",
+			Effective: a.groupRuleFor(ag).Eagerness},
+		{Key: "group_quiet", Group: "group", Label: "群里安静多久才插话", Type: "string",
 			Help:      "群里安静这么久以后才可能主动说一句，例如 20s、1m",
 			Global:    "20s",
 			Value:     ptrAny(ag.GroupQuiet),
 			Effective: pickString(ag.GroupQuiet, "20s")},
-		{Key: "group_min_gap", Label: "两条发言最短间隔", Type: "string", Help: "群里连着说话时两条之间至少隔多久，免得刷屏；例如 10s、30s",
+		{Key: "group_min_gap", Group: "group", Label: "两条发言最短间隔", Type: "string", Help: "群里连着说话时两条之间至少隔多久，免得刷屏；例如 10s、30s",
 			Global:    "10s",
 			Value:     ptrAny(ag.GroupMinGap),
 			Effective: pickString(ag.GroupMinGap, "10s")},
-		{Key: "group_max_len", Label: "群聊一条最多多少字", Type: "int", Help: "超过就在合适的地方截断，像人在群里发消息一样",
+		{Key: "group_max_len", Group: "group", Label: "群聊一条最多多少字", Type: "int", Help: "超过就在合适的地方截断，像人在群里发消息一样",
 			Global:    300,
 			Value:     ptrAny(ag.GroupMaxLen),
 			Effective: pickPositive(ag.GroupMaxLen, 300)},
-		{Key: "group_parts", Label: "一条回复最多拆成几条", Type: "int", Help: "像人一样按空行拆开、隔一会儿再发，最多这么多条",
+		{Key: "group_parts", Group: "group", Label: "一条回复最多拆成几条", Type: "int", Help: "像人一样按空行拆开、隔一会儿再发，最多这么多条",
 			Global:    3,
 			Value:     ptrAny(ag.GroupParts),
 			Effective: pickPositive(ag.GroupParts, 3)},
+		{Key: "life_awake", Group: "life", Label: "醒着的时间", Type: "string", Help: "这段时间里它有自己的活动、会主动找人；之外在睡觉（睡着时整理记忆）。例如 08:00-23:30，可以跨午夜（22:00-06:00）；00:00-24:00 表示不睡",
+			Global:    defaultAwake,
+			Value:     ptrAny(ag.LifeAwake),
+			Effective: pickString(ag.LifeAwake, defaultAwake)},
+		{Key: "life_level", Group: "life", Label: "活跃度", Type: "enum", Options: []string{"low", "normal", "high"},
+			Help:      "多久自己醒来一次：low 2–4 小时（每天最多 4 次，主动找人最多 1 次）；normal 1–2 小时（8 次，2 次）；high 半小时到一小时（16 次，4 次）。越久没人找它越容易醒",
+			Global:    "normal",
+			Value:     ptrAny(ag.LifeLevel),
+			Effective: pickString(ag.LifeLevel, "normal")},
+		{Key: "life_reach", Group: "life", Label: "主动找谁聊天", Type: "enum", Options: []string{"owner", "all", "off"},
+			Help:      "owner 只找主人；all 私聊过的人都可能找；off 不主动找人。网关里的群和别的 agent 不受限制。对方没回上一条就不会再找他",
+			Global:    "owner",
+			Value:     ptrAny(ag.LifeReach),
+			Effective: pickString(ag.LifeReach, "owner")},
+		{Key: "life_budget", Group: "life", Label: "内心活动每天最多用多少 token", Type: "int", Help: "token 是 AI 的用量单位；自己醒来、冲浪、找人用的都算，到了就当天不再醒。0 表示不限",
+			Global:    0,
+			Value:     ptrAny(ag.LifeBudget),
+			Effective: pickInt(ag.LifeBudget, 0)},
+		{Key: "memory", Group: "memory", Label: "长期记忆", Type: "enum", Options: []string{"on", "off"},
+			Help:      "开着时它会记住人、事、偏好和学到的东西（知识库在记忆节点里能看能改），每次聊天带上相关的记忆，空闲或睡着时整理一次。关掉就不记也不整理",
+			Global:    "on",
+			Value:     ptrAny(ag.Memory),
+			Effective: pickString(ag.Memory, "on")},
+		{Key: "dream_when", Group: "memory", Label: "什么时候整理记忆", Type: "enum", Options: []string{"idle", "nightly", "sleep", "off"},
+			Help:      "idle 所有聊天都空闲一阵、攒了不少新聊天时；nightly 每天定点；sleep 睡着的时候（按醒着的时间，拟人型默认）；off 不自动整理（还能手动）",
+			Global:    a.dreamWhen(agents.Agent{Style: ag.Style}),
+			Value:     ptrAny(ag.DreamWhen),
+			Effective: a.dreamWhen(ag)},
+		{Key: "dream_at", Group: "memory", Label: "每天几点整理", Type: "string", Help: "选了 nightly 时用，例如 03:00",
+			Global:    "03:00",
+			Value:     ptrAny(ag.DreamAt),
+			Effective: pickString(ag.DreamAt, "03:00")},
+		{Key: "dream_idle", Group: "memory", Label: "空闲多久整理", Type: "string", Help: "选了 idle 时用：所有聊天都安静这么久才整理，例如 2h",
+			Global:    "2h",
+			Value:     ptrAny(ag.DreamIdle),
+			Effective: pickString(ag.DreamIdle, "2h")},
+		{Key: "dream_max", Group: "memory", Label: "每天最多自动整理几次", Type: "int", Help: "手动整理（/sleep、网页按钮）不算",
+			Global:    1,
+			Value:     ptrAny(ag.DreamMax),
+			Effective: a.dreamMax(ag)},
+		{Key: "dream_model", Group: "memory", Label: "整理记忆用的模型", Type: "model", Options: models,
+			Help:      "整理记忆读的聊天多，可以换个便宜的模型；空就用这个 agent 自己的模型",
+			Global:    "",
+			Value:     ptrAny(ag.DreamModel),
+			Effective: pickString(ag.DreamModel, "")},
 	}
 	return out
 }
@@ -438,9 +508,23 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 		}
 	}
 	info.ThinkingLevels = a.levelsForModel(ag.Model)
+	info.Style = agents.StyleTool
+	if ag.Life() {
+		info.Style = agents.StyleLife
+		info.Life = a.lifeBrief(ag)
+	}
+	if a.agentRoot != "" {
+		info.Memory.On = a.memoryOn(ag)
+		info.Memory.Total, info.Memory.People, _ = a.memStore(ag.ID).Counts()
+		ds := a.dreamOf(ag.ID)
+		info.Memory.LastDream, info.Memory.LastNote = ds.LastEnd*1000, ds.LastNote
+		if s := a.sessions[dreamSID(ag.ID)]; s != nil && s.run != nil {
+			info.Memory.Dreaming = true
+		}
+	}
 	info.ToolsAvailable = a.toolNames()
 	for _, sid := range a.sessionIDs() {
-		if agents.SessionAgent(sid) != ag.ID {
+		if agents.SessionAgent(sid) != ag.ID || isInnerSID(sid) || isRoomMemberSID(sid) {
 			continue
 		}
 		info.Sessions++
@@ -481,6 +565,8 @@ func (a *App) toolNames() []string {
 	}
 	add("Skill")
 	add("Schedule")
+	add(knowledgeLabel)
+	add("FollowUp")
 	for _, spec := range a.searchTools() {
 		add(spec.Name)
 	}
@@ -521,6 +607,7 @@ type AgentPatch struct {
 	Thinking   *string        `json:"thinking"`
 	Tools      *[]string      `json:"tools"`
 	GroupTools *[]string      `json:"group_tools"`
+	Style      *string        `json:"style"`    // tool 工具型 / life 拟人型
 	Settings   map[string]any `json:"settings"` // 值为 null 表示恢复跟随全局
 }
 
@@ -531,6 +618,9 @@ func applyAgentPatch(ag *agents.Agent, p AgentPatch) error {
 	}
 	if p.Emoji != nil {
 		ag.Emoji = *p.Emoji
+	}
+	if p.Style != nil {
+		ag.Style = *p.Style
 	}
 	if p.Model != nil {
 		ag.Model = *p.Model
@@ -552,145 +642,85 @@ func applyAgentPatch(ag *agents.Agent, p AgentPatch) error {
 	return nil
 }
 
-// applyAgentSetting 设置一个可覆盖的项；v 是 nil 表示恢复跟随全局。
+// applyAgentSetting 设置一个可覆盖的项；v 是 nil 表示恢复跟随全局（或者默认值）。
 func applyAgentSetting(ag *agents.Agent, key string, v any) error {
-	clear := func() {
-		switch key {
-		case "max_steps":
-			ag.MaxSteps = nil
-		case "keep_turns":
-			ag.KeepTurns = nil
-		case "max_output_kb":
-			ag.MaxOutputKB = nil
-		case "compact_at":
-			ag.CompactAt = nil
-		case "compact_to":
-			ag.CompactTo = nil
-		case "idle_compact_min":
-			ag.IdleCompactMin = nil
-		case "run_timeout":
-			ag.RunTimeout = nil
-		case "approval_timeout":
-			ag.ApprovalTimeout = nil
-		case "idle_compact":
-			ag.IdleCompact = nil
-		case "mode":
-			ag.Mode = nil
+	strs := map[string]**string{"run_timeout": &ag.RunTimeout, "approval_timeout": &ag.ApprovalTimeout, "idle_compact": &ag.IdleCompact,
+		"mode": &ag.Mode, "group_eagerness": &ag.GroupEagerness, "group_quiet": &ag.GroupQuiet, "group_min_gap": &ag.GroupMinGap,
+		"life_awake": &ag.LifeAwake, "life_level": &ag.LifeLevel, "life_reach": &ag.LifeReach, "memory": &ag.Memory,
+		"dream_when": &ag.DreamWhen, "dream_at": &ag.DreamAt, "dream_idle": &ag.DreamIdle, "dream_model": &ag.DreamModel}
+	ints := map[string]**int{"max_steps": &ag.MaxSteps, "keep_turns": &ag.KeepTurns, "max_output_kb": &ag.MaxOutputKB,
+		"group_max_len": &ag.GroupMaxLen, "group_parts": &ag.GroupParts, "life_budget": &ag.LifeBudget, "dream_max": &ag.DreamMax}
+	floats := map[string]**float64{"compact_at": &ag.CompactAt, "compact_to": &ag.CompactTo, "idle_compact_min": &ag.IdleCompactMin}
+	if p, ok := strs[key]; ok {
+		if v == nil {
+			*p = nil
+			return nil
 		}
-	}
-	if v == nil {
-		clear()
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("%s 要填文字", key)
+		}
+		s = strings.TrimSpace(s)
+		enums := map[string][]string{"mode": {"auto", "ask", "readonly"}, "group_eagerness": {"off", "low", "normal", "high"},
+			"life_level": {"low", "normal", "high"}, "life_reach": {"owner", "all", "off"}, "memory": {"on", "off"},
+			"dream_when": {"idle", "nightly", "sleep", "off"}}
+		switch {
+		case enums[key] != nil:
+			if !slices.Contains(enums[key], s) {
+				return fmt.Errorf("%s 只能是 %s", key, strings.Join(enums[key], "、"))
+			}
+		case key == "group_quiet" || key == "group_min_gap":
+			if _, err := time.ParseDuration(s); err != nil {
+				return fmt.Errorf("%s 的写法不对，比如 20s、1m", key)
+			}
+		case key == "run_timeout" || key == "approval_timeout" || key == "idle_compact" || key == "dream_idle":
+			if s != "" && s != "0" {
+				if _, err := time.ParseDuration(s); err != nil {
+					return fmt.Errorf("%s 的写法不对，比如 30m、2h、0", key)
+				}
+			}
+		case key == "life_awake":
+			if _, err := parseWindow(s); err != nil {
+				return err
+			}
+		case key == "dream_at":
+			if _, err := parseClock(s); err != nil {
+				return err
+			}
+		}
+		*p = &s
 		return nil
 	}
-	switch key {
-	case "group_max_len", "group_parts":
+	if p, ok := ints[key]; ok {
 		if v == nil {
-			if key == "group_max_len" {
-				ag.GroupMaxLen = nil
-			} else {
-				ag.GroupParts = nil
-			}
+			*p = nil
 			return nil
 		}
 		n, ok := toInt(v)
-		if !ok || n <= 0 {
-			return fmt.Errorf("%s 要填大于 0 的整数", key)
-		}
-		if key == "group_max_len" {
-			ag.GroupMaxLen = &n
-		} else {
-			if n > 5 {
-				return errors.New("最多拆成 5 条")
-			}
-			ag.GroupParts = &n
-		}
-	case "max_steps", "keep_turns", "max_output_kb":
-		n, ok := toInt(v)
-		if !ok || n < 0 {
+		switch {
+		case !ok || n < 0:
 			return fmt.Errorf("%s 要填不小于 0 的整数", key)
+		case (key == "group_max_len" || key == "group_parts" || key == "dream_max") && n == 0:
+			return fmt.Errorf("%s 要填大于 0 的整数", key)
+		case key == "group_parts" && n > 5:
+			return errors.New("最多拆成 5 条")
 		}
-		switch key {
-		case "max_steps":
-			ag.MaxSteps = &n
-		case "keep_turns":
-			ag.KeepTurns = &n
-		default:
-			ag.MaxOutputKB = &n
+		*p = &n
+		return nil
+	}
+	if p, ok := floats[key]; ok {
+		if v == nil {
+			*p = nil
+			return nil
 		}
-	case "compact_at", "compact_to", "idle_compact_min":
 		f, ok := toFloat(v)
 		if !ok || f <= 0 || f >= 1 {
 			return fmt.Errorf("%s 要是 0 到 1 之间的小数", key)
 		}
-		switch key {
-		case "compact_at":
-			ag.CompactAt = &f
-		case "compact_to":
-			ag.CompactTo = &f
-		default:
-			ag.IdleCompactMin = &f
-		}
-	case "group_eagerness":
-		if v == nil {
-			ag.GroupEagerness = nil
-			return nil
-		}
-		s, ok := v.(string)
-		if !ok || !slices.Contains([]string{"off", "low", "normal", "high"}, s) {
-			return errors.New("插话积极度只能是 off、low、normal、high")
-		}
-		ag.GroupEagerness = &s
-	case "group_quiet", "group_min_gap":
-		if v == nil {
-			if key == "group_quiet" {
-				ag.GroupQuiet = nil
-			} else {
-				ag.GroupMinGap = nil
-			}
-			return nil
-		}
-		s, ok := v.(string)
-		if !ok {
-			return fmt.Errorf("%s 要填时长，比如 20s", key)
-		}
-		s = strings.TrimSpace(s)
-		if _, err := time.ParseDuration(s); err != nil {
-			return fmt.Errorf("%s 的写法不对，比如 20s、1m", key)
-		}
-		if key == "group_quiet" {
-			ag.GroupQuiet = &s
-		} else {
-			ag.GroupMinGap = &s
-		}
-	case "run_timeout", "approval_timeout", "idle_compact":
-		s, ok := v.(string)
-		if !ok {
-			return fmt.Errorf("%s 要填时长，比如 30m", key)
-		}
-		s = strings.TrimSpace(s)
-		if s != "" && s != "0" {
-			if _, err := time.ParseDuration(s); err != nil {
-				return fmt.Errorf("%s 的写法不对，比如 30m、2h、0", key)
-			}
-		}
-		switch key {
-		case "run_timeout":
-			ag.RunTimeout = &s
-		case "approval_timeout":
-			ag.ApprovalTimeout = &s
-		default:
-			ag.IdleCompact = &s
-		}
-	case "mode":
-		s, ok := v.(string)
-		if !ok || !slices.Contains([]string{"auto", "ask", "readonly"}, s) {
-			return errors.New("权限模式只能是 auto、ask、readonly")
-		}
-		ag.Mode = &s
-	default:
-		return fmt.Errorf("不认识设置项 %s", key)
+		*p = &f
+		return nil
 	}
-	return nil
+	return fmt.Errorf("不认识设置项 %s", key)
 }
 
 func toInt(v any) (int, bool) {
@@ -738,6 +768,7 @@ func (a *App) CreateAgent(p AgentPatch) (AgentInfo, error) {
 		a.log.Warn("建 agent 目录失败", "id", ag.ID, "err", err)
 	}
 	a.log.Info("新建 agent", "id", ag.ID, "name", ag.Name)
+	a.lifeBegin(ag)
 	a.publishAgents()
 	got, _ := a.agentStore.Get(ag.ID)
 	return a.agentInfo(got), nil
@@ -811,6 +842,7 @@ func (a *App) UpdateAgent(id string, p AgentPatch) (AgentInfo, error) {
 		return AgentInfo{}, err
 	}
 	a.log.Info("改了 agent", "id", id)
+	a.lifeBegin(ag)
 	a.publishAgents()
 	got, _ := a.agentStore.Get(id)
 	return a.agentInfo(got), nil
@@ -959,6 +991,21 @@ func (a *App) cmdAgent(c in) {
 	}
 	if m, _, ok := a.modelFor(ag); ok {
 		b.WriteString("\n它用的模型：" + modelLabel(m))
+	}
+	if ag.Life() {
+		b.WriteString("\n类型：拟人型（有作息，没事时自己上网、想事情、找人聊天；")
+		if lb := a.lifeBrief(ag); lb != nil {
+			b.WriteString(map[string]string{"sleeping": "现在在睡觉", "awake": "现在醒着", "thinking": "现在正在想事情"}[lb.State])
+		}
+		b.WriteString("）")
+	} else {
+		b.WriteString("\n类型：工具型（有人找才干活）")
+	}
+	if a.memoryOn(ag) {
+		total, people, _ := a.memStore(ag.ID).Counts()
+		fmt.Fprintf(&b, "\n长期记忆：%d 条，认识 %d 个人（/memory 看）", total, people)
+	} else if a.agentRoot != "" {
+		b.WriteString("\n长期记忆：关着")
 	}
 	if bot, ok := a.botForChannel(c.ep.ch); ok {
 		b.WriteString("\n这个窗口的机器人：" + bot.Name + "（" + agents.ChannelName(bot) + "）")

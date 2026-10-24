@@ -71,8 +71,18 @@ func (s *Store) load(sid string) []Msg {
 // Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
 func (s *Store) Archive(sid string) []Msg { return s.loadFrom(sid, 0) }
 
-func (s *Store) loadFrom(sid string, skip int) []Msg {
-	f, err := os.Open(s.file(sid))
+func (s *Store) loadFrom(sid string, skip int) []Msg { return readMsgs(s.file(sid), skip) }
+
+// ReadArchive 读一份归档（/reset 时挪走的历史）的全部消息。整理记忆时当日记读。
+func (s *Store) ReadArchive(sid, id string) []Msg {
+	if filepath.Base(id) != id || filepath.Ext(id) != ".jsonl" {
+		return nil
+	}
+	return readMsgs(filepath.Join(s.archiveDir(sid), id), 0)
+}
+
+func readMsgs(path string, skip int) []Msg {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -139,6 +149,7 @@ func (s *Store) Compact(sid string, high, low int, summary string) (int, error) 
 	if st.EnvNote != "" && !strings.Contains(st.Summary, st.EnvNote) {
 		st.Summary += "\n" + st.EnvNote
 	}
+	st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 	if err := s.SaveSettings(sid, st); err != nil {
 		return 0, err
 	}
@@ -202,8 +213,9 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 {
 		st.EnvNote, st.Base, st.Summary = "", 0, ""
+		st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 		st.Meter = Meter{}
 		st.Prefix = nil
 		st.Omitted = nil

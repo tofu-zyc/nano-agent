@@ -10,6 +10,7 @@ export type Toast = {
   detail?: string;
   approval?: Approval;
   pair?: PairRequest;
+  open?: string; // 点“去看看”打开的会话（拟人型主动找你时）
 };
 
 export type { PairRequest };
@@ -95,6 +96,7 @@ class Store {
   connected = $state(false);
   historyTick = $state<Record<string, number>>({});
   personaTick = $state(0);
+  memoryTick = $state(0); // 记忆、整理记忆、内心活动有变化（记忆面板据此重读）
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
   restarting = $state(false);
   updating = $state(false);
@@ -459,6 +461,20 @@ class Store {
         break;
       case 'models':
         this.reloadModels();
+        break;
+      case 'reach':
+        // 拟人型主动发来一条私聊：正在看那个会话就不用弹了
+        if (!(this.route.view === 'sessions' && this.route.arg === sid)) {
+          this.toast({ kind: 'info', text: `${e.name ?? '它'} 来找你了`, detail: e.text ?? '', open: sid }, 12000);
+        }
+        break;
+      case 'memory':
+      case 'dream':
+      case 'life':
+        // 记忆变了、开始/结束整理、内心活动醒了：记忆面板重读，agent 节点上的状态跟着变
+        this.memoryTick++;
+        clearTimeout(this.reloadTimer);
+        this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 300);
         break;
       case 'agents':
       case 'bots':

@@ -54,7 +54,7 @@
               {#if store.phase[s.sid]}
                 <span class="live">● 处理中</span>
               {:else}
-                <span class="eps">{s.endpoints?.length ? s.endpoints.map(endpointLabel).join('、') : '网页'}</span>
+                <span class="eps">{s.channel === 'life' ? '内心活动 · 只能看' : s.endpoints?.length ? s.endpoints.map(endpointLabel).join('、') : '网页'}</span>
                 <span class="n">· {s.messages} 条</span>
               {/if}
               {#if s.pending}<span class="pending">待审批 {s.pending}</span>{/if}

@@ -30,14 +30,14 @@ const gatewaySchema = `{
       "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明），或者 agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
     "group":{"type":"string","enum":["agent","gateway","web","cli","telegram","feishu","model","memory","search","skills","local","machines"],
-      "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
+      "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档；每个 agent 的长期记忆设置在它自己的 settings 里，用 agent_save 改）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
   }
 }`
 
 const messageSchema = `{
   "type":"object",
   "properties":{
-    "to":{"type":"string","description":"发给谁：room:<群名或 ID> 发到群里，agent:<名字或 ID> 私聊某个 agent；也可以只写名字"},
+    "to":{"type":"string","description":"发给谁：room:<群名或 ID> 发到群里，agent:<名字或 ID> 私聊某个 agent，chat:<会话 ID> 发到你自己的某个私聊（比如 chat:main 是主人）；也可以只写名字"},
     "text":{"type":"string","description":"要说的内容"},
     "wait":{"type":"boolean","description":"等对方回话再返回（最多 5 分钟），默认 false"}
   },
@@ -59,7 +59,8 @@ const gatewayAdminSchema = `{
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
     "name":{"type":"string","description":"接口或 SSH 连接的名字；agent_save 时是 agent 的名字"},
     "emoji":{"type":"string","description":"agent_save：头像，一个 emoji"},
-    "settings":{"type":"object","description":"agent_save：这个 agent 覆盖的全局设置（键见 Gateway settings，比如 max_steps、mode、compact_at）；值为 null 表示恢复跟随全局"},
+    "style":{"type":"string","enum":["tool","life"],"description":"agent_save：类型。tool 工具型（有人找才干活，群里只回被叫到的）；life 拟人型（有作息，没事时自己上网、想事情、找人聊天，群里会插话）"},
+    "settings":{"type":"object","description":"agent_save：这个 agent 自己的设置（键见 Gateway agents 里每个 agent 的 settings，比如 max_steps、mode、compact_at、group_eagerness、life_awake、life_level、life_reach、memory、dream_when）；值为 null 表示恢复跟随全局或默认"},
     "host":{"type":"string","description":"SSH 主机地址或 SSH 别名；添加工作目录时是机器名"},
     "port":{"type":"integer","description":"SSH 端口"},
     "user":{"type":"string","description":"SSH 用户"},
@@ -93,7 +94,7 @@ const gatewayAdminSchema = `{
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
 		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
-		{Name: "Message", Description: "给网关里的一个群（房间）或者某个 agent 发一条消息；把 wait 设成 true 时等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。", InputSchema: json.RawMessage(messageSchema)},
+		{Name: "Message", Description: "给网关里的一个群（房间）、某个 agent，或者你自己的某个私聊（chat:）发一条消息；发给 agent 时把 wait 设成 true 可以等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。发到私聊的消息对方会在聊天软件里收到，他回了就在那个聊天里接着聊。", InputSchema: json.RawMessage(messageSchema)},
 		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }
@@ -238,6 +239,7 @@ type gatewayArgs struct {
 	What                                                                 string
 	Lines                                                                int
 	Emoji                                                                string
+	Style                                                                string
 	Agent                                                                string
 	Settings                                                             map[string]any
 }
@@ -477,6 +479,9 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 		}
 		if args.Thinking != "" {
 			p.Thinking = &args.Thinking
+		}
+		if args.Style != "" {
+			p.Style = &args.Style
 		}
 		ip := args.ID
 		if ip == "" && args.Agent != "" {

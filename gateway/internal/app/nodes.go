@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -98,7 +99,7 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 // toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill）；管理员再加 Gateway /
 // GatewayAdmin。按名字排序（顺序固定，方便前缀缓存）。访客没有工具（调用方跳过）。
 // 调用方持有锁。
-func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
+func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
 	for _, spec := range a.searchTools() {
 		tools = append(tools, toolOf(spec))
@@ -108,7 +109,7 @@ func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
 			return t.Function.Name != "Read" && t.Function.Name != "Grep" && t.Function.Name != "WebSearch" && t.Function.Name != "WebFetch"
 		})
 	}
-	if spec, ok := a.skills.ToolSpec(); ok {
+	if spec, ok := a.skillSpec(sid); ok {
 		tools = append(tools, toolOf(spec))
 	}
 	if admin {
@@ -119,6 +120,36 @@ func (a *App) toolsFor(n *node, readOnly, admin bool) []llm.Tool {
 	}
 	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	return tools
+}
+
+// ownSkills 是 agent 自己的技能目录 agents/<id>/skills（和全局的合并，同名用自己的）。调用方持有锁。
+func (a *App) ownSkills(agentID string) *skills.Registry {
+	if a.agentRoot == "" {
+		return nil
+	}
+	if a.agentSkills == nil {
+		a.agentSkills = map[string]*skills.Registry{}
+	}
+	r := a.agentSkills[agentID]
+	if r == nil {
+		r = skills.New(filepath.Join(a.agentRoot, agentID, "skills"))
+		a.agentSkills[agentID] = r
+	}
+	r.Scan()
+	return r
+}
+
+// skillSpec 是会话能用的 Skill 工具：全局技能加上所属 agent 自己的。调用方持有锁。
+func (a *App) skillSpec(sid string) (proto.ToolSpec, bool) {
+	return skills.ToolSpecFor(skills.Merged(a.skills, a.ownSkills(a.agentOf(sid).ID)))
+}
+
+// skillText 是保留技能（dream、life）的正文：agent 自己的 > 全局的 > 内置的 fallback。调用方持有锁。
+func (a *App) skillText(agentID, name, fallback string) string {
+	if t, ok := skills.Body(name, a.ownSkills(agentID), a.skills); ok {
+		return t
+	}
+	return fallback
 }
 
 // refreshSkills 重新扫描技能目录，有变化时通知网页。调用方持有锁。

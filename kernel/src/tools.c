@@ -63,7 +63,12 @@ static const builtin BUILTINS[] = {
     { { "Skill", NA_TOOL_READ, 70 * 1000 }, NULL, NULL },   /* 技能在网关，描述由网关给模型，调用交给网关 */
     { { "Gateway", NA_TOOL_READ, 70 * 1000 }, NULL, NULL }, /* 网关查询：描述由网关给模型 */
     { { "GatewayAdmin", NA_TOOL_ADMIN, 610 * 1000 }, NULL, NULL }, /* 网关修改：任何模式都要审批 */
-    { { "Message", NA_TOOL_READ, 320 * 1000 }, NULL, NULL }, /* 给群/别的 agent 发消息：网关执行，不用审批 */
+    /* 下面这些由网关执行，谁能用、能做什么由网关判断（Message 只给管理员和内心活动；Knowledge 在群里只读……），
+     * 内核不按权限模式拦：整理记忆、内心活动、群聊这些轮次没有工作目录，模式是 none */
+    { { "Message", NA_TOOL_PUBLIC_READ, 320 * 1000 }, NULL, NULL },   /* 给群/别的 agent/私聊发消息 */
+    { { "Knowledge", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL }, /* 长期记忆 */
+    { { "Diary", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },     /* 整理记忆时读聊天记录 */
+    { { "FollowUp", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },  /* 约好过会儿再看 */
     { { "Write", NA_TOOL_WRITE, 30 * 1000 },
       "创建或覆盖文件，写入完整内容；上级目录不存在会自动创建。默认只能写工作目录；写工作目录外要把 elevated 设为 true，会请用户批准。"
       "只改文件的一部分时用 Edit，不要用 Write 重写整个文件。",

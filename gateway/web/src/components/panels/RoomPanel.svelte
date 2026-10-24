@@ -76,7 +76,7 @@
     <div class="p-card">
       <select class="p-select" value={r.mode} onchange={(e) => patch({ mode: (e.target as HTMLSelectElement).value })}>
         <option value="mention">点名：只有被 @ 或者叫到名字才说</option>
-        <option value="free">自由：安静下来按积极度自己插话</option>
+        <option value="free">自由：拟人型的成员安静下来按积极度自己插话（工具型只回被叫到的）</option>
       </select>
       <label class="p-label">名字
         <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />

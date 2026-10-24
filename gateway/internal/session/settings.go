@@ -13,6 +13,7 @@ import (
 type Prefix struct {
 	System string     `json:"system"`
 	Tools  []llm.Tool `json:"tools"`
+	Ver    int        `json:"ver,omitempty"` // 网关给的工具变了（升级加了新工具）时加一，旧快照作废一次
 }
 type Settings struct {
 	Prefix  *Prefix        `json:"prefix,omitempty"`
@@ -41,6 +42,15 @@ type Settings struct {
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。
 	EnvNote string `json:"env_note,omitempty"`
+
+	// MemNote 是上一次放进对话的记忆说明的哈希（app/memory.go）：记忆变了才在下一条用户消息前再放一次。
+	// Recalled 是这段上下文里已经“想起来”过的记忆，同一条不重复放。压缩、清空上下文后都清掉。
+	MemNote  string   `json:"mem_note,omitempty"`
+	LifeNote string   `json:"life_note,omitempty"` // 拟人型：上一次放的近况说明的哈希
+	Recalled []string `json:"recalled,omitempty"`
+
+	// Members 是群聊里说过话的人：名字 → 身份（整理记忆时用来把群友的画像和身份对上）。
+	Members map[string]string `json:"members,omitempty"`
 
 	// Base 是历史文件里已经被 Compact 丢掉的消息数；Summary 代替被丢掉的部分，放在历史最前面。
 	Meter       Meter  `json:"meter,omitempty"`

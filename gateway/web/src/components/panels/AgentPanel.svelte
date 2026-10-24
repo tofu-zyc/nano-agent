@@ -30,8 +30,59 @@
   }
 
   async function saveSetting(k: string, v: any) {
+    const s = a?.settings.find((x) => x.key === k);
     await patch({ settings: { [k]: v } });
-    store.toast({ kind: 'ok', text: v === null ? '已恢复跟随全局' : '已保存' }, 1800);
+    store.toast({ kind: 'ok', text: v === null ? (s && ownDefault(s) ? '已恢复默认' : '已恢复跟随全局') : '已保存' }, 1800);
+  }
+
+  // 设置分组：干活跟随全局；群聊、拟人、记忆这几组没有全局设置，用的是默认值
+  const groups: { key: AgentSetting['group']; title: string; note: string }[] = [
+    { key: 'work', title: '干活', note: '没改的跟随' },
+    { key: 'group', title: '群聊', note: '在群里怎么说话' },
+    { key: 'life', title: '拟人', note: '作息、多久醒一次、主动找谁' },
+    { key: 'memory', title: '长期记忆', note: '记什么、什么时候整理' },
+  ];
+  const ownDefault = (s: AgentSetting) => s.group !== 'work';
+  const life = $derived(a?.style === 'life');
+
+  async function setStyle(style: 'tool' | 'life') {
+    if (!a || a.style === style) return;
+    await patch({ style });
+    store.toast({ kind: 'ok', text: style === 'life' ? '改成拟人型了：它会有自己的作息，醒着时偶尔自己活动' : '改成工具型了：只在有人找它时干活' }, 2600);
+  }
+
+  async function post(path: string, ok: string) {
+    busy = true;
+    try {
+      await api.post('/api/agents/' + encodeURIComponent(id) + path, {});
+      store.toast({ kind: 'ok', text: ok }, 2200);
+      await store.refresh();
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function when(ms?: number): string {
+    if (!ms) return '';
+    const d = new Date(ms);
+    const now = new Date();
+    const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    if (d.toDateString() === now.toDateString()) return hm;
+    const tomorrow = new Date(now.getTime() + 86400000);
+    if (d.toDateString() === tomorrow.toDateString()) return '明天 ' + hm;
+    return `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
+  }
+  const lifeState: Record<string, { icon: string; text: string }> = {
+    sleeping: { icon: '💤', text: '睡着' },
+    awake: { icon: '🌱', text: '醒着' },
+    thinking: { icon: '💭', text: '在想事情' },
+  };
+  const sessionOf = (kind: string) => '@' + id + '/' + kind;
+  function modelLabelOf(v: string) {
+    if (!v) return '跟这个 agent 一样';
+    return models.find((m) => m.id === v)?.label ?? v;
   }
 
   function shown(s: AgentSetting): string {
@@ -94,7 +145,66 @@
     <div class="p-grid">
       <div class="p-stat"><b>{a.sessions}</b><span>会话</span></div>
       <div class="p-stat"><b class:acc={a.bots.length > 0}>{a.bots.length}</b><span>绑的机器人</span></div>
-      <div class="p-stat"><b>{a.running ? '在跑' : '空闲'}</b><span>现在</span></div>
+      {#if a.life}
+        <div class="p-stat"><b>{lifeState[a.life.state]?.icon} {lifeState[a.life.state]?.text}</b><span>现在</span></div>
+      {:else}
+        <div class="p-stat"><b>{a.running ? '在跑' : '空闲'}</b><span>现在</span></div>
+      {/if}
+    </div>
+
+    <div class="styles" role="radiogroup" aria-label="类型">
+      <button class="style" class:on={!life} role="radio" aria-checked={!life} disabled={busy} onclick={() => setStyle('tool')}>
+        <span class="si">🛠</span><b>工具型</b><span class="muted p-small">有人找它才干活；群里只回被叫到的</span>
+      </button>
+      <button class="style" class:on={life} role="radio" aria-checked={life} disabled={busy} onclick={() => setStyle('life')}>
+        <span class="si">🌱</span><b>拟人型</b><span class="muted p-small">像人一样：有作息，没事时自己上网、想事情、找人聊天</span>
+      </button>
+    </div>
+
+    {#if a.life}
+      {@const L = a.life}
+      <div class="p-card lifecard">
+        <div class="p-row">
+          <span class="p-grow">
+            {#if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else if L.state === 'thinking'}💭 正在想事情{:else}🌱 醒着{#if L.next}，大约 {when(L.next)} 再自己醒一次{/if}{/if}
+          </span>
+        </div>
+        <div class="p-note p-small">今天自己醒了 {L.wakes}/{L.max_wakes} 次 · 主动找了 {L.reaches} 次人 · 用了 {L.tokens.toLocaleString()} token{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}</div>
+        {#if L.recent.length}
+          <ul class="recent">
+            {#each L.recent.slice().reverse() as n (n.at)}
+              <li><span class="muted">{when(n.at * 1000)}</span> {n.text}</li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="p-note p-small">还没有近况：它第一次醒来以后，这里会写它做了什么、心情怎样。</p>
+        {/if}
+        <div class="p-actions tight">
+          <button class="btn sm primary" disabled={busy || L.state === 'thinking'} onclick={() => post('/wake', '叫醒了，它在想事情')}><Icon name="sparkles" size={13} />现在叫醒它</button>
+          {#if L.recent.length || L.wakes}
+            <a class="btn sm" href="#/sessions/{encodeURIComponent(sessionOf('life'))}" onclick={() => (store.inspector = null)}><Icon name="chat" size={13} />看它的内心</a>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    <div class="p-card">
+      <div class="p-row">
+        <span class="p-k">记忆</span>
+        <span class="p-grow">{#if !a.memory.on}关着{:else}{a.memory.total} 条，{a.memory.people} 个人{/if}</span>
+        {#if a.memory.dreaming}<span class="tag accent">🌙 在整理</span>{/if}
+      </div>
+      {#if !a.memory.on}
+        <div class="p-actions tight">
+          <button class="btn sm" disabled={busy} onclick={() => saveSetting('memory', null)}><Icon name="brain" size={13} />打开长期记忆</button>
+        </div>
+      {:else}
+        <div class="p-note p-small">{#if a.memory.last_dream}上次整理：{when(a.memory.last_dream)}{#if a.memory.last_note}。{a.memory.last_note}{/if}{:else}还没整理过：{life ? '睡着时' : '所有聊天都安静一阵以后'}会读最近的聊天，把值得记住的人和事记下来。{/if}</div>
+        <div class="p-actions tight">
+          <button class="btn sm" onclick={() => store.open({ type: 'memory', agent: id })}><Icon name="brain" size={13} />看记忆</button>
+          <button class="btn sm" disabled={busy || a.memory.dreaming} onclick={() => post('/dream', '去整理记忆了')}><Icon name="layers" size={13} />现在整理</button>
+        </div>
+      {/if}
     </div>
 
     <div class="p-card">
@@ -160,33 +270,44 @@
       </label>
     </div>
 
-    <h5 class="p-h">覆盖的设置 <span class="muted p-small">没改的跟随 <button class="p-lnk" onclick={() => store.open({ type: 'agentDefaults' })}>Agent 默认值</button></span></h5>
-    <div class="p-card">
-      {#each a.settings as s (s.key)}
-        <div class="setting">
-          <div class="p-row">
-            <span class="p-grow">{s.label}{#if s.value !== null}<span class="tag">自己设的</span>{/if}</span>
-            {#if s.value !== null}
-              <button class="p-lnk p-small" onclick={() => saveSetting(s.key, null)}>跟随全局</button>
-            {/if}
-          </div>
-          {#if s.type === 'enum'}
-            <select class="p-select" value={settingValue(s)} onchange={(e) => saveSetting(s.key, (e.target as HTMLSelectElement).value)}>
-              {#each s.options ?? [] as o (o)}<option value={o}>{optionLabel(s.key, o)}</option>{/each}
-            </select>
-          {:else}
-            <input class="p-input" value={shown(s)} inputmode={s.type === 'string' ? 'text' : 'decimal'}
-              onchange={(e) => {
-                const raw = (e.target as HTMLInputElement).value.trim();
-                if (raw === '') return saveSetting(s.key, null);
-                saveSetting(s.key, s.type === 'string' ? raw : Number(raw));
-              }} />
+    {#each groups as g (g.key)}
+      {#if g.key !== 'life' || life}
+        <h5 class="p-h">{g.title} <span class="muted p-small">{#if g.key === 'work'}没改的跟随 <button class="p-lnk" onclick={() => store.open({ type: 'agentDefaults' })}>Agent 默认值</button>{:else}{g.note}{/if}</span></h5>
+        <div class="p-card">
+          {#if g.key === 'group' && !life}
+            <p class="p-note p-small">工具型在群里只回被叫到的（@ 它、回复它、叫它名字），不主动插话；想让它在群里像人一样聊，改成拟人型。</p>
           {/if}
-          {#if s.value === null}<p class="p-note p-small">现在用全局的：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
-          {#if s.help}<p class="p-note p-small">{s.help}</p>{/if}
+          {#each a.settings.filter((x) => (x.group ?? 'work') === g.key) as s (s.key)}
+            <div class="setting">
+              <div class="p-row">
+                <span class="p-grow">{s.label}{#if s.value !== null}<span class="tag">自己设的</span>{/if}</span>
+                {#if s.value !== null}
+                  <button class="p-lnk p-small" onclick={() => saveSetting(s.key, null)}>{ownDefault(s) ? '用默认' : '跟随全局'}</button>
+                {/if}
+              </div>
+              {#if s.type === 'enum'}
+                <select class="p-select" value={settingValue(s)} disabled={s.key === 'group_eagerness' && !life} onchange={(e) => saveSetting(s.key, (e.target as HTMLSelectElement).value)}>
+                  {#each s.options ?? [] as o (o)}<option value={o}>{optionLabel(s.key, o)}</option>{/each}
+                </select>
+              {:else if s.type === 'model'}
+                <select class="p-select" value={String(s.value ?? '')} onchange={(e) => saveSetting(s.key, (e.target as HTMLSelectElement).value || null)}>
+                  {#each s.options ?? [''] as o (o)}<option value={o}>{modelLabelOf(o)}</option>{/each}
+                </select>
+              {:else}
+                <input class="p-input" value={shown(s)} inputmode={s.type === 'string' ? 'text' : 'decimal'}
+                  onchange={(e) => {
+                    const raw = (e.target as HTMLInputElement).value.trim();
+                    if (raw === '') return saveSetting(s.key, null);
+                    saveSetting(s.key, s.type === 'string' ? raw : Number(raw));
+                  }} />
+              {/if}
+              {#if s.value === null && s.type !== 'model'}<p class="p-note p-small">现在用{ownDefault(s) ? '默认的' : '全局的'}：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
+              {#if s.help}<p class="p-note p-small">{s.help}</p>{/if}
+            </div>
+          {/each}
         </div>
-      {/each}
-    </div>
+      {/if}
+    {/each}
 
     <h5 class="p-h">工具白名单 <span class="muted p-small">点一下加减；一个都不选表示全部能用</span></h5>
     <div class="p-card">
@@ -212,6 +333,44 @@
 {/if}
 
 <style>
+  .styles {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .style {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .style .si {
+    font-size: 18px;
+  }
+  .style.on {
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  }
+  .lifecard .recent {
+    margin: 4px 0 0;
+    padding-left: 16px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-2);
+  }
+  @media (max-width: 420px) {
+    .styles {
+      grid-template-columns: 1fr;
+    }
+  }
   .setting {
     display: flex;
     flex-direction: column;

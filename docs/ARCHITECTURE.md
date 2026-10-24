@@ -67,6 +67,21 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 
 管理员会话额外有 `Gateway`（查询）和 `GatewayAdmin`（修改，任何模式都审批）。工具定义由网关加，内核只把它们当管理工具（`NA_TOOL_ADMIN`），调用时用 `exec` 交给网关。查询返回模型/SSH/工作目录/配对状态，不含密钥；修改直接调用 `models.Store`、`host.Manager`、`AddWorkspace`、`UpdateSession` 和配对 API，实时生效。`ssh_setup` 会等连接结果（在线/认证失败/超时）。监听地址等要重启的配置不开放。详见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
 
+## 活的 agent 和长期记忆（v0.6）
+
+详细设计见 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)。都在网关里（`gateway/internal/app` 的 `memory.go`、`dream.go`、`life.go`、`group.go`，`gateway/internal/knowledge`），内核只是把这几个网关工具（`Knowledge`、`Diary`、`FollowUp`、`Message`）转给网关执行：
+
+```
+ 聊天（私聊 / 外部群 / 网关里的群）     内心活动（拟人型）          整理记忆（做梦）
+ 听 → 触发 → 不调模型的门槛 → 说/不说    @<id>/life，作息里自己醒     @<id>/dream，空闲/定点/睡着时
+   读：消息前面放记忆说明、想起来的        冲浪、想事、找人（Message）   读日记（原始聊天记录）
+   写：Knowledge                         最后一句是近况               写知识库、画像、自我认知
+            └──────────── agents/<id>/knowledge（一条一个 .md）+ self.md ────────────┘
+```
+
+- 缓存优先：记忆说明、近况像环境说明一样放在用户消息前面，变了才放；系统提示只在类型改变时变（拟人守则）。
+- 策略在技能里：怎么整理记忆是 `skills/dream/SKILL.md`，醒来干什么是 `skills/life/SKILL.md`，用户能改，agent 自己的 `agents/<id>/skills/` 优先。
+
 ## 安全
 
 - 网页只听本机、密码登录。

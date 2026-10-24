@@ -47,7 +47,7 @@
     <label class="p-label">怎么说话
       <select class="p-select" bind:value={mode}>
         <option value="mention">点名：被 @ 或者叫到名字才说</option>
-        <option value="free">自由：安静下来可以自己插话</option>
+        <option value="free">自由：拟人型的成员安静下来会自己插话</option>
       </select>
     </label>
     <div class="members">

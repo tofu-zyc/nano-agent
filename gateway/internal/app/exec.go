@@ -45,7 +45,8 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		return
 	}
 	if m.Name == "Message" {
-		if !a.isAdmin(r.from) {
+		// 管理员让它发，或者拟人型在内心活动里自己想找人（内心活动里有自己的规矩，见 messageChat）
+		if !a.isAdmin(r.from) && !isLifeSID(s.sid) {
 			reply(false, "只有管理员能用 Message 给群和别的 agent 发消息")
 			return
 		}
@@ -54,6 +55,33 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 			raw = "{}"
 		}
 		go a.messageTool(s.sid, raw, reply)
+		return
+	}
+	if m.Name == "FollowUp" {
+		out, err := a.followUpCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
+	if m.Name == "Diary" {
+		out, err := a.diaryCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
+	if m.Name == knowledgeLabel {
+		out, err := a.knowledgeCall(s.sid, r.from, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
 		return
 	}
 	if m.Name == "Skill" {
@@ -137,7 +165,7 @@ func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, strin
 		Name string `json:"name"`
 	}
 	json.Unmarshal(m.Args, &args)
-	text, files, _, ok := a.skills.Load(args.Name)
+	text, files, _, ok := skills.LoadAny(args.Name, a.ownSkills(a.agentOf(sid).ID), a.skills)
 	if !ok {
 		reply(false, text)
 		return
