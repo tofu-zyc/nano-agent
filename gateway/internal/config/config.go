@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	Agent     Agent     `toml:"agent" json:"agent"`
 	Search    Search    `toml:"search" json:"search"`
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
 	Channels  Channels  `toml:"channels" json:"channels"`
@@ -37,6 +38,56 @@ type Config struct {
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
 }
+
+// Agent 是每条消息怎么跑：最多请求模型几次、最长多久、等审批多久、工具结果留多少。
+// 网关每一轮都把它们带给内核，kernel.conf 里的同名项只在连着旧网关时兜底。
+type Agent struct {
+	MaxSteps        *int   `toml:"max_steps" json:"max_steps"`               // 最多请求模型几次，0 不限，默认 200
+	RunTimeout      string `toml:"run_timeout" json:"run_timeout"`           // 最长处理多久（30m、2h），0 不限（默认）
+	ApprovalTimeout string `toml:"approval_timeout" json:"approval_timeout"` // 等审批多久，0 一直等，默认 30m
+	MaxOutputKB     int    `toml:"max_output_kb" json:"max_output_kb"`       // 一个工具结果最多保留多少 KB，默认 64
+}
+
+// DefaultMaxSteps 是每条消息默认最多请求模型的次数。
+const DefaultMaxSteps = 200
+
+// Steps 是每条消息最多请求模型几次，0 表示不限。
+func (a Agent) Steps() int {
+	if a.MaxSteps == nil {
+		return DefaultMaxSteps
+	}
+	return *a.MaxSteps
+}
+
+// RunLimit 是每条消息最长处理多久，0 表示不限。
+func (a Agent) RunLimit() time.Duration { return parseLimit(a.RunTimeout) }
+
+// ApprovalLimit 是等审批的最长时间，0 表示一直等；没写是 30 分钟。
+func (a Agent) ApprovalLimit() time.Duration {
+	if strings.TrimSpace(a.ApprovalTimeout) == "" {
+		return 30 * time.Minute
+	}
+	return parseLimit(a.ApprovalTimeout)
+}
+
+// OutputBytes 是一个工具结果最多保留多少字节。
+func (a Agent) OutputBytes() int {
+	if a.MaxOutputKB <= 0 {
+		return 64 << 10
+	}
+	return a.MaxOutputKB << 10
+}
+
+func parseLimit(s string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
+}
+
+// maxLimit 是时限最长能设多久：发给内核时是毫秒数（32 位整数）
+const maxLimit = 7 * 24 * time.Hour
 
 type Search struct {
 	Enabled  *bool  `toml:"enabled" json:"enabled"`
@@ -292,6 +343,19 @@ func (c *Config) applyEnv() {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Agent.MaxSteps == nil {
+		n := DefaultMaxSteps
+		c.Agent.MaxSteps = &n
+	}
+	if strings.TrimSpace(c.Agent.RunTimeout) == "" {
+		c.Agent.RunTimeout = "0"
+	}
+	if strings.TrimSpace(c.Agent.ApprovalTimeout) == "" {
+		c.Agent.ApprovalTimeout = "30m"
+	}
+	if c.Agent.MaxOutputKB <= 0 {
+		c.Agent.MaxOutputKB = 64
+	}
 	if c.Search.Provider == "" {
 		c.Search.Provider = "deepseek"
 	}
@@ -344,6 +408,19 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	if n := c.Agent.Steps(); n < 0 || n > 100000 {
+		errs = append(errs, errors.New("agent.max_steps：每条消息最多请求模型几次，0 表示不限，最多 100000"))
+	}
+	for _, f := range []struct{ name, v string }{{"agent.run_timeout", c.Agent.RunTimeout}, {"agent.approval_timeout", c.Agent.ApprovalTimeout}} {
+		if d, err := time.ParseDuration(strings.TrimSpace(f.v)); err != nil || d < 0 || d > maxLimit {
+			errs = append(errs, fmt.Errorf("%s 要写成 30m、2h 这样（0 表示不限），最长 7 天，现在是 %q", f.name, f.v))
+		} else if d > 0 && d < time.Second {
+			errs = append(errs, fmt.Errorf("%s 至少 1 秒（0 表示不限）", f.name))
+		}
+	}
+	if c.Agent.MaxOutputKB < 1 || c.Agent.MaxOutputKB > 64<<10 {
+		errs = append(errs, errors.New("agent.max_output_kb：工具结果最多保留多少 KB，1–65536"))
+	}
 	if c.Search.Provider != "deepseek" || c.Search.Count < 1 || c.Search.Count > 10 {
 		errs = append(errs, errors.New("search：provider 只能是 deepseek，count 为 1–10"))
 	}

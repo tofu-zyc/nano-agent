@@ -295,11 +295,30 @@ try:
     assert os.path.exists(TOKEN) and open(TOKEN, encoding="ascii").read().strip() == old_token, "升级丢了配对口令"
     print("  ok   升级保留配置和 paired.token")
 
+    # 以前的安装脚本按 GBK 读写过 kernel.conf：第一行说明成了乱码、吃掉换行，gateway 进了注释；
+    # 最后一行没有换行，nano-kernel connect 追加时两行粘在一起。不带 -Gateway 升级（nano-kernel update 就是这样）也要修好
+    old_head = "# nano-agent 内核配置（由安装脚本生成，可以改；再运行安装脚本会保留）"
+    garbled = old_head.encode("utf-8").decode("gbk", errors="replace") + "?"
+    exe_line = [x for x in conf.splitlines() if x.startswith("exec = ")][0]
+    with open(CONF, "w", encoding="utf-8", newline="") as f:
+        f.write(garbled + f"gateway = tcp:127.0.0.1:{gw.port}\r\nnode = installpc3\r\n{exe_line}\r\n"
+                "max_steps = 16\r\nrun_timeout = 600\r\napproval_timeout = 300\r\n"
+                f"max_output = 65536gateway = tcp:127.0.0.1:{gw.port}")
+    r = ps(PKG_PS1, "-Yes", "-NoService", "-NoPath", "-Dir", INST_W)
+    assert r.returncode == 0, r.stdout + r.stderr
+    raw = open(CONF, "rb").read()
+    conf = raw.decode("utf-8")
+    lines = [x for x in conf.splitlines() if x.strip()]
+    assert not raw.startswith(b"\xef\xbb\xbf") and conf.endswith("\r\n"), repr(raw[-40:])
+    assert lines[0].startswith("# nano-agent") and "=" not in lines[0], lines
+    assert lines[1:] == [f"gateway = tcp:127.0.0.1:{gw.port}", "node = installpc3", exe_line], lines
+    print("  ok   升级修好以前写坏的 kernel.conf（乱码说明行、粘在一起的行），去掉旧的默认上限")
+
     assert os.path.exists(os.path.join(INST_L, "install-kernel.ps1")), "安装目录里没有留安装脚本"
     r = ps(INST_W + "\\install-kernel.ps1", "-Uninstall", "-Yes", "-NoPath", "-Dir", INST_W)
     assert r.returncode == 0 and not os.path.exists(INST_L), r.stdout + r.stderr
     print("  ok   卸载（用安装目录里留的脚本）")
-    passed = 6
+    passed = 7
 
     # 「启动」文件夹（任务计划建不了时的退路，-NoTask 直接走这条）：放快捷方式、直接拉起内核、
     # nano-kernel status 认得、卸载时删掉快捷方式

@@ -285,6 +285,26 @@ def t_output(gw):
     finish(gw, "s4")
 
 
+@case("网关在 input 里带的上限：工具结果多长、最多请求几次模型")
+def t_gateway_limits(gw):
+    gw.send(t="input", sid="s4b", mode="auto", workspaces=[local_ws((WORK,))], max_steps=1, max_output=2048,
+            run_timeout_ms=-1, approval_timeout_ms=-1, **{"from": "tg:user"})
+    gw.expect("model", sid="s4b")
+    call(gw, "s4b", ("c1", "Shell", {"command": "seq 1 100000"}))
+    r = gw.expect("result", sid="s4b")
+    assert "中间省略" in r["content"] and len(r["content"].encode()) < 2048 + 200, len(r["content"].encode())
+    gw.expect("done", sid="s4b", status="budget")
+    # 交给网关执行的工具也带上这一轮的上限
+    gw.send(t="input", sid="g0", mode="auto", workspaces=[box_ws(7)], max_output=300000, **{"from": "tg:user"})
+    gw.expect("model", sid="g0")
+    call(gw, "g0", ("c1", "Read", {"path": "a"}))
+    e = gw.expect("exec", sid="g0", id="c1")
+    assert e["max_output"] == 300000, e
+    gw.send(t="exec_result", sid="g0", id="c1", ok=True, content="x")
+    gw.expect("result", sid="g0", id="c1")
+    finish(gw, "g0")
+
+
 @case("权限模式：none 全拒绝，readonly 只能读")
 def t_modes(gw):
     start_run(gw, "s5", mode="none")
@@ -469,6 +489,43 @@ def old_ssh_config():
         print(f"  FAIL 旧的 remote = 配置：{r.returncode} {r.stderr}")
 
 
+def conf_repair():
+    """以前的 Windows 安装脚本把 kernel.conf 写坏过：最后一行没有换行，nano-kernel connect 追加时两行粘在一起；
+    记事本存的文件开头可能带 BOM。内核要读得了 BOM，粘住的行要说清楚，connect 要顺手修好"""
+    d = os.path.join(T, "repair")
+    os.makedirs(d)
+    conf = os.path.join(d, "kernel.conf")
+    with open(os.path.join(d, "service"), "w") as f:
+        f.write("none\n")
+    with open(conf, "wb") as f:
+        f.write(("# nano-agent \u95c2\u4f7d?gateway = tcp:10.0.0.1:7700\nnode = pc\nexec = " + EXEC +
+                 "\nmax_steps = 16\nmax_output = 65536gateway = tcp:10.0.0.1:7700").encode())
+    r = subprocess.run([KERNEL, "-t", "-c", conf], capture_output=True, text=True)
+    ok = r.returncode != 0 and "粘在了一起" in r.stderr and "第 5 行" in r.stderr
+    r = subprocess.run([KERNEL, "connect", "10.0.0.9:7700", "-c", conf], capture_output=True, text=True)
+    text = open(conf, encoding="utf-8").read()
+    ok = ok and r.returncode == 0 and "max_output = 65536\ngateway = tcp:10.0.0.9:7700\n" in text
+    r = subprocess.run([KERNEL, "-t", "-c", conf], capture_output=True, text=True)
+    ok = ok and r.returncode == 0 and "tcp:10.0.0.9:7700" in r.stderr
+    # 最后一行没有换行、也没有 gateway：connect 追加时先补上换行
+    with open(conf, "w") as f:
+        f.write("node = pc\nexec = " + EXEC)
+    subprocess.run([KERNEL, "connect", "10.0.0.8:7700", "-c", conf], capture_output=True, text=True)
+    ok = ok and open(conf).read().endswith(EXEC + "\ngateway = tcp:10.0.0.8:7700\n")
+    # 开头带 BOM
+    with open(conf, "wb") as f:
+        f.write(("\ufeffgateway = tcp:10.0.0.7:7700\nexec = " + EXEC + "\n").encode())
+    r = subprocess.run([KERNEL, "-t", "-c", conf], capture_output=True, text=True)
+    ok = ok and r.returncode == 0 and "tcp:10.0.0.7:7700" in r.stderr
+    r = subprocess.run([KERNEL, "connect", "-c", conf], capture_output=True, text=True)
+    ok = ok and "tcp:10.0.0.7:7700" in r.stdout
+    if ok:
+        print("  ok   kernel.conf：粘住的行给出提示、connect 修好，最后一行没换行、BOM 都没问题")
+    else:
+        FAILS.append("conf repair")
+        print(f"  FAIL kernel.conf 修复：{r.returncode} {r.stdout} {r.stderr}\n{open(conf, encoding='utf-8-sig').read()}")
+
+
 def main():
     try:
         os.makedirs(WORK)
@@ -496,7 +553,7 @@ def main():
             gw.send(t="welcome", v=5)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_modes, t_approve,
+            for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_gateway_cancel, t_reconnect):
                 t(gw)
@@ -514,6 +571,7 @@ def main():
             log.close()
         time.sleep(0.3)
         old_ssh_config()
+        conf_repair()
         if leftover("sleep 4646"):
             FAILS.append("exit cleanup")
             print(f"  FAIL 内核退出后命令还在：{leftover('sleep 4646')}")

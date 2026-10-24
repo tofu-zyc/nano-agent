@@ -15,7 +15,7 @@
     { id: 'telegram', label: 'Telegram', icon: 'send', color: 'var(--c-telegram)', desc: '机器人 token、代理', target: { type: 'channel', name: 'telegram' } },
     { id: 'feishu', label: '飞书', icon: 'feishu', color: 'var(--c-feishu)', desc: '扫码创建机器人、应用凭证、代理', target: { type: 'channel', name: 'feishu' } },
     { id: 'cli', label: '命令行', icon: 'terminal', color: 'var(--c-cli)', desc: '终端里显示什么', target: { type: 'channel', name: 'cli' } },
-    { id: 'kernel', label: '内核连接', icon: 'shield', color: 'var(--c-kernel)', desc: '监听地址和口令', target: { type: 'kernel' } },
+    { id: 'kernel', label: '内核', icon: 'shield', color: 'var(--c-kernel)', desc: '每条消息最多请求模型几次、最长多久、等审批多久；内核怎么连进来', target: { type: 'kernel' } },
   ];
 
   let q = $state('');

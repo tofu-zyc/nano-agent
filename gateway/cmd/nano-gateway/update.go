@@ -120,7 +120,8 @@ type gatewayUpdater struct {
 }
 
 func (u *gatewayUpdater) client() *release.Client {
-	return release.New(u.conf.Current().Update.URL)
+	cfg := u.conf.Current()
+	return release.New(cfg.Update.URL, cfg.Network.Proxy)
 }
 
 func (u *gatewayUpdater) Check(ctx context.Context) (app.UpdateInfo, error) {
@@ -511,7 +512,7 @@ func runUpdate(args []string) int {
 		return 1
 	}
 	cfg := conf.Current()
-	c := release.New(cfg.Update.URL)
+	c := release.New(cfg.Update.URL, cfg.Network.Proxy)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -519,7 +520,7 @@ func runUpdate(args []string) int {
 	if target == "" {
 		if target, err = c.Latest(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "查最新版本失败：", err)
-			fmt.Fprintln(os.Stderr, "访问 GitHub 慢的话，可以在 gateway.toml 的 [update] url 或 NANO_DOWNLOAD_URL 换成镜像")
+			fmt.Fprintln(os.Stderr, "访问不了 GitHub 的话：在网页拓扑图的网关节点里填「默认代理」，或者把「下载地址」换成镜像（也可以设 NANO_DOWNLOAD_URL）")
 			return 1
 		}
 	} else if !release.IsRelease(target) {

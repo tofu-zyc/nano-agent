@@ -13,6 +13,7 @@ typedef struct {
     char  *node;              /* 本内核的名字，默认主机名 */
     char  *exec;              /* 执行器 nano-exec 的路径，默认和内核放在同一个目录 */
     char  *dir;               /* 配置文件所在目录（解析过符号链接），不能被用作工作目录 */
+    /* 下面四项只是兜底：网关每一轮都带上自己的设置（拓扑图里改），以网关为准 */
     int    max_steps;         /* 每个 run 最多请求几次模型 */
     int    run_timeout;       /* 秒 */
     int    approval_timeout;  /* 秒 */
@@ -21,6 +22,10 @@ typedef struct {
 } kconf;
 
 int  kconf_load(kconf *k, const char *path, char *err, size_t errlen);
+/* 配置项的名字（以 NULL 结尾） */
+extern const char *const KCONF_KEYS[];
+/* 值里夹着另一个配置项（两行粘在了一起）：返回第二项开始的位置，没有返回 NULL */
+const char *kconf_glued(const char *val);
 void kconf_free(kconf *k);
 
 #endif

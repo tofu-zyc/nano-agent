@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/secret"
 )
@@ -243,5 +244,38 @@ func TestDefaultOnSwitchesShowOn(t *testing.T) {
 	}
 	if v := find(ds, "update.check").Value; v != false {
 		t.Errorf("update.check 写了 false：%v", v)
+	}
+}
+
+// 每条消息的上限：默认 200 次、不限时长、等审批 30 分钟、工具结果 64 KB；0 表示不限
+func TestAgentLimits(t *testing.T) {
+	s, _, err := Open(writeConf(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := s.Current().Agent
+	if a.Steps() != 200 || a.RunLimit() != 0 || a.ApprovalLimit() != 30*time.Minute || a.OutputBytes() != 64<<10 {
+		t.Fatalf("defaults: %+v steps=%d", a, a.Steps())
+	}
+	if v := find(s.Describe(), "agent.max_steps").Value; v != float64(200) {
+		t.Fatalf("describe max_steps: %v", v)
+	}
+	if err := s.Set(map[string]any{"agent.max_steps": float64(0), "agent.run_timeout": "2h", "agent.approval_timeout": "0", "agent.max_output_kb": float64(256)}); err != nil {
+		t.Fatal(err)
+	}
+	a = s.Current().Agent
+	if a.Steps() != 0 || a.RunLimit() != 2*time.Hour || a.ApprovalLimit() != 0 || a.OutputBytes() != 256<<10 {
+		t.Fatalf("after set: %+v", a)
+	}
+	for _, bad := range []map[string]any{{"agent.run_timeout": "abc"}, {"agent.run_timeout": "200h"}, {"agent.approval_timeout": "-1m"},
+		{"agent.max_steps": float64(-1)}, {"agent.max_output_kb": float64(1 << 20)}} {
+		if err := s.Set(bad); err == nil {
+			t.Errorf("%v 应该不合法", bad)
+		}
+	}
+	// 重新打开：网页里改的值还在
+	s2, _, err := Open(s.path)
+	if err != nil || s2.Current().Agent.Steps() != 0 || s2.Current().Agent.RunLimit() != 2*time.Hour {
+		t.Fatalf("reopen: %v %+v", err, s2.Current().Agent)
 	}
 }

@@ -139,7 +139,7 @@ export type RuntimeStatus = {
 };
 
 export type Overview = {
-  gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string };
+  gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string; env_proxy?: string };
   runtime?: RuntimeStatus;
   kernels: KernelInfo[];
   model: {

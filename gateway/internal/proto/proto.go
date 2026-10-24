@@ -98,7 +98,10 @@ type Msg struct {
 	Reason string `json:"reason,omitempty"`
 	Calls  []Call `json:"calls,omitempty"`
 
-	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权
+	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权。
+	// 最多请求模型几次、总时限、审批时限：大于 0 是上限，小于 0 表示不限（不带就用内核自己的配置）；
+	// max_output（和 exec 共用）是工具结果最多保留的字节数
+	MaxSteps          int             `json:"max_steps,omitempty"`
 	RunTimeoutMs      int             `json:"run_timeout_ms,omitempty"`
 	ApprovalTimeoutMs int             `json:"approval_timeout_ms,omitempty"`
 	Mode              string          `json:"mode,omitempty"`

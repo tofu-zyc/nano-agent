@@ -259,9 +259,7 @@ func main() {
 		a.RestartDone(req, elapsed)
 	}
 	finishUpdate(ctx, a, upd, log)
-	if config.On(cfg.Update.Check) {
-		go checkUpdatesDaily(ctx, a, log)
-	}
+	go checkUpdatesDaily(ctx, a, conf, log)
 
 	names := []string{}
 	for _, c := range a.Channels() {
@@ -301,7 +299,8 @@ func main() {
 }
 
 // checkUpdatesDaily 每天查一次新版本，只记下来（status、网页、/status 里提示），不自动更新。
-func checkUpdatesDaily(ctx context.Context, a *app.App, log *slog.Logger) {
+// 「检查新版本」关着时跳过，网页里打开后下一次就会查，不用重启。
+func checkUpdatesDaily(ctx context.Context, a *app.App, conf *config.Store, log *slog.Logger) {
 	t := time.NewTimer(2 * time.Minute)
 	defer t.Stop()
 	for {
@@ -309,6 +308,10 @@ func checkUpdatesDaily(ctx context.Context, a *app.App, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		if !config.On(conf.Current().Update.Check) {
+			t.Reset(time.Hour)
+			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		info, err := a.CheckUpdate(cctx)

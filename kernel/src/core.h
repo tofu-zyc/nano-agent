@@ -45,6 +45,8 @@ typedef enum {
 typedef struct {
     const na_tool_policy *tools; size_t ntools;   /* 由宿主持有，生命周期须长于 core */
     bool sandbox;             /* 执行器能套上沙箱；不能时，自动模式下的 Shell 也要审批 */
+    /* 下面三项是网关没在 input 里给值时的兜底（kernel.conf 里的值）；
+     * 网关现在每一轮都带上自己的设置，以网关为准 */
     int max_steps;            /* 每个 run 最多请求几次模型 */
     int run_timeout_ms;       /* 每个 run 最长持续时间 */
     int approval_timeout_ms;  /* 等待审批的最长时间 */
@@ -90,7 +92,8 @@ typedef struct {
     const char *sid;
     const char *from;
     na_mode mode;
-    int run_timeout_ms, approval_timeout_ms; /* INPUT：这一轮的总时限、审批时限，0 用内核配置（定时任务用） */
+    /* INPUT：这一轮最多请求几次模型、总时限、审批时限。大于 0 是上限，0 用内核配置，小于 0 表示不限 */
+    int max_steps, run_timeout_ms, approval_timeout_ms;
     bool elevate;         /* INPUT：这个身份的会话能不能提权（访客不能） */
     na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */

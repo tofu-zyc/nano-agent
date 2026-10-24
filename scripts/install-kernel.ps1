@@ -97,20 +97,59 @@ if (-not (Test-Path $PkgKernel) -or -not (Test-Path $PkgExec)) {
 }
 
 $Upgrade = Test-Path $Conf
+$Utf8 = New-Object System.Text.UTF8Encoding($false)
+$ConfKeys = 'gateway|token|node|exec|skills|max_steps|run_timeout|approval_timeout|max_output'
+$ConfHead = "# nano-agent 内核配置（安装脚本生成，可以改，再运行安装脚本会保留）。这里只管连哪个网关；每条消息的上限等设置在网关网页的拓扑图里改"
+
+# 以前的安装脚本按系统编码（中文系统是 GBK）读 kernel.conf：第一行的中文说明读成了乱码，吃掉了换行，
+# 后面的 gateway = … 跟着进了注释；最后一行又没有换行，nano-kernel connect 追加时两行粘在一起。
+# 这里按 UTF-8 读，把这两种坏掉的地方修好，其他行原样保留。
+function Repair-ConfLines([string]$text) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($text -split "\r?\n")) {
+        if ($line -match '^\s*#\s*nano-agent') {
+            # 安装脚本写的说明行：去掉（写回时换成新的），粘在后面的配置项救回来
+            if ($line -match "(?<![A-Za-z_])((?:$ConfKeys)\s*=.*)$") { $line = $Matches[1] } else { continue }
+        }
+        if ($line -match '^\s*#') { $lines.Add($line); continue }
+        $parts = @()
+        while ($line -match "^(\s*(?:$ConfKeys)\s*=.*?\S)((?:$ConfKeys)\s*=.*)$") {
+            $parts += $Matches[1]
+            $line = $Matches[2]
+        }
+        foreach ($p in ($parts + $line)) {
+            # 以前安装脚本写的默认上限：现在由网关每一轮带过来，这几行没用了
+            if ($p -match '^\s*(max_steps\s*=\s*16|run_timeout\s*=\s*600|approval_timeout\s*=\s*300|max_output\s*=\s*65536)\s*$') { continue }
+            $lines.Add($p)
+        }
+    }
+    while ($lines.Count -and -not $lines[$lines.Count - 1].Trim()) { $lines.RemoveAt($lines.Count - 1) }
+    return ,$lines
+}
+$ConfLines = New-Object System.Collections.Generic.List[string]
+if ($Upgrade) { $ConfLines = Repair-ConfLines ([System.IO.File]::ReadAllText($Conf, [System.Text.Encoding]::UTF8)) }
 function Conf-Get($key) {
-    if (-not (Test-Path $Conf)) { return "" }
-    $line = Get-Content $Conf | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -Last 1
+    $line = $ConfLines | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -Last 1
     if ($line) { return ($line -replace "^\s*$key\s*=\s*", "").Trim() }
     return ""
 }
-
-if (-not $Gateway) {
-    if ($Upgrade) { $Gateway = Conf-Get "gateway" }
-    elseif ($Yes) { Die "没有网关地址：加上 -Gateway tcp:主机:7700" }
-    else {
-        $Gateway = Read-Host "网关地址（例如 tcp:192.168.1.2:7700）"
-        if (-not $Gateway) { $Gateway = "tcp:127.0.0.1:7700" }
+function Conf-Set($key, $value) {
+    $hit = $false
+    for ($i = 0; $i -lt $ConfLines.Count; $i++) {
+        if ($ConfLines[$i] -match "^\s*$key\s*=") {
+            if ($hit) { $ConfLines.RemoveAt($i); $i--; continue }
+            $ConfLines[$i] = "$key = $value"
+            $hit = $true
+        }
     }
+    if (-not $hit) { $ConfLines.Add("$key = $value") }
+}
+
+if (-not $Gateway -and $Upgrade) { $Gateway = Conf-Get "gateway" }
+if (-not $Gateway) {
+    if ($Yes) { Die "没有网关地址：加上 -Gateway tcp:主机:7700" }
+    $Gateway = Read-Host "网关地址（例如 tcp:192.168.1.2:7700）"
+    if (-not $Gateway) { $Gateway = "tcp:127.0.0.1:7700" }
 }
 if ($Gateway -notmatch '^(tcp|unix):') {
     if ($Gateway -match ':') { $Gateway = "tcp:$Gateway" }
@@ -144,28 +183,13 @@ if (Test-Path $PkgRg) { Copy-Item $PkgRg (Join-Path $Dir "rg.exe") -Force }
 $Version = if (Test-Path (Join-Path $Here "VERSION")) { (Get-Content (Join-Path $Here "VERSION") -Raw).Trim() } else { "dev" }
 Set-Content -Path (Join-Path $Dir "VERSION") -Value $Version -Encoding ASCII
 
-if ($Upgrade) {
-    Say "==> 升级（保留配置和配对口令）"
-    $text = Get-Content $Conf -Raw
-    $text = [regex]::Replace($text, '(?m)^\s*gateway\s*=.*$', "gateway = $Gateway")
-    $text = [regex]::Replace($text, '(?m)^\s*node\s*=.*$', "node = $Name")
-    if ($text -notmatch '(?m)^\s*exec\s*=') {
-        $text = $text.TrimEnd() + "`r`nexec = $Exec`r`n"
-    }
-    [System.IO.File]::WriteAllText($Conf, $text, (New-Object System.Text.UTF8Encoding($false)))
-} else {
-    $newConf = @"
-# nano-agent 内核配置（由安装脚本生成，可以改；再运行安装脚本会保留）
-gateway = $Gateway
-node = $Name
-exec = $Exec
-max_steps = 16
-run_timeout = 600
-approval_timeout = 300
-max_output = 65536
-"@
-    [System.IO.File]::WriteAllText($Conf, $newConf, (New-Object System.Text.UTF8Encoding($false)))
-}
+if ($Upgrade) { Say "==> 升级（保留配置和配对口令）" }
+Conf-Set "gateway" $Gateway
+Conf-Set "node" $Name
+if (-not (Conf-Get "exec")) { Conf-Set "exec" $Exec }
+# 按 UTF-8（不带 BOM）写，每行都以换行结尾
+$text = (@($ConfHead) + $ConfLines) -join "`r`n"
+[System.IO.File]::WriteAllText($Conf, $text + "`r`n", $Utf8)
 
 # 没有口令：第一次连网关时请求配对，在网关网页「设备」里核对确认码。
 # 配对口令由内核写在 kernel.conf 旁边的 paired.token。

@@ -1012,3 +1012,32 @@ func TestGatewayAdminErrorRedacted(t *testing.T) {
 		t.Fatalf("错误里泄露了密钥：%v %q", ok, text)
 	}
 }
+
+// 每条消息的上限由网关带给内核：0 表示不限（发给内核是 -1）；到了上限要说清楚怎么接着做、在哪里改
+func TestInputCarriesAgentLimits(t *testing.T) {
+	e := setup(t)
+	zero := 0
+	e.a.mu.Lock()
+	e.a.cfg.Agent = config.Agent{MaxSteps: &zero, RunTimeout: "2h", ApprovalTimeout: "0", MaxOutputKB: 128}
+	e.a.mu.Unlock()
+	e.say("干活")
+	in := e.k.expect(proto.TInput)
+	if in.MaxSteps != -1 || in.RunTimeoutMs != 7200000 || in.ApprovalTimeoutMs != -1 || in.MaxOutput != 128<<10 {
+		t.Fatalf("input limits: %+v", in)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusBudget})
+	e.ch.wait(t, "发「继续」接着做")
+
+	// 没设置过：默认 200 次、不限时长、等审批 30 分钟、64 KB
+	e.a.mu.Lock()
+	e.a.cfg.Agent = config.Agent{}
+	e.a.mu.Unlock()
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[in.SID].run == nil })
+	e.say("再来")
+	in = e.k.expect(proto.TInput)
+	if in.MaxSteps != 200 || in.RunTimeoutMs != -1 || in.ApprovalTimeoutMs != 1800000 || in.MaxOutput != 64<<10 {
+		t.Fatalf("default limits: %+v", in)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusTimeout})
+	e.ch.wait(t, "时限在网页拓扑图的内核节点里改")
+}

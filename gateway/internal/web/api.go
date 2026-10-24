@@ -19,6 +19,7 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/httpx"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/persona"
@@ -106,7 +107,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	snap := s.app.Snapshot()
 	writeJSON(w, map[string]any{
 		"gateway": map[string]any{"started": snap.Started, "kernel_listen": cfg.Kernel.Listen, "web_listen": cfg.Web.Listen,
-			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir},
+			"config_dir": cfg.Dir, "data_dir": cfg.Session.DataDir, "env_proxy": httpx.EnvProxy()},
 		"runtime":    s.app.Status(),
 		"kernels":    snap.Kernels,
 		"model":      defaultModelInfo(s, cfg),

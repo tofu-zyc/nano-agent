@@ -7,6 +7,7 @@
  * startup 是 Windows 上建不了任务计划时的退路：「启动」文件夹里放一个快捷方式，登录时运行 run-kernel.ps1。
  * Windows 上 stop 在没有服务管理器时写一个 kernel.stop 文件，内核看到后正常退出（Windows 上 run-kernel.ps1 也就不再拉起）。 */
 #include "ctl.h"
+#include "conf.h"
 #include "cJSON.h"
 #include "plat.h"
 #include "util.h"
@@ -59,7 +60,9 @@ static char *read_text(const char *p, size_t max)
         buf_free(&b);
         return NULL;
     }
-    char *s = xstrdup(b.len ? buf_cstr(&b) : "");
+    const char *t = b.len ? buf_cstr(&b) : "";
+    if (!strncmp(t, "\xEF\xBB\xBF", 3)) t += 3;   /* 记事本存的 UTF-8 开头可能带 BOM */
+    char *s = xstrdup(t);
     buf_free(&b);
     return s;
 }
@@ -93,11 +96,43 @@ static char *conf_get(const char *path, const char *key)
     return val;
 }
 
+/* 把粘在一起的行拆开（"max_output = 65536gateway = …"，以前的安装脚本少写了换行），其他原样保留 */
+static char *unglue(const char *text)
+{
+    buf_t out = {0};
+    for (const char *p = text; *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char *line = xmalloc(n + 1);
+        memcpy(line, p, n);
+        line[n] = 0;
+        char *l = line;
+        while (*l == ' ' || *l == '\t') l++;
+        char *eq = *l != '#' ? strchr(l, '=') : NULL;
+        const char *g;
+        while (eq && (g = kconf_glued(eq + 1))) {
+            buf_append(&out, l, (size_t)(g - l));
+            buf_puts(&out, "\n");
+            l = (char *)g;
+            eq = strchr(l, '=');
+        }
+        buf_puts(&out, l);
+        if (nl) buf_puts(&out, "\n");
+        free(line);
+        p += n + (nl ? 1 : 0);
+    }
+    char *s = xstrdup(out.len ? buf_cstr(&out) : "");
+    buf_free(&out);
+    return s;
+}
+
 /* 改 kernel.conf 里的一项（没有就加在最后），其他行原样保留 */
 static int conf_set(const char *path, const char *key, const char *value)
 {
-    char *text = read_text(path, 1 << 20);
-    if (!text) return -1;
+    char *raw = read_text(path, 1 << 20);
+    if (!raw) return -1;
+    char *text = unglue(raw);
+    free(raw);
     buf_t out = {0};
     bool done = false;
     char *p = text;
@@ -130,6 +165,7 @@ static int conf_set(const char *path, const char *key, const char *value)
         p += n + (nl ? 1 : 0);
     }
     if (!done) {
+        if (out.len && out.p[out.len - 1] != '\n') buf_puts(&out, "\n");   /* 最后一行没有换行 */
         buf_puts(&out, key);
         buf_puts(&out, " = ");
         buf_puts(&out, value);

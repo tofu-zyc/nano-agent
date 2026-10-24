@@ -383,7 +383,14 @@ static const cJSON *pick_workspace(const cJSON *policy, const cJSON *args, char 
 }
 
 /* 交给网关：Skill（技能在网关上），或者工作目录不在这台机器上的工具调用 */
-static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *workspace)
+/* 这一轮工具结果的上限（网关在 input 里带上的；没带用 kernel.conf） */
+static size_t run_max_output(const kernel_t *k, const cJSON *pol)
+{
+    const cJSON *mo = cJSON_GetObjectItemCaseSensitive(pol, "max_output");
+    return cJSON_IsNumber(mo) ? (size_t)mo->valuedouble : k->conf.max_output;
+}
+
+static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *workspace, size_t max_output)
 {
     cJSON *m = msg_new("exec", c->sid);
     cJSON_AddStringToObject(m, "id", c->id);
@@ -392,7 +399,7 @@ static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *wor
     if (workspace) cJSON_AddStringToObject(m, "workspace", workspace);
     if (c->elevated) cJSON_AddBoolToObject(m, "elevated", true);
     cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
-    cJSON_AddNumberToObject(m, "max_output", (double)k->conf.max_output);
+    cJSON_AddNumberToObject(m, "max_output", (double)max_output);
     link_send(&k->link, m);
     gw_add(k, c->sid, c->id);
     log_info("交给网关执行 %s（%s）%s%s", c->name, c->id, workspace ? "：" : "", workspace ? workspace : "");
@@ -408,8 +415,11 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
     job_t *j = NULL;
     if (ok) {
-        if (!cJSON_GetObjectItemCaseSensitive(req, "max_output"))
+        const cJSON *mo = cJSON_GetObjectItemCaseSensitive(req, "max_output");
+        if (!cJSON_IsNumber(mo))
             cJSON_AddNumberToObject(req, "max_output", (double)k->conf.max_output);
+        else if ((size_t)mo->valuedouble * 6 + 4096 > k->runner.out_cap)
+            k->runner.out_cap = (size_t)mo->valuedouble * 6 + 4096;   /* 执行器的输出是转义后的 JSON，留足余量 */
         cJSON_DeleteItemFromObjectCaseSensitive(req, "watch_stdin");
         cJSON_AddBoolToObject(req, "watch_stdin", true);
         char *body = cJSON_PrintUnformatted(req);
@@ -435,18 +445,20 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
+    cJSON *pol = cJSON_Parse(c->policy ? c->policy : "{}");
+    size_t max_output = run_max_output(k, pol);
     if (gateway_tool(c->name)) {
-        send_exec(k, c, args, NULL);
+        send_exec(k, c, args, NULL, max_output);
+        cJSON_Delete(pol);
         return;
     }
-    cJSON *pol = cJSON_Parse(c->policy ? c->policy : "{}");
     const cJSON *ws = pick_workspace(pol, args, err, sizeof err);
     job_t *j = NULL;
     if (ws) {
         cJSON_DeleteItemFromObjectCaseSensitive(args, "workspace");
         if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"))) {
             /* 工作目录不在这台机器上：交给网关，约束由网关按会话的设置生成 */
-            send_exec(k, c, args, sget(ws, "name"));
+            send_exec(k, c, args, sget(ws, "name"), max_output);
             cJSON_Delete(pol);
             return;
         }
@@ -467,6 +479,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         cJSON_AddItemToObject(req, "args", args);
         args = NULL;
         cJSON_AddStringToObject(req, "tmp_key", c->sid);
+        cJSON_AddNumberToObject(req, "max_output", (double)max_output);
         j = start_exec(k, req, c->sid, c->id, c->name, err, sizeof err);
         if (j) log_info("执行 %s（%s）%s", c->name, c->id, sget(ws, "name") ? sget(ws, "name") : "");
     }
@@ -676,6 +689,10 @@ static char *build_policy(const cJSON *m, na_mode mode)
         cJSON_ArrayForEach(it, v) if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "home"))) home = true;
     cJSON_AddBoolToObject(p, "write", !home && (mode == NA_MODE_ASK || mode == NA_MODE_AUTO));
     cJSON_AddBoolToObject(p, "elevate", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate")));
+    /* 工具结果的上限：网关每一轮带上（没带就用 kernel.conf 的 max_output） */
+    const cJSON *mo = cJSON_GetObjectItemCaseSensitive(m, "max_output");
+    if (cJSON_IsNumber(mo) && mo->valuedouble >= 1024 && mo->valuedouble <= (64 << 20))
+        cJSON_AddNumberToObject(p, "max_output", mo->valuedouble);
     char *s = cJSON_PrintUnformatted(p);
     cJSON_Delete(p);
     return s;
@@ -805,8 +822,11 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.type = NA_EV_INPUT;
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
+        /* 网关的设置：大于 0 是上限，小于 0 不限，没有（旧网关）用 kernel.conf */
+        const cJSON *ms = cJSON_GetObjectItemCaseSensitive(m, "max_steps");
         const cJSON *rt = cJSON_GetObjectItemCaseSensitive(m, "run_timeout_ms");
         const cJSON *at = cJSON_GetObjectItemCaseSensitive(m, "approval_timeout_ms");
+        ev.max_steps = cJSON_IsNumber(ms) ? ms->valueint : 0;
         ev.run_timeout_ms = cJSON_IsNumber(rt) ? rt->valueint : 0;
         ev.approval_timeout_ms = cJSON_IsNumber(at) ? at->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));

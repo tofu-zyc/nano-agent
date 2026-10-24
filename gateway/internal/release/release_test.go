@@ -66,7 +66,7 @@ func TestFetchVerifiesAndCaches(t *testing.T) {
 		w.Write(b)
 	}))
 	defer srv.Close()
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	c.Cache = t.TempDir()
 	ctx := context.Background()
 

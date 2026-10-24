@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/httpx"
 	"nano-agent/gateway/internal/paths"
 )
 
@@ -33,20 +34,28 @@ type Client struct {
 	Base  string // 不带结尾的 /
 	Cache string // 缓存目录
 	HTTP  *http.Client
+	Via   string // 走的什么代理，下载失败时写进错误里
 }
 
-// New 用 base（空表示 NANO_DOWNLOAD_URL 或默认地址）建一个客户端。
-func New(base string) *Client {
+// New 用 base（空表示 NANO_DOWNLOAD_URL 或默认地址）建一个客户端。proxy 是网关的默认代理
+// （空：跟随环境变量；none：直连；或者代理地址）。
+func New(base, proxy string) *Client {
 	if base == "" {
 		base = os.Getenv("NANO_DOWNLOAD_URL")
 	}
 	if base == "" {
 		base = DefaultBase
 	}
+	hc, err := httpx.NewClient(proxy, 10*time.Minute)
+	if err != nil { // 配置检查过，不会走到这里；万一走到了就跟随环境变量
+		hc, _ = httpx.NewClient("", 10*time.Minute)
+		proxy = ""
+	}
 	return &Client{
 		Base:  strings.TrimRight(base, "/"),
 		Cache: filepath.Join(paths.Home(), "cache", "releases"),
-		HTTP:  &http.Client{Timeout: 10 * time.Minute},
+		HTTP:  hc,
+		Via:   httpx.Describe(proxy),
 	}
 }
 
@@ -131,6 +140,9 @@ func (c *Client) get(ctx context.Context, url string, w io.Writer) error {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		if c.Via != "" {
+			return fmt.Errorf("下载 %s 失败（%s）：%w", url, c.Via, err)
+		}
 		return fmt.Errorf("下载 %s 失败：%w", url, err)
 	}
 	defer resp.Body.Close()

@@ -13,7 +13,7 @@ typedef struct {
     const na_tool_policy *tool;
     bool elevated;
     call_state st;
-    int64_t deadline;
+    int64_t deadline;    /* -1 表示不限（一直等审批） */
 } call_t;
 
 typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
@@ -24,9 +24,10 @@ typedef struct run {
     bool elevate;        /* 这个身份能不能提权 */
     bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
-    int approval_timeout_ms;
+    int approval_timeout_ms;  /* 不大于 0 表示一直等 */
+    int max_steps;            /* 最多请求几次模型，不大于 0 表示不限 */
     int steps;            /* 已请求模型的次数 */
-    int64_t deadline;     /* 整个 run 的截止时刻 */
+    int64_t deadline;     /* 整个 run 的截止时刻，-1 表示不限 */
     call_t *calls; size_t ncalls;  /* 当前这一轮的工具调用 */
     struct run *next;
 } run_t;
@@ -228,7 +229,7 @@ static void finish(na_core *c, run_t *r, const char *status, const char *detail)
 static void step(na_core *c, run_t *r)
 {
     free_calls(r);
-    if (r->steps >= c->cfg.max_steps) {
+    if (r->max_steps > 0 && r->steps >= r->max_steps) {
         finish(c, r, "budget", NULL);
         return;
     }
@@ -308,9 +309,11 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->mode = ev->mode;
     r->elevate = ev->elevate;
     r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
-    /* 定时任务会带自己的时限，普通聊天用内核配置 */
-    r->deadline = now + (ev->run_timeout_ms > 0 ? ev->run_timeout_ms : c->cfg.run_timeout_ms);
-    r->approval_timeout_ms = ev->approval_timeout_ms > 0 ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
+    /* 网关每一轮带上自己的设置（大于 0 是上限，小于 0 不限）；没带（旧网关）用内核配置 */
+    int run_ms = ev->run_timeout_ms ? ev->run_timeout_ms : c->cfg.run_timeout_ms;
+    r->deadline = run_ms > 0 ? now + run_ms : -1;
+    r->approval_timeout_ms = ev->approval_timeout_ms ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
+    r->max_steps = ev->max_steps ? ev->max_steps : c->cfg.max_steps;
     r->next = c->runs;
     c->runs = r;
     step(c, r);
@@ -377,7 +380,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             m->args = dupstr(k->args);
             m->from = dupstr(r->from);
             k->st = CALL_WAIT_APPROVAL;
-            k->deadline = now + r->approval_timeout_ms;
+            k->deadline = r->approval_timeout_ms > 0 ? now + r->approval_timeout_ms : -1;
         } else {
             exec_call(c, now, r, k);
         }
@@ -426,7 +429,7 @@ static void on_tick(na_core *c, int64_t now)
     run_t *next;
     for (run_t *r = c->runs; r; r = next) {
         next = r->next;   /* r 可能在下面被释放 */
-        if (now >= r->deadline) {
+        if (r->deadline >= 0 && now >= r->deadline) {
             abort_calls(c, r, "运行超时，已终止");
             finish(c, r, "timeout", NULL);
             continue;
@@ -434,7 +437,7 @@ static void on_tick(na_core *c, int64_t now)
         if (r->st != RUN_WAIT_TOOLS) continue;
         for (size_t i = 0; i < r->ncalls; i++) {
             call_t *k = &r->calls[i];
-            if (now < k->deadline) continue;
+            if (k->deadline < 0 || now < k->deadline) continue;
             if (k->st == CALL_RUNNING) {
                 kill_call(c, r, k);
                 result_err(c, r, k, "执行超时（%d 秒），已终止", k->tool->timeout_ms / 1000);
@@ -492,11 +495,11 @@ int64_t na_core_next_deadline(const na_core *c)
 {
     int64_t best = -1;
     for (const run_t *r = c->runs; r; r = r->next) {
-        if (best < 0 || r->deadline < best) best = r->deadline;
+        if (r->deadline >= 0 && (best < 0 || r->deadline < best)) best = r->deadline;
         for (size_t i = 0; i < r->ncalls; i++) {
             const call_t *k = &r->calls[i];
-            if (k->st == CALL_DONE) continue;
-            if (k->deadline < best) best = k->deadline;
+            if (k->st == CALL_DONE || k->deadline < 0) continue;
+            if (best < 0 || k->deadline < best) best = k->deadline;
         }
     }
     return best;

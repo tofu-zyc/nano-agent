@@ -9,7 +9,7 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 
 ## 先查
 
-`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看一组：`memory`（上下文与记忆）、`search`（网络搜索）、`chat`（消息与显示：显示档位、消息时间、时区）、`llm`（模型请求）、`gateway`（访问控制、代理、更新）、`workspace`、`telegram`、`feishu`、`cli`、`kernel`。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因（要重启才生效的、网页密码和渠道 token 这类密钥），让用户去网页设置页改。
+`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看一组：`memory`（上下文与记忆）、`search`（网络搜索）、`chat`（消息与显示：显示档位、消息时间、时区）、`llm`（模型请求）、`gateway`（访问控制、代理、更新）、`workspace`、`telegram`、`feishu`、`cli`、`kernel`（每条消息的上限、内核怎么连进来）。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因（要重启才生效的、网页密码和渠道 token 这类密钥），让用户去网页设置页改。
 
 ## 再改
 
@@ -29,6 +29,8 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 - `telegram.show`、`feishu.show`：只改这个机器人，空字符串表示跟随全局；
 - 只改当前这个聊天窗口：让用户发 `/show 详细`（`/show default` 恢复跟随默认）。
 
-**其他**：`session.timestamps`（用户消息前加发送时间）、`session.timezone`（时区，比如 `Asia/Shanghai`，定时任务也按它）、`access.guest`（其他人能用的工具：`none` 只聊天，`readonly` 只读）、`network.proxy`（默认代理）、`update.check` / `update.kernels`（检查新版本、内核自动跟网关同版本）。
+**每条消息的上限**（`kernel` 组，网关每一轮带给内核）：`agent.max_steps`（最多请求模型几次，模型调一轮工具算一次，默认 200，0 不限）、`agent.run_timeout`（最长处理多久，如 `2h`，`0` 不限，默认不限）、`agent.approval_timeout`（等审批多久，默认 `30m`，`0` 一直等）、`agent.max_output_kb`（一个工具结果最多保留多少 KB，默认 64）。用户说“做到一半停了”“工具调用次数到上限”时改这里；停下以后让用户发“继续”。
+
+**其他**：`session.timestamps`（用户消息前加发送时间）、`session.timezone`（时区，比如 `Asia/Shanghai`，定时任务也按它）、`access.guest`（其他人能用的工具：`none` 只聊天，`readonly` 只读）、`network.proxy`（默认代理；检查更新、下载新版本也走它。网关作为服务运行时终端里的 `HTTPS_PROXY` 传不进来，要代理就填地址）、`update.check` / `update.kernels`（检查新版本、内核自动跟网关同版本）。
 
 模型和接口用 `model-setup` 技能，机器和工作目录用 `device-connections`，网络搜索用 `web-search`，上下文整理用 `context-and-history`。

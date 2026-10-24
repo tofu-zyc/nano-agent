@@ -32,6 +32,23 @@ static int parse_int(const char *v, long lo, long hi, long *out)
     return 0;
 }
 
+const char *const KCONF_KEYS[] = { "gateway", "token", "node", "exec", "skills", "max_steps",
+                                    "run_timeout", "approval_timeout", "max_output", NULL };
+
+/* 值里夹着另一个配置项（"65536gateway = …"）：两行粘在了一起，返回第二项开始的位置 */
+const char *kconf_glued(const char *val)
+{
+    for (const char *const *k = KCONF_KEYS; *k; k++) {
+        size_t n = strlen(*k);
+        for (const char *q = strstr(val, *k); q; q = strstr(q + 1, *k)) {
+            const char *e = q + n;
+            while (*e == ' ' || *e == '\t') e++;
+            if (*e == '=' && q > val) return q;
+        }
+    }
+    return NULL;
+}
+
 /* 节点名会出现在网关和网页上：不能有空白、控制字符、冒号和斜杠，最长 64 字节 */
 int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 {
@@ -51,7 +68,9 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 
     int lineno = 0, rc = 0;
     char *p = text.p ? text.p : "";
-    while (*p || p == text.p) {
+    if (!strncmp(p, "\xEF\xBB\xBF", 3)) p += 3;   /* 记事本存的 UTF-8 开头可能带 BOM */
+    char *start = p;
+    while (*p || p == start) {
         char *nl = strchr(p, '\n');
         if (nl) *nl = 0;
         lineno++;
@@ -76,6 +95,13 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
             val++;
         }
 
+        if (kconf_glued(val)) {
+            snprintf(err, errlen, "%s 第 %d 行：%s = %s 好像是两行粘在了一起（少了换行），"
+                     "把后面的配置项挪到下一行；或者运行 nano-kernel connect 网关地址，会顺手修好",
+                     path, lineno, key, val);
+            rc = -1;
+            break;
+        }
         long n = 0;
         if (!strcmp(key, "gateway")) set_str(&k->gateway, val);
         else if (!strcmp(key, "token")) set_str(&k->token, val);

@@ -310,6 +310,64 @@ static void test_step_budget(void)
     na_core_free(c);
 }
 
+/* 网关每一轮带上自己的上限：大于 0 是上限，小于 0 不限，0 用内核配置 */
+static void test_gateway_limits(void)
+{
+    na_core *c = mk(16);
+    na_event ev = { .type = NA_EV_INPUT, .sid = "s1", .from = "tg:9", .mode = NA_MODE_ASK, .max_steps = 1 };
+    na_core_feed(c, 0, &ev);
+    EXPECT(c, "MODEL(s1)");
+    na_call a[] = { { "a", "Read", "{}", true, NA_SB_DEFAULT, NULL } };
+    turn(c, 1, "s1", NA_TURN_TOOL_USE, a, 1);
+    drain(c);
+    tool_done(c, 2, "s1", "a", true, "1");
+    EXPECT(c, "RESULT(a,ok,1) DONE(budget)");
+    na_core_free(c);
+
+    /* 不限次数、不限时长：请求 40 次模型（内核配置是 2）也不停，没有截止时刻 */
+    c = mk(2);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s1", .from = "tg:9", .mode = NA_MODE_ASK,
+                     .max_steps = -1, .run_timeout_ms = -1, .approval_timeout_ms = -1 };
+    na_core_feed(c, 0, &ev);
+    EXPECT(c, "MODEL(s1)");
+    CHECK(na_core_next_deadline(c) == -1);
+    for (int i = 0; i < 40; i++) {
+        turn(c, 10 + i, "s1", NA_TURN_TOOL_USE, a, 1);
+        drain(c);
+        tool_done(c, 10 + i, "s1", "a", true, "1");
+        EXPECT(c, "RESULT(a,ok,1) MODEL(s1)");
+    }
+    simple(c, 100000000, NA_EV_TICK, NULL);
+    EXPECT(c, "");
+    /* 一直等审批：截止时刻只有工具自己的 */
+    na_call w[] = { { "w", "Write", "{}", true, NA_SB_DEFAULT, NULL } };
+    turn(c, 100000001, "s1", NA_TURN_TOOL_USE, w, 1);
+    EXPECT(c, "APPROVE_REQ(w,Write,tg:9)");
+    CHECK(na_core_next_deadline(c) == -1);
+    simple(c, 900000000, NA_EV_TICK, NULL);
+    EXPECT(c, "");
+    approve(c, 900000001, "s1", "w", true);
+    EXPECT(c, "NOTICE(已批准，开始执行 Write) EXEC(w,Write,10000)");
+    CHECK(na_core_next_deadline(c) == 900010001);
+    tool_done(c, 900000002, "s1", "w", true, "ok");
+    EXPECT(c, "RESULT(w,ok,ok) MODEL(s1)");
+    turn(c, 900000003, "s1", NA_TURN_FINAL, NULL, 0);
+    EXPECT(c, "DONE(ok)");
+    na_core_free(c);
+
+    /* 0：用内核配置 */
+    c = mk(1);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s1", .from = "tg:9", .mode = NA_MODE_ASK };
+    na_core_feed(c, 0, &ev);
+    drain(c);
+    CHECK(na_core_next_deadline(c) == 600000);
+    turn(c, 1, "s1", NA_TURN_TOOL_USE, a, 1);
+    drain(c);
+    tool_done(c, 2, "s1", "a", true, "1");
+    EXPECT(c, "RESULT(a,ok,1) DONE(budget)");
+    na_core_free(c);
+}
+
 static void test_cancel(void)
 {
     na_core *c = mk(16);
@@ -543,6 +601,7 @@ int main(void)
     test_approval_denied_and_timeout();
     test_tool_timeout_and_late_result();
     test_step_budget();
+    test_gateway_limits();
     test_cancel();
     test_run_timeout_while_waiting_model();
     test_reset_kills_running_tools();

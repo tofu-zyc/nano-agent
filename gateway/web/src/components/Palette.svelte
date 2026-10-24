@@ -11,8 +11,8 @@
   const groupInfo: Record<string, { label: string; target: Target; icon: string; color: string }> = {
     memory: { label: '上下文与记忆', target: { type: 'memory' }, icon: 'brain', color: 'var(--c-memory)' },
     search: { label: '网络搜索', target: { type: 'search' }, icon: 'search', color: 'var(--c-search)' },
-    chat: { label: '消息与显示', target: { type: 'gateway' }, icon: 'chat', color: 'var(--c-session)' },
-    llm: { label: '模型请求', target: { type: 'gateway' }, icon: 'sparkles', color: 'var(--c-model)' },
+    chat: { label: '消息与显示', target: { type: 'channel', name: 'cli' }, icon: 'chat', color: 'var(--c-session)' },
+    llm: { label: '模型请求', target: { type: 'model' }, icon: 'sparkles', color: 'var(--c-model)' },
     gateway: { label: '网关', target: { type: 'gateway' }, icon: 'hub', color: 'var(--c-gateway)' },
     kernel: { label: '内核', target: { type: 'kernel' }, icon: 'shield', color: 'var(--c-kernel)' },
     workspace: { label: '工作目录与沙箱', target: { type: 'workspace' }, icon: 'folder', color: 'var(--c-dir)' },
@@ -126,8 +126,7 @@
         id: 'f:' + f.key, icon: g.icon, color: g.color, title: f.label, sub: `${g.label}${f.section ? ' · ' + f.section : ''} · ${truncate(valuePreview(f), 40)}`, kind: '设置',
         text: `${f.label} ${f.key} ${g.label} ${f.section ?? ''} ${f.help ?? ''} ${f.keywords ?? ''}`,
         run: () => {
-          if (f.group === 'llm' || f.group === 'chat') location.hash = '#/settings?focus=' + encodeURIComponent(f.key);
-          else store.open(g.target, f.key);
+          store.openOnMap(g.target, f.key);
           close();
         },
       });

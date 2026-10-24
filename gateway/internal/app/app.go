@@ -736,6 +736,12 @@ func (a *App) startRun(s *sess) {
 	}
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
+	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
+	ag := a.cfg.Agent
+	in.MaxSteps = wireLimit(ag.Steps())
+	in.RunTimeoutMs = wireMs(ag.RunLimit())
+	in.ApprovalTimeoutMs = wireMs(ag.ApprovalLimit())
+	in.MaxOutput = ag.OutputBytes()
 	if r.scheduled != nil {
 		limit, _ := schedule.Timeout(*r.scheduled)
 		in.RunTimeoutMs = int(limit / time.Millisecond)
@@ -961,9 +967,12 @@ func (a *App) finish(s *sess, status, detail string) {
 			note = "（回复太长，被截断了）"
 		}
 	case proto.StatusBudget:
-		note = "（这一轮调用工具的次数达到上限，已停止）"
+		note = fmt.Sprintf("（这条消息已经请求了 %d 次模型，到了上限，先停在这里。发「继续」接着做；上限在网页拓扑图的内核节点里改，0 表示不限）", r.calls)
 	case proto.StatusTimeout:
-		note = "（这一轮运行超时，已停止）"
+		note = "（这条消息处理的时间到了上限，先停在这里。发「继续」接着做；时限在网页拓扑图的内核节点里改，0 表示不限）"
+		if r.scheduled != nil {
+			note = "（任务运行超时，已停止；时限在定时任务里改）"
+		}
 	case proto.StatusCancelled:
 		note = "（已停止）"
 	case proto.StatusRefused:
@@ -1189,4 +1198,19 @@ func prettyArgs(raw json.RawMessage) string {
 		s = string(r[:800]) + "…"
 	}
 	return s
+}
+
+// wireLimit 把“0 表示不限”的设置换成发给内核的值：内核那边 0 表示用它自己的配置，小于 0 才是不限。
+func wireLimit(n int) int {
+	if n <= 0 {
+		return -1
+	}
+	return n
+}
+
+func wireMs(d time.Duration) int {
+	if d <= 0 {
+		return -1
+	}
+	return int(d / time.Millisecond)
 }

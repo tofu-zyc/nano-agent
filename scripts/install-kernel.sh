@@ -357,9 +357,17 @@ echo "$VERSION" >"$DIR/VERSION"
 if [ "$UPGRADE" = 1 ]; then
 	# 只改网关地址和名字两行，别的配置原样留着
 	# 技能已经改放在网关上，旧版本写的 skills = 一并去掉
+	# 每条消息的上限现在由网关每一轮带过来（网页拓扑图里改），以前写的默认值也去掉
 	sed -e "s|^[[:space:]]*gateway[[:space:]]*=.*|gateway = $GATEWAY|" \
 		-e "s|^[[:space:]]*node[[:space:]]*=.*|node = $NAME|" \
-		-e "/^[[:space:]]*skills[[:space:]]*=/d" "$DIR/kernel.conf" >"$DIR/kernel.conf.new"
+		-e "/^[[:space:]]*skills[[:space:]]*=/d" \
+		-e "/^[[:space:]]*max_steps[[:space:]]*=[[:space:]]*16[[:space:]]*$/d" \
+		-e "/^[[:space:]]*run_timeout[[:space:]]*=[[:space:]]*600[[:space:]]*$/d" \
+		-e "/^[[:space:]]*approval_timeout[[:space:]]*=[[:space:]]*300[[:space:]]*$/d" \
+		-e "/^[[:space:]]*max_output[[:space:]]*=[[:space:]]*65536[[:space:]]*$/d" "$DIR/kernel.conf" >"$DIR/kernel.conf.new"
+	# 最后一行没有换行时先补上，不然追加的配置项会和它粘在一起
+	[ -z "$(tail -c 1 "$DIR/kernel.conf.new")" ] || echo >>"$DIR/kernel.conf.new"
+	grep -q '^[[:space:]]*gateway[[:space:]]*=' "$DIR/kernel.conf.new" || echo "gateway = $GATEWAY" >>"$DIR/kernel.conf.new"
 	grep -q '^[[:space:]]*node[[:space:]]*=' "$DIR/kernel.conf.new" || echo "node = $NAME" >>"$DIR/kernel.conf.new"
 	mv -f "$DIR/kernel.conf.new" "$DIR/kernel.conf"
 else
@@ -373,13 +381,9 @@ gateway = $GATEWAY
 # 这台电脑在网关里的名字
 node = $NAME
 
-# 没有写口令：第一次连上网关时请求配对，在网关网页的「设备」里核对确认码、点允许，
+# 没有写口令：第一次连上网关时请求配对，在网关网页上核对确认码、点允许，
 # 网关发给这台电脑的专用口令会存在本文件旁边的 paired.token。
-
-max_steps = 16
-run_timeout = 600
-approval_timeout = 300
-max_output = 65536
+# 每条消息最多请求模型几次、最长多久等设置都在网关网页的拓扑图里改，这里不用写。
 EOF
 	umask 022
 fi

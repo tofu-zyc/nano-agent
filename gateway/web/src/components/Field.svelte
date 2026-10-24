@@ -91,9 +91,12 @@
   const proxyKind = $derived(!f.value ? 'default' : f.value === 'none' ? 'direct' : 'custom');
   let customProxy = $state(false);
   const gatewayProxy = $derived(store.field('network.proxy')?.value as string | undefined);
+  // 网关进程实际看到的代理环境变量：作为服务运行时，终端里设的代理传不进来
+  const envProxy = $derived(store.ov?.gateway.env_proxy ?? '');
+  const envText = $derived(envProxy ? `环境变量里是 ${envProxy}` : '网关进程的环境变量里没有代理，等于直连');
   function proxyHint() {
-    if (isGatewayProxy) return '跟随网关进程的环境变量（HTTPS_PROXY 等）';
-    if (!gatewayProxy) return '用网关的默认代理（现在是：跟随环境变量）';
+    if (isGatewayProxy) return `跟随网关进程的环境变量（HTTPS_PROXY 等）：${envText}。网关作为服务运行时，终端里设的代理变量传不进来，要用代理就选“自定义”填地址`;
+    if (!gatewayProxy) return `用网关的默认代理（现在是跟随环境变量：${envText}）`;
     return `用网关的默认代理（现在是：${gatewayProxy === 'none' ? '直连' : gatewayProxy}）`;
   }
 </script>
