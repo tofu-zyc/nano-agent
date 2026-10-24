@@ -119,7 +119,7 @@
         {#each a.bots as b (b.id)}
           <button class="p-srow" onclick={() => store.open({ type: 'bot', id: b.id })} title={'渠道 ID：' + b.channel}>
             <Icon name={b.kind === 'feishu' ? 'feishu' : 'send'} size={14} />
-            <span class="p-grow">{b.name} <span class="muted p-small">{botKindLabel(b.kind)}</span></span>
+            <span class="p-grow">{b.name}{#if b.name !== botKindLabel(b.kind)} <span class="muted p-small">{botKindLabel(b.kind)}</span>{/if}</span>
             <span class="muted p-small">{b.enabled ? '开着' : '停用'}</span>
             <Icon name="right" size={13} />
           </button>
@@ -130,7 +130,7 @@
       {#if unbound.length}
         <select class="p-select" bind:value={pick} onchange={() => bind(pick)}>
           <option value="">把一个机器人绑到它…</option>
-          {#each unbound as b (b.id)}<option value={b.id}>{b.name}（{botKindLabel(b.kind)}{b.enabled ? '' : ' · 停用'}）</option>{/each}
+          {#each unbound as b (b.id)}<option value={b.id}>{b.name}{#if b.name !== botKindLabel(b.kind)}（{botKindLabel(b.kind)}）{/if}{b.enabled ? '' : ' · 停用'}</option>{/each}
         </select>
       {/if}
       <div class="p-actions tight">
