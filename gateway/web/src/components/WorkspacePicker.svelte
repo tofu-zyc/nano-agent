@@ -133,7 +133,7 @@
               <span class="dot {m.online ? 'online' : 'stopped'}"></span>
             </button>
           {/each}
-          <button class="mc ghost" onclick={() => { onclose(); store.go('#/devices'); }}><Icon name="server" size={14} />添加 SSH 服务器…</button>
+          <button class="mc ghost" onclick={() => { onclose(); store.openOnMap({ type: 'machines' }); }}><Icon name="server" size={14} />接入电脑或 SSH 服务器…</button>
         </div>
       </div>
     </div>

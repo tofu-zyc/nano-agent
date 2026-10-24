@@ -86,7 +86,7 @@ if ($Uninstall) {
     Remove-Task
     if (-not $NoPath) { Remove-UserPath $Dir }
     Remove-Item -Recurse -Force $Dir
-    Say "已卸载。网关网页「设备」里配对过的这台电脑可以一并移除。"
+    Say "已卸载。网关网页拓扑图上配对过的这台电脑可以一并移除。"
     exit 0
 }
 
@@ -191,7 +191,7 @@ if (-not (Conf-Get "exec")) { Conf-Set "exec" $Exec }
 $text = (@($ConfHead) + $ConfLines) -join "`r`n"
 [System.IO.File]::WriteAllText($Conf, $text + "`r`n", $Utf8)
 
-# 没有口令：第一次连网关时请求配对，在网关网页「设备」里核对确认码。
+# 没有口令：第一次连网关时请求配对，在网关网页上核对确认码。
 # 配对口令由内核写在 kernel.conf 旁边的 paired.token。
 
 # 退出码 75：内核换上了新版本（或退回了旧版本），马上重新拉起；0：正常退出（被网关拒绝等）；其他：崩溃，等一会儿再拉起
@@ -318,7 +318,7 @@ while ($true) {
         $code = $Matches[1]
         Say ""
         Say "  确认码：$($code.Substring(0,3)) $($code.Substring(3))"
-        Say "  打开网关网页的「设备」页面，核对确认码一致后点「允许接入」。"
+        Say "  打开网关网页（会弹出接入请求），核对确认码一致后点「允许接入」。"
         Say "  （可以关掉这个窗口，内核会在后台一直等着。）"
         $codeDeadline = (Get-Date).AddMinutes(5)
     }
@@ -337,7 +337,7 @@ if ($code) {
     }
     Say "暂时没连上网关，内核会在后台一直重试。现在的状态："
     & $Kernel status
-    Say "检查：网关地址对不对（$Gateway）、网页「设备」里电脑接入有没有启用、防火墙是否放行端口。"
+    Say "检查：网关地址对不对（$Gateway）、网关网页拓扑图「接入机器」里电脑接入有没有启用、防火墙是否放行端口。"
     Say "看状态：nano-kernel status；看日志：nano-kernel logs -f（新开的终端里）"
 }
 exit 0

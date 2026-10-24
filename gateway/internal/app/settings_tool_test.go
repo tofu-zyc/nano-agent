@@ -52,8 +52,14 @@ func TestSettingsQueryAndSet(t *testing.T) {
 	if !ok || !strings.Contains(text, "context.compact_at") || strings.Contains(text, "search.enabled") {
 		t.Fatalf("查 memory 组：%v %s", ok, text)
 	}
-	if ok, text = queryCall(e, `{"what":"settings","group":"gateway"}`); !ok || !strings.Contains(text, `"web.listen"`) || !strings.Contains(text, `"changeable": false`) {
-		t.Fatalf("要重启的项应当标成不能改：%s", text)
+	if ok, text = queryCall(e, `{"what":"settings","group":"web"}`); !ok || !strings.Contains(text, `"web.listen"`) || !strings.Contains(text, `"changeable": false`) || !strings.Contains(text, "网页拓扑图的「网页」节点") {
+		t.Fatalf("要重启的项应当标成不能改，并说在哪个节点改：%s", text)
+	}
+	if ok, text = queryCall(e, `{"what":"settings","group":"agent"}`); !ok || !strings.Contains(text, `"agent.max_steps"`) || !strings.Contains(text, `"workspace.mode"`) {
+		t.Fatalf("查 agent 组：%s", text)
+	}
+	if ok, text = adminCall(e, `{"action":"settings_set","key":"agent.max_steps","value":0}`); !ok {
+		t.Fatalf("改每条消息的上限：%s", text)
 	}
 
 	if ok, text = adminCall(e, `{"action":"settings_set","key":"context.compact_at","value":0.8}`); !ok {
@@ -124,4 +130,25 @@ func TestTurnsQuery(t *testing.T) {
 		t.Fatalf("轮次：%+v", out.Turns)
 	}
 	e.roundTrip(t)
+}
+
+// 聊天里查设置的分组就是拓扑图上的节点：工具 schema 里列的要和 config.Nodes 一致
+func TestSettingsGroupsMatchNodes(t *testing.T) {
+	var sc struct {
+		Properties struct {
+			Group struct {
+				Enum []string `json:"enum"`
+			} `json:"group"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(gatewaySchema), &sc); err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, n := range config.Nodes {
+		want = append(want, n.ID)
+	}
+	if strings.Join(sc.Properties.Group.Enum, ",") != strings.Join(want, ",") {
+		t.Fatalf("Gateway 工具的 group：%v，节点：%v", sc.Properties.Group.Enum, want)
+	}
 }

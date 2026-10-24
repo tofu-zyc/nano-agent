@@ -10,10 +10,7 @@
   import ActivityBar from './components/ActivityBar.svelte';
   import Topology from './views/Topology.svelte';
   import Sessions from './views/Sessions.svelte';
-  import Personas from './views/Personas.svelte';
-  import Settings from './views/Settings.svelte';
-  import Devices from './views/Devices.svelte';
- import Schedules from './views/Schedules.svelte';
+  import PersonaEditor from './components/panels/PersonaEditor.svelte';
 
   onMount(() => {
     store.boot();
@@ -29,6 +26,7 @@
         setTimeout(() => {
           if (e.defaultPrevented) return;
           if (store.palette) store.palette = false;
+          else if (store.persona) return; // 人格编辑器自己处理（可能有没保存的修改）
           else if (store.inspector) store.inspector = null;
         }, 0);
       }
@@ -48,14 +46,6 @@
       <div class="stage">
         {#if store.route.view === 'sessions'}
           <Sessions />
-        {:else if store.route.view === 'personas'}
-          <Personas />
-        {:else if store.route.view === 'settings'}
-          <Settings />
-        {:else if store.route.view === 'schedules'}
- <Schedules />
- {:else if store.route.view === 'devices'}
-          <Devices />
         {:else}
           <Topology />
         {/if}
@@ -68,6 +58,9 @@
   </div>
   {#if store.palette}
     <Palette />
+  {/if}
+  {#if store.persona}
+    <PersonaEditor />
   {/if}
   {#if store.restarting}
     <div class="restarting"><div class="orb small"></div><div>网关正在重启，页面会自动重连…</div></div>

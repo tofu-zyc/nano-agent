@@ -474,7 +474,7 @@ func (a *App) cmdCron(c in, arg string) {
 			fmt.Fprintf(&b, "\n%d. %s · %s · %s · 下次 %s（%s）", i+1, t.Name, t.When, state, next, t.ID)
 		}
 		if len(tasks) == 0 {
-			b.WriteString("\n还没有任务，可以请我创建，或在网页的定时任务页添加。")
+			b.WriteString("\n还没有任务，可以请我创建，或在网页拓扑图的「定时任务」节点里添加。")
 		}
 		a.answer(c, b.String())
 		return

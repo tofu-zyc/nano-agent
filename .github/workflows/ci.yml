@@ -28,6 +28,21 @@ jobs:
         run: scripts/fetch-zig.sh && scripts/fetch-rg.sh --all
       - name: make test
         run: make test
+      # 网页界面检查：每个配置项都能在拓扑图的节点里找到、改了能保存（make test 里没有浏览器时跳过，这里装上再跑）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 装浏览器
+        run: python -m pip install playwright && python -m playwright install --with-deps chromium-headless-shell
+      - name: 网页界面检查
+        run: make test-ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-check
+          path: build/ui-check/
+          if-no-files-found: ignore
+          retention-days: 3
       - name: 交叉编译 Windows 程序
         run: make -C kernel windows-exec windows-kernel
       - uses: actions/upload-artifact@v4

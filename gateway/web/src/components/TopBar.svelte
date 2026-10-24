@@ -3,7 +3,7 @@
   import { num, pct, since } from '../lib/format';
   import Icon from './Icon.svelte';
 
-  const titles: Record<string, string> = { schedules: '定时任务', topology: '拓扑', sessions: '会话', personas: '人格', settings: '设置', devices:'设备与服务器' };
+  const titles: Record<string, string> = { topology: '拓扑', sessions: '会话' };
   const ov = $derived(store.ov!);
   const t = $derived(ov.totals);
   const isMac = navigator.platform.toLowerCase().includes('mac');
@@ -17,12 +17,12 @@
 
   <button class="search" onclick={() => (store.palette = true)}>
     <Icon name="search" size={15} />
-    <span>搜索设置、会话、操作…</span>
+    <span>搜索设置、节点、会话、操作…</span>
     <span class="kbd">{isMac ? '⌘' : 'Ctrl'} K</span>
   </button>
 
   <div class="pills">
-    <button class="pill" onclick={() => store.open({ type: 'kernel' })} title="内核（节点）">
+    <button class="pill" onclick={() => store.openOnMap(ov.kernels.length === 1 ? { type: 'kernel', node: ov.kernels[0].node } : ov.kernels.length ? { type: 'machines' } : { type: 'kernel' })} title="内核">
       <span class="dot {ov.kernels.length ? 'online' : 'error'}"></span>
       {#if ov.kernels.length === 1}
         内核 · {ov.kernels[0].node}
@@ -38,15 +38,15 @@
       {ov.models?.models?.find((m) => m.default)?.label || '未配置模型'}
       {#if (ov.models?.models?.length ?? 0) > 1}<span class="muted">· {ov.models?.models?.length}</span>{/if}
     </button>
-    <button class="pill" onclick={() => store.open({ type: 'gateway' })} title="启动以来的前缀缓存命中率">
+    <button class="pill" onclick={() => store.openOnMap({ type: 'gateway' })} title="启动以来的前缀缓存命中率">
       <Icon name="zap" size={14} class="zap" />
       缓存 {pct(t.cached_tokens, t.prompt_tokens)}
       <span class="muted">· {num(t.prompt_tokens)} tokens</span>
     </button>
     {#if ov.runtime}
-      <button class="pill" onclick={() => store.go('#/settings')} title="网关版本和运行时长；点开设置查看详情">
+      <button class="pill" onclick={() => store.openOnMap({ type: 'gateway' })} title="网关版本和运行时长；点开网关节点检查更新、重启">
         <Icon name="hub" size={14} />
-        v{ov.runtime.version}
+        v{ov.runtime.version.replace(/^v/, '')}
         {#if ov.runtime.update?.available}<span class="newver">→ {ov.runtime.update.latest} 可更新</span>{/if}
         <span class="muted">· {since(ov.runtime.started)}</span>
       </button>

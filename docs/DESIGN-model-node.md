@@ -4,6 +4,8 @@
 最后更新：2026-10-22  
 相关：[HANDOFF.md](HANDOFF.md)、[ARCHITECTURE.md](ARCHITECTURE.md)
 
+> v0.4 起没有设置页了：文中说的“设置页”“设备页”都换成了拓扑图上的节点（模型请求参数在模型节点里），见 [DESIGN-topology-config.md](DESIGN-topology-config.md)。
+
 ## 0. 先纠正概念
 
 **模型就是模型。** 一个模型 = 某个接口上的一个模型名。模型只有一个来源：模型列表（`data/models.json`）。

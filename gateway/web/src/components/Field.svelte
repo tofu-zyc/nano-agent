@@ -14,9 +14,9 @@
     'llm.provider': { openai: 'OpenAI 兼容', mock: '假模型' },
     'llm.modalities': { text: '文字', image: '图片' },
     'feishu.domain': { feishu: '飞书', lark: 'Lark' },
-    'telegram.show': { '': '跟随默认' },
-    'feishu.show': { '': '跟随默认' },
   };
+  // 机器人自己的显示档位：空表示跟随 Agent 节点里的默认值
+  const followShow = $derived(`跟随 Agent（${store.field('channels.show')?.value ?? '过程'}）`);
   const sourceLabel = { web: '网页里改过', file: '配置文件', env: '环境变量', default: '默认值' };
 
   const toText = (v: any) => (v === null || v === undefined ? '' : f.type === 'json' ? JSON.stringify(v, null, 2) : String(v));
@@ -84,7 +84,7 @@
     }
   }
 
-  const labelOf = (o: string) => optionLabels[f.key]?.[o] ?? o;
+  const labelOf = (o: string) => ((f.key === 'telegram.show' || f.key === 'feishu.show') && o === '' ? followShow : (optionLabels[f.key]?.[o] ?? o));
 
   // 代理：默认（网关的默认代理，或者网关自己跟随环境变量）/ 直连 / 自定义地址
   const isGatewayProxy = $derived(f.key === 'network.proxy');

@@ -38,7 +38,7 @@ func (a *App) cmdPersona(c in, arg string) {
 		for i, p := range presets {
 			fmt.Fprintf(&b, "%d. %s：%s\n", i+1, p.Name, p.Desc)
 		}
-		b.WriteString("/persona <编号或名字> 给这个会话换上，/persona default 改回默认人格。默认人格和人格内容在网页「人格」页里改。")
+		b.WriteString("/persona <编号或名字> 给这个会话换上，/persona default 改回默认人格。默认人格和人格内容在网页拓扑图的 Agent 节点里改。")
 		a.answer(c, b.String())
 		return
 	}
