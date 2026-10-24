@@ -369,37 +369,7 @@ def run(page, url, nano):
         ok("群 / 私聊 / 机器人 / 群会话的连线都连对了")
     if ("s:" + room["sid"] + ">ag:default") in edges:
         fail("群的会话还连到了默认 agent")
-    # 入口直连 agent 的虚线不能穿过任何 agent 卡片
-    lane_ids = ["c:" + bot["channel"] + ">ag:" + bao] if bot else []
-    if "sched>ag:default" in edges:
-        lane_ids.append("sched>ag:default")
-    if lane_ids:
-        crossing = page.evaluate("""(ids) => {
-          const rects = [];
-          for (const g of document.querySelectorAll('g.node')) {
-            if (!g.dataset.id.startsWith('ag:')) continue;
-            const m = g.transform.baseVal.consolidate().matrix;
-            const r = g.querySelector('.card').getBBox();
-            rects.push([m.e + r.x, m.f + r.y, m.e + r.x + r.width, m.f + r.y + r.height]);
-          }
-          const bad = new Set();
-          for (const id of ids) {
-            const p = document.querySelector('path.edge[data-id="' + id + '"]');
-            if (!p) continue;
-            const L = p.getTotalLength();
-            for (let t = 0; t <= L; t += 5) {
-              const pt = p.getPointAtLength(t);
-              for (const r of rects) {
-                if (pt.x > r[0] + 3 && pt.x < r[2] - 3 && pt.y > r[1] + 3 && pt.y < r[3] - 3) bad.add(id);
-              }
-            }
-          }
-          return [...bad];
-        }""", lane_ids)
-        if crossing:
-            fail("这些线穿过了 agent 卡片：" + json.dumps(crossing, ensure_ascii=False))
-        else:
-            ok("入口直连 agent 的线不穿过任何 agent 卡片")
+    # 入口直接连 agent 的虚线：和原来一样是直连，线画在卡片下面（被挡住的段落看不见）
     page.screenshot(path=os.path.join(SHOTS, "topology-groups.png"))
     # 群面板
     open_node(page, "rm:" + room["id"])

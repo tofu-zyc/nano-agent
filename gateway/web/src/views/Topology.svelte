@@ -15,7 +15,7 @@
   type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'room' | 'dm' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
   type Col = 'in' | 'sess' | 'room' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
   type N = { id: string; kind: Kind; col: Col; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
-  type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean; route?: 'bottom'; off?: number };
+  type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
   // 节点上的标记：有问题要处理（err / warn），或者有新东西（info）
   type Issue = { level: 'err' | 'warn' | 'info'; text: string; n?: number };
 
@@ -130,17 +130,16 @@
     }
     // 没有会话的已启用渠道、没有任务会话的定时任务直接连到 Agent，表示“接上了”
     const agentOfChannel = (name: string) => botOf(name)?.agent ?? 'default';
-    let laneNo = 0;
     for (const c of chans) {
       // 每个机器人（停用的也算）都画出它绑到哪个 agent；有会话的时候线走会话那边
       if (shown.some((s) => sessionChannels(s).includes(c.name))) continue;
       const ag = agentOfChannel(c.name);
       if (!agents.some((a) => a.id === ag)) continue;
-      edges.push({ id: `c:${c.name}>ag:${ag}`, from: 'c:' + c.name, to: 'ag:' + ag, off: laneNo++,
-        color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true, route: 'bottom' });
+      edges.push({ id: `c:${c.name}>ag:${ag}`, from: 'c:' + c.name, to: 'ag:' + ag,
+        color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true });
     }
     if (!shown.some((s) => s.sid.startsWith('cron:'))) {
-      edges.push({ id: 'sched>ag:default', from: 'sched', to: 'ag:default', off: laneNo++, color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true, route: 'bottom' });
+      edges.push({ id: 'sched>ag:default', from: 'sched', to: 'ag:default', color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true });
     }
 
     // Agent 列：每个 agent 一个节点（各有自己的名字、人格、模型、绑定的机器人），
@@ -294,38 +293,10 @@
     return { x: n.x + (side === 'l' ? 0 : n.w), y: n.y + n.h / 2 };
   }
 
-  // 折线（圆角）：入口直接连 Agent 的线用它走空隙，不横穿卡片
-  function roundedPath(pts: { x: number; y: number }[], r = 14): string {
-    let d = `M${pts[0].x} ${pts[0].y}`;
-    for (let i = 1; i < pts.length - 1; i++) {
-      const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1];
-      const d1 = { x: p1.x - p0.x, y: p1.y - p0.y };
-      const d2 = { x: p2.x - p1.x, y: p2.y - p1.y };
-      const l1 = Math.hypot(d1.x, d1.y) || 1, l2 = Math.hypot(d2.x, d2.y) || 1;
-      const r1 = Math.min(r, l1 / 2), r2 = Math.min(r, l2 / 2);
-      const a = { x: p1.x - (d1.x / l1) * r1, y: p1.y - (d1.y / l1) * r1 };
-      const b = { x: p1.x + (d2.x / l2) * r2, y: p1.y + (d2.y / l2) * r2 };
-      d += ` L` + a.x + ' ' + a.y + ` Q` + p1.x + ' ' + p1.y + ' ' + b.x + ' ' + b.y;
-    }
-    const last = pts[pts.length - 1];
-    return d + ` L` + last.x + ' ' + last.y;
-  }
-
   function edgePath(e: E) {
     const a = layout.byId.get(e.from);
     const b = layout.byId.get(e.to);
     if (!a || !b) return '';
-    // 入口直接连到 Agent 的线（没有会话的机器人、定时任务）：从入口右边进「入口/会话」之间的空隙下去，
-    // 沿画布最下面横过去，再从「群/Agent」之间的空隙上来接到 Agent 左边——一路上不碰任何卡片。
-    if (e.route === 'bottom') {
-      const off = e.off ?? 0;
-      const p = { x: a.x + a.w, y: a.y + a.h / 2 };
-      const q = { x: b.x, y: b.y + b.h / 2 };
-      const lane = X.chan + 200 + 14 + off * 8; // 入口和会话之间的空隙
-      const yb = layout.H - 20 - off * 8;       // 画布最下面的横向通道
-      const xc = X.room + 200 + 18 + off * 8;   // 群和 Agent 之间的空隙
-      return roundedPath([p, { x: lane, y: p.y }, { x: lane, y: yb }, { x: xc, y: yb }, { x: xc, y: q.y }, q]);
-    }
     const p = anchor(a, 'r');
     const q = anchor(b, 'l');
     const dx = Math.max(40, (q.x - p.x) * 0.5);
