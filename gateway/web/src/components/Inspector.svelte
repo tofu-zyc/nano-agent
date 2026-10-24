@@ -106,7 +106,7 @@
           sub: !si?.enabled ? '已关闭' : ready ? `DeepSeek · 今天搜索 ${si.today.search} 次` : '没有可用的 key' };
       }
       case 'memory':
-        return { icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: '什么时候整理上下文、整理到多少、归档留多久' };
+        return { icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: '每个 agent 记住的人和事，以及上下文怎么整理' };
       case 'skills':
         return { icon: 'book', color: 'var(--c-skill)', title: '技能', sub: `${ov.skills?.list?.length ?? 0} 个技能，所有内核共用` };
       case 'schedules': {
@@ -171,7 +171,7 @@
       {:else if target.type === 'search'}
         <SearchPanel />
       {:else if target.type === 'memory'}
-        <MemoryPanel />
+        <MemoryPanel agent={target.agent} />
       {:else if target.type === 'skills'}
         <SkillsPanel />
       {:else if target.type === 'schedules'}

@@ -95,6 +95,7 @@ class Store {
   connected = $state(false);
   historyTick = $state<Record<string, number>>({});
   personaTick = $state(0);
+  memoryTick = $state(0); // 记忆、整理记忆、内心活动有变化（记忆面板据此重读）
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
   restarting = $state(false);
   updating = $state(false);
@@ -459,6 +460,14 @@ class Store {
         break;
       case 'models':
         this.reloadModels();
+        break;
+      case 'memory':
+      case 'dream':
+      case 'life':
+        // 记忆变了、开始/结束整理、内心活动醒了：记忆面板重读，agent 节点上的状态跟着变
+        this.memoryTick++;
+        clearTimeout(this.reloadTimer);
+        this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 300);
         break;
       case 'agents':
       case 'bots':

@@ -65,7 +65,8 @@
     const nodes: N[] = [];
     const edges: E[] = [];
 
-    const all = (ov.sessions ?? []).slice();
+    // 拟人型的内心活动是 agent 自己的会话，从 agent 节点进，不占会话列
+    const all = (ov.sessions ?? []).filter((s) => !/^@[^/]+\/(life|dream)$/.test(s.sid));
     // 先挑出最值得看的会话（在跑的、待审批的、最近活跃的），再按渠道排，连线少交叉
     all.sort((a, b) => Number(b.running || b.pending > 0) - Number(a.running || a.pending > 0) || b.last_at - a.last_at);
     const shown = all.slice(0, MAX_SESSIONS);
@@ -586,7 +587,10 @@
     }
   }
   function agentSub(a: AgentInfo): string {
-    const bits = [`${a.sessions} 个会话`];
+    const bits: string[] = [];
+    if (a.memory?.dreaming) bits.push('🌙 整理记忆');
+    else if (a.life) bits.push({ sleeping: '💤 睡着', awake: '🌱 醒着', thinking: '💭 在想事情' }[a.life.state]);
+    bits.push(`${a.sessions} 个会话`);
     if (a.bots.length) bits.push(`${a.bots.length} 个机器人`);
     return bits.join(' · ');
   }
@@ -933,10 +937,10 @@
             <text x={n.w / 2} y="25" class="t2 center">还有 {n.data} 个会话 →</text>
           {:else if n.kind === 'agent'}
             {@const ag = n.data as AgentInfo}
-            <rect class="card agent-card" class:active={ag.running} width={n.w} height={n.h} rx="20" />
+            <rect class="card agent-card" class:active={ag.running || ag.life?.state === 'thinking' || ag.memory?.dreaming} width={n.w} height={n.h} rx="20" />
             <circle class="disc" cx="34" cy="33" r="21" />
             <text x="34" y="41" class="emoji">{ag.emoji || '🙂'}</text>
-            <text x="66" y="26" class="t3">{ag.default ? 'AGENT · 默认' : 'AGENT'}</text>
+            <text x="66" y="26" class="t3">{ag.default ? 'AGENT · 默认' : 'AGENT'}{ag.style === 'life' ? ' · 拟人' : ''}</text>
             <text x="66" y="45" class="t1">{truncate(ag.name, 10)}</text>
             <text x="66" y="60" class="t2">{truncate(agentSub(ag), 22)}</text>
           {:else if n.kind === 'gateway'}
@@ -983,9 +987,11 @@
             <rect class="card" width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="34" cy="36" r="18" />
             <g class="ico"><Icon name="brain" x={23} y={25} size={22} /></g>
+            {@const memTotal = (ov.agents ?? []).reduce((n, x) => n + (x.memory?.total ?? 0), 0)}
+            {@const memPeople = (ov.agents ?? []).reduce((n, x) => n + (x.memory?.people ?? 0), 0)}
             <text x="62" y="24" class="t3">上下文与记忆</text>
-            <text x="62" y="43" class="t1">到 {pctOf('context.compact_at', 0.75)} 自动整理到 {pctOf('context.compact_to', 0.4)}</text>
-            <text x="62" y="60" class="t2">{mi?.summarized ?? 0} 个会话整理过 · {mi?.archives ?? 0} 份归档</text>
+            <text x="62" y="43" class="t1">{memTotal ? `记住了 ${memTotal} 条 · ${memPeople} 个人` : '长期记忆还是空的'}</text>
+            <text x="62" y="60" class="t2">到 {pctOf('context.compact_at', 0.75)} 整理上下文 · {mi?.summarized ?? 0} 个会话整理过</text>
           {:else if n.kind === 'skills'}
             {@const list = n.data?.list ?? []}
             <rect class="card" width={n.w} height={n.h} rx="16" />

@@ -41,14 +41,8 @@ func turnsOf(h []session.Msg, base int) []turn {
 		switch m.Role {
 		case "user":
 			t := turn{start: base + i}
-			text := m.Content
-			for strings.HasPrefix(text, "[系统] ") { // 环境说明不是用户说的
-				_, rest, ok := strings.Cut(text, "\n")
-				if !ok {
-					rest = ""
-				}
-				text = rest
-			}
+			// 环境说明、记忆说明、想起来的、近况都是网关放的，不是用户说的
+			text := diaryText(m.Content)
 			if g := stampRe.FindStringSubmatch(text); g != nil {
 				t.at, t.via, text = g[1]+" "+g[2], g[3], text[len(g[0]):]
 			}
@@ -73,12 +67,14 @@ func renderTurn(t turn) string {
 	if head := strings.Trim(t.at+" · "+t.via, " ·"); head != "" {
 		b.WriteString("〔" + head + "〕\n")
 	}
-	b.WriteString("你：" + clip(strings.TrimSpace(t.user), 200))
+	if user := strings.TrimSpace(t.user); user != "" {
+		b.WriteString("你：" + clip(user, 200) + "\n")
+	}
 	reply := strings.TrimSpace(t.reply)
 	if reply == "" {
 		reply = "（没有回复）"
 	}
-	b.WriteString("\n机器人：" + clip(reply, 400))
+	b.WriteString("机器人：" + clip(reply, 400))
 	if t.tools > 0 {
 		fmt.Fprintf(&b, "（调用了 %d 次工具）", t.tools)
 	}

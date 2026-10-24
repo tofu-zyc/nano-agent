@@ -1,11 +1,12 @@
 // 把会话历史整理成对话视图要显示的块
 import type { Attachment, Msg, Usage } from './types';
-import { parseUser } from './format';
+import { parseUser, type NoteKind } from './format';
 
 export type ToolView = { id: string; name: string; detail: string; args: string; ok?: boolean; result?: string };
 
 export type Block =
   | { type: 'env'; text: string }
+  | { type: 'note'; kind: NoteKind; text: string }
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
   | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number };
 
@@ -46,7 +47,9 @@ export function buildBlocks(history: Msg[]): Block[] {
     if (m.role === 'user') {
       const p = parseUser(m.content ?? '');
       for (const e of p.env) out.push({ type: 'env', text: e });
-      out.push({ type: 'user', text: p.text, time: p.time, via: p.via, sender: p.sender, images: m.images });
+      for (const n of p.notes) out.push({ type: 'note', kind: n.kind, text: n.text });
+      // 只有网关放的说明（群里的记忆说明、约好的提醒）：不画一个空的气泡
+      if (p.text.trim() || m.images?.length) out.push({ type: 'user', text: p.text, time: p.time, via: p.via, sender: p.sender, images: m.images });
     } else if (m.role === 'assistant') {
       const tools: ToolView[] = (m.tool_calls ?? []).map((c) => {
         const t: ToolView = { id: c.id, name: c.function.name, args: c.function.arguments, detail: toolDetail(c.function.name, c.function.arguments) };
