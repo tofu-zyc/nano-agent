@@ -863,6 +863,13 @@ func (a *App) dropAgentFromRooms(id string) {
 		if !changed {
 			continue
 		}
+		// 私聊少了一个人就没意义了：连这个房间一起删（聊天记录还在会话里）
+		if r.IsDM() && len(r.Members) < 2 {
+			if err := a.roomStore.Delete(r.ID); err != nil {
+				a.log.Warn("两个人的私聊少了一个人，没删掉", "room", r.ID, "err", err)
+			}
+			continue
+		}
 		if len(r.Members) == 0 {
 			if err := a.roomStore.Delete(r.ID); err != nil {
 				a.log.Warn("清空成员的群没删掉", "room", r.ID, "err", err)
