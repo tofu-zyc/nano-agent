@@ -42,6 +42,7 @@ func TestGroupThoughtBudget(t *testing.T) {
 		e.a.mu.Unlock()
 		t.Fatal("没有默认 agent")
 	}
+	ag.Style = agents.StyleLife // 只有拟人型主动插话
 	for eag, want := range map[string]int{"low": 6, "normal": 18, "high": 45} {
 		v := eag
 		ag.GroupEagerness = &v

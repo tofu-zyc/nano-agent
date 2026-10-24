@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
@@ -54,9 +55,14 @@ func groupPerHour(v string) (string, int) {
 }
 
 // groupRuleOf 是会话所属 agent 的群聊规则。调用方持有锁。
-func (a *App) groupRuleOf(sid string) groupRule {
-	ag := a.agentOf(sid)
+func (a *App) groupRuleOf(sid string) groupRule { return a.groupRuleFor(a.agentOf(sid)) }
+
+// groupRuleFor 是 agent 的群聊规则。工具型在群里只回被叫到的（不主动插话），拟人型按积极度。
+func (a *App) groupRuleFor(ag agents.Agent) groupRule {
 	eag, per := groupPerHour(pickString(ag.GroupEagerness, "low"))
+	if !ag.Life() {
+		eag, per = "off", 0
+	}
 	// “要不要说话”的判断本身也要花一次模型调用：除了说出口的额度，判断也单独限一下
 	r := groupRule{Eagerness: eag, PerHour: per, Quiet: 20 * time.Second, MinGap: 10 * time.Second, MaxLen: 300, Parts: 3,
 		Decisions: max(2, per*3), ThinkGap: time.Minute}

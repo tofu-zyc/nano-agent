@@ -51,6 +51,7 @@ var Commands = []Command{
 	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
 	{Name: "sleep", Desc: "让 agent 现在去整理记忆（睡觉做梦）", Admin: true},
+	{Name: "wake", Desc: "叫醒拟人型 agent，让它自己待一会儿（冲浪、想事情、找人聊天）", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -158,6 +159,8 @@ type App struct {
 	agentSkills   map[string]*skills.Registry // 每个 agent 自己的技能目录
 	dreams        map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
 	bootAt        time.Time                   // 网关启动的时间（算“空闲多久”的起点）
+	lifes         map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
+	rnd           func() float64              // 随机数，测试里换成固定的
 	approvals     map[int]*approval
 	nextAppr      int
 	runSeq        uint64
@@ -482,6 +485,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "sleep":
 		a.cmdSleep(c)
 		return
+	case "wake":
+		a.cmdWake(c)
+		return
 	case "forget":
 		a.cmdForget(c, arg)
 		return
@@ -786,6 +792,9 @@ func (a *App) startRun(s *sess) {
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
 	if s.scheduled == nil && !head.inner {
 		a.catchUp(head.ep, s.sid)
+	}
+	if !head.trigger && !head.inner {
+		a.lifeAnswered(s.sid) // 有人在这里说话了：之前的主动消息算回了
 	}
 	a.remember(s, batch, a.histEnd(s.sid))
 	if !head.trigger {

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 )
@@ -90,13 +91,26 @@ func TestGroupParts(t *testing.T) {
 
 func TestGroupProactive(t *testing.T) {
 	e := setup(t)
-	withAgents(t, e)
+	store, _ := withAgents(t, e)
 	sid := groupSession(t, e)
 	base := time.Date(2026, 10, 21, 15, 8, 0, 0, time.UTC)
 	e.a.mu.Lock()
 	e.a.now = func() time.Time { return base }
 	e.a.mu.Unlock()
 	e.say("大家好", group(false))
+
+	// 工具型：安静多久都不主动插话
+	e.a.mu.Lock()
+	e.a.now = func() time.Time { return base.Add(time.Minute) }
+	e.a.mu.Unlock()
+	e.a.groupTick()
+	e.k.none()
+	e.a.mu.Lock()
+	life, _ := store.Get("default")
+	life.Style = agents.StyleLife
+	store.Update(life)
+	e.a.now = func() time.Time { return base }
+	e.a.mu.Unlock()
 
 	// 安静期没到：不插话
 	e.a.mu.Lock()

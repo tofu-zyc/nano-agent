@@ -222,3 +222,11 @@ func (s *Server) getDreams(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"days": days, "text": text})
 }
+
+func (s *Server) wakeAgent(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.Wake(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}

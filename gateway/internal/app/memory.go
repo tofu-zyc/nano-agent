@@ -267,6 +267,12 @@ func (a *App) memoryNotes(sid, who, text string, st *session.Settings, dirty *bo
 			st.MemNote, *dirty = h, true
 		}
 	}
+	if note := a.lifeRecentNote(sid); note != "" {
+		if h := fmt.Sprintf("%x", sha256.Sum256([]byte(note))); h != st.LifeNote {
+			parts = append(parts, note)
+			st.LifeNote, *dirty = h, true
+		}
+	}
 	if note, paths := a.recallNote(sid, who, text, st.Recalled); note != "" {
 		parts = append(parts, note)
 		st.Recalled = append(st.Recalled, paths...)
@@ -568,7 +574,7 @@ func (a *App) recentLines(sid string, n int) string {
 	h := a.store.History(sid)
 	var lines []string
 	for i := len(h) - 1; i >= 0 && len(lines) < n; i-- {
-		if h[i].Role == "user" && !strings.HasPrefix(h[i].Content, memNoteOpen) && !strings.HasPrefix(h[i].Content, recallOpen) {
+		if h[i].Role == "user" && !strings.HasPrefix(h[i].Content, memNoteOpen) && !strings.HasPrefix(h[i].Content, recallOpen) && !strings.HasPrefix(h[i].Content, lifeRecentOp) {
 			lines = append(lines, h[i].Content)
 		}
 	}

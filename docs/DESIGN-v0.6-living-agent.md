@@ -249,7 +249,14 @@ invalid: 2026-10-30 已经换工作了，见「张三的新工作」   # 过时�
   - **内核改了**：`kernel/src/tools.c` 里 `Message`、`Knowledge`、`Diary`、`FollowUp` 都是 `NA_TOOL_PUBLIC_READ`（网关执行、权限网关判断，任何模式都交给网关），`main.c` 的 `gateway_tool` 名单加了后三个。旧内核不认识这几个工具会拒绝，内核会自动跟网关升级。
   - 自带整理方法 `skills/dream/SKILL.md`，和 `dream.go` 的 `defaultDreamSkill` 一样（`TestDreamSkillMatchesRepo` 对比，改一处要改另一处）。更新时 `installShipped` 会装上新文件。
   - 测试：`app/dream_test.go`（时间段、技能和仓库一致、日记读写和进度、归档、跑一轮写日志、三种触发和每天上限、拟人型记进内心会话）。
-- [ ] **C 两种类型 + 内心活动**：`style` 字段和设置分组（含修“跟随全局”）、拟人守则、`life` 会话和心跳、`data/life.json`、`Message` 的 `chat:` 和不追着发、近况说明、自带 `skills/life/SKILL.md`、`/wake`。
+- [x] **C 两种类型 + 内心活动**（后端完成，网页在 E）：
+  - 类型：`agents.Agent.Style`（空/`tool` 工具型，`life` 拟人型）、`AgentPatch.style`；工具型在群里不主动插话（`groupRuleFor`：积极度强制 off）。**这是行为变化**：v0.5 的 agent 默认“少插话”，升级后都是工具型、只回被叫到的，要插话得改成拟人型（发布说明要写）。
+  - 设置：`AgentSetting.group`（work/group/life/memory）；新项 `life_awake`、`life_level`、`life_reach`、`life_budget`、`memory`、`dream_when`、`dream_at`、`dream_idle`、`dream_max`、`dream_model`（type `model`，options 是模型 ID）；`applyAgentSetting` 改成按表处理，`nil` 一律恢复默认（修了 v0.5 群聊几项“跟随全局”不生效）。
+  - 拟人守则 `defaultLifeGuide`（`agents/<id>/life.md` 可换）：拟人型每个会话的系统提示都带（换类型会让缓存失效一次）。
+  - `app/life.go`：`lifeState`（`data/life.json`：下次醒来、今天醒几次/找几次人/用多少 token、近况最多 10 条、`Awaiting` 主动找了还没回的私聊、`FollowUps` 留给 D）；`lifeTick`（每 15 秒；第一次只定下 5–15 分钟后醒；醒着、没在想事情、20 分钟内没人找、没超每天次数和预算才醒；间隔按活跃度随机，3 小时没人找就减半）；`startLife`（内心会话 `@<id>/life` 不清空，`compactLimits` 对它封顶 40k/15k token；开头一条 `[系统]` 情况：几点、多久没人找、今天第几次、还能找几次人、最近的聊天和 `to`、谁还没回）；`lifeDone`（记用量、最终回复记成近况）；`lifeRecentNote`（`[近况]…[/近况]` 块放进其他会话的消息前面，变了才放，会话设置 `LifeNote`）；`lifeAnswered`（有人在私聊里说话就清掉 Awaiting 和 FollowUp）；`/wake`、网页 `POST /api/agents/{id}/wake`；`AgentInfo.life`（state sleeping/awake/thinking、next、wake_at、今天的次数、近况、谁没回）。
+  - 内心会话的工具：WebSearch/WebFetch（配了搜索才有）、Knowledge、Message；系统提示 = 人格 + 拟人守则 + life 技能（`skills/life/SKILL.md`，和 `defaultLifeSkill` 一样，有测试对比）。
+  - `Message` 的 `to: chat:<会话>`（`messageChat`，`rooms.go`）：只能发自己的私聊；记进那个会话（assistant）并发到最近说过话的窗口（`epRec.Last`，`attach` 里每条消息更新，一轮结束时存盘）；内心活动里发的要守规矩（`life_reach`、对方没回不再找、每天次数、睡觉时间）。内心活动里能用 Message（`exec.go` 放行 `@<id>/life`）；`life_reach=off` 时也不能私聊别的 agent。
+  - 测试：`app/life_test.go`（技能和仓库一致、醒来的时机和看到的情况、近况只放一次、/wake 不算次数、不醒的几种情况、主动找人的规矩、设置恢复默认和类型）；群聊旧测试改成拟人型测插话，并加了“工具型不插话”。
 - [ ] **D 统一聊天循环**：门槛 + 退避、工具型群里不插话、私聊拆条和 `[不回复]`、`FollowUp`、房间里 agent @ agent、房间发言计额度。
 - [ ] **E 网页**：agent 面板、记忆节点、只读会话、拓扑状态；`check-web-ui.py`。
 - [ ] **F 收尾**：README、HANDOFF、ARCHITECTURE、e2e、`make test`、CI 全绿；等用户同意合并发布 v0.6.0。

@@ -45,7 +45,8 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		return
 	}
 	if m.Name == "Message" {
-		if !a.isAdmin(r.from) {
+		// 管理员让它发，或者拟人型在内心活动里自己想找人（内心活动里有自己的规矩，见 messageChat）
+		if !a.isAdmin(r.from) && !isLifeSID(s.sid) {
 			reply(false, "只有管理员能用 Message 给群和别的 agent 发消息")
 			return
 		}

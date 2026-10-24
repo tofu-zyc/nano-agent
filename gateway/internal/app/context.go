@@ -37,9 +37,17 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			}
 		}
 	}
-	// 整理记忆：人格后面加上整理方法（dream 技能），工具只有日记和记忆
-	if isDreamSID(sid) {
-		system = strings.TrimSpace(system + "\n\n" + a.skillText(a.agentOf(sid).ID, "dream", defaultDreamSkill))
+	ag := a.agentOf(sid)
+	switch {
+	case isDreamSID(sid):
+		// 整理记忆：人格后面加上整理方法（dream 技能），工具只有日记和记忆
+		system = strings.TrimSpace(system + "\n\n" + a.skillText(ag.ID, "dream", defaultDreamSkill))
+	case ag.Life():
+		// 拟人型：每个会话都带拟人守则；内心活动再加上“一个人的时候做什么”（life 技能）
+		system = strings.TrimSpace(system + "\n\n" + a.lifeGuide(ag.ID))
+		if isLifeSID(sid) {
+			system += "\n\n" + a.skillText(ag.ID, "life", defaultLifeSkill)
+		}
 	}
 	noTools := false
 	if s := a.sessions[sid]; s != nil && s.run != nil {
@@ -47,6 +55,20 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	}
 	if isDreamSID(sid) {
 		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
+	} else if isLifeSID(sid) {
+		// 内心活动：上网、记东西、找人
+		for _, spec := range a.searchTools() {
+			tools = append(tools, toolOf(spec))
+		}
+		if a.memoryOn(ag) {
+			tools = append(tools, toolOf(knowledgeTool()))
+		}
+		for _, spec := range a.gatewayTools() {
+			if spec.Name == "Message" {
+				tools = append(tools, toolOf(spec))
+			}
+		}
+		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
 		var all []llm.Tool

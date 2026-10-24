@@ -485,6 +485,23 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 		return
 	}
 	a.mu.Lock()
+	if target, ok := strings.CutPrefix(to, "chat:"); ok {
+		out, err := a.messageChat(fromSID, strings.TrimSpace(target), text)
+		a.mu.Unlock()
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
+	if isLifeSID(fromSID) {
+		if ag, ok := a.agentByID(agents.SessionAgent(fromSID)); ok && pickString(ag.LifeReach, "owner") == "off" && strings.HasPrefix(to, "agent:") {
+			a.mu.Unlock()
+			reply(false, "你设成了不主动找人")
+			return
+		}
+	}
 	sender := roomSender(fromSID)
 	senderName := sender
 	if ag, ok := a.agentByID(sender); ok {
@@ -742,4 +759,80 @@ func (a *App) dmRoom(from, to string) (rooms.Room, error) {
 		nb = ag.Name
 	}
 	return a.roomStore.Create(rooms.Room{Name: "@" + na + "+" + nb, Members: []string{from, to}, Mode: rooms.ModeMention, DM: []string{from, to}})
+}
+
+// messageChat 把一条消息发到 agent 自己的某个私聊：记进那个会话的历史，发到对方最近说话的那个窗口。
+// 内心活动里发的有规矩：找人范围、对方没回上一条不再找、每天次数、睡觉时间不打扰。调用方持有锁。
+func (a *App) messageChat(fromSID, target, text string) (string, error) {
+	agentID := agents.SessionAgent(fromSID)
+	ag, ok := a.agentByID(agentID)
+	if !ok {
+		return "", errors.New("没有这个 agent")
+	}
+	if agents.SessionAgent(target) != agentID || !a.hasSession(target) || !a.isPrivateChat(target) {
+		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
+	}
+	fromLife := isLifeSID(fromSID)
+	var ls *lifeState
+	if fromLife {
+		now := a.now().In(a.loc)
+		ls = a.lifeOf(agentID)
+		switch reach := pickString(ag.LifeReach, "owner"); {
+		case reach == "off":
+			return "", errors.New("你设成了不主动找人")
+		case reach == "owner" && target != agents.SessionFor(agentID, mainSID):
+			return "", errors.New("你只能主动找主人（找人范围在 agent 设置里改）")
+		}
+		if at, waiting := ls.Awaiting[target]; waiting {
+			return "", fmt.Errorf("你 %s 主动找过他，他还没回；等他回了再说", agoText(now, at))
+		}
+		if ls.Reaches >= lifeLevelOf(ag).reaches {
+			return "", errors.New("今天主动找人的次数用完了")
+		}
+		if !a.awakeOf(ag).contains(now) {
+			return "", errors.New("现在是睡觉时间，别打扰人")
+		}
+	}
+	if s := a.sessions[target]; s != nil && (s.run != nil || len(s.queue) > 0) {
+		return "", errors.New("那边正在聊着，等会儿再说")
+	}
+	if err := a.store.Append(target, session.Msg{Role: "assistant", Content: text}); err != nil {
+		return "", fmt.Errorf("保存消息失败：%w", err)
+	}
+	a.publish(events.Event{T: "say", SID: target, Text: text})
+	where := "网页上"
+	if ep, ok := a.lastEndpoint(target); ok {
+		a.deliver(ep, text, "")
+		a.markSeen(ep, target, a.histEnd(target), true)
+		where = chanName(ep.ch) + "里"
+	}
+	if fromLife {
+		ls.Awaiting[target] = a.now().Unix()
+		ls.Reaches++
+		a.saveLife()
+	}
+	a.log.Info("主动发了私聊消息", "agent", agentID, "to", target, "from", fromSID)
+	return "发出去了（" + where + "）。对方回了会在那个聊天里接着聊。", nil
+}
+
+// lastEndpoint 是会话最近有人说过话的那个窗口（不算网页）；都没记录时挑一个聊天软件的窗口。调用方持有锁。
+func (a *App) lastEndpoint(sid string) (endpoint, bool) {
+	best, bestAt, found := endpoint{}, int64(-1), false
+	for key, r := range a.eps {
+		if r.Session != sid {
+			continue
+		}
+		ep := parseEndpoint(key)
+		if ep.ch == "web" || a.chans[ep.ch] == nil {
+			continue
+		}
+		at := r.Last
+		if ep.ch == "cli" {
+			at-- // 一样久的时候优先聊天软件
+		}
+		if !found || at > bestAt || at == bestAt && key < best.key() {
+			best, bestAt, found = ep, at, true
+		}
+	}
+	return best, found
 }

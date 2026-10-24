@@ -46,6 +46,7 @@ type Settings struct {
 	// MemNote 是上一次放进对话的记忆说明的哈希（app/memory.go）：记忆变了才在下一条用户消息前再放一次。
 	// Recalled 是这段上下文里已经“想起来”过的记忆，同一条不重复放。压缩、清空上下文后都清掉。
 	MemNote  string   `json:"mem_note,omitempty"`
+	LifeNote string   `json:"life_note,omitempty"` // 拟人型：上一次放的近况说明的哈希
 	Recalled []string `json:"recalled,omitempty"`
 
 	// Members 是群聊里说过话的人：名字 → 身份（整理记忆时用来把群友的画像和身份对上）。
