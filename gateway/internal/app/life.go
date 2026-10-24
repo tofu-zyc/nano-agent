@@ -459,7 +459,7 @@ func (a *App) lifeHeard(agentID, text string) {
 // lifeAnswered：有人在这个私聊里说话了，之前的主动消息算回了。调用方持有锁。
 func (a *App) lifeAnswered(sid string) {
 	ag, ok := a.agentByID(agents.SessionAgent(sid))
-	if !ok || !ag.Life() || a.lifes == nil {
+	if !ok || !ag.Life() || a.agentRoot == "" {
 		return
 	}
 	ls := a.lifeOf(ag.ID)
