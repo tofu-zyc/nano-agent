@@ -37,11 +37,17 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			}
 		}
 	}
+	// 整理记忆：人格后面加上整理方法（dream 技能），工具只有日记和记忆
+	if isDreamSID(sid) {
+		system = strings.TrimSpace(system + "\n\n" + a.skillText(a.agentOf(sid).ID, "dream", defaultDreamSkill))
+	}
 	noTools := false
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		noTools = s.run.noTools
 	}
-	if a.isGroupSession(sid) {
+	if isDreamSID(sid) {
+		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
+	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
 		var all []llm.Tool
 		for _, spec := range a.searchTools() {

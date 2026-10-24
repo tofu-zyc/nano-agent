@@ -48,6 +48,9 @@ type Settings struct {
 	MemNote  string   `json:"mem_note,omitempty"`
 	Recalled []string `json:"recalled,omitempty"`
 
+	// Members 是群聊里说过话的人：名字 → 身份（整理记忆时用来把群友的画像和身份对上）。
+	Members map[string]string `json:"members,omitempty"`
+
 	// Base 是历史文件里已经被 Compact 丢掉的消息数；Summary 代替被丢掉的部分，放在历史最前面。
 	Meter       Meter  `json:"meter,omitempty"`
 	CompactedAt int64  `json:"compacted_at,omitempty"`

@@ -105,10 +105,24 @@ func (a *App) groupLine(m channel.Message) string {
 }
 
 // listenGroup 把一条群消息记进历史（不触发模型）。调用方持有锁。
-func (a *App) listenGroup(s *sess, ep endpoint, m channel.Message) {
+func (a *App) listenGroup(s *sess, ep endpoint, m channel.Message, who string) {
 	line := a.groupLine(m)
 	if line == "" {
 		return
+	}
+	// 记下群里谁是谁（名字 → 身份），整理记忆时把群友的画像和身份对上
+	if name := strings.TrimSpace(m.SenderName); name != "" && who != "" {
+		if st := a.store.Settings(s.sid); st.Members[name] != who {
+			if st.Members == nil {
+				st.Members = map[string]string{}
+			}
+			if len(st.Members) < 500 {
+				st.Members[name] = who
+				if err := a.store.SaveSettings(s.sid, st); err != nil {
+					a.log.Warn("保存群成员失败", "sid", s.sid, "err", err)
+				}
+			}
+		}
 	}
 	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: line}); err != nil {
 		a.log.Warn("保存群消息失败", "sid", s.sid, "err", err)

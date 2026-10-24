@@ -277,6 +277,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/agents/{id}/memory/item", s.auth(s.deleteMemoryItem))
 	mux.HandleFunc("POST /api/agents/{id}/memory/invalidate", s.auth(s.invalidateMemoryItem))
 	mux.HandleFunc("PUT /api/agents/{id}/memory/self", s.auth(s.putMemorySelf))
+	mux.HandleFunc("POST /api/agents/{id}/dream", s.auth(s.startDream))
+	mux.HandleFunc("GET /api/agents/{id}/dreams", s.auth(s.getDreams))
 	mux.HandleFunc("GET /api/rooms", s.auth(s.listRooms))
 	mux.HandleFunc("POST /api/rooms", s.auth(s.createRoom))
 	mux.HandleFunc("PATCH /api/rooms/{id}", s.auth(s.patchRoom))

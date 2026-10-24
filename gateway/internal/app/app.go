@@ -50,6 +50,7 @@ var Commands = []Command{
 	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
+	{Name: "sleep", Desc: "让 agent 现在去整理记忆（睡觉做梦）", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -154,7 +155,9 @@ type App struct {
 	totals        Totals
 	sessions      map[string]*sess
 	mems          map[string]*knowledge.Store // 每个 agent 的知识库（memory.go），"" 是共用的
-	agentSkills   map[string]*skills.Registry  // 每个 agent 自己的技能目录
+	agentSkills   map[string]*skills.Registry // 每个 agent 自己的技能目录
+	dreams        map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
+	bootAt        time.Time                   // 网关启动的时间（算“空闲多久”的起点）
 	approvals     map[int]*approval
 	nextAppr      int
 	runSeq        uint64
@@ -194,6 +197,7 @@ type queued struct {
 	ep      endpoint
 	who     string
 	trigger bool
+	inner   bool // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -229,6 +233,7 @@ type run struct {
 	readOnly   bool      // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate    bool      // 这个身份可以提权写工作目录外（管理员）
 	proactive  bool      // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
 	withImages bool      // 这一轮的模型能接收图片
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
@@ -307,6 +312,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	go a.maintenance()
 	go a.scheduleLoop()
 	go a.groupLoop()
+	go a.agentLoop()
 	return a
 }
 
@@ -401,7 +407,7 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			}
 			a.publishSession(c.s.sid)
 		}
-		a.listenGroup(c.s, ep, m)
+		a.listenGroup(c.s, ep, m, who)
 		if m.Mentioned || groupMentionsName(m.Text, a.agentOf(c.s.sid).Name) {
 			a.groupReply(c.s, ep, who)
 		}
@@ -472,6 +478,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "memory":
 		a.cmdMemory(c, arg)
+		return
+	case "sleep":
+		a.cmdSleep(c)
 		return
 	case "forget":
 		a.cmdForget(c, arg)
@@ -744,13 +753,16 @@ func (a *App) startRun(s *sess) {
 	// 群里说话的人按访客算；管理员在群里也只能用群聊白名单里的工具
 	admin := a.isAdmin(head.who) && !group
 	note := ""
-	if !group {
+	if !group && !head.inner {
 		note = a.envNote(w, rt, admin)
 	}
 	// 长期记忆：记忆说明（变了才放）和这一轮想起来的几条，也放在消息前面（memory.go）
 	recallText := text
 	if head.trigger {
 		recallText = a.recentLines(s.sid, 3)
+	}
+	if head.inner {
+		recallText = "" // 自己的一轮：放记忆说明，不“想起来”
 	}
 	if mem := a.memoryNotes(s.sid, head.who, recallText, &st, &dirty); mem != "" {
 		if head.trigger {
@@ -772,7 +784,7 @@ func (a *App) startRun(s *sess) {
 		}
 	}
 	// 先补上这个窗口没看到的对话（别的窗口聊的），再开始这一轮
-	if s.scheduled == nil {
+	if s.scheduled == nil && !head.inner {
 		a.catchUp(head.ep, s.sid)
 	}
 	a.remember(s, batch, a.histEnd(s.sid))
@@ -813,7 +825,9 @@ func (a *App) startRun(s *sess) {
 		a.notify(s, "（这个模型不能接收图片：图片已保存在历史里，但没有发给它。需要的话用 /model 换一个支持图片的模型）")
 	}
 	r.stopTyping = func() {}
-	if r.scheduled == nil {
+	if head.inner {
+		r.inner, r.outs = true, nil // 不对任何窗口说话；结果由 innerDone 处理
+	} else if r.scheduled == nil {
 		r.stopTyping = a.startTyping(head.ep)
 	} else {
 		r.outs = nil
@@ -842,6 +856,10 @@ func (a *App) startRun(s *sess) {
 		limit, _ := schedule.Timeout(*r.scheduled)
 		in.RunTimeoutMs = int(limit / time.Millisecond)
 		in.ApprovalTimeoutMs = int((30 * time.Minute) / time.Millisecond)
+	}
+	if r.inner {
+		steps, limit := innerLimits(s.sid)
+		in.MaxSteps, in.RunTimeoutMs = steps, int(limit/time.Millisecond)
 	}
 	for _, m := range rt.mounts {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
@@ -1094,6 +1112,10 @@ func (a *App) finish(s *sess, status, detail string) {
 	if r.scheduled != nil {
 		a.completeSchedule(r.scheduled, status == proto.StatusOK, strings.TrimSpace(body+"\n"+note))
 		r.scheduled = nil
+		body, note = "", ""
+	}
+	if r.inner {
+		a.innerDone(s, r, status, strings.TrimSpace(body+"\n"+note))
 		body, note = "", ""
 	}
 	a.endRun(s, "")

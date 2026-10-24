@@ -240,7 +240,15 @@ invalid: 2026-10-30 已经换工作了，见「张三的新工作」   # 过时�
   - agent 自己的技能目录：`skills.Merged`/`LoadAny`/`Body`/`ToolSpecFor`；`Reserved = dream, life` 不进 Skill 工具；`app.ownSkills`/`skillSpec`/`skillText`。
   - 测试：`knowledge/knowledge_test.go`；`app/memory_test.go`（记忆说明只在变了时放、想起来的不重复、群里看不到私密、Knowledge 各动作和权限、关掉记忆、agent 技能覆盖、网页接口）。
   - **网页那边要注意**：用户消息前面现在可能有 `[记忆]…[/记忆]`、`[想起来的]…[/想起来的]` 两个多行块（在 `[系统]` 环境说明之后、时间戳之前），`web/src/lib/format.ts` 的 `parseUser` 要把它们拆出来折叠显示（E 阶段做）。
-- [ ] **B 做梦**：`Diary` 工具、`dream` 会话、触发（idle/nightly/sleep/off、每天上限）、`dream-state.json`、梦境日志、自带 `skills/dream/SKILL.md`、`/sleep`、网页「现在整理」。
+- [x] **B 做梦**（后端完成，网页在 E）：
+  - `app/dream.go`：`dreamState`（`agents/<id>/dream-state.json`：`done` 每段日记下一条要读的位置、今天几次、上次开始/结束、上次日志开头）；`diarySources`（这个 agent 的所有会话的原始记录 `store.Archive` + `data/archive/` 里的归档 `store.ReadArchive`；不含 dream、cron、room 记录会话；第一次见到的会话只从两周前开始；`/reset` 后会话从头算，旧进度记到最新那份归档上）；`Diary` 工具（list/read/done；read 去掉 `[系统]`、记忆块，每条 `#编号 [时间] 主人/对方/群里/我：…`，一次最多 12000 字）；`dreamTick`（idle：所有会话空闲够 `dream_idle` 且上次整理也过了这么久、日记 ≥20 条；nightly：过了 `dream_at`；sleep：拟人型作息之外、这次睡着后还没整理；每天 `dream_max` 次）；`startDream`（清空 dream 会话、可单独选 `dream_model`、开头一条 `[系统]` 说明类型和日记数量）；`dreamDone`（最终回复追加到 `dreams/<日期>.md`，拟人型同时 `lifeHeard` 记进内心会话）；`/sleep`；网页 `POST /api/agents/{id}/dream`、`GET /api/agents/{id}/dreams?day=`（`{days, text}`）；`AgentInfo.memory`（条数、人数、在不在整理、上次整理和日志开头）。
+  - `app/awake.go`：`dayWindow`（`08:00-23:30`，可跨午夜，`lastEnd` 是最近一次开始睡觉、`nextStart` 是下次醒来）。
+  - `app/life.go`（先放了 C 要用的骨架）：`innerLimits`（dream 150 步 40 分钟，life 12 步 10 分钟）、`innerDone`、`lifeHeard`、`agentLoop`（每 15 秒 `dreamTick`）。
+  - 自己的一轮：`queued.inner` / `run.inner`：不对任何窗口说话、没有环境说明、不“想起来”、上限按 `innerLimits`，结束时 `innerDone`。
+  - 群聊记下谁是谁：会话设置 `Members`（名字 → 身份），`listenGroup` 写，日记里“参与的人”用。
+  - **内核改了**：`kernel/src/tools.c` 里 `Message`、`Knowledge`、`Diary`、`FollowUp` 都是 `NA_TOOL_PUBLIC_READ`（网关执行、权限网关判断，任何模式都交给网关），`main.c` 的 `gateway_tool` 名单加了后三个。旧内核不认识这几个工具会拒绝，内核会自动跟网关升级。
+  - 自带整理方法 `skills/dream/SKILL.md`，和 `dream.go` 的 `defaultDreamSkill` 一样（`TestDreamSkillMatchesRepo` 对比，改一处要改另一处）。更新时 `installShipped` 会装上新文件。
+  - 测试：`app/dream_test.go`（时间段、技能和仓库一致、日记读写和进度、归档、跑一轮写日志、三种触发和每天上限、拟人型记进内心会话）。
 - [ ] **C 两种类型 + 内心活动**：`style` 字段和设置分组（含修“跟随全局”）、拟人守则、`life` 会话和心跳、`data/life.json`、`Message` 的 `chat:` 和不追着发、近况说明、自带 `skills/life/SKILL.md`、`/wake`。
 - [ ] **D 统一聊天循环**：门槛 + 退避、工具型群里不插话、私聊拆条和 `[不回复]`、`FollowUp`、房间里 agent @ agent、房间发言计额度。
 - [ ] **E 网页**：agent 面板、记忆节点、只读会话、拓扑状态；`check-web-ui.py`。

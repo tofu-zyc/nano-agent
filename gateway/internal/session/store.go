@@ -71,8 +71,18 @@ func (s *Store) load(sid string) []Msg {
 // Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
 func (s *Store) Archive(sid string) []Msg { return s.loadFrom(sid, 0) }
 
-func (s *Store) loadFrom(sid string, skip int) []Msg {
-	f, err := os.Open(s.file(sid))
+func (s *Store) loadFrom(sid string, skip int) []Msg { return readMsgs(s.file(sid), skip) }
+
+// ReadArchive 读一份归档（/reset 时挪走的历史）的全部消息。整理记忆时当日记读。
+func (s *Store) ReadArchive(sid, id string) []Msg {
+	if filepath.Base(id) != id || filepath.Ext(id) != ".jsonl" {
+		return nil
+	}
+	return readMsgs(filepath.Join(s.archiveDir(sid), id), 0)
+}
+
+func readMsgs(path string, skip int) []Msg {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}

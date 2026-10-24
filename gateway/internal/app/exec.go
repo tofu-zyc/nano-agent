@@ -56,6 +56,15 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		go a.messageTool(s.sid, raw, reply)
 		return
 	}
+	if m.Name == "Diary" {
+		out, err := a.diaryCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
 	if m.Name == knowledgeLabel {
 		out, err := a.knowledgeCall(s.sid, r.from, m.Args)
 		if err != nil {

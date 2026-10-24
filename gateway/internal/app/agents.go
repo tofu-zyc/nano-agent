@@ -259,6 +259,18 @@ type AgentInfo struct {
 	PersonaFile    string         `json:"persona_file"`
 	PersonaChars   int            `json:"persona_chars"`
 	Settings       []AgentSetting `json:"settings"`
+	Style          string         `json:"style"` // tool | life
+	Memory         MemoryBrief    `json:"memory"`
+}
+
+// MemoryBrief 是 agent 长期记忆的概况：多少条、多少人、上次整理。
+type MemoryBrief struct {
+	On        bool   `json:"on"`
+	Total     int    `json:"total"`
+	People    int    `json:"people"`
+	Dreaming  bool   `json:"dreaming"`
+	LastDream int64  `json:"last_dream,omitempty"` // 上次整理结束（毫秒）
+	LastNote  string `json:"last_note,omitempty"`
 }
 
 // botBrief 是机器人的概况（渠道状态网页从概况接口里读）。调用方持有锁。
@@ -438,9 +450,22 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 		}
 	}
 	info.ThinkingLevels = a.levelsForModel(ag.Model)
+	info.Style = agents.StyleTool
+	if ag.Life() {
+		info.Style = agents.StyleLife
+	}
+	if a.agentRoot != "" {
+		info.Memory.On = a.memoryOn(ag)
+		info.Memory.Total, info.Memory.People, _ = a.memStore(ag.ID).Counts()
+		ds := a.dreamOf(ag.ID)
+		info.Memory.LastDream, info.Memory.LastNote = ds.LastEnd*1000, ds.LastNote
+		if s := a.sessions[dreamSID(ag.ID)]; s != nil && s.run != nil {
+			info.Memory.Dreaming = true
+		}
+	}
 	info.ToolsAvailable = a.toolNames()
 	for _, sid := range a.sessionIDs() {
-		if agents.SessionAgent(sid) != ag.ID {
+		if agents.SessionAgent(sid) != ag.ID || isInnerSID(sid) || isRoomMemberSID(sid) {
 			continue
 		}
 		info.Sessions++

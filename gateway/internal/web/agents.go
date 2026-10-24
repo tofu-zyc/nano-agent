@@ -205,3 +205,20 @@ func (s *Server) putMemorySelf(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
+
+func (s *Server) startDream(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.Dream(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) getDreams(w http.ResponseWriter, r *http.Request) {
+	days, text, err := s.app.DreamLog(r.PathValue("id"), r.URL.Query().Get("day"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"days": days, "text": text})
+}

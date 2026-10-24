@@ -100,7 +100,7 @@ func (a *App) Snapshot() Snapshot {
 	defer a.mu.Unlock()
 	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Machines: a.machineList(), Workspaces: a.workspaceInfos()}
 	for _, sid := range a.sessionIDs() {
-		if isRoomMemberSID(sid) {
+		if isRoomMemberSID(sid) || isDreamSID(sid) {
 			continue // agent 在房间里旁听的会话，用户看群那个会话就够了
 		}
 		// agent 删掉了：它的会话不再列出来（历史还在磁盘上，重新建一个同 ID 的 agent 才会再出现）
