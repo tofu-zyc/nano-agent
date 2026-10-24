@@ -1,12 +1,14 @@
 package app
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -149,5 +151,49 @@ func TestChannelsIncludeDisabledBots(t *testing.T) {
 		if s.SID == sid {
 			t.Fatal("旁听会话不该出现在会话列表里")
 		}
+	}
+}
+
+// 删掉 agent：它的会话不再列出来，群里的成员/禁言名单也去掉它。
+func TestDeleteAgentCleansUp(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, err := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.SetRooms(st)
+	info, err := e.a.CreateAgent(AgentPatch{Name: strp("小鲍")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := st.Create(rooms.Room{Name: "产品组", Members: []string{"default", info.ID}, Muted: []string{info.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := "@" + info.ID + "/main"
+	e.a.mu.Lock()
+	_ = e.a.store.Append(sid, session.Msg{Role: "user", Content: "你好"})
+	e.a.mu.Unlock()
+	seen := func() bool {
+		for _, s := range e.a.Snapshot().Sessions {
+			if s.SID == sid {
+				return true
+			}
+		}
+		return false
+	}
+	if !seen() {
+		t.Fatal("删之前应该能看到它的会话")
+	}
+	if err := e.a.DeleteAgent(info.ID); err != nil {
+		t.Fatal(err)
+	}
+	if seen() {
+		t.Fatal("删了 agent，它的会话不该再列出来")
+	}
+	got, ok := st.Get(room.ID)
+	if !ok || len(got.Members) != 1 || got.Members[0] != "default" || len(got.Muted) != 0 {
+		t.Fatalf("群里的成员没清干净: %+v", got)
 	}
 }

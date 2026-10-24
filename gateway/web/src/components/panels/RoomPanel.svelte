@@ -48,7 +48,7 @@
 
     <div class="p-card">
       <div class="p-row"><span class="p-k">名字</span><span class="p-grow">{r.name}</span></div>
-      <div class="p-row"><span class="p-k">记录</span><code class="p-grow">{r.sid}</code></div>
+      <div class="p-row"><span class="p-k">聊天记录</span><span class="p-grow">就是会话「{r.name}」{#if r.dm}<span class="muted p-small">（两个人的私聊）</span>{/if}</span></div>
       <div class="p-actions tight">
         <button class="btn sm primary" onclick={() => { location.hash = '#/sessions/' + encodeURIComponent(r!.sid); store.inspector = null; }}><Icon name="chat" size={13} />打开聊天</button>
         <button class="btn sm" onclick={() => patch({ paused: !r!.paused })}>{r.paused ? '恢复' : '暂停'}</button>
@@ -76,12 +76,12 @@
     <div class="p-card">
       <select class="p-select" value={r.mode} onchange={(e) => patch({ mode: (e.target as HTMLSelectElement).value })}>
         <option value="mention">点名：只有被 @ 或者叫到名字才说</option>
-        <option value="free">自由：安静下来可以自己插话</option>
+        <option value="free">自由：安静下来按积极度自己插话</option>
       </select>
       <label class="p-label">名字
         <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
       </label>
-      <label class="p-label">每天最多多少 token（0 表示不限，超了自动暂停）
+      <label class="p-label">每天最多用多少 token（AI 的用量单位；0 表示不限，超了自动暂停）
         <input class="p-input" value={r.budget ?? 0} inputmode="numeric"
           onchange={(e) => patch({ budget: Number((e.target as HTMLInputElement).value) || 0 })} />
       </label>

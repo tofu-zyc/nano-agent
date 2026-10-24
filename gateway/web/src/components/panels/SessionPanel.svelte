@@ -211,7 +211,8 @@
           <span class="p-grow">用这个 agent 自己的人格</span>
           <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去 Agent</button>
         </div>
-        <button class="btn sm ghost" onclick={() => (store.persona = { name: sess.persona_file, isNew: true })}><Icon name="plus" size={13} />给这个会话单独设定人格</button>
+        <button class="btn sm ghost" onclick={() => (store.persona = { name: sess.persona_file, isNew: true })}><Icon name="plus" size={13} />新建一个只给这个会话用的人格</button>
+        <p class="p-note p-small">新建的人格文件放在 `~/.nano-agent/personas/`，只在这个会话生效；别的会话、别的 agent 不受影响。想让人格长期用，就在拓扑里多加一个 agent。</p>
       {/if}
     </div>
     {#if sess.compacted}

@@ -147,7 +147,8 @@
 
 <div class="backdrop" use:portal onclick={(e) => e.target === e.currentTarget && close()} role="presentation">
   <div class="sheet" role="dialog" aria-label="编辑人格">
-    <aside class="list" class:hidden={!!agentId}>
+    <aside class="list">
+      {#if !agentId}
       <div class="head">
         <strong>人格文件</strong>
         <span class="muted small">{dir}</span>
@@ -167,10 +168,11 @@
           <span class="txt"><span class="t">{titleOf(name)}</span><span class="s">新建 · 还没保存</span></span>
         </div>
       {/if}
+      {/if}
       {#if presets.length}
         <div class="head presets">
           <strong>自带人格</strong>
-          <span class="muted small">点一下填进「{titleOf(name)}」，保存后生效</span>
+          <span class="muted small">{agentId ? '点一下填进这个 agent 的人格，保存后生效' : '点一下填进「' + titleOf(name) + '」，保存后生效'}</span>
         </div>
         {#each presets as p (p.id)}
           <button class="preset" class:on={matched?.id === p.id} onclick={() => usePreset(p)}>
@@ -178,6 +180,12 @@
             <span class="s">{p.desc}</span>
           </button>
         {/each}
+      {/if}
+      {#if agentId}
+        <div class="head presets">
+          <strong>再要一个人格？</strong>
+        </div>
+        <p class="muted small hint">每个人格就是一个 agent：拓扑图 Agent 列的「＋ 添加 agent」，再给它写人格。只想让某个会话换个人格，去那个会话的「人格」里新建。</p>
       {/if}
     </aside>
 
@@ -248,6 +256,10 @@
     display: flex;
     flex-direction: column;
     padding: 2px 8px 10px;
+  }
+  .hint {
+    margin: 2px 10px 10px;
+    line-height: 1.5;
   }
   .head.presets {
     margin-top: 16px;
@@ -412,9 +424,6 @@
   }
   .preview :global(ul) {
     padding-left: 20px;
-  }
-  .list.hidden {
-    display: none;
   }
   @media (max-width: 760px) {
     .list {

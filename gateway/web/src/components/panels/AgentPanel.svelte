@@ -4,6 +4,7 @@
   import { store } from '../../lib/state.svelte';
   import { api } from '../../lib/api';
   import { modeMeta } from '../../lib/format';
+  import { botKindLabel, optionLabel, toolLabel } from '../../lib/labels';
   import type { AgentSetting } from '../../lib/types';
   import Icon from '../Icon.svelte';
 
@@ -34,6 +35,12 @@
   }
 
   function shown(s: AgentSetting): string {
+    const v = s.value ?? s.effective;
+    if (v === null || v === undefined) return '';
+    return s.type === 'enum' ? optionLabel(s.key, String(v)) : String(v);
+  }
+  // 下拉框用的是原始值，显示的是中文
+  function settingValue(s: AgentSetting): string {
     const v = s.value ?? s.effective;
     return v === null || v === undefined ? '' : String(v);
   }
@@ -69,7 +76,8 @@
   }
 
   async function remove() {
-    if (!a || !confirm('删除 agent「' + a.name + '」？它的人格文件会留着，会话历史也不再显示。')) return;
+    const botHint = !a || !a.bots.length ? '' : '\n绑着它的 ' + a.bots.length + ' 个机器人会交给默认 agent（' + a.bots.map((b) => b.name).join('、') + '）。';
+    if (!a || !confirm('删除 agent「' + a.name + '」？' + botHint + '会话记录还在，但它的人格文件不再被使用。')) return;
     try {
       await api.del('/api/agents/' + encodeURIComponent(id));
       store.inspector = null;
@@ -102,16 +110,16 @@
         <button class="btn sm primary" onclick={() => (store.persona = { name: 'persona.md', isNew: false, agent: id })}><Icon name="pen" size={13} />编辑人格</button>
         <button class="btn sm" onclick={() => store.open({ type: 'session', sid: a!.default ? 'main' : '@' + a!.id + '/main' })}><Icon name="chat" size={13} />打开会话</button>
       </div>
-      <p class="p-note p-small">没写就是没有人格。从 v0.4 升级时会把 personas/default.md 复制成这个文件（原文件留着，方便退回旧版本）；某个会话还可以有自己的专属人格。</p>
+      <p class="p-note p-small">没写就是没有人格。升级时会把 v0.4 的 personas/default.md 复制成这个文件（原文件留着，方便退回旧版本）。想要另一个人格就再加一个 agent（每个人格一个 agent）；只想让某个会话换人格，用那个会话里的「人格」新建。</p>
     </div>
 
     <h5 class="p-h">机器人 <span class="muted p-small">一个机器人只绑一个 agent</span></h5>
     <div class="p-card">
       {#if a.bots.length}
         {#each a.bots as b (b.id)}
-          <button class="p-srow" onclick={() => store.open({ type: 'bot', id: b.id })}>
+          <button class="p-srow" onclick={() => store.open({ type: 'bot', id: b.id })} title={'渠道 ID：' + b.channel}>
             <Icon name={b.kind === 'feishu' ? 'feishu' : 'send'} size={14} />
-            <span class="p-grow">{b.name} <span class="muted p-small">{b.channel}</span></span>
+            <span class="p-grow">{b.name} <span class="muted p-small">{botKindLabel(b.kind)}</span></span>
             <span class="muted p-small">{b.enabled ? '开着' : '停用'}</span>
             <Icon name="right" size={13} />
           </button>
@@ -122,7 +130,7 @@
       {#if unbound.length}
         <select class="p-select" bind:value={pick} onchange={() => bind(pick)}>
           <option value="">把一个机器人绑到它…</option>
-          {#each unbound as b (b.id)}<option value={b.id}>{b.name}（{b.channel}）</option>{/each}
+          {#each unbound as b (b.id)}<option value={b.id}>{b.name}（{botKindLabel(b.kind)}{b.enabled ? '' : ' · 停用'}）</option>{/each}
         </select>
       {/if}
       <div class="p-actions tight">
@@ -141,7 +149,7 @@
       <label class="p-label">思考强度
         <select class="p-select" value={a.thinking} onchange={(e) => patch({ thinking: (e.target as HTMLSelectElement).value })}>
           <option value="">模型默认</option>
-          {#each a.thinking_levels ?? [] as l (l)}<option value={l}>{l}</option>{/each}
+          {#each a.thinking_levels ?? [] as l (l)}<option value={l}>{optionLabel('thinking', l)}</option>{/each}
         </select>
       </label>
     </div>
@@ -157,8 +165,8 @@
             {/if}
           </div>
           {#if s.type === 'enum'}
-            <select class="p-select" value={shown(s)} onchange={(e) => saveSetting(s.key, (e.target as HTMLSelectElement).value)}>
-              {#each s.options ?? [] as o (o)}<option value={o}>{o}</option>{/each}
+            <select class="p-select" value={settingValue(s)} onchange={(e) => saveSetting(s.key, (e.target as HTMLSelectElement).value)}>
+              {#each s.options ?? [] as o (o)}<option value={o}>{optionLabel(s.key, o)}</option>{/each}
             </select>
           {:else}
             <input class="p-input" value={shown(s)} inputmode={s.type === 'string' ? 'text' : 'decimal'}
@@ -168,7 +176,7 @@
                 saveSetting(s.key, s.type === 'string' ? raw : Number(raw));
               }} />
           {/if}
-          {#if s.value === null}<p class="p-note p-small">现在用全局的：{s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
+          {#if s.value === null}<p class="p-note p-small">现在用全局的：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
           {#if s.help}<p class="p-note p-small">{s.help}</p>{/if}
         </div>
       {/each}
@@ -178,7 +186,9 @@
     <div class="p-card">
       <div class="tools">
         {#each a.tools_available ?? [] as t (t)}
-          <button class="chip" class:on={a.tools.includes(t)} onclick={() => toggleTool(t)} disabled={busy}>{t}</button>
+          <button class="chip" class:on={a.tools.includes(t)} onclick={() => toggleTool(t)} disabled={busy} title={'模型看到的工具名：' + t}>
+            {toolLabel(t)}{#if toolLabel(t) !== t}<span class="tiny">{t}</span>{/if}
+          </button>
         {/each}
       </div>
       {#if !(a.tools_available ?? []).length}<p class="p-note">还没有内核在线，读不到工具列表；先装上内核再来选。</p>{/if}
@@ -187,7 +197,7 @@
     {#if !a.default}
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={remove}><Icon name="trash" size={13} />删除这个 agent</button>
-        <p class="p-note p-small">人格文件（agents/{a.id}/persona.md）会留着；绑着的机器人要先换绑。</p>
+        <p class="p-note p-small">人格文件（agents/{a.id}/persona.md）留在磁盘上；绑着它的机器人会交给默认 agent。</p>
       </div>
     {/if}
   </div>
@@ -220,6 +230,11 @@
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+  }
+  .chip .tiny {
+    margin-left: 4px;
+    opacity: 0.55;
+    font-size: 10.5px;
   }
   .chip.on {
     border-color: color-mix(in srgb, var(--accent) 55%, var(--line));

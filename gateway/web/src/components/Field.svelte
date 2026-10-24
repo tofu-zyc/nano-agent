@@ -1,20 +1,14 @@
 <script lang="ts">
   import { store } from '../lib/state.svelte';
   import type { FieldState } from '../lib/types';
+  import { optionLabel } from '../lib/labels';
   import ChipList from './ChipList.svelte';
   import DirInput from './DirInput.svelte';
   import Icon from './Icon.svelte';
 
   let { f, highlight = false }: { f: FieldState; highlight?: boolean } = $props();
 
-  // 选项的中文名
-  const optionLabels: Record<string, Record<string, string>> = {
-    'workspace.mode': { auto: '自动', ask: '审批', readonly: '只读' },
-    'access.guest': { none: '只能聊天', readonly: '可以读文件' },
-    'llm.provider': { openai: 'OpenAI 兼容', mock: '假模型' },
-    'llm.modalities': { text: '文字', image: '图片' },
-    'feishu.domain': { feishu: '飞书', lark: 'Lark' },
-  };
+
   // 机器人自己的显示档位：空表示跟随 Agent 节点里的默认值
   const followShow = $derived(`跟随 Agent（${store.field('channels.show')?.value ?? '过程'}）`);
   const sourceLabel = { web: '网页里改过', file: '配置文件', env: '环境变量', default: '默认值' };
@@ -84,7 +78,7 @@
     }
   }
 
-  const labelOf = (o: string) => ((f.key === 'telegram.show' || f.key === 'feishu.show') && o === '' ? followShow : (optionLabels[f.key]?.[o] ?? o));
+  const labelOf = (o: string) => ((f.key === 'telegram.show' || f.key === 'feishu.show') && o === '' ? followShow : optionLabel(f.key, o));
 
   // 代理：默认（网关的默认代理，或者网关自己跟随环境变量）/ 直连 / 自定义地址
   const isGatewayProxy = $derived(f.key === 'network.proxy');

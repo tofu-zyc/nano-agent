@@ -56,13 +56,13 @@
         {#if channel?.status.identity}<span class="muted p-small">{channel.status.identity}</span>{/if}
       </div>
       {#if channel?.status.error}<div class="p-err">{channel.status.error}</div>{/if}
-      <div class="p-row"><span class="p-k">渠道</span><code class="p-grow">{b.channel}</code></div>
+      <div class="p-row"><span class="p-k">渠道 ID</span><code class="p-grow">{b.channel}</code></div>
       <div class="p-row"><span class="p-k">种类</span><span class="p-grow">{b.kind === 'feishu' ? '飞书' : 'Telegram'}{#if b.legacy}<span class="tag">内置</span>{/if}</span></div>
     </div>
 
     <h5 class="p-h">绑定</h5>
     <div class="p-card">
-      <label class="p-label">这个机器人是谁
+      <label class="p-label">接到哪个 agent
         <select class="p-select" value={b.agent} onchange={(e) => patch({ agent: (e.target as HTMLSelectElement).value })}>
           {#each store.agents as a (a.id)}<option value={a.id}>{a.emoji} {a.name}</option>{/each}
         </select>

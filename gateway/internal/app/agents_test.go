@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nano-agent/gateway/internal/agents"
@@ -233,20 +234,41 @@ func TestAgentCRUD(t *testing.T) {
 	if err := e.a.DeleteAgent(agents.DefaultID); err == nil {
 		t.Fatal("默认 agent 不能删")
 	}
-	// 绑着机器人的 agent 不能删
+	// 删 agent 的时候绑着它的机器人交给默认 agent，不用先一个个换绑
 	e.a.mu.Lock()
 	bots := e.a.botStore
 	e.a.mu.Unlock()
 	if err := bots.Bind("tg", info.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.a.DeleteAgent(info.ID); err == nil {
-		t.Fatal("还有机器人绑着的 agent 不该能删")
+	if err := e.a.DeleteAgent(info.ID); err != nil {
+		t.Fatalf("删 agent 应该把机器人交给默认 agent: %v", err)
 	}
-	if err := bots.Bind("tg", agents.DefaultID); err != nil {
+	if b, ok := bots.Get("tg"); !ok || b.Agent != agents.DefaultID {
+		t.Fatalf("机器人没交给默认 agent: %+v", b)
+	}
+}
+
+func strp(s string) *string { return &s }
+
+// 名字不能重复：按名字找 agent（@小纳）时会有歧义。
+func TestAgentNameUnique(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	if _, err := e.a.CreateAgent(AgentPatch{Name: strp("小鲍")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.a.DeleteAgent(info.ID); err != nil {
-		t.Fatalf("换绑以后应该能删: %v", err)
+	if _, err := e.a.CreateAgent(AgentPatch{Name: strp("小鲍")}); err == nil {
+		t.Fatal("同名的 agent 不该能建")
+	} else if !strings.Contains(err.Error(), "已经有叫「小鲍」的 agent") {
+		t.Fatalf("错误提示不清楚: %v", err)
+	}
+	// 改名撞上别人也不行
+	other, err := e.a.CreateAgent(AgentPatch{Name: strp("阿强")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.UpdateAgent(other.ID, AgentPatch{Name: strp("小鲍")}); err == nil {
+		t.Fatal("改名撞上同名的 agent 不该成功")
 	}
 }

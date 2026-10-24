@@ -727,6 +727,9 @@ func (a *App) CreateAgent(p AgentPatch) (AgentInfo, error) {
 	if strings.TrimSpace(ag.Name) == "" {
 		return AgentInfo{}, errors.New("要给 agent 起个名字")
 	}
+	if other, ok := a.agentByName(ag.Name); ok {
+		return AgentInfo{}, fmt.Errorf("已经有叫「%s」的 agent 了（%s），换个名字", other.Name, other.ID)
+	}
 	ag.ID = agentIDSuggestion(a.agentStore, ag.Name)
 	if err := a.agentStore.Create(ag); err != nil {
 		return AgentInfo{}, err
@@ -741,6 +744,20 @@ func (a *App) CreateAgent(p AgentPatch) (AgentInfo, error) {
 }
 
 // agentIDSuggestion 按名字起一个没被占用的 ID（中文名退到 agent、agent-2……）。
+// agentByName 按名字找（不分大小写和首尾空格）。调用方持有锁。
+func (a *App) agentByName(name string) (agents.Agent, bool) {
+	if a.agentStore == nil {
+		return agents.Agent{}, false
+	}
+	want := strings.ToLower(strings.TrimSpace(name))
+	for _, ag := range a.agentStore.List() {
+		if strings.ToLower(strings.TrimSpace(ag.Name)) == want {
+			return ag, true
+		}
+	}
+	return agents.Agent{}, false
+}
+
 func agentIDSuggestion(s *agents.Store, name string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(name) {
@@ -787,6 +804,9 @@ func (a *App) UpdateAgent(id string, p AgentPatch) (AgentInfo, error) {
 	if err := applyAgentPatch(&ag, p); err != nil {
 		return AgentInfo{}, err
 	}
+	if other, ok := a.agentByName(ag.Name); ok && other.ID != id {
+		return AgentInfo{}, fmt.Errorf("已经有叫「%s」的 agent 了（%s），换个名字", other.Name, other.ID)
+	}
 	if err := a.agentStore.Update(ag); err != nil {
 		return AgentInfo{}, err
 	}
@@ -806,15 +826,65 @@ func (a *App) DeleteAgent(id string) error {
 	if id == agents.DefaultID {
 		return errors.New("默认 agent 不能删除")
 	}
-	if a.botStore != nil && len(a.botStore.OfAgent(id)) > 0 {
-		return errors.New("还有机器人绑着这个 agent，先在机器人节点里换绑或者删掉")
+	// 机器人不能没有 agent：删的时候把它们交给默认 agent，不然用户得先一个个换绑
+	if a.botStore != nil {
+		for _, b := range a.botStore.OfAgent(id) {
+			if err := a.botStore.Bind(b.ID, agents.DefaultID); err != nil {
+				return fmt.Errorf("把机器人「%s」交给默认 agent 失败：%w", b.Name, err)
+			}
+			a.log.Info("agent 删掉了，机器人交给默认 agent", "bot", b.ID, "agent", agents.DefaultID)
+		}
 	}
+	// 群里的成员/禁言名单也去掉它，免得群面板里人数对不上
+	a.dropAgentFromRooms(id)
 	if err := a.agentStore.Delete(id); err != nil {
 		return err
 	}
 	a.log.Info("删除 agent", "id", id)
 	a.publishAgents()
 	return nil
+}
+
+// dropAgentFromRooms 把某个 agent 从所有群里去掉（成员和禁言名单）。调用方持有锁。
+func (a *App) dropAgentFromRooms(id string) {
+	if a.roomStore == nil {
+		return
+	}
+	for _, r := range a.roomStore.List() {
+		changed := false
+		if members := withoutString(r.Members, id); len(members) != len(r.Members) {
+			r.Members = members
+			changed = true
+		}
+		if muted := withoutString(r.Muted, id); len(muted) != len(r.Muted) {
+			r.Muted = muted
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if len(r.Members) == 0 {
+			if err := a.roomStore.Delete(r.ID); err != nil {
+				a.log.Warn("清空成员的群没删掉", "room", r.ID, "err", err)
+			}
+			continue
+		}
+		if err := a.roomStore.Update(r); err != nil {
+			a.log.Warn("群成员没更新", "room", r.ID, "err", err)
+		}
+	}
+	a.publish(events.Event{T: "rooms"})
+}
+
+// withoutString 返回去掉 x 以后的新切片。
+func withoutString(xs []string, x string) []string {
+	out := make([]string, 0, len(xs))
+	for _, v := range xs {
+		if v != x {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // AgentPersona 是某个 agent 的人格文本。

@@ -103,6 +103,12 @@ func (a *App) Snapshot() Snapshot {
 		if isRoomMemberSID(sid) {
 			continue // agent 在房间里旁听的会话，用户看群那个会话就够了
 		}
+		// agent 删掉了：它的会话不再列出来（历史还在磁盘上，重新建一个同 ID 的 agent 才会再出现）
+		if ag := agents.SessionAgent(sid); ag != agents.DefaultID {
+			if _, ok := a.agentByID(ag); !ok {
+				continue
+			}
+		}
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })

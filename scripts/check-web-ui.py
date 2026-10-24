@@ -229,8 +229,33 @@ def run(page, url, nano):
         ok("agent 节点里有它自己的人格和绑定的机器人")
     else:
         fail("agent 节点里看不到人格或机器人：" + text[:200])
+    # 编辑这个 agent 的人格：自带的两个（小纳、大肥鱼）都要能看见、能点
+    page.locator(".insp button:has-text('编辑人格')").first.click()
+    page.wait_for_selector(".sheet[aria-label='编辑人格']")
+    page.wait_for_timeout(400)
+    page.screenshot(path=os.path.join(SHOTS, "agent-persona.png"))
+    sheet = page.locator(".sheet[aria-label='编辑人格']").inner_text()
+    if "小纳" in sheet and "大肥鱼" in sheet:
+        ok("编辑 agent 的人格时能看见自带的两个人格（小纳、大肥鱼）")
+    else:
+        fail("编辑 agent 的人格时看不到自带的两个人格：" + sheet[:300])
+    # 自带的两个都能点：点「大肥鱼」编辑框会换成它
+    page.locator(".sheet[aria-label='编辑人格'] button.preset:has-text('大肥鱼')").first.click()
+    page.wait_for_timeout(300)
+    body = page.locator(".sheet[aria-label='编辑人格'] textarea").input_value()
+    if "大肥鱼" in body:
+        ok("点自带的「大肥鱼」会把人格填进编辑框")
+    else:
+        fail("点自带人格没有填进编辑框：" + body[:120])
+    page.screenshot(path=os.path.join(SHOTS, "agent-persona.png"))
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
     if "群里插话积极度" in text:
         ok("agent 节点里有群聊行为（插话积极度等）")
+        if "少插话" in text or "不主动说" in text:
+            ok("群聊积极度的选项是中文（不主动说 / 少插话 / 正常 / 多插话）")
+        else:
+            fail("群聊积极度还是英文选项：" + text[:300])
     else:
         fail("agent 节点里没有群聊设置：" + text[:200])
     # 在 agent 节点里改一条覆盖设置：存进去的是它自己的值
@@ -255,6 +280,24 @@ def run(page, url, nano):
             ok("Telegram 节点里能改它绑的 agent")
         else:
             fail("Telegram 节点里没有绑定 agent 的地方")
+
+    # ---- 新建 agent 时直接挑一个自带人格：人格文件里就是它 ----
+    open_node(page, "add:agent")
+    page.locator(".insp input").first.fill("测试人格")
+    page.locator(".insp select").first.select_option(index=2)  # 自己写 / 小纳 / 大肥鱼
+    page.locator(".insp button:has-text('创建')").first.click()
+    page.wait_for_timeout(1200)
+    made = [a for a in api(page, "GET", "/api/agents")[1]["items"] if a["name"] == "测试人格"]
+    if not made:
+        fail("新建 agent 没成功")
+    else:
+        made = made[0]
+        pfile = os.path.join(nano, "agents", made["id"], "persona.md")
+        if os.path.exists(pfile) and "大肥鱼" in open(pfile, encoding="utf-8").read():
+            ok("新建 agent 时能直接选自带人格（大肥鱼 写进了它的人格文件）")
+        else:
+            fail("新建 agent 的人格文件不对：" + (open(pfile, encoding="utf-8").read()[:120] if os.path.exists(pfile) else "文件不存在"))
+        api(page, "DELETE", "/api/agents/" + made["id"])
 
     # ---- 群和私聊：3 个 agent、2 个群、1 个私聊、1 个停用的机器人 ----
     api(page, "POST", "/api/agents", {"name": "小鲍", "emoji": "🦊"})
@@ -362,7 +405,7 @@ def run(page, url, nano):
     open_node(page, "rm:" + room["id"])
     page.screenshot(path=os.path.join(SHOTS, "room.png"))
     text = page.locator(".insp").inner_text()
-    if "成员" in text and "怎么说话" in text and "每天最多多少 token" in text:
+    if "成员" in text and "怎么说话" in text and "每天最多用多少 token" in text:
         ok("群面板能改成员、说话方式和预算")
     else:
         fail("群面板缺东西：" + text[:200])
@@ -392,6 +435,30 @@ def run(page, url, nano):
     for aid in (bao, qiang):
         if aid != "default":
             api(page, "DELETE", "/api/agents/" + aid)
+
+    # ---- 会话面板：新建一个只给这个会话用的人格文件 ----
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(800)
+    sessions = page.eval_on_selector_all("g.node.session", "els => els.map(e => e.dataset.id)")
+    if sessions:
+        open_node(page, sessions[0])
+        insp = page.locator(".insp").inner_text()
+        if "人格" in insp:
+            page.locator(".insp button:has-text('新建一个只给这个会话用的人格')").first.click()
+            page.wait_for_selector(".sheet[aria-label='编辑人格']")
+            page.wait_for_timeout(400)
+            sheet = page.locator(".sheet[aria-label='编辑人格']").inner_text()
+            if "人格文件" in sheet and "小纳" in sheet and "大肥鱼" in sheet:
+                ok("会话里能新建人格文件，并且能套用自带的两个")
+            else:
+                fail("会话里新建人格的界面不对：" + sheet[:300])
+            page.screenshot(path=os.path.join(SHOTS, "session-persona.png"))
+            page.keyboard.press("Escape")
+        else:
+            fail("会话面板里没有「人格」：" + insp[:200])
+    else:
+        fail("图上没有会话节点")
 
     # ---- 改设置：数字、文本、开关、列表，刷新后还在 ----
     open_node(page, "agdefault")
