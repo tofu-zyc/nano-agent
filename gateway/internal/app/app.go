@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
@@ -25,6 +26,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
@@ -43,6 +45,8 @@ var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
+	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
+	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -94,6 +98,12 @@ type App struct {
 	llm               llm.Client
 	store             *session.Store
 	persona           *persona.Loader
+	personaAgent      *persona.Loader // agents/<id>/persona.md
+	agentStore        *agents.Store   // agent 列表（data/agents.json）
+	botStore          *agents.Bots    // 机器人（data/bots.json）
+	agentRoot         string          // agents 目录
+	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
+	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
 	log               *slog.Logger
 	bus               *events.Bus
@@ -159,13 +169,26 @@ type sess struct {
 	resetAfter          bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
 	undoAfter           bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
 	recent              []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
+
+	// 群聊（group.go）：记进历史的最新一条、要不要插话、主动发言的额度
+	groupEp        endpoint
+	groupLast      time.Time
+	groupFresh     bool
+	groupProactive bool
+	groupTimer     *time.Timer
+	groupSpokeAt   time.Time
+	groupSpeaks    []time.Time
+	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
+	groupThoughts  []time.Time // 最近一小时判断了几次
 }
 
-// queued 是排队等处理的一条消息
+// queued 是排队等处理的一条消息。trigger 是群聊里“该你说话了”的触发：
+// 内容已经在历史里了，不再追加一条用户消息。
 type queued struct {
-	m   channel.Message
-	ep  endpoint
-	who string
+	m       channel.Message
+	ep      endpoint
+	who     string
+	trigger bool
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -200,6 +223,7 @@ type run struct {
 	noTools    bool      // 访客没有工作目录：不给模型工具，只聊天
 	readOnly   bool      // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate    bool      // 这个身份可以提权写工作目录外（管理员）
+	proactive  bool      // 群聊里自己凑上来的（上一次是 groupTick 触发的）
 	withImages bool      // 这一轮的模型能接收图片
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
@@ -266,6 +290,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		skills:       skills.New(cfg.Skills.Dir),
 		outboxes:     map[string]chan outItem{},
 		sessions:     map[string]*sess{},
+		roomRuns:     map[string]*roomRun{},
 		approvals:    map[int]*approval{},
 		nodes:        map[string]*node{},
 	}
@@ -276,6 +301,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.skills.Scan()
 	go a.maintenance()
 	go a.scheduleLoop()
+	go a.groupLoop()
 	return a
 }
 
@@ -359,18 +385,32 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if m.Group {
-		// 群聊暂不支持：被 @ 时提醒一次，其余忽略
-		if m.Mentioned && !a.groupNoticed[ep.key()] {
-			a.groupNoticed[ep.key()] = true
-			a.deliver(ep, "暂时只支持私聊，有事请私聊我", m.MsgID)
+	if m.Group && cmd == "" && m.Action == "" {
+		// 群聊：每条消息都记进历史（不触发模型），被 @、回复机器人、叫到名字才回
+		c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who, name: m.SenderName}
+		st := a.store.Settings(c.s.sid)
+		if !st.Group {
+			st.Group = true
+			if err := a.store.SaveSettings(c.s.sid, st); err != nil {
+				a.log.Warn("保存会话设置失败", "sid", c.s.sid, "err", err)
+			}
+			a.publishSession(c.s.sid)
 		}
-		a.log.Debug("暂不支持群聊，忽略", "chat", ep.key())
+		a.listenGroup(c.s, ep, m)
+		if m.Mentioned || groupMentionsName(m.Text, a.agentOf(c.s.sid).Name) {
+			a.groupReply(c.s, ep, who)
+		}
 		return
 	}
 	switch cmd {
 	case "help":
 		a.tell(a.boundSession(ep, m), ep, helpText)
+		return
+	case "room":
+		a.cmdRoom(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who}, arg)
+		return
+	case "agent":
+		a.cmdAgent(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
 		return
 	case "whoami":
 		sid := a.boundSession(ep, m)
@@ -393,6 +433,20 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	}
 	c := in{s: a.sessOf(a.attach(ep, m, who)), ep: ep, who: who, name: m.SenderName}
+	// 在房间的记录会话里说话：记进群记录、转给群里所有成员，被叫到的会回；这里不跑普通的一轮
+	if room, ok := a.roomOfSession(c.s.sid); ok && c.s.sid == roomLogSID(room.ID) {
+		name := c.name
+		if name == "" {
+			name = "有人"
+		}
+		if text := strings.TrimSpace(m.Text); text != "" {
+			_ = a.store.Append(c.s.sid, session.Msg{Role: "user", Content: "[" + name + "] " + text})
+			a.publish(events.Event{T: "message", SID: c.s.sid, Name: m.SenderName, Text: text})
+		}
+		a.roomHumanLine(room.ID)
+		a.roomHumanSay(room, name, m.Text)
+		return
+	}
 	if m.Action == channel.ActionStop {
 		if c.s.run != nil || len(c.s.queue) > 0 {
 			a.stop(c)
@@ -661,8 +715,9 @@ func (a *App) startRun(s *sess) {
 	if len(images) > media.MaxPerMessage {
 		images = images[:media.MaxPerMessage]
 	}
+	group := a.isGroupSession(s.sid)
 	content := text
-	if config.On(a.cfg.Session.Timestamps) {
+	if !head.trigger && config.On(a.cfg.Session.Timestamps) {
 		if content == "" {
 			content = a.stamp(sourceOf(head.ep.ch))
 		} else {
@@ -675,8 +730,12 @@ func (a *App) startRun(s *sess) {
 	if !st.WorkspacesSet && len(w.wss) > 0 {
 		st.Workspaces, st.WorkspacesSet, dirty = w.ids(), true, true // 新会话第一次说话：定下默认挂载的工作目录
 	}
-	admin := a.isAdmin(head.who)
-	note := a.envNote(w, rt, admin)
+	// 群里说话的人按访客算；管理员在群里也只能用群聊白名单里的工具
+	admin := a.isAdmin(head.who) && !group
+	note := ""
+	if !group {
+		note = a.envNote(w, rt, admin)
+	}
 	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
 		st.EnvNote, dirty = note, true
@@ -691,8 +750,10 @@ func (a *App) startRun(s *sess) {
 		a.catchUp(head.ep, s.sid)
 	}
 	a.remember(s, batch, a.histEnd(s.sid))
-	if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
-		a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
+	if !head.trigger {
+		if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
+			a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
+		}
 	}
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
@@ -700,7 +761,7 @@ func (a *App) startRun(s *sess) {
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
-	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil {
+	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil && !group {
 		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
 	}
 	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
@@ -735,13 +796,22 @@ func (a *App) startRun(s *sess) {
 		}
 	}
 	mode := a.runMode(w, r.from)
+	if group {
+		// 群聊按访客权限跑，工具由群聊白名单决定
+		mode = a.cfg.Access.Guest
+		if mode == "" {
+			mode = proto.ModeNone
+		}
+	}
+	r.proactive = s.groupProactive
+	s.groupProactive = false
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
-	ag := a.cfg.Agent
-	in.MaxSteps = wireLimit(ag.Steps())
-	in.RunTimeoutMs = wireMs(ag.RunLimit())
-	in.ApprovalTimeoutMs = wireMs(ag.ApprovalLimit())
-	in.MaxOutput = ag.OutputBytes()
+	ag := a.limitsOf(s.sid)
+	in.MaxSteps = wireLimit(ag.Steps)
+	in.RunTimeoutMs = wireMs(ag.Run)
+	in.ApprovalTimeoutMs = wireMs(ag.Approval)
+	in.MaxOutput = ag.Output
 	if r.scheduled != nil {
 		limit, _ := schedule.Timeout(*r.scheduled)
 		in.RunTimeoutMs = int(limit / time.Millisecond)
@@ -1010,18 +1080,36 @@ func (a *App) finish(s *sess, status, detail string) {
 	if note != "" {
 		a.publish(events.Event{T: "say", SID: s.sid, Text: note})
 	}
+	group := a.isGroupSession(s.sid)
+	roomOf, inRoom := a.roomOfSession(s.sid)
 	for _, o := range r.outs {
 		text := note
 		if body != "" && (o.view == nil || !r.streamed) {
 			text = strings.TrimSpace(body + "\n\n" + note)
 		}
-		if text != "" {
-			a.deliver(o.ep, text, "")
+		if text == "" {
+			continue
 		}
+		if group && o.ep.ch == "room" {
+			continue // 房间里的发言由 roomAgentSay 记进群记录
+		}
+		if group {
+			a.sendGroup(s, o.ep, text)
+			continue
+		}
+		a.deliver(o.ep, text, "")
+	}
+	// agent 在房间里的回复：记进群记录，转给其他成员；顺手记用量
+	if inRoom {
+		if roomLogSID(roomOf.ID) != s.sid && strings.TrimSpace(body) != "" {
+			s.groupSpokeAt = a.now()
+			a.roomAgentSay(roomOf, roomSender(s.sid), body)
+		}
+		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)
-	if s.run == nil && !strings.HasPrefix(s.sid, "cron:") {
+	if s.run == nil && !isCronSID(s.sid) {
 		a.maybeCompact(s, false)
 	}
 }
@@ -1060,6 +1148,11 @@ func (a *App) generateModel(s *sess) {
 	req := llm.Request{
 		Messages: session.BuildMessages(system, st.Summary, a.store.EffectiveHistory(s.sid), a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
+	}
+	if r.proactive {
+		// 自己凑上来的那一轮：只在这次请求里加一句提醒，不改历史（前缀缓存基本不受影响）
+		req.Messages = append(req.Messages, llm.Message{Role: "user",
+			Content: "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。"})
 	}
 	if a.cfg.Security.Redact != "off" {
 		_, e, ok := a.modelOf(s.sid)

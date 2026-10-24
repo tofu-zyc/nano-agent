@@ -14,6 +14,9 @@ func (a *App) thinkingOf(sid string) string {
 	if t := a.store.Settings(sid).Thinking; t != "" {
 		return t
 	}
+	if t := a.agentOf(sid).Thinking; t != "" {
+		return t
+	}
 	if m, _, ok := a.modelOf(sid); ok {
 		return m.Thinking
 	}

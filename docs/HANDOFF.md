@@ -3,13 +3,72 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-24，**v0.4.1 已发布**（main）：网关换了版本，开着的网页自己刷新；工具调用轮数上限改名、好找（见下面「v0.4.1 发布后的修复」）。之前 **v0.4.0 已发布**（dev/v0.4 合并回 main）：拓扑图就是控制台，去掉设置页、设备页、定时任务页、人格页（见下面「v0.4 开发进度」）；同一个版本里还有 Windows 内核配置被写坏的修复、每条消息的上限改成网关设置、检查更新走代理（见「v0.3.2 发布后的修复」，原来准备单独发 v0.3.3，用户要求一起发）。之前 **v0.3.2 已发布**：设置页数字项改了不保存修好；显示档位单独成「消息与显示」组，Telegram、飞书、命令行节点面板里也有（见「v0.3.1 发布后的修复」）。之前 **v0.3.1 已发布**：修飞书回复出现两次、Telegram 工具记录被删（显示档位）；设置页和拓扑图补上「上下文与记忆」「网络搜索」「定时任务」；v0.3 功能的技能（web-search、scheduled-tasks、context-and-history、gateway-settings）和聊天里改设置（`settings_set`）、查对话轮次（`turns`）；默认开的开关在设置页显示对了；见下面「v0.3.0 发布后的修复」。之前 **v0.3.0 已发布**（dev/v0.3 合并回 main）：上下文真实用量计量和 `/context`、分层上下文整理（工具结果占位 + 分块滚动摘要，请求前/结束后/空闲/`/compact`）、`/reset` 归档和删除历史（整段、几轮、归档）、聊天显示档位（`/show`）、DeepSeek 网络搜索（WebSearch/WebFetch）、定时任务（`Schedule`、`/cron`、网页「定时任务」页），见下面「v0.3 开发进度」；之前 **v0.2.2 已发布**：自带人格「小纳」「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹，`nano-kernel start` 在任务不存在时直接拉起）、`nano-gateway help` / `--help` / `-h`、`nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一个大版本（v0.3 – v0.6：上下文压缩、显示档位、搜索、定时任务、多 agent 和群聊、知识库和做梦、MCP 和 computer use）见 [PLAN-roadmap.md](PLAN-roadmap.md)；更早的计划见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-24，**v0.5 做完了，等用户点头合并发布**（dev/v0.5，阶段 6、7、8 都已完成）：多 agent——每个 agent 是图上一个节点，有自己的名字、人格、模型和会话，可以绑自己的机器人；每个 agent 能覆盖全局设置，没覆盖的跟随全局；外部群聊能听会回；网关内部有群（房间）和两个 agent 的私聊；**专门给群聊做的界面（成员头像、@ 补全）还没做**，群聊现在就用普通的会话页（每一条前面带 `[谁说的]`）。验收提的问题都修了（覆盖人格、Message 权限、拓扑分列、判断费用、中文名字的 ID 等），见下面「v0.5 验收修复」。之前 **v0.4.1 已发布**（main）：网关换了版本，开着的网页自己刷新；工具调用轮数上限改名、好找（见「v0.4.1 发布后的修复」）。之前 **v0.4.0 已发布**（dev/v0.4 合并回 main）：拓扑图就是控制台，去掉设置页、设备页、定时任务页、人格页（见下面「v0.4 开发进度」）；同一个版本里还有 Windows 内核配置被写坏的修复、每条消息的上限改成网关设置、检查更新走代理（见「v0.3.2 发布后的修复」，原来准备单独发 v0.3.3，用户要求一起发）。之前 **v0.3.2 已发布**：设置页数字项改了不保存修好；显示档位单独成「消息与显示」组，Telegram、飞书、命令行节点面板里也有（见「v0.3.1 发布后的修复」）。之前 **v0.3.1 已发布**：修飞书回复出现两次、Telegram 工具记录被删（显示档位）；设置页和拓扑图补上「上下文与记忆」「网络搜索」「定时任务」；v0.3 功能的技能（web-search、scheduled-tasks、context-and-history、gateway-settings）和聊天里改设置（`settings_set`）、查对话轮次（`turns`）；默认开的开关在设置页显示对了；见下面「v0.3.0 发布后的修复」。之前 **v0.3.0 已发布**（dev/v0.3 合并回 main）：上下文真实用量计量和 `/context`、分层上下文整理（工具结果占位 + 分块滚动摘要，请求前/结束后/空闲/`/compact`）、`/reset` 归档和删除历史（整段、几轮、归档）、聊天显示档位（`/show`）、DeepSeek 网络搜索（WebSearch/WebFetch）、定时任务（`Schedule`、`/cron`、网页「定时任务」页），见下面「v0.3 开发进度」；之前 **v0.2.2 已发布**：自带人格「小纳」「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹，`nano-kernel start` 在任务不存在时直接拉起）、`nano-gateway help` / `--help` / `-h`、`nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一个大版本（v0.3 – v0.6：上下文压缩、显示档位、搜索、定时任务、多 agent 和群聊、知识库和做梦、MCP 和 computer use）见 [PLAN-roadmap.md](PLAN-roadmap.md)；更早的计划见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## v0.4.1 发布后的修复（2026-10-23，v0.4.1 发布）
 
 - **升级后在开着的网页上找不到新设置**：网关更新以后，一直开着的标签页还在跑旧的页面代码；旧页面不认识新的 `agent` 组，工具调用上限在哪个面板里都不显示（用户说“还是没看到”，刷新后才找到）。现在页面记下加载时网关的版本，之后读概况时发现版本变了就自己刷新一次，刷新后提示“网关已经是 x，页面已刷新成新版本”（`state.svelte.ts` 的 `refresh`）。
 - 工具调用上限不好找：设置项改叫「工具调用轮数上限」（用户的说法），搜索词加上“工具调用、调用次数、轮数”；内核面板里的说明直接链到 Agent 节点的这一项；到了上限的回复里也写“工具调用轮数上限”。
 - 测试：`check-web-ui.py` 加了“搜‘工具调用上限’能找到”和“网关换了版本，开着的页面自己刷新、版本不变不刷新”（拦截概况接口改版本号）。
+
+## v0.5 开发进度（dev/v0.5，阶段 6、7、8 已完成，2026-10-24）
+
+v0.5 是多 agent、机器人绑定、群聊（[PLAN-roadmap.md](PLAN-roadmap.md) 阶段 6–8）。大版本在新分支 `dev/v0.5` 上做，每个阶段 `make test` 全过后单独提交；做完、用户同意再合并回 main 发布。
+
+### 阶段 6/7/8 都做完了
+
+- 阶段 6：多 agent、机器人绑定、每个 agent 覆盖设置（见下）。
+- 阶段 7：外部群聊（Telegram、飞书）能听会回、点名才回、安静了按积极度插话、发短消息、可回 `[不回复]`。
+- 阶段 8：网关内部的群（房间）和两个 agent 的私聊、防刷屏（连续 8 条 / 来回 6 轮自动暂停）、`Message` 工具、网页上的群节点和面板。
+- **还没做**：专门给群聊做的界面——成员头像、@ 补全、多人气泡（现在群里就是普通会话页，每一条前面带 `[名字]`），下一版再做。
+
+### v0.5 验收修复（2026-10-24，用户验收提的问题）
+
+- **升级盖掉用户改过的人格**：`nano-gateway update` 的 `installShipped` 会先写包里自带的 `agents/default/persona.md`，网关启动时 `MigrateAgents` 看到目标已存在就不再迁移，用户改过的 `personas/default.md` 被忽略。现在：老布局（有 `personas/default.md`）的机器升级时 `installShipped` 不写这个文件，由迁移决定；迁移改成**复制**、原文件留着（更新失败退回旧版本还要用它）。`personaFor` 也不再兜底回 `personas/default.md`（一处能改），只有没有 agent 列表的老模式才用它。测试：`scripts/test-update.py` 加了「从 v0.4 布局升级（用户改过人格）」的用例，用单独的 HOME 装 0.4.0（包里只有 `personas/default.md`）、改名、删掉 `agents/`（真实 v0.4 机器就是这样）、升级到 0.5.0，确认用的还是用户的人格、原文件还在、没有 `.new`。
+- **`Message` 只给管理员**：`exec.go` 里执行前和 Gateway/GatewayAdmin 一样查 `isAdmin(r.from)`；测试 `TestMessageGuestRejected`（访客 readonly 时模型调 Message 被拒，内核收到 OK=false）。
+- **拓扑图**：群（房间）单独一列（`群` 在会话和 Agent 之间），群的聊天记录连到群节点而不是默认 agent；两个 agent 的私聊不再当普通群，画成一个虚线小节点；每个机器人（含停用的）都是入口列一个节点，并画出到它绑的 agent 的连线；入口直接连 agent 的线（没有会话的机器人、定时任务）走空隙：从入口右边进「入口/会话」之间的缝下去，沿画布最下面横过去，再从「群/Agent」之间的缝上来接 Agent 左边，不横穿任何卡片（检查脚本沿路径采样，落在任何 agent 卡片里就失败）。停用的机器人在后端 `Channels()` 里也要出现（原来只在 `a.runs` 里有）。agent 在群里旁听的会话（`@<agent>/room:<id>`）不再当成普通会话显示。网页检查用「3 个 agent、2 个群、1 个私聊、1 个停用的机器人」的场景截图并断言连线（`topology-groups.png`）。
+- **群聊插话的判断也花模型调用**：以前只有说出口的才记额度，每次「要不要说话」的判断都是白花的模型调用。现在除了每小时说几次，还限判断次数（积极度 low/normal/high → 每小时最多 6/18/45 次，两次判断至少隔 1 分钟），写进了 agent 面板「群里插话积极度」的说明；`TestGroupThoughtBudget`。
+- **小问题**：中文名字的 agent 以前 ID 会变成 `agent`、`agent-2`，现在取不出拉丁字母时用短的随机 ID（`a-1f2e3d`），面板上仍然显示名字；时长不再显示 `30m0s` 而是 `30m`（`durText`）；agent 面板里关于 `personas/default.md` 的说明按修完后的真实行为改了；README 里升级那句话也改了。
+- **第二轮验收发现：内置 Telegram 在图上出现两次**（一个一直是停用的）。“停用的机器人也上图”那段按机器人的消息渠道名找，内置 Telegram 的消息渠道名是 `tg`，而 runs 和图上它叫 `telegram`；改成用 `botRunKey`。只影响显示，路由一直是对的（消息带的渠道名就是 `tg`）。`TestChannelsIncludeDisabledBots` 检查渠道列表正好是 cli、web、telegram、feishu 加另外的机器人；`check-web-ui.py` 检查入口列没有重名的节点。
+- 还可以再好看点（没改）：没有会话的机器人到 agent 的虚线从画布最下面绕过去，再从下往上接到 agent 卡片的底边，会穿过下面几个 agent；能看清，但不够干净。
+
+### 阶段 6：多 agent 和机器人绑定
+
+- 用户的要求：多 agent 要在拓扑图上有节点，agent 之间的群聊也用节点和连线（阶段 8）；每个 agent 可以覆盖全局设置（模型、思考强度、每条消息上限、权限模式、上下文整理），没覆盖的跟随全局；定时任务可以指定由哪个 agent 跑。这两点做前问过用户，都同意。
+- **数据**：`data/agents.json`（名字、头像、模型、思考强度、覆盖的设置、工具白名单、群聊白名单）、`agents/<id>/persona.md`（人格）、`data/bots.json`（机器人：种类、凭据加密、绑定的 agent、显示档位、是否内置）。会话 ID：默认 agent 不变（`main`、`tg:123`），别的 agent 加前缀 `@<id>/main`、`@<id>/tg:123`（`agents.SessionFor` / `SessionAgent`）。
+- **迁移**：第一次启动建默认 agent「小纳」，把 `personas/default.md` 挪到 `agents/default/persona.md`（挪完删原文件；目标文件已存在就不再挪）；内置 Telegram、飞书当成 `tg`、`feishu` 两个机器人绑到默认 agent。现有的会话、窗口、历史都不动。
+- **覆盖**：`agents.Agent` 里的指针字段为 nil 表示跟随全局。优先级：会话自己设的（`/model`、`/mode`、`/think`）> 所属 agent 的 > 全局（`config.toml` 的 `agent`、`workspace.mode`、`context` 组）。实现是 `limitsOf`、`agentModeDefault`、`contextConfigFor`、`modelFor`、`thinkingOf`、`filterAgentTools` 这几个，调用方都持有 `a.mu`。
+- **机器人**：内置 tg/feishu 的凭据还是 `gateway.toml` 里的 `[telegram]`、`[feishu]`（设置只有一个家：Telegram、飞书节点），另外加的机器人凭据存在 `bots.json` 里（`secret.Encrypt`，网页只回传有没有）；渠道名 `tg.<id>`、`feishu.<id>`（`channel.SetName`，Telegram/Feishu 的 `Name()` 改成读字段）。`ReconcileChannels` 按机器人列表启动、停止、重启；窗口接哪个会话由 `agentForChannel` 决定，机器人换绑后窗口跟着换到新 agent 的会话。
+- **网页**：Agent 列里每个 agent 一个节点（名字、头像、会话数、机器人数），下面是「Agent 默认值」（`agent` 组全体设置的家，`FieldGroup`）和「添加 agent」；入口列多了「添加机器人」；内置 Telegram / 飞书节点里能换绑 agent。面板：`AgentPanel`（人格、模型、思考强度、覆盖设置、工具白名单、加机器人）、`AgentDefaultsPanel`、`AgentsPanel`、`BotPanel`、`BotsPanel`。人格编辑器支持编辑 agent 自己的 `agents/<id>/persona.md`（`store.persona.agent`）。
+- **聊天里**：`Gateway {"what":"agents"}` 查 agent 和机器人；`GatewayAdmin` 加 `agent_save`、`agent_delete`、`bot_bind`。技能 `skills/agents/SKILL.md`。
+- **定时任务**：任务记创建时所在的 agent（`schedule.Task.Agent`），会话 ID 是 `@<agent>/cron:<id>`（`cronSID`），任务面板能选「由谁执行」。
+- **测试**：`agents` 包单测（ID 校验、默认 agent 不能删、持久化、会话 ID 前缀）；`app` 里测迁移、人格查找顺序、覆盖优先级（会话 > agent > 全局）、工具白名单、机器人路由和换绑、agent 增删改；`check-web-ui.py` 加：每个 agent 都有节点、Agent 默认值 / 添加 agent / 添加机器人节点在图上、agent 面板能存覆盖设置、Telegram 节点能换绑。
+- **坑**：面板里 `onclick={() => store.open({ type: 'bots' })}` 手写时少一个 `}` 会让 svelte-check 报「Expected token }」；改成在 script 里写一个函数再 `onclick={openBots}` 最稳。Agent 列节点变多以后列会变长，拓扑图会自动缩放适配；拖过节点的偏移量还记在 `nano.layout2`。
+
+### 阶段 7：群聊行为（2026-10-24）
+
+- 用户的要求：群聊像真人——不在群里展示思考和工具过程、不长篇大论、不是每句都回、只能用少量工具。
+- **会话**：每个外部群在每个 agent 下一个会话（默认 agent 是 `tg:<群ID>`，别的是 `@bob/tg:<群ID>`），会话设置里标 `group`。群聊默认不挂工作目录，工具只有 agent 的群聊白名单（默认 WebSearch、WebFetch、Skill），权限按访客算（`access.guest`）。
+- **听着**：群里每条消息都记进历史，格式 `[15:08][张三] 内容`，不触发模型（`listenGroup`）。
+- **什么时候说话**：被 @、回复了机器人（渠道给的 `Mentioned`）、或者消息里叫到 agent 的名字 → 等 2 秒（`groupReply` 的定时器）把这期间的几条一起交给模型；这一轮不再追加用户消息（`queued.trigger`）。
+- **插话**：`groupTick` 每秒看一遍——群里安静够久（默认 20s）、有新消息、最短间隔（10s）和每小时额度（off/low/normal/high = 0/2/6/15）都允许时，让模型决定要不要说；不想说就回 `[不回复]`（这一轮只在请求里补一句提醒，不改历史）。
+- **怎么说话**：系统提示 = 人格 + 群聊守则（`agents/<id>/group.md`，没有就用内置的）；回复按空行拆成最多 3 条、每条最多 300 字，之间停 0.3–3 秒；不发思考、工具过程和用量（群聊这一轮不开流式窗口）。
+- **设置**：插话积极度、安静多久、最短间隔、一条多长、最多几条，都在 agent 自己节点的「覆盖的设置」里（`group_*`，存 agents.json）。
+- **平台前提**：Telegram 要关掉 privacy mode 或者当群管理员；飞书要开「获取群组中所有消息」。写进了 Telegram / 飞书节点的接入说明。
+- **测试**：`group_test.go`——只听不回、被 @ 才回（回复里没有用量）、`[不回复]` 什么都不发、拆条和长度上限、安静期 / 最短间隔 / 积极度 off、群聊工具白名单和群聊守则、群聊默认不挂工作目录。
+- **坑**：以前群消息会被当成管理员的窗口接进主会话；现在 `attach` 对群消息一律用这个群自己的会话。
+- **坑**：拓扑图第一次打开时，节点有 0.45 秒淡入，截图/自动化容易截到“只有连线没有卡片”；检查脚本现在等节点 opacity 到 1 再截图，并且 `prefers-reduced-motion` 下不做淡入。
+
+### 阶段 8：网关内部群聊和 agent 私聊（2026-10-24，后端 + 节点，聊天界面还没做）
+
+- 数据：`data/rooms.json`（id、名字、成员 agent、点名/自由、暂停、禁言、是不是私聊）。群的聊天记录直接用网关的会话 `room:<id>`（网页的会话页能看、能发言），每个成员 agent 在群里还有自己的会话 `@<agent>/room:<id>`。
+- 说话：人在 `room:<id>` 里发言 → 转给所有成员（`[张三] 内容`），被 @ 或者叫到名字的进「攒 2 秒再回」那一套（沿用阶段 7 的群聊引擎：短、口语、不发思考、工具只有群聊白名单）；自由模式按积极度插话。agent 的回复由 `roomAgentSay` 记进群的记录并转给其他成员。
+- 防乱：连续 8 条都是 agent 说的、或者两个 agent 来回 6 轮（中间没有人说话）→ 自动暂停并在群里说一声；手动暂停 / 恢复、禁言某个成员、点名 / 自由在房间节点里改。
+- `Message` 工具（网关执行，内核登记成 NA_TOOL_READ）：`{to:"room:群名", text}` 发到群、`{to:"agent:名字", text, wait:true}` 私聊并等对方回话（最多 5 分钟）；两个 agent 的私聊就是两个成员的房间，第一次发消息时自动建。
+- 网页：拓扑图 Agent 列上面是群节点（连着成员 agent），下面是「创建群」；房间面板能改成员、禁言、点名/自由、暂停/恢复、打开聊天、删除。聊天就是用会话页——发到 `room:<id>` 的话就是群里的话。
+- **收尾补上的**：建群/改名时把群记录会话的标题设成群名（会话列表里不再是 `room:abc123`）；`/room` 命令（列出、`/room <群名> pause|resume`，只有管理员）；群每天 token 预算（房间面板里填，0 不限，超了自动暂停并说明）；`Message` 发给整个群时也按点名/自由判断，不会把所有人叫起来；`/room` 的命令权限补了 `isAdmin` 检查。
+- **还没做**：多人头像和 @ 补全这类专门的群聊界面（现在就是普通的会话页，能看到每一条和谁说的）。下一轮补。
+- 测试：`rooms` 包的增删改查；`TestRoomFanout`（人说话转给成员、被叫到的回、记录里能看到）。
 
 ## v0.4 开发进度（dev/v0.4，已合并 main，v0.4.0 发布）
 

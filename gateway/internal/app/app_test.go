@@ -227,8 +227,9 @@ func TestFinalAnswer(t *testing.T) {
 	}
 	req := e.llm.lastReq()
 	// 没有工作目录：HOME 模式，工具仍然给；管理员还有 Gateway / GatewayAdmin
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 4 ||
-		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "Schedule" || req.Tools[3].Function.Name != "echo" {
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 5 ||
+		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "Message" ||
+		req.Tools[3].Function.Name != "Schedule" || req.Tools[4].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -264,20 +265,6 @@ func TestInvalidToolArgsAreForwardedAsString(t *testing.T) {
 	var s string
 	if json.Unmarshal(turn.Calls[0].Args, &s) != nil || s != "{broken" {
 		t.Fatalf("args: %s", turn.Calls[0].Args)
-	}
-}
-
-func TestGroupIgnored(t *testing.T) {
-	e := setup(t)
-	e.say("随便聊聊", group(false))
-	e.say("@机器人 几点了", group(true))
-	e.ch.wait(t, "暂时只支持私聊")
-	e.say("@机器人 在吗", group(true)) // 只提醒一次
-	e.k.none()
-	select {
-	case m := <-e.ch.sent:
-		t.Fatalf("不该再回复：%q", m)
-	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -318,7 +305,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 4 {
+	if n := len(e.llm.lastReq().Tools); n != 5 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }

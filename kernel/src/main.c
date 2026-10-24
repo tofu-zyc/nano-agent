@@ -435,7 +435,7 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
 /* 由网关执行的工具：内核只转给网关，不挑工作目录、不交给执行器 */
 static bool gateway_tool(const char *name)
 {
-    static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule" };
+    static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(name, names[i])) return true;
     return false;

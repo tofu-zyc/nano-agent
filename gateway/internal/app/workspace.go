@@ -37,7 +37,8 @@ type workspace struct {
 
 func (a *App) workspaceOf(sid string) workspace {
 	st := a.store.Settings(sid)
-	w := workspace{mode: a.cfg.Workspace.Mode}
+	// 权限模式：会话自己的 > agent 的 > 全局默认
+	w := workspace{mode: a.agentModeDefault(sid)}
 	if st.Mode != "" {
 		w.mode = st.Mode
 	}
@@ -47,7 +48,8 @@ func (a *App) workspaceOf(sid string) workspace {
 				w.wss = append(w.wss, x)
 			}
 		}
-	} else {
+	} else if !st.Group {
+		// 群聊默认不挂工作目录（管理员可以在会话节点里单独给它挂）
 		w.wss = a.defaultWorkspaces()
 	}
 	return w

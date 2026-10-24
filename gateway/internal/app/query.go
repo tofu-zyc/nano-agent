@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
@@ -38,6 +39,8 @@ func (t *Totals) add(u llm.Usage) {
 
 type SessionInfo struct {
 	SID            string         `json:"sid"`
+	Agent          string         `json:"agent"`     // 这个会话属于哪个 agent
+	Group          bool           `json:"group"`     // 这是某个群聊里的会话
 	Channel        string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
 	Endpoints      []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title          string         `json:"title"`
@@ -97,6 +100,9 @@ func (a *App) Snapshot() Snapshot {
 	defer a.mu.Unlock()
 	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Machines: a.machineList(), Workspaces: a.workspaceInfos()}
 	for _, sid := range a.sessionIDs() {
+		if isRoomMemberSID(sid) {
+			continue // agent 在房间里旁听的会话，用户看群那个会话就够了
+		}
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })
@@ -116,7 +122,7 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
-	info := SessionInfo{SID: sid, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
+	info := SessionInfo{SID: sid, Agent: agents.SessionAgent(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
 		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
 	if m, _, ok := a.modelOf(sid); ok {
@@ -171,8 +177,8 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Usage.ReasoningTokens += m.Usage.ReasoningTokens
 		}
 	}
-	if _, path := a.persona.For(sid); path != "" {
-		info.Persona = filepath.Base(path)
+	if _, path := a.personaFor(sid); path != "" {
+		info.Persona = filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path)
 	}
 	info.PersonaFile = persona.FileFor(sid)
 	return info

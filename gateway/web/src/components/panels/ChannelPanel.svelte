@@ -14,6 +14,19 @@
   // 在这个渠道上聊过天的人（每个私聊是一个窗口）
   const people = $derived((ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === name).map((e) => ({ e, s }))));
   const showDefault = $derived(String(store.field('channels.show')?.value ?? '过程'));
+  // 内置的 Telegram / 飞书也是一个机器人，绑在某个 agent 上（设置的“家”仍然在这个节点）
+  const bot = $derived(name === 'telegram' ? store.botOfChannel('tg') : name === 'feishu' ? store.botOfChannel('feishu') : undefined);
+
+  async function bindAgent(agent: string) {
+    if (!bot) return;
+    try {
+      await api.patch('/api/bots/' + encodeURIComponent(bot.id), { agent });
+      await store.refresh();
+      store.toast({ kind: 'ok', text: '换好了，新消息进新 agent 的会话' }, 2600);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
 
   async function moveEndpoint(e: EndpointInfo, sid: string) {
     try {
@@ -63,6 +76,18 @@
     </div>
   {/if}
 
+  {#if bot}
+    <h5 class="p-h">这个机器人是谁</h5>
+    <div class="p-card">
+      <label class="p-label">绑定的 agent
+        <select class="p-select" value={bot.agent} onchange={(e) => bindAgent((e.target as HTMLSelectElement).value)}>
+          {#each store.agents as a (a.id)}<option value={a.id}>{a.emoji} {a.name}{a.default ? '（默认）' : ''}</option>{/each}
+        </select>
+      </label>
+      <p class="p-note p-small">一个机器人只绑一个 agent：它上面的消息都进这个 agent 的会话。想给别的 agent 一个 Telegram，可以在拓扑图里「添加机器人」。</p>
+    </div>
+  {/if}
+
   {#if name === 'telegram' || name === 'feishu'}
     {#if people.length}
       <h5 class="p-h">聊过天的人 <span class="muted p-small">每个私聊是一个窗口</span></h5>
@@ -100,7 +125,7 @@
         <li>找 <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> 发 <code>/newbot</code>，拿到 token，填到下面；</li>
         <li>国内一般要设代理，比如 <code>http://127.0.0.1:7890</code>（或者在网关节点设默认代理）；</li>
         <li>打开“启用”，几秒后这里会显示机器人的名字；</li>
-        <li>私聊机器人就能用了。目前只支持私聊，群聊以后再做。</li>
+        <li>私聊机器人就能用了。要让它看得见群里的所有消息：在 BotFather 里 <code>/setprivacy</code> 关掉 privacy mode，或者把它设成群管理员；不然它只收得到 @ 它的消息。</li>
       </ol>
     </details>
   {/if}
@@ -113,7 +138,8 @@
         <li>把 App ID 和 App Secret 填到下面，打开“启用”；</li>
         <li>在“事件与回调”里选“使用长连接接收事件”，添加 <code>im.message.receive_v1</code>、<code>im.message.recalled_v1</code>；</li>
         <li>“回调配置”里同样选长连接，添加 <code>card.action.trigger</code>（卡片上的停止、批准 / 拒绝按钮要用）；</li>
-        <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code>、<code>cardkit:card:write</code> 权限，发布版本。</li>
+        <li>开通 <code>im:message</code>、<code>im:message:send_as_bot</code>、<code>cardkit:card:write</code> 权限，发布版本；</li>
+        <li>要在群里用：再开“获取群组中所有消息”的权限，不然只收得到 @ 它的消息。</li>
       </ol>
     </details>
   {/if}

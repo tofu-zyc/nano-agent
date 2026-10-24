@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import type { AgentInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
 import { HOMES } from './nodes';
 
 export type Toast = {
@@ -19,7 +19,7 @@ export type View = 'topology' | 'sessions';
 export type Route = { view: View; arg?: string };
 
 // 以前的页面（设置、设备、定时任务、人格）的链接：跳到拓扑图，打开对应的节点
-type Legacy = { target: Target; focus?: string; persona?: { name: string; isNew: boolean } };
+type Legacy = { target: Target; focus?: string; persona?: { name: string; isNew: boolean; agent?: string } };
 
 function parseHash(): { route: Route; legacy?: Legacy } {
   const h = location.hash.replace(/^#\/?/, '');
@@ -37,8 +37,14 @@ function parseHash(): { route: Route; legacy?: Legacy } {
       return { route: topo, legacy: { target: { type: 'machines' } } };
     case 'schedules':
       return { route: topo, legacy: { target: { type: 'schedules' } } };
-    case 'personas':
-      return { route: topo, legacy: { target: { type: 'agent' }, persona: { name: arg ?? 'default.md', isNew: params.get('new') === '1' } } };
+    case 'personas': {
+      // 人格现在是每个 agent 自己的：默认人格是默认 agent 的 persona.md，其他的是会话专属
+      const name = arg ?? 'default.md';
+      if (name === 'default.md') {
+        return { route: topo, legacy: { target: { type: 'agent', id: 'default' }, persona: { name: 'persona.md', isNew: false, agent: 'default' } } };
+      }
+      return { route: topo, legacy: { target: { type: 'agent', id: 'default' }, persona: { name, isNew: params.get('new') === '1' } } };
+    }
   }
   return { route: topo };
 }
@@ -82,7 +88,7 @@ class Store {
   modelIntent = $state<'model' | 'endpoint' | null>(null); // 打开模型面板后直接进添加模型/接口
   route = $state<Route>(parseHash().route);
   devices = $state<Devices | null>(null); // SSH 连接、配对请求、配对过的电脑（机器节点和“接入机器”用）
-  persona = $state<{ name: string; isNew: boolean } | null>(null); // 正在编辑的人格文件
+  persona = $state<{ name: string; isNew: boolean; agent?: string } | null>(null); // 正在编辑的人格文件（agent 在时是那个 agent 自己的）
   scheduleNew = $state(false); // 打开定时任务节点后直接新建
   panelWidth = $state(loadWidth());
   theme = $state<Theme>(loadTheme());
@@ -331,6 +337,34 @@ class Store {
 
   // ---- 会话 ----
 
+  /** 所有 agent */
+  get agents(): AgentInfo[] {
+    return this.ov?.agents ?? [];
+  }
+
+  /** 所有机器人 */
+  get bots(): BotInfo[] {
+    return this.ov?.bots ?? [];
+  }
+
+  /** 网关内部的群聊（房间） */
+  get rooms(): RoomInfo[] {
+    return this.ov?.rooms ?? [];
+  }
+
+  room(id: string | undefined): RoomInfo | undefined {
+    return id ? this.rooms.find((r) => r.id === id) : undefined;
+  }
+
+  agent(id: string | undefined): AgentInfo | undefined {
+    return id ? this.agents.find((a) => a.id === id) : undefined;
+  }
+
+  /** 绑在某个渠道上的机器人（内置的 tg/feishu 也在这里） */
+  botOfChannel(channel: string): BotInfo | undefined {
+    return this.bots.find((b) => b.channel === channel);
+  }
+
   /** 所有机器：本机、装了内核的电脑、SSH 服务器 */
   get machines(): MachineInfo[] {
     return this.ov?.machines ?? [];
@@ -375,10 +409,10 @@ class Store {
     delete this.phase[sid];
   }
 
-  /** 新建一个会话并打开它 */
-  async newSession(title = '') {
+  /** 新建一个会话并打开它（agent 留空就是默认 agent） */
+  async newSession(title = '', agent = '') {
     try {
-      const info = await api.post<SessionInfo>('/api/sessions', { title });
+      const info = await api.post<SessionInfo>('/api/sessions', { title, agent });
       this.upsertSession(info);
       location.hash = '#/sessions/' + encodeURIComponent(info.sid);
       return info;
@@ -425,6 +459,13 @@ class Store {
         break;
       case 'models':
         this.reloadModels();
+        break;
+      case 'agents':
+      case 'bots':
+      case 'rooms':
+        // agent 或机器人列表变了：拓扑图和面板跟着重新读一遍
+        clearTimeout(this.reloadTimer);
+        this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 300);
         break;
       case 'search':
         if (ov && e.data) ov.search = e.data;

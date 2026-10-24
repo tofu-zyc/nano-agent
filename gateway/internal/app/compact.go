@@ -24,7 +24,7 @@ func (a *App) contextConfig() (float64, float64, int) {
 	return c.CompactAt, c.CompactTo, max(1, c.KeepTurns)
 }
 func (a *App) compactLimits(sid string) (int, int, int) {
-	at, to, keep := a.contextConfig()
+	at, to, keep := a.contextConfigFor(sid)
 	_, _, _, window := a.contextParts(sid)
 	high, low := int(float64(window)*at), int(float64(window)*to)
 	m, _, _ := a.modelOf(sid)
@@ -286,7 +286,7 @@ func (a *App) Maintain() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, sid := range a.sessionIDs() {
-		if strings.HasPrefix(sid, "cron:") {
+		if isCronSID(sid) {
 			continue
 		} // 下次任务会归档并清空，无需空闲摘要
 		s := a.sessOf(sid)

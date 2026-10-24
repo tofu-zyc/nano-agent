@@ -35,6 +35,7 @@ type Settings struct {
 	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用模型的默认值
 	Model    string `json:"model,omitempty"`    // 用哪个模型（models 包里的 ID），空表示用默认模型
 	Title    string `json:"title,omitempty"`    // 会话的名字，网页里显示
+	Group    bool   `json:"group,omitempty"`    // 这是某个群聊里的会话：不挂工作目录、只发正文、用群聊的工具
 	Web      bool   `json:"web,omitempty"`      // 网页接着这个会话：在网页里新建的，或者在网页里说过话
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，

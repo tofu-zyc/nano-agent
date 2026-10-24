@@ -80,7 +80,7 @@ dir = "{TMP}/skills"
 provider = "mock"
 max_history_tokens = 4000
 [persona]
-dir = "{ROOT}/personas"
+dir = "{TMP}/personas"
 [session]
 data_dir = "{TMP}/data"
 [workspace]

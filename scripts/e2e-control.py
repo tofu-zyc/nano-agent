@@ -48,7 +48,7 @@ provider = "mock"
 [skills]
 dir = "{HOME}/skills"
 [persona]
-dir = "{ROOT}/personas"
+dir = "{TMP}/personas"
 [session]
 data_dir = "{DATA}"
 [workspace]

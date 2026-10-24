@@ -190,7 +190,7 @@ if [ "$UNINSTALL" = 1 ]; then
     # 同一个目录里还装着内核：只删网关的部分
     confirm "删除网关的程序、配置和数据（保留 $NANO_HOME/kernel 里的内核）？" || { say "已取消"; exit 0; }
     rm -rf "$BIN/nano-gateway" "$LIB" "$NANO_HOME/run" "$NANO_HOME/backup" "$NANO_HOME/cache/releases" \
-      "$CONFIG" "$DATA" "$NANO_HOME/secret.key" "$NANO_HOME/personas" "$NANO_HOME/skills" \
+      "$CONFIG" "$DATA" "$NANO_HOME/secret.key" "$NANO_HOME/agents" "$NANO_HOME/personas" "$NANO_HOME/skills" \
       "$NANO_HOME/update.json" "$NANO_HOME/.shipped.sha256"
   elif [ -d "$NANO_HOME" ]; then
     confirm "删除 $NANO_HOME？里面有会话记录、模型和 SSH 连接。" || { say "已取消"; exit 0; }
@@ -233,16 +233,20 @@ fi
 
 # ---- 配置 ----
 step "安装配置到 $NANO_HOME"
-install -d -m700 "$DATA" "$NANO_HOME/personas" "$NANO_HOME/skills"
+install -d -m700 "$DATA" "$NANO_HOME/personas" "$NANO_HOME/skills" "$NANO_HOME/agents"
 if [ -d "$ROOT/personas" ] && [ -z "$(ls -A "$NANO_HOME/personas" 2>/dev/null)" ]; then
   cp -a "$ROOT/personas/." "$NANO_HOME/personas/"
+fi
+# 自带的 agent 人格（包里 agents/default/persona.md）：第一次装才放进去，之后由 agent 自己管
+if [ -d "$ROOT/agents" ] && [ -z "$(ls -A "$NANO_HOME/agents" 2>/dev/null)" ]; then
+  cp -a "$ROOT/agents/." "$NANO_HOME/agents/"
 fi
 if [ -d "$ROOT/skills" ] && [ -z "$(ls -A "$NANO_HOME/skills" 2>/dev/null)" ]; then
   cp -a "$ROOT/skills/." "$NANO_HOME/skills/"
 fi
 # 记下自带的人格和技能装的是哪个版本：以后 nano-gateway update 只覆盖没改过的
 if [ ! -f "$NANO_HOME/.shipped.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
-  (cd "$NANO_HOME" && find personas skills -type f ! -name '*.new' -print0 2>/dev/null | sort -z |
+  (cd "$NANO_HOME" && find agents personas skills -type f ! -name '*.new' -print0 2>/dev/null | sort -z |
     xargs -0 -r sha256sum) >"$NANO_HOME/.shipped.sha256" 2>/dev/null || rm -f "$NANO_HOME/.shipped.sha256"
   chmod 600 "$NANO_HOME/.shipped.sha256" 2>/dev/null || true
 fi

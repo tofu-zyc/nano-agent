@@ -11,6 +11,8 @@
 
   const ov = $derived(store.ov!);
   const sess = $derived(store.session(sid));
+  // 群记录会话（room:<id>）：显示群的名字、成员，能直接去房间节点
+  const room = $derived(store.rooms.find((r) => r.sid === sid));
   // 列表里还没有这个会话（比如刚新建）：去网关问一下，确实没有才说不存在
   let gone = $state(false);
   $effect(() => {
@@ -95,6 +97,30 @@
       <div class="p-stat"><b>{sess.messages}</b><span>条消息</span></div>
       <div class="p-stat"><b class="acc">{pct(sess.usage.cached_tokens, sess.usage.prompt_tokens)}</b><span>缓存命中</span></div>
       <div class="p-stat"><b>{num(sess.usage.prompt_tokens)}</b><span>累计输入</span></div>
+    </div>
+
+    {#if room}
+      <div class="p-card">
+        <div class="p-row">
+          <Icon name="chat" size={15} />
+          <span class="p-grow">群「{room.name}」</span>
+          {#if room.paused}<span class="tag">已暂停</span>{/if}
+          <button class="btn sm" onclick={() => store.open({ type: 'room', id: room!.id })}>去群节点</button>
+        </div>
+        <p class="p-note p-small">这里的每一条都会转给群里的 {room.members.map((m) => store.agent(m)?.name ?? m).join('、')}；被 @ 或叫到名字的会回。</p>
+      </div>
+    {/if}
+    {#if sess.group}
+      <div class="p-warn">这是在群聊里的会话：每条群消息都记进历史，被 @ 或叫到名字才回；群里安静够了、额度也够时可以插一句。默认不挂工作目录，工具只有群聊白名单里的。</div>
+    {/if}
+
+    <h5 class="p-h">属于哪个 agent <span class="muted p-small">换 agent 就是换个机器人聊</span></h5>
+    <div class="p-card">
+      <div class="p-row">
+        <span class="p-grow">{store.agent(sess.agent)?.emoji} {store.agent(sess.agent)?.name ?? sess.agent}</span>
+        <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去它的节点</button>
+      </div>
+      <p class="p-note p-small">人格、模型、每条消息的上限都用这个 agent 的；会话里单独设过的优先。</p>
     </div>
 
     <h5 class="p-h">接入的窗口 <span class="muted p-small">在哪个窗口说话都是同一段上下文</span></h5>
@@ -182,8 +208,8 @@
       {:else}
         <div class="p-row">
           <Icon name="persona" size={15} />
-          <span class="p-grow">用 Agent 的默认人格</span>
-          <button class="btn sm" onclick={() => store.open({ type: 'agent' })}>去 Agent</button>
+          <span class="p-grow">用这个 agent 自己的人格</span>
+          <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去 Agent</button>
         </div>
         <button class="btn sm ghost" onclick={() => (store.persona = { name: sess.persona_file, isNew: true })}><Icon name="plus" size={13} />给这个会话单独设定人格</button>
       {/if}

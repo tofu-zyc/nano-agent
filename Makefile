@@ -146,13 +146,14 @@ release-gateway: $(ZIG) $(RG)/linux-x86_64
 	@for pair in amd64:x86_64 arm64:aarch64; do \
 	  goarch=$${pair%%:*}; karch=$${pair##*:}; \
 	  dir=$(RELEASE)/nano-gateway-$(VERSION)-linux-$$karch; \
-	  rm -rf $$dir; mkdir -p $$dir/lib $$dir/personas $$dir/skills; \
+	  rm -rf $$dir; mkdir -p $$dir/lib $$dir/personas $$dir/skills $$dir/agents/default; \
 	  (cd gateway && GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nano-agent/gateway/internal/version.Version=$(VERSION)" -o ../$$dir/nano-gateway ./cmd/nano-gateway); \
 	  cp kernel/build/cross/linux-$$karch/nano-kernel $$dir/lib/; \
 	  cp kernel/build/cross/linux-$$karch/nano-exec $$dir/lib/; \
 	  cp $(RG)/linux-$$karch $$dir/lib/rg; \
 	  cp gateway.example.toml $$dir/; \
-	  cp -a personas/. $$dir/personas/; \
+	  if [ -d personas ]; then cp -a personas/. $$dir/personas/; fi; \
+	  cp -a agents/. $$dir/agents/; \
 	  cp -a skills/. $$dir/skills/; \
 	  cp scripts/install-gateway.sh $$dir/; \
 	  echo '$(VERSION)' > $$dir/VERSION; \

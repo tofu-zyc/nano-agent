@@ -161,7 +161,12 @@ def run(page, url, nano):
     page.fill("input[type=password]", PASSWORD)
     page.keyboard.press("Enter")
     page.wait_for_selector("g.node.gateway", timeout=15000)
-    page.wait_for_timeout(800)
+    # 节点有 0.45 秒的淡入：等它们真的画出来再截图，免得截到空白
+    page.wait_for_function(
+        "() => { const n = document.querySelector('g.node.agent'); return n && getComputedStyle(n).opacity === '1'; }",
+        timeout=8000,
+    )
+    page.wait_for_timeout(400)
     page.screenshot(path=os.path.join(SHOTS, "topology.png"))
 
     # ---- 左边只剩拓扑和会话 ----
@@ -170,6 +175,19 @@ def run(page, url, nano):
         ok("左边只有拓扑和会话两个页面")
     else:
         fail(f"左边的页面：{rail}")
+
+    # ---- 同一个东西在图上只有一个节点（比如内置 Telegram 不能出现两次） ----
+    titles = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id + '|' + (e.querySelector('.t1')?.textContent ?? ''))")
+    seen_t = {}
+    for t in titles:
+        nid, title = t.split("|", 1)
+        if nid.startswith("c:"):
+            seen_t.setdefault(title.strip(), []).append(nid)
+    dups = {k: v for k, v in seen_t.items() if len(v) > 1}
+    if dups:
+        fail(f"入口列里有重复的节点：{dups}")
+    else:
+        ok("入口列里每个渠道、机器人只有一个节点")
 
     # ---- 每个配置项恰好在一个节点里 ----
     all_fields = fields(page)
@@ -194,8 +212,189 @@ def run(page, url, nano):
     if not (missing or dup or unknown):
         ok(f"{len(all_fields)} 个配置项都恰好在一个节点里（点开了 {len(nodes)} 个节点）")
 
+    # ---- v0.5 的节点：每个 agent、Agent 默认值、机器人 ----
+    agents = api(page, "GET", "/api/agents")[1]["items"]
+    bots = api(page, "GET", "/api/bots")[1]["items"]
+    node_ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
+    for aid in [a["id"] for a in agents]:
+        if "ag:" + aid not in node_ids:
+            fail(f"agent {aid} 在图上没有节点")
+    if "agdefault" not in node_ids or "add:agent" not in node_ids or "add:bot" not in node_ids:
+        fail("图上缺 Agent 默认值 / 添加 agent / 添加机器人 节点")
+    else:
+        ok(f"{len(agents)} 个 agent 各有节点，另有 Agent 默认值、添加 agent、添加机器人")
+    title = open_node(page, "ag:default")
+    text = page.locator(".insp").inner_text()
+    if "人格" in text and "机器人" in text:
+        ok("agent 节点里有它自己的人格和绑定的机器人")
+    else:
+        fail("agent 节点里看不到人格或机器人：" + text[:200])
+    if "群里插话积极度" in text:
+        ok("agent 节点里有群聊行为（插话积极度等）")
+    else:
+        fail("agent 节点里没有群聊设置：" + text[:200])
+    # 在 agent 节点里改一条覆盖设置：存进去的是它自己的值
+    first = page.locator(".insp .setting input, .insp .setting select").first
+    if first.count():
+        first.fill("42") if first.evaluate("e => e.tagName === 'INPUT'") else None
+        first.press("Enter")
+        page.wait_for_timeout(700)
+        got = api(page, "GET", "/api/agents")[1]["items"]
+        mine = [a for a in got if a["id"] == "default"][0]
+        vals = {s["key"]: s["value"] for s in mine["settings"]}
+        if any(v is not None for v in vals.values()):
+            ok("agent 自己的设置能保存（覆盖全局）")
+        else:
+            fail("agent 的设置没存上：" + json.dumps(vals, ensure_ascii=False))
+        api(page, "PATCH", "/api/agents/default", {"settings": {k: None for k in vals}})
+    # 机器人节点
+    if bots:
+        open_node(page, "c:telegram")
+        text = page.locator(".insp").inner_text()
+        if "绑定的 agent" in text:
+            ok("Telegram 节点里能改它绑的 agent")
+        else:
+            fail("Telegram 节点里没有绑定 agent 的地方")
+
+    # ---- 群和私聊：3 个 agent、2 个群、1 个私聊、1 个停用的机器人 ----
+    api(page, "POST", "/api/agents", {"name": "小鲍", "emoji": "🦊"})
+    api(page, "POST", "/api/agents", {"name": "阿强", "emoji": "🐻"})
+    agents = api(page, "GET", "/api/agents")[1]["items"]
+    byname = {a["name"]: a["id"] for a in agents}
+    if "小鲍" not in byname or "阿强" not in byname:
+        fail("中文名字的 agent 没建成：" + json.dumps(byname, ensure_ascii=False))
+        bao = qiang = "default"
+    elif byname["小鲍"] in ("agent", "agent-2") or byname["阿强"] in ("agent", "agent-2"):
+        fail("中文名字的 ID 还是 agent / agent-2：" + json.dumps(byname, ensure_ascii=False))
+        bao, qiang = byname["小鲍"], byname["阿强"]
+    else:
+        ok("中文名字的 agent 用短随机 ID（小鲍 → " + byname["小鲍"] + "）")
+        bao, qiang = byname["小鲍"], byname["阿强"]
+    code, room = api(page, "POST", "/api/rooms", {"name": "产品组", "members": ["default", bao, qiang], "mode": "mention"})
+    code2, room2 = api(page, "POST", "/api/rooms", {"name": "值班", "members": [bao, qiang]})
+    code3, dm = api(page, "POST", "/api/rooms", {"members": ["default", bao], "dm": True})
+    code4, _ = api(page, "POST", "/api/bots", {"kind": "telegram", "name": "旧号", "token": "123456:abcDEF", "agent": bao, "enabled": False})
+    if not (code == 200 and code2 == 200 and code3 == 200 and code4 == 200):
+        fail("建群 / 私聊 / 机器人接口失败：" + str([code, code2, code3, code4]))
+    bot = [b for b in api(page, "GET", "/api/bots")[1]["items"] if b["name"] == "旧号"][0] if code4 == 200 else None
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_function(
+        "() => { const n = document.querySelector('g.node.agent'); return n && getComputedStyle(n).opacity === '1'; }",
+        timeout=8000,
+    )
+    page.wait_for_timeout(500)
+    ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
+    want = ["rm:" + room["id"], "rm:" + room2["id"], "dm:" + dm["id"], "add:room"]
+    if bot:
+        want.append("c:" + bot["channel"])
+    missing = [w for w in want if w not in ids]
+    if missing:
+        fail("图上缺群 / 私聊 / 停用机器人的节点：" + json.dumps(missing, ensure_ascii=False))
+    else:
+        ok("2 个群、1 个私聊、1 个停用的机器人都在图上")
+    # 群单独一列：群节点的 x 在 agent 左边（连线不会反向绕）
+    xof = page.evaluate("""() => {
+      const out = {};
+      for (const g of document.querySelectorAll('g.node')) {
+        const m = g.transform.baseVal.consolidate();
+        out[g.dataset.id] = m ? m.matrix.e : null;
+      }
+      return out;
+    }""")
+    room_x = xof.get("rm:" + room["id"])
+    agent_xs = [x for k, x in xof.items() if k.startswith("ag:") and x is not None]
+    if room_x is not None and agent_xs and room_x + 200 <= min(agent_xs):
+        ok("群单独一列，在 Agent 左边")
+    else:
+        fail(f"群和 agent 挤在一起：群 x={room_x}，agent x={agent_xs}")
+    # 连线：群 → 成员、私聊 → 两个人、停用的机器人 → 它绑的 agent、群会话 → 群节点
+    edges = page.eval_on_selector_all("path.edge", "els => els.map(e => e.dataset.id)")
+    checks = {
+        "群 → 小鲍": "rm:" + room["id"] + ">ag:" + bao,
+        "群 → 阿强": "rm:" + room["id"] + ">ag:" + qiang,
+        "私聊 → 小纳": "dm:" + dm["id"] + ">ag:default",
+        "私聊 → 小鲍": "dm:" + dm["id"] + ">ag:" + bao,
+        "群会话 → 群节点": "s:" + room["sid"] + ">rm:" + room["id"],
+    }
+    if bot:
+        checks["停用的机器人 → 它绑的 agent"] = "c:" + bot["channel"] + ">ag:" + bao
+    bad = [k for k, v in checks.items() if v not in edges]
+    if bad:
+        fail("这些连线不对：" + "、".join(bad) + " / " + json.dumps(edges, ensure_ascii=False)[:500])
+    else:
+        ok("群 / 私聊 / 机器人 / 群会话的连线都连对了")
+    if ("s:" + room["sid"] + ">ag:default") in edges:
+        fail("群的会话还连到了默认 agent")
+    # 入口直连 agent 的虚线不能穿过任何 agent 卡片
+    lane_ids = ["c:" + bot["channel"] + ">ag:" + bao] if bot else []
+    if "sched>ag:default" in edges:
+        lane_ids.append("sched>ag:default")
+    if lane_ids:
+        crossing = page.evaluate("""(ids) => {
+          const rects = [];
+          for (const g of document.querySelectorAll('g.node')) {
+            if (!g.dataset.id.startsWith('ag:')) continue;
+            const m = g.transform.baseVal.consolidate().matrix;
+            const r = g.querySelector('.card').getBBox();
+            rects.push([m.e + r.x, m.f + r.y, m.e + r.x + r.width, m.f + r.y + r.height]);
+          }
+          const bad = new Set();
+          for (const id of ids) {
+            const p = document.querySelector('path.edge[data-id="' + id + '"]');
+            if (!p) continue;
+            const L = p.getTotalLength();
+            for (let t = 0; t <= L; t += 5) {
+              const pt = p.getPointAtLength(t);
+              for (const r of rects) {
+                if (pt.x > r[0] + 3 && pt.x < r[2] - 3 && pt.y > r[1] + 3 && pt.y < r[3] - 3) bad.add(id);
+              }
+            }
+          }
+          return [...bad];
+        }""", lane_ids)
+        if crossing:
+            fail("这些线穿过了 agent 卡片：" + json.dumps(crossing, ensure_ascii=False))
+        else:
+            ok("入口直连 agent 的线不穿过任何 agent 卡片")
+    page.screenshot(path=os.path.join(SHOTS, "topology-groups.png"))
+    # 群面板
+    open_node(page, "rm:" + room["id"])
+    page.screenshot(path=os.path.join(SHOTS, "room.png"))
+    text = page.locator(".insp").inner_text()
+    if "成员" in text and "怎么说话" in text and "每天最多多少 token" in text:
+        ok("群面板能改成员、说话方式和预算")
+    else:
+        fail("群面板缺东西：" + text[:200])
+    sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
+    if sessions.get(room["sid"], {}).get("title") == "产品组":
+        ok("群的会话在列表里显示群名")
+    else:
+        fail("群的会话标题不对：" + json.dumps(sessions.get(room["sid"], {}).get("title"), ensure_ascii=False))
+    if any("/room:" in sid for sid in sessions):
+        fail("agent 在群里旁听的会话不应该出现在会话列表里")
+    # 暂停一下，看看面板和接口对得上
+    api(page, "PATCH", "/api/rooms/" + room["id"], {"paused": True})
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(600)
+    paused = [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == room["id"]]
+    if paused and paused[0]["paused"] is True:
+        ok("群能暂停")
+    else:
+        fail("暂停没生效")
+    # 收拾干净，后面的检查不受影响
+    for r in (room, room2, dm):
+        if r.get("id"):
+            api(page, "DELETE", "/api/rooms/" + r["id"])
+    if bot:
+        api(page, "DELETE", "/api/bots/" + bot["id"])
+    for aid in (bao, qiang):
+        if aid != "default":
+            api(page, "DELETE", "/api/agents/" + aid)
+
     # ---- 改设置：数字、文本、开关、列表，刷新后还在 ----
-    open_node(page, "agent")
+    open_node(page, "agdefault")
     box = page.locator("#f-agent\\.max_steps input")
     box.fill("0")
     box.press("Enter")
@@ -224,7 +423,7 @@ def run(page, url, nano):
         ok("数字、文本、开关、列表改了自动保存，刷新后还在")
     else:
         fail(f"改设置没保存：{got}")
-    open_node(page, "agent")
+    open_node(page, "agdefault")
     v = page.locator("#f-agent\\.max_steps input").input_value()
     if v == "0":
         ok("刷新后面板里显示的是改过的值")
@@ -251,7 +450,7 @@ def run(page, url, nano):
         fail("网关节点没列出改过的设置")
     page.locator(".insp .p-srow", has_text="工具调用轮数上限").click()
     page.wait_for_timeout(500)
-    if page.locator(".insp header h3").inner_text() == "Agent" and page.locator("#f-agent\\.max_steps.hl").count():
+    if page.locator(".insp header h3").inner_text() == "Agent 默认值" and page.locator("#f-agent\\.max_steps.hl").count():
         ok("点改过的设置跳到它所在的节点并高亮")
     else:
         fail("点改过的设置没跳对")
@@ -272,9 +471,10 @@ def run(page, url, nano):
         page.fill(".sheet textarea", "# 测试人格\n你是界面检查用的人格。")
         page.click(".sheet button.primary")
         page.wait_for_timeout(600)
-        persona = os.path.join(nano, "personas", "default.md")
+        # 人格现在是每个 agent 自己的：默认 agent 的文件在 agents/default/persona.md
+        persona = os.path.join(nano, "agents", "default", "persona.md")
         if os.path.exists(persona) and "界面检查" in open(persona, encoding="utf-8").read():
-            ok("人格编辑器保存到 default.md")
+            ok("人格编辑器保存到 agents/default/persona.md")
         else:
             fail("人格没保存")
         page.keyboard.press("Escape")

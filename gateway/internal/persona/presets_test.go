@@ -36,15 +36,15 @@ func TestPresets(t *testing.T) {
 	}
 }
 
-// 自带的 personas/default.md 就是小纳预设，两份要一样。
+// 自带的 agents/default/persona.md 就是小纳预设，两份要一样（v0.5 起人格在 agent 目录里）。
 func TestShippedDefaultIsXiaona(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "personas", "default.md"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "agents", "default", "persona.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, ok := MatchPreset(string(b))
 	if !ok || p.ID != "xiaona" {
-		t.Fatal("personas/default.md 和 presets/xiaona.md 的正文不一样了，改一份要同步另一份")
+		t.Fatal("agents/default/persona.md 和 presets/xiaona.md 的正文不一样了，改一份要同步另一份")
 	}
 }
 

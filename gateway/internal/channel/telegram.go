@@ -29,6 +29,7 @@ type Telegram struct {
 
 	botID   int64
 	botUser string
+	name    string       // 渠道名：内置的是 tg，另外加的机器人是 tg.<id>
 	media   *media.Store // 用户发来的图片存这里，nil 时不收图片
 }
 
@@ -38,6 +39,7 @@ func NewTelegram(c config.Telegram, store *media.Store, log *slog.Logger) (*Tele
 		return nil, fmt.Errorf("telegram.proxy：%w", err)
 	}
 	return &Telegram{
+		name:     "tg",
 		token:    c.Token,
 		base:     strings.TrimRight(c.APIBase, "/"),
 		hc:       hc,
@@ -46,7 +48,16 @@ func NewTelegram(c config.Telegram, store *media.Store, log *slog.Logger) (*Tele
 	}, nil
 }
 
-func (t *Telegram) Name() string { return "tg" }
+func (t *Telegram) Name() string { return t.name }
+
+// SetName 给另外加的机器人换渠道名（tg.<id>），内置的机器人不用调。
+func (t *Telegram) SetName(name string) {
+	if name == "" || name == t.name {
+		return
+	}
+	t.name = name
+	t.log = t.log.With("channel", name)
+}
 
 type tgUser struct {
 	ID        int64  `json:"id"`

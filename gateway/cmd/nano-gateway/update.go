@@ -294,7 +294,7 @@ func installGatewayVersion(ctx context.Context, c *release.Client, cfgPath, data
 	return notes, nil
 }
 
-// installShipped 更新包里自带的人格和技能：用户没改过的（和上次装的一样）才覆盖，
+// installShipped 更新包里自带的人格（agents/、personas/）和技能：用户没改过的（和上次装的一样）才覆盖，
 // 改过的保留，新版本写成 .new；用户删掉的不再放回来。清单记在 .shipped.sha256。
 func installShipped(home string, files []release.File) []string {
 	old := map[string]string{}
@@ -312,8 +312,16 @@ func installShipped(home string, files []release.File) []string {
 	}
 	var notes []string
 	for _, f := range files {
-		if !strings.HasPrefix(f.Name, "personas/") && !strings.HasPrefix(f.Name, "skills/") {
+		// 包里自带的人格（agents/ 下，某个 agent 的 persona.md）、会话人格和技能
+		if !strings.HasPrefix(f.Name, "agents/") && !strings.HasPrefix(f.Name, "personas/") && !strings.HasPrefix(f.Name, "skills/") {
 			continue
+		}
+		// 老布局（v0.4：人格在 personas/default.md）的机器：默认 agent 的人格由 MigrateAgents 从那个文件
+		// 复制过来，这里不能写 —— 不然用户改过的人格会被包里的覆盖掉。
+		if f.Name == "agents/default/persona.md" {
+			if _, err := os.Stat(filepath.Join(home, "personas", "default.md")); err == nil {
+				continue
+			}
 		}
 		sum := sha256.Sum256(f.Data)
 		h := hex.EncodeToString(sum[:])

@@ -5,7 +5,7 @@ import type { FieldState, Target } from './types';
 type Home = { label: string; icon: string; color: string; target: Target };
 
 export const HOMES: Record<string, Home> = {
-  agent: { label: 'Agent', icon: 'persona', color: 'var(--c-agent)', target: { type: 'agent' } },
+  agent: { label: 'Agent 默认值', icon: 'persona', color: 'var(--c-agent)', target: { type: 'agentDefaults' } },
   gateway: { label: '网关', icon: 'hub', color: 'var(--c-gateway)', target: { type: 'gateway' } },
   web: { label: '网页', icon: 'globe', color: 'var(--c-web)', target: { type: 'channel', name: 'web' } },
   cli: { label: '终端', icon: 'terminal', color: 'var(--c-cli)', target: { type: 'channel', name: 'cli' } },
@@ -27,7 +27,7 @@ export function homeOf(f: Pick<FieldState, 'group'>): Home {
 /** 某个节点面板要显示哪些组的设置 */
 export function groupsOf(t: Target): string[] {
   switch (t.type) {
-    case 'agent':
+    case 'agentDefaults':
       return ['agent'];
     case 'gateway':
       return ['gateway'];

@@ -42,7 +42,7 @@
   data/
     agents.json             阶段 6：agent 配置
     bots.json               阶段 6：聊天机器人实例（token 等加密）
-    rooms.json rooms/       阶段 8：内部群聊和群聊记录
+    rooms.json              阶段 8：内部群聊（聊天记录就是会话 room:<id>，不另外存文件）
     schedules.json          阶段 5：定时任务
     mcp.json                阶段 11：MCP 服务
     archive/<会话ID>/        阶段 2：/reset 归档的历史，给做梦用

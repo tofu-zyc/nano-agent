@@ -1,6 +1,6 @@
 <script lang="ts">
   // 拓扑图就是控制台：每个能配置的东西都是一个节点，点开就是它全部的状态、操作和设置。
-  // 从左到右：入口 → 会话 → Agent → 网关 → 能力（记忆、搜索、技能、模型）/ 内核 → 机器 → 工作目录。
+  // 从左到右：入口 → 会话 → 群（房间）→ Agent → 网关 → 能力（记忆、搜索、技能、模型）/ 内核 → 机器 → 工作目录。
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
@@ -10,21 +10,22 @@
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
-  import type { Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
+  import type { AgentInfo, Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, RoomInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
-  type Col = 'in' | 'sess' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
+  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'room' | 'dm' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
+  type Col = 'in' | 'sess' | 'room' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
   type N = { id: string; kind: Kind; col: Col; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
-  type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
+  type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean; route?: 'bottom'; off?: number };
   // 节点上的标记：有问题要处理（err / warn），或者有新东西（info）
   type Issue = { level: 'err' | 'warn' | 'info'; text: string; n?: number };
 
   const MAX_SESSIONS = 9;
   const ORDER = ['cli', 'web', 'telegram', 'feishu'];
-  const X = { chan: 0, sess: 280, agent: 570, gw: 880, right: 1030, mach: 1360, ws: 1680 };
+  const X = { chan: 0, sess: 240, room: 520, agent: 780, gw: 1110, right: 1230, mach: 1560, ws: 1880 };
   const COLS: { col: Col; x: number; w: number; label: string }[] = [
     { col: 'in', x: X.chan, w: 200, label: '入口' },
     { col: 'sess', x: X.sess, w: 220, label: '会话' },
+    { col: 'room', x: X.room, w: 200, label: '群' },
     { col: 'agent', x: X.agent, w: 210, label: 'Agent' },
     { col: 'gw', x: X.gw - 62, w: 124, label: '网关' },
     { col: 'caps', x: X.right, w: 250, label: '能力和内核' },
@@ -54,17 +55,6 @@
     fit();
   }
 
-  // 默认人格的名字（第一行标题），显示在 Agent 节点上
-  let personaName = $state('');
-  $effect(() => {
-    store.personaTick;
-    (async () => {
-      const list = await api.get<{ items: { name: string }[] }>('/api/personas').then((r) => r.items ?? [], () => []);
-      if (!list.some((p) => p.name === 'default.md')) return (personaName = '');
-      const r = await api.get<{ text: string }>('/api/personas/default.md').catch(() => ({ text: '' }));
-      personaName = (r.text.match(/^#\s*(.+)$/m)?.[1] ?? '').trim();
-    })();
-  });
 
   // 正在跑任务的内核（连线上有流动的效果）
   const busyKernels = $derived(new Set((store.ov?.sessions ?? []).filter((s) => s.running).map((s) => s.run_node)));
@@ -84,8 +74,15 @@
     const more = all.length - shown.length;
 
     const chans = ov.channels;
+    const bots = ov.bots ?? [];
+    const botOf = (name: string) => bots.find((b) => b.channel === name);
+    const agents = ov.agents ?? [];
+    // 群：会话 sid 是 room:<id>；私聊画成小节点，群画成普通节点
+    const roomsAll = ov.rooms ?? [];
+    const roomOfSid = (sid: string) => roomsAll.find((r) => r.sid === sid);
+    const roomNodeID = (r: RoomInfo) => (r.dm ? 'dm:' : 'rm:') + r.id;
     const nS = shown.length + (more > 0 ? 1 : 0);
-    const nL = chans.length + 1; // 渠道，最下面是定时任务
+    const nL = chans.length + 2; // 渠道、定时任务，最下面是“添加机器人”
     const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
       Number(!!b.managed) - Number(!!a.managed) || Number(b.local) - Number(a.local) || a.node.localeCompare(b.node));
     const nM = store.machines.length + 1; // 机器，最下面是“接入机器”
@@ -95,13 +92,18 @@
 
     chans.forEach((c, i) => {
       const y = leftY(i);
-      const meta = channelMeta[c.name] ?? { label: c.name, color: 'var(--c-session)', icon: 'link' };
+      const bot = botOf(c.name);
+      const meta = channelMeta[c.name] ?? { label: bot?.name ?? c.name, icon: bot?.kind === 'feishu' ? 'feishu' : 'send',
+        color: bot?.kind === 'feishu' ? 'var(--c-feishu)' : 'var(--c-telegram)' };
+      const target: Target = bot && !bot.legacy ? { type: 'bot', id: bot.id } : { type: 'channel', name: c.name };
       nodes.push({ id: 'c:' + c.name, kind: 'channel', col: 'in', x: X.chan, y: y - 32, w: 200, h: 64, color: meta.color,
-        target: { type: 'channel', name: c.name }, data: { ...c, meta } });
+        target, data: { ...c, meta } });
     });
     const sc = ov.schedules;
     nodes.push({ id: 'sched', kind: 'schedule', col: 'in', x: X.chan, y: leftY(chans.length) - 32, w: 200, h: 64, color: sc?.total ? 'var(--c-cron)' : 'var(--muted)',
       target: { type: 'schedules' }, data: sc });
+    nodes.push({ id: 'add:bot', kind: 'botadd', col: 'in', x: X.chan, y: leftY(chans.length + 1) - 22, w: 200, h: 44, color: 'var(--c-telegram)',
+      target: { type: 'bots' }, data: { icon: 'plus', title: '添加机器人', sub: '让某个 agent 有自己的机器人' } });
 
     // 会话连到它接着的窗口所在的渠道（一个会话可以接好几个渠道的窗口），再连到 Agent
     shown.forEach((s, j) => {
@@ -114,24 +116,73 @@
         edges.push({ id: `c:${ch}>s:${s.sid}`, from: 'c:' + ch, to: 's:' + s.sid, color: cc, flow: s.running });
       }
       if (s.sid.startsWith('cron:')) edges.push({ id: `sched>s:${s.sid}`, from: 'sched', to: 's:' + s.sid, color: 'var(--c-cron)', flow: s.running });
-      edges.push({ id: `s:${s.sid}>agent`, from: 's:' + s.sid, to: 'agent', color: 'var(--c-session)', flow: s.running });
+      // 群（房间）的聊天记录连到群节点，不连默认 agent
+      const r = roomOfSid(s.sid);
+      if (r) {
+        edges.push({ id: `s:${s.sid}>${roomNodeID(r)}`, from: 's:' + s.sid, to: roomNodeID(r), color: 'var(--accent-2)', flow: s.running });
+      } else {
+        edges.push({ id: `s:${s.sid}>ag:${s.agent}`, from: 's:' + s.sid, to: 'ag:' + s.agent, color: 'var(--c-session)', flow: s.running });
+      }
     });
     if (more > 0) {
       const y = cy + (nS - 1 - (nS - 1) / 2) * 64;
       nodes.push({ id: 'more', kind: 'more', col: 'sess', x: X.sess, y: y - 20, w: 220, h: 40, color: 'var(--muted)', data: more });
     }
     // 没有会话的已启用渠道、没有任务会话的定时任务直接连到 Agent，表示“接上了”
+    const agentOfChannel = (name: string) => botOf(name)?.agent ?? 'default';
+    let laneNo = 0;
     for (const c of chans) {
-      if (c.status.state !== 'disabled' && !shown.some((s) => sessionChannels(s).includes(c.name))) {
-        edges.push({ id: `c:${c.name}>agent`, from: 'c:' + c.name, to: 'agent', color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true });
-      }
+      // 每个机器人（停用的也算）都画出它绑到哪个 agent；有会话的时候线走会话那边
+      if (shown.some((s) => sessionChannels(s).includes(c.name))) continue;
+      const ag = agentOfChannel(c.name);
+      if (!agents.some((a) => a.id === ag)) continue;
+      edges.push({ id: `c:${c.name}>ag:${ag}`, from: 'c:' + c.name, to: 'ag:' + ag, off: laneNo++,
+        color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true, route: 'bottom' });
     }
     if (!shown.some((s) => s.sid.startsWith('cron:'))) {
-      edges.push({ id: 'sched>agent', from: 'sched', to: 'agent', color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true });
+      edges.push({ id: 'sched>ag:default', from: 'sched', to: 'ag:default', off: laneNo++, color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true, route: 'bottom' });
     }
 
-    nodes.push({ id: 'agent', kind: 'agent', col: 'agent', x: X.agent, y: cy - 46, w: 210, h: 92, color: 'var(--c-agent)', target: { type: 'agent' } });
-    edges.push({ id: 'agent>gw', from: 'agent', to: 'gw', color: 'var(--c-agent)', flow: anyRunning });
+    // Agent 列：每个 agent 一个节点（各有自己的名字、人格、模型、绑定的机器人），
+    // 下面是“Agent 默认值”（全局设置的家）和“添加 agent”
+    const aH = 72;
+    const aTop = cy - (agents.length * aH) / 2;
+    agents.forEach((a: AgentInfo, i: number) => {
+      nodes.push({ id: 'ag:' + a.id, kind: 'agent', col: 'agent', x: X.agent, y: aTop + i * aH, w: 210, h: 66, color: 'var(--c-agent)',
+        target: { type: 'agent', id: a.id }, data: a });
+      edges.push({ id: 'ag:' + a.id + '>gw', from: 'ag:' + a.id, to: 'gw', color: 'var(--c-agent)', flow: a.running });
+    });
+    const below = aTop + Math.max(agents.length, 1) * aH + 6;
+    nodes.push({ id: 'agdefault', kind: 'agentdefaults', col: 'agent', x: X.agent, y: below, w: 210, h: 46, color: 'var(--muted)',
+      target: { type: 'agentDefaults' }, data: null });
+    nodes.push({ id: 'add:agent', kind: 'add', col: 'agent', x: X.agent, y: below + 54, w: 210, h: 44, color: 'var(--c-agent)',
+      target: { type: 'agents' }, data: { icon: 'plus', title: '添加 agent', sub: '多一个一直存在的它' } });
+    // 群（房间）单独一列：左边连群的聊天记录，右边连成员 agent。
+    // 两个 agent 的私聊不画成群：画成一个虚线的小节点，一眼能看出来是两个人之间的事。
+    const roomsList = (ov.rooms ?? []).filter((r: RoomInfo) => !r.dm);
+    const dms = (ov.rooms ?? []).filter((r: RoomInfo) => r.dm);
+    const rBlock = roomsList.length * 60 + dms.length * 46 + 44;
+    const rTop = cy - rBlock / 2 + 10;
+    roomsList.forEach((r: RoomInfo, i: number) => {
+      nodes.push({ id: 'rm:' + r.id, kind: 'room', col: 'room', x: X.room, y: rTop + i * 60, w: 200, h: 50, color: 'var(--accent-2)',
+        target: { type: 'room', id: r.id }, data: r });
+      for (const m of r.members) {
+        if (agents.some((a) => a.id === m)) {
+          edges.push({ id: 'rm:' + r.id + '>ag:' + m, from: 'rm:' + r.id, to: 'ag:' + m, color: 'var(--accent-2)', dashed: r.paused });
+        }
+      }
+    });
+    const dTop = rTop + roomsList.length * 60 + 4;
+    dms.forEach((r: RoomInfo, i: number) => {
+      const id = 'dm:' + r.id;
+      nodes.push({ id, kind: 'dm', col: 'room', x: X.room, y: dTop + i * 46, w: 200, h: 38, color: 'var(--accent-2)',
+        target: { type: 'room', id: r.id }, data: r });
+      for (const m of r.members) {
+        if (agents.some((a) => a.id === m)) edges.push({ id: id + '>ag:' + m, from: id, to: 'ag:' + m, color: 'var(--accent-2)', dashed: true });
+      }
+    });
+    nodes.push({ id: 'add:room', kind: 'add', col: 'room', x: X.room, y: dTop + dms.length * 46 + 8, w: 200, h: 44, color: 'var(--accent-2)',
+      target: { type: 'rooms' }, data: { icon: 'chat', title: '创建群', sub: '几个 agent 一起聊' } });
     nodes.push({ id: 'gw', kind: 'gateway', col: 'gw', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
 
     // 能力：网关用的服务，从上到下是记忆、搜索、技能、模型（模型离中间最近，光点最多）
@@ -243,10 +294,38 @@
     return { x: n.x + (side === 'l' ? 0 : n.w), y: n.y + n.h / 2 };
   }
 
+  // 折线（圆角）：入口直接连 Agent 的线用它走空隙，不横穿卡片
+  function roundedPath(pts: { x: number; y: number }[], r = 14): string {
+    let d = `M${pts[0].x} ${pts[0].y}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1];
+      const d1 = { x: p1.x - p0.x, y: p1.y - p0.y };
+      const d2 = { x: p2.x - p1.x, y: p2.y - p1.y };
+      const l1 = Math.hypot(d1.x, d1.y) || 1, l2 = Math.hypot(d2.x, d2.y) || 1;
+      const r1 = Math.min(r, l1 / 2), r2 = Math.min(r, l2 / 2);
+      const a = { x: p1.x - (d1.x / l1) * r1, y: p1.y - (d1.y / l1) * r1 };
+      const b = { x: p1.x + (d2.x / l2) * r2, y: p1.y + (d2.y / l2) * r2 };
+      d += ` L` + a.x + ' ' + a.y + ` Q` + p1.x + ' ' + p1.y + ' ' + b.x + ' ' + b.y;
+    }
+    const last = pts[pts.length - 1];
+    return d + ` L` + last.x + ' ' + last.y;
+  }
+
   function edgePath(e: E) {
     const a = layout.byId.get(e.from);
     const b = layout.byId.get(e.to);
     if (!a || !b) return '';
+    // 入口直接连到 Agent 的线（没有会话的机器人、定时任务）：从入口右边进「入口/会话」之间的空隙下去，
+    // 沿画布最下面横过去，再从「群/Agent」之间的空隙上来接到 Agent 左边——一路上不碰任何卡片。
+    if (e.route === 'bottom') {
+      const off = e.off ?? 0;
+      const p = { x: a.x + a.w, y: a.y + a.h / 2 };
+      const q = { x: b.x, y: b.y + b.h / 2 };
+      const lane = X.chan + 200 + 14 + off * 8; // 入口和会话之间的空隙
+      const yb = layout.H - 20 - off * 8;       // 画布最下面的横向通道
+      const xc = X.room + 200 + 18 + off * 8;   // 群和 Agent 之间的空隙
+      return roundedPath([p, { x: lane, y: p.y }, { x: lane, y: yb }, { x: xc, y: yb }, { x: xc, y: q.y }, q]);
+    }
     const p = anchor(a, 'r');
     const q = anchor(b, 'l');
     const dx = Math.max(40, (q.x - p.x) * 0.5);
@@ -535,10 +614,10 @@
       return u;
     }
   }
-  function agentSub() {
-    const steps = Number(store.field('agent.max_steps')?.value ?? 200);
-    const mode = String(store.field('workspace.mode')?.value ?? 'ask');
-    return `每条 ${steps > 0 ? '≤' + steps + ' 次' : '不限次数'} · ${modeMeta[mode]?.label ?? mode}`;
+  function agentSub(a: AgentInfo): string {
+    const bits = [`${a.sessions} 个会话`];
+    if (a.bots.length) bits.push(`${a.bots.length} 个机器人`);
+    return bits.join(' · ');
   }
 
   function machineSub(m: MachineInfo) {
@@ -602,14 +681,32 @@
       case 'channel': {
         const c = n.data;
         const on = c.status.state !== 'disabled';
-        const toggle: MenuItem[] = c.name === 'web' ? [] : [{ label: on ? '停用' : '启用', icon: on ? 'stop' : 'zap',
+        // 另外加的机器人：开关和凭据在它自己的节点里
+        const toggle: MenuItem[] = c.name === 'web' || n.target?.type === 'bot' ? [] : [{ label: on ? '停用' : '启用', icon: on ? 'stop' : 'zap',
           run: () => store.setConfig({ [`${c.name}.enabled`]: !on }) }];
         return { title: c.meta.label, items: [open, ...toggle] };
       }
       case 'schedule':
         return { title: '定时任务', items: [open, { label: '新建任务…', icon: 'plus', run: () => { store.scheduleNew = true; store.open({ type: 'schedules' }); } }] };
-      case 'agent':
-        return { title: 'Agent', items: [open, { label: '编辑人格…', icon: 'pen', run: () => (store.persona = { name: 'default.md', isNew: false }) }] };
+      case 'dm':
+      case 'room': {
+        const rm = n.data as RoomInfo;
+        return { title: '群 · ' + rm.name, items: [
+          open,
+          { label: '打开聊天', icon: 'chat', run: () => (location.hash = '#/sessions/' + encodeURIComponent(rm.sid)) },
+          { label: rm.paused ? '恢复' : '暂停', icon: rm.paused ? 'play' : 'stop',
+            run: () => act(() => api.patch('/api/rooms/' + encodeURIComponent(rm.id), { paused: !rm.paused }), rm.paused ? '已恢复' : '已暂停') },
+        ] };
+      }
+      case 'agent': {
+        const ag = n.data as AgentInfo;
+        return { title: 'Agent · ' + ag.name, items: [
+          open,
+          { label: '编辑人格…', icon: 'pen', run: () => (store.persona = { name: 'persona.md', isNew: false, agent: ag.id }) },
+          { label: '打开它的会话', icon: 'chat', run: () => (location.hash = '#/sessions/' + encodeURIComponent(ag.default ? 'main' : '@' + ag.id + '/main')) },
+          { label: '加一个机器人…', icon: 'plus', run: () => store.open({ type: 'bots' }) },
+        ] };
+      }
       case 'gateway':
         return { title: '网关', items: [
           open,
@@ -676,6 +773,8 @@
       case 'search':
       case 'skills':
       case 'add':
+      case 'agentdefaults':
+      case 'botadd':
         return n.target ? { title: '', items: [open] } : null;
       case 'more':
         return { title: '会话', items: [{ label: '查看全部会话', icon: 'chat', run: () => (location.hash = '#/sessions') }] };
@@ -791,6 +890,7 @@
       {#each layout.edges as e (e.id)}
         <path
           use:reg={e.id}
+          data-id={e.id}
           d={edgePath(e)}
           class="edge"
           class:hot={hot(e)}
@@ -861,12 +961,13 @@
             <rect class="card more" width={n.w} height={n.h} rx="20" />
             <text x={n.w / 2} y="25" class="t2 center">还有 {n.data} 个会话 →</text>
           {:else if n.kind === 'agent'}
-            <rect class="card agent-card" class:active={anyRunning} width={n.w} height={n.h} rx="20" />
-            <circle class="disc" cx="38" cy="46" r="23" />
-            <g class="ico"><Icon name="persona" x={25} y={33} size={26} /></g>
-            <text x="72" y="30" class="t3">AGENT</text>
-            <text x="72" y="51" class="t1">{truncate(personaName || '默认人格', 9)}</text>
-            <text x="72" y="70" class="t2">{agentSub()}</text>
+            {@const ag = n.data as AgentInfo}
+            <rect class="card agent-card" class:active={ag.running} width={n.w} height={n.h} rx="20" />
+            <circle class="disc" cx="34" cy="33" r="21" />
+            <text x="34" y="41" class="emoji">{ag.emoji || '🙂'}</text>
+            <text x="66" y="26" class="t3">{ag.default ? 'AGENT · 默认' : 'AGENT'}</text>
+            <text x="66" y="45" class="t1">{truncate(ag.name, 10)}</text>
+            <text x="66" y="60" class="t2">{truncate(agentSub(ag), 22)}</text>
           {:else if n.kind === 'gateway'}
             <g transform="translate(62 62)">
               <circle r="92" class="halo" filter="url(#soft)" />
@@ -962,8 +1063,21 @@
             <g class="ico small"><Icon name="folder" x={13} y={12} size={20} /></g>
             <text x="42" y="20" class="t1 mono">{shortPath(homeShort(w.path), 22)}</text>
             <text x="42" y="35" class="t2">{w.default ? '默认 · ' : ''}{w.sessions} 个会话</text>
-          {:else if n.kind === 'add'}
-            {@const a = n.data}
+          {:else if n.kind === 'dm'}
+            {@const dm = n.data as RoomInfo}
+            <rect class="card" width={n.w} height={n.h} rx="12" />
+            <circle class="disc" cx="22" cy={n.h / 2} r="11" />
+            <g class="ico"><Icon name="chat" x={15} y={n.h / 2 - 7} size={14} /></g>
+            <text x="40" y={n.h / 2 + 4} class="t2">{truncate(dm.name, 14)}</text>
+          {:else if n.kind === 'room'}
+            {@const rm = n.data as RoomInfo}
+            <rect class="card" width={n.w} height={n.h} rx="14" />
+            <circle class="disc" cx="26" cy="23" r="14" />
+            <g class="ico"><Icon name="chat" x={18} y={15} size={16} /></g>
+            <text x="48" y="21" class="t1">{truncate(rm.name, 12)}</text>
+            <text x="48" y="36" class="t2">{rm.members.length} 个 agent{rm.paused ? ' · 已暂停' : ''} · {rm.count} 条</text>
+          {:else if n.kind === 'add' || n.kind === 'agentdefaults' || n.kind === 'botadd'}
+            {@const a = n.kind === 'agentdefaults' ? { icon: 'sliders', title: 'Agent 默认值', sub: '所有 agent 没覆盖的项' } : n.data}
             <rect class="card ghost" width={n.w} height={n.h} rx="14" />
             <circle class="disc" cx={n.h / 2} cy={n.h / 2} r={n.h > 50 ? 15 : 12} />
             <g class="ico"><Icon name={a.icon} x={n.h / 2 - 8} y={n.h / 2 - 8} size={16} /></g>
@@ -997,6 +1111,8 @@
     <span style="--c: var(--c-telegram)">入口</span>
     <i>→</i>
     <span style="--c: var(--c-session)">会话</span>
+    <i>→</i>
+    <span style="--c: var(--accent-2)">群</span>
     <i>→</i>
     <span style="--c: var(--c-agent)">Agent</span>
     <i>→</i>
@@ -1116,6 +1232,14 @@
   }
   .node.dimmed {
     opacity: 0.45;
+  }
+  .node.dm .card {
+    stroke-dasharray: 6 4;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .node {
+      animation: none;
+    }
   }
   .node.dragging {
     cursor: grabbing;

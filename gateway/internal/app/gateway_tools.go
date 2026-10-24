@@ -26,12 +26,22 @@ import (
 const gatewaySchema = `{
   "type":"object",
   "properties":{
-    "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings"],
-      "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态，或设置项（当前值和说明）"},
+    "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings","agents"],
+      "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明），或者 agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
     "group":{"type":"string","enum":["agent","gateway","web","cli","telegram","feishu","model","memory","search","skills","local","machines"],
       "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
   }
+}`
+
+const messageSchema = `{
+  "type":"object",
+  "properties":{
+    "to":{"type":"string","description":"发给谁：room:<群名或 ID> 发到群里，agent:<名字或 ID> 私聊某个 agent；也可以只写名字"},
+    "text":{"type":"string","description":"要说的内容"},
+    "wait":{"type":"boolean","description":"等对方回话再返回（最多 5 分钟），默认 false"}
+  },
+  "required":["to","text"]
 }`
 
 const gatewayAdminSchema = `{
@@ -41,13 +51,15 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set"
+      "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set","agent_save","agent_delete","bot_bind"
     ],"description":"要做什么"},
     "key":{"type":"string","description":"settings_set：设置项的 key，比如 search.enabled、context.compact_at、channels.show（先用 Gateway settings 查）"},
     "value":{"description":"settings_set：新值（数字、true/false、文本或列表，类型按 Gateway settings 里的 type）；null 表示去掉网页里改的值、恢复成配置文件里的"},
-    "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID，或配对请求 ID"},
+    "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID、要改的 agent ID、要换绑的机器人 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
-    "name":{"type":"string","description":"接口或 SSH 连接的名字"},
+    "name":{"type":"string","description":"接口或 SSH 连接的名字；agent_save 时是 agent 的名字"},
+    "emoji":{"type":"string","description":"agent_save：头像，一个 emoji"},
+    "settings":{"type":"object","description":"agent_save：这个 agent 覆盖的全局设置（键见 Gateway settings，比如 max_steps、mode、compact_at）；值为 null 表示恢复跟随全局"},
     "host":{"type":"string","description":"SSH 主机地址或 SSH 别名；添加工作目录时是机器名"},
     "port":{"type":"integer","description":"SSH 端口"},
     "user":{"type":"string","description":"SSH 用户"},
@@ -72,7 +84,8 @@ const gatewayAdminSchema = `{
     "all":{"type":"boolean","description":"history_delete：删除全部历史和归档"},
     "from":{"type":"integer","description":"history_delete：起始轮次（从 0 开始）"},
     "to":{"type":"integer","description":"history_delete：结束轮次（含）"},
-    "mount":{"type":"boolean","description":"workspace_mount：true 挂上，false 取下"}
+    "mount":{"type":"boolean","description":"workspace_mount：true 挂上，false 取下"},
+    "agent":{"type":"string","description":"agent_save / bot_bind：agent 的 ID（先用 Gateway agents 查）；agent_save 时留空表示新建"}
   },
   "required":["action"]
 }`
@@ -80,6 +93,7 @@ const gatewayAdminSchema = `{
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
 		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
+		{Name: "Message", Description: "给网关里的一个群（房间）或者某个 agent 发一条消息；把 wait 设成 true 时等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。", InputSchema: json.RawMessage(messageSchema)},
 		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }
@@ -160,6 +174,8 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 		out = a.SearchInfo()
 	case "settings":
 		out, err = a.settingsView(args.Group)
+	case "agents":
+		out = map[string]any{"agents": a.AgentList(), "bots": a.Bots()}
 	default:
 		err = fmt.Errorf("不认识的查询 %q", args.What)
 	}
@@ -221,6 +237,9 @@ type gatewayArgs struct {
 	ThinkingLevels, Modalities                                           []string
 	What                                                                 string
 	Lines                                                                int
+	Emoji                                                                string
+	Agent                                                                string
+	Settings                                                             map[string]any
 }
 
 func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
@@ -445,6 +464,59 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 		return "指定历史已删除；摘要可能保留概要，可在网页清空摘要", err
 	case "settings_set":
 		return a.setSetting(args.Key, args.Value)
+	case "agent_save":
+		p := AgentPatch{}
+		if args.Name != "" {
+			p.Name = &args.Name
+		}
+		if args.Emoji != "" {
+			p.Emoji = &args.Emoji
+		}
+		if args.Model != "" {
+			p.Model = &args.Model
+		}
+		if args.Thinking != "" {
+			p.Thinking = &args.Thinking
+		}
+		ip := args.ID
+		if ip == "" && args.Agent != "" {
+			ip = args.Agent
+		}
+		p.Settings = args.Settings
+		if ip == "" {
+			if strings.TrimSpace(args.Name) == "" {
+				return "", errors.New("新建 agent 要给 name")
+			}
+			info, err := a.CreateAgent(p)
+			if err != nil {
+				return "", err
+			}
+			return "已经建好 agent " + info.ID + "（" + info.Name + "）", nil
+		}
+		if _, ok := a.Agent(ip); !ok {
+			return "", errors.New("没有这个 agent")
+		}
+		info, err := a.UpdateAgent(ip, p)
+		if err != nil {
+			return "", err
+		}
+		return "agent 已更新：" + info.ID + "（" + info.Name + "）", nil
+	case "agent_delete":
+		if err := a.DeleteAgent(args.ID); err != nil {
+			return "", err
+		}
+		return "agent 已删除：" + args.ID, nil
+	case "bot_bind":
+		if args.ID == "" || args.Agent == "" {
+			return "", errors.New("bot_bind 要同时给 id（机器人）和 agent（agent ID）")
+		}
+		if _, ok := a.Agent(args.Agent); !ok {
+			return "", errors.New("没有这个 agent")
+		}
+		if _, err := a.UpdateBot(args.ID, BotPatch{Agent: &args.Agent}); err != nil {
+			return "", err
+		}
+		return "机器人 " + args.ID + " 已经绑到 " + args.Agent, nil
 	case "restart":
 		if err := a.RequestRestart(RestartRequest{By: "gateway-admin", SID: sid}); err != nil {
 			return "", err

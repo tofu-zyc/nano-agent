@@ -40,7 +40,7 @@ max_history_tokens = 4000
 [context]
 keep_turns = 1
 [persona]
-dir = "$ROOT/personas"
+dir = "$TMP/personas"
 [session]
 data_dir = "$TMP/data"
 [workspace]
