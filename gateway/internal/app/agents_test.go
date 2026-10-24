@@ -39,9 +39,9 @@ func TestMigrateAgents(t *testing.T) {
 	if !ok || def.Name != defaultAgentName {
 		t.Fatalf("没有默认 agent: %+v", def)
 	}
-	// 老版本的 personas/default.md 挪到默认 agent 下面，原来的文件删掉
-	if _, err := os.Stat(filepath.Join(e.dir, "personas", "default.md")); !os.IsNotExist(err) {
-		t.Fatal("老的 personas/default.md 应该已经挪走")
+	// 老版本的 personas/default.md 复制到默认 agent 下面；原文件留着（升级失败退回旧版本还要用）
+	if b, err := os.ReadFile(filepath.Join(e.dir, "personas", "default.md")); err != nil || string(b) != "你是测试机器人" {
+		t.Fatalf("老的 personas/default.md 应该留着：%q %v", b, err)
 	}
 	data, err := os.ReadFile(filepath.Join(e.dir, "agents", agents.DefaultID, "persona.md"))
 	if err != nil || string(data) != "你是测试机器人" {

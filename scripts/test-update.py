@@ -72,7 +72,8 @@ SITE = os.path.join(TMP, "site")
 os.makedirs(os.path.join(SITE, "latest", "download"))
 
 
-def publish(ver, bins, persona_extra="", skill_extra=""):
+def publish(ver, bins, persona_extra="", skill_extra="", layout="agents"):
+    # layout="personas" 是 v0.4 那种包：自带人格在 personas/default.md，没有 agents/ 目录
     rel = os.path.join(SITE, "download", "v" + ver)
     os.makedirs(rel)
     work = os.path.join(TMP, "pkg-" + ver)
@@ -85,12 +86,13 @@ def publish(ver, bins, persona_extra="", skill_extra=""):
     if os.path.isdir(os.path.join(ROOT, "personas")):
         shutil.copytree(os.path.join(ROOT, "personas"), os.path.join(g, "personas"), dirs_exist_ok=True)
     shutil.copytree(os.path.join(ROOT, "skills"), os.path.join(g, "skills"))
-    os.makedirs(os.path.join(g, "agents", "default"))
-    with open(os.path.join(g, "agents", "default", "persona.md"), "w") as f:
-        f.write("你是小纳\n")
-    if persona_extra:
-        with open(os.path.join(g, "agents", "default", "persona.md"), "a") as f:
-            f.write(persona_extra)
+    if layout == "personas":
+        with open(os.path.join(g, "personas", "default.md"), "w") as f:
+            f.write("你是小纳\n" + persona_extra)
+    else:
+        os.makedirs(os.path.join(g, "agents", "default"))
+        with open(os.path.join(g, "agents", "default", "persona.md"), "w") as f:
+            f.write("你是小纳\n" + persona_extra)
     if skill_extra:
         with open(os.path.join(g, "skills", "model-setup", "SKILL.md"), "a") as f:
             f.write(skill_extra)
@@ -169,9 +171,13 @@ def leftover():
 
 try:
     b1, b2, b3 = build("0.0.1"), build("0.0.2"), build("0.0.3", fail=True)
+    b4, b5 = build("0.4.0"), build("0.5.0")
     publish("0.0.1", b1)
     publish("0.0.2", b2, persona_extra="\n新版本的人格补充\n", skill_extra="\n新版本的技能说明\n")
     publish("0.0.3", b3)
+    # 老布局（v0.4：只有 personas/default.md）和新布局（v0.5：agents/default/persona.md）
+    publish("0.4.0", b4, layout="personas")
+    publish("0.5.0", b5, persona_extra="\n新版本的人格补充\n")
     set_latest("0.0.1")
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=SITE))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -249,6 +255,55 @@ try:
         wait(lambda: "kpc（linux 0.0.2）" in status(), 30, "网关看到内核 0.0.2：" + status())
         r = subprocess.run([os.path.join(NANO, "bin", "nano-kernel"), "version"], env=ENV, capture_output=True, text=True)
         assert r.stdout.strip() == "0.0.2", r.stdout + r.stderr
+
+    @case("从 v0.4 布局升级：用户改过的人格不会被覆盖，原文件还在")
+    def _():
+        home2 = os.path.join(TMP, "home04")
+        nano2 = os.path.join(home2, ".nano-agent")
+        os.makedirs(home2)
+        env2 = dict(ENV, HOME=home2)
+        # 0.4.0 是 v0.4 那种布局：自带人格只在 personas/default.md
+        set_latest("0.4.0")
+        old2 = os.path.join(TMP, "old04")
+        os.makedirs(old2)
+        with open(os.path.join(old2, "gateway.toml"), "w") as f:
+            f.write(f'[kernel]\nlisten = "unix:{old2}/k.sock"\ntoken = "tok"\ndevice_listen = "127.0.0.1:{DEVPORT}"\n'
+                    '[web]\nlisten = "off"\n[llm]\nprovider = "mock"\n[update]\ncheck = false\n')
+        exp2 = os.path.join(TMP, "export04.tar.gz")
+        r = subprocess.run([os.path.join(b4, "nano-gateway"), "export", "-c", os.path.join(old2, "gateway.toml"), "-o", exp2],
+                           env=dict(env2, NANO_HOME=old2), capture_output=True)
+        assert r.returncode == 0, out(r)
+        script = open(os.path.join(ROOT, "scripts", "install.sh"), "rb").read()
+        r = subprocess.run(["sh", "-s", "--", "--import", exp2, "--yes"], input=script, env=env2, capture_output=True, timeout=300)
+        assert r.returncode == 0, out(r)
+
+        def gw2(*args):
+            return subprocess.run([os.path.join(nano2, "bin", "nano-gateway"), *args], env=env2, capture_output=True, timeout=180)
+
+        def status2():
+            rr = gw2("status")
+            return out(rr) if rr.returncode == 0 else ""
+
+        wait(lambda: "版本 0.4.0" in status2(), 40, "0.4.0 起来：" + status2())
+        p = os.path.join(nano2, "personas", "default.md")
+        assert os.path.exists(p), "0.4.0 没装出自带人格：" + str(os.listdir(nano2))
+        with open(p, "a") as f:
+            f.write("\n我是用户自己改的人格\n")
+        # 真实的 v0.4 机器上没有 agents/ 目录（这里装的二进制是新代码，第一次启动就复制过一份）
+        shutil.rmtree(os.path.join(nano2, "agents"), ignore_errors=True)
+        set_latest("0.5.0")
+        r = gw2("update", "--yes")
+        assert r.returncode == 0 and "已更新到 0.5.0" in out(r), out(r)
+        wait(lambda: "版本 0.5.0" in status2(), 40, "0.5.0 起来")
+        agent_persona = os.path.join(nano2, "agents", "default", "persona.md")
+        assert os.path.exists(agent_persona), "升级后没有 agent 的人格"
+        text = open(agent_persona).read()
+        assert "我是用户自己改的人格" in text, "用户的人格被盖掉了：" + text
+        assert "新版本的人格补充" not in text, "包里的人格盖到用户头上了：" + text
+        assert os.path.exists(p) and "我是用户自己改的人格" in open(p).read(), "老的 personas/default.md 被删了"
+        # 没有生出 .new（这些用户的 agent 人格完全由迁移决定）
+        assert not os.path.exists(agent_persona + ".new"), "不该有 .new"
+        gw2("uninstall", "--yes")
 
     @case("网关和内核在一起：nano-gateway uninstall 只卸网关")
     def _():

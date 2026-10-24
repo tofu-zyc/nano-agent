@@ -243,41 +243,111 @@ def run(page, url, nano):
         else:
             fail("Telegram 节点里没有绑定 agent 的地方")
 
-    # ---- 网关内部的群：建一个，看节点、面板、会话标题 ----
-    code, room = api(page, "POST", "/api/rooms", {"name": "自检群", "members": ["default"], "mode": "mention"})
-    if code == 200 and room.get("sid"):
-        page.reload()
-        page.wait_for_selector("g.node.gateway")
-        page.wait_for_timeout(600)
-        ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
-        if ("rm:" + room["id"]) in ids and "add:room" in ids:
-            ok("建群后图上有群节点和创建群节点")
-        else:
-            fail("群节点没上图：" + json.dumps(ids, ensure_ascii=False))
-        open_node(page, "rm:" + room["id"])
-        page.screenshot(path=os.path.join(SHOTS, "room.png"))
-        text = page.locator(".insp").inner_text()
-        if "成员" in text and "怎么说话" in text and "每天最多多少 token" in text:
-            ok("群面板能改成员、说话方式和预算")
-        else:
-            fail("群面板缺东西：" + text[:200])
-        sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
-        if sessions.get(room["sid"], {}).get("title") == "自检群":
-            ok("群的会话在列表里显示群名")
-        else:
-            fail("群的会话标题不对：" + json.dumps(sessions.get(room["sid"], {}).get("title"), ensure_ascii=False))
-        # 暂停一下，看看面板和接口对得上
-        api(page, "PATCH", "/api/rooms/" + room["id"], {"paused": True})
-        page.reload()
-        page.wait_for_selector("g.node.gateway")
-        page.wait_for_timeout(600)
-        if api(page, "GET", "/api/rooms")[1]["items"][0]["paused"] is True:
-            ok("群能暂停")
-        else:
-            fail("暂停没生效")
-        api(page, "DELETE", "/api/rooms/" + room["id"])
+    # ---- 群和私聊：3 个 agent、2 个群、1 个私聊、1 个停用的机器人 ----
+    api(page, "POST", "/api/agents", {"name": "小鲍", "emoji": "🦊"})
+    api(page, "POST", "/api/agents", {"name": "阿强", "emoji": "🐻"})
+    agents = api(page, "GET", "/api/agents")[1]["items"]
+    byname = {a["name"]: a["id"] for a in agents}
+    if "小鲍" not in byname or "阿强" not in byname:
+        fail("中文名字的 agent 没建成：" + json.dumps(byname, ensure_ascii=False))
+        bao = qiang = "default"
+    elif byname["小鲍"] in ("agent", "agent-2") or byname["阿强"] in ("agent", "agent-2"):
+        fail("中文名字的 ID 还是 agent / agent-2：" + json.dumps(byname, ensure_ascii=False))
+        bao, qiang = byname["小鲍"], byname["阿强"]
     else:
-        fail("建群接口失败：" + str(code) + " " + json.dumps(room, ensure_ascii=False))
+        ok("中文名字的 agent 用短随机 ID（小鲍 → " + byname["小鲍"] + "）")
+        bao, qiang = byname["小鲍"], byname["阿强"]
+    code, room = api(page, "POST", "/api/rooms", {"name": "产品组", "members": ["default", bao, qiang], "mode": "mention"})
+    code2, room2 = api(page, "POST", "/api/rooms", {"name": "值班", "members": [bao, qiang]})
+    code3, dm = api(page, "POST", "/api/rooms", {"members": ["default", bao], "dm": True})
+    code4, _ = api(page, "POST", "/api/bots", {"kind": "telegram", "name": "旧号", "token": "123456:abcDEF", "agent": bao, "enabled": False})
+    if not (code == 200 and code2 == 200 and code3 == 200 and code4 == 200):
+        fail("建群 / 私聊 / 机器人接口失败：" + str([code, code2, code3, code4]))
+    bot = [b for b in api(page, "GET", "/api/bots")[1]["items"] if b["name"] == "旧号"][0] if code4 == 200 else None
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_function(
+        "() => { const n = document.querySelector('g.node.agent'); return n && getComputedStyle(n).opacity === '1'; }",
+        timeout=8000,
+    )
+    page.wait_for_timeout(500)
+    ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
+    want = ["rm:" + room["id"], "rm:" + room2["id"], "dm:" + dm["id"], "add:room"]
+    if bot:
+        want.append("c:" + bot["channel"])
+    missing = [w for w in want if w not in ids]
+    if missing:
+        fail("图上缺群 / 私聊 / 停用机器人的节点：" + json.dumps(missing, ensure_ascii=False))
+    else:
+        ok("2 个群、1 个私聊、1 个停用的机器人都在图上")
+    # 群单独一列：群节点的 x 在 agent 左边（连线不会反向绕）
+    xof = page.evaluate("""() => {
+      const out = {};
+      for (const g of document.querySelectorAll('g.node')) {
+        const m = g.transform.baseVal.consolidate();
+        out[g.dataset.id] = m ? m.matrix.e : null;
+      }
+      return out;
+    }""")
+    room_x = xof.get("rm:" + room["id"])
+    agent_xs = [x for k, x in xof.items() if k.startswith("ag:") and x is not None]
+    if room_x is not None and agent_xs and room_x + 200 <= min(agent_xs):
+        ok("群单独一列，在 Agent 左边")
+    else:
+        fail(f"群和 agent 挤在一起：群 x={room_x}，agent x={agent_xs}")
+    # 连线：群 → 成员、私聊 → 两个人、停用的机器人 → 它绑的 agent、群会话 → 群节点
+    edges = page.eval_on_selector_all("path.edge", "els => els.map(e => e.dataset.id)")
+    checks = {
+        "群 → 小鲍": "rm:" + room["id"] + ">ag:" + bao,
+        "群 → 阿强": "rm:" + room["id"] + ">ag:" + qiang,
+        "私聊 → 小纳": "dm:" + dm["id"] + ">ag:default",
+        "私聊 → 小鲍": "dm:" + dm["id"] + ">ag:" + bao,
+        "群会话 → 群节点": "s:" + room["sid"] + ">rm:" + room["id"],
+    }
+    if bot:
+        checks["停用的机器人 → 它绑的 agent"] = "c:" + bot["channel"] + ">ag:" + bao
+    bad = [k for k, v in checks.items() if v not in edges]
+    if bad:
+        fail("这些连线不对：" + "、".join(bad) + " / " + json.dumps(edges, ensure_ascii=False)[:500])
+    else:
+        ok("群 / 私聊 / 机器人 / 群会话的连线都连对了")
+    if ("s:" + room["sid"] + ">ag:default") in edges:
+        fail("群的会话还连到了默认 agent")
+    page.screenshot(path=os.path.join(SHOTS, "topology-groups.png"))
+    # 群面板
+    open_node(page, "rm:" + room["id"])
+    page.screenshot(path=os.path.join(SHOTS, "room.png"))
+    text = page.locator(".insp").inner_text()
+    if "成员" in text and "怎么说话" in text and "每天最多多少 token" in text:
+        ok("群面板能改成员、说话方式和预算")
+    else:
+        fail("群面板缺东西：" + text[:200])
+    sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
+    if sessions.get(room["sid"], {}).get("title") == "产品组":
+        ok("群的会话在列表里显示群名")
+    else:
+        fail("群的会话标题不对：" + json.dumps(sessions.get(room["sid"], {}).get("title"), ensure_ascii=False))
+    if any("/room:" in sid for sid in sessions):
+        fail("agent 在群里旁听的会话不应该出现在会话列表里")
+    # 暂停一下，看看面板和接口对得上
+    api(page, "PATCH", "/api/rooms/" + room["id"], {"paused": True})
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(600)
+    paused = [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == room["id"]]
+    if paused and paused[0]["paused"] is True:
+        ok("群能暂停")
+    else:
+        fail("暂停没生效")
+    # 收拾干净，后面的检查不受影响
+    for r in (room, room2, dm):
+        if r.get("id"):
+            api(page, "DELETE", "/api/rooms/" + r["id"])
+    if bot:
+        api(page, "DELETE", "/api/bots/" + bot["id"])
+    for aid in (bao, qiang):
+        if aid != "default":
+            api(page, "DELETE", "/api/agents/" + aid)
 
     # ---- 改设置：数字、文本、开关、列表，刷新后还在 ----
     open_node(page, "agdefault")

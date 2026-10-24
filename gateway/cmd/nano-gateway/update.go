@@ -316,6 +316,13 @@ func installShipped(home string, files []release.File) []string {
 		if !strings.HasPrefix(f.Name, "agents/") && !strings.HasPrefix(f.Name, "personas/") && !strings.HasPrefix(f.Name, "skills/") {
 			continue
 		}
+		// 老布局（v0.4：人格在 personas/default.md）的机器：默认 agent 的人格由 MigrateAgents 从那个文件
+		// 复制过来，这里不能写 —— 不然用户改过的人格会被包里的覆盖掉。
+		if f.Name == "agents/default/persona.md" {
+			if _, err := os.Stat(filepath.Join(home, "personas", "default.md")); err == nil {
+				continue
+			}
+		}
 		sum := sha256.Sum256(f.Data)
 		h := hex.EncodeToString(sum[:])
 		dst := filepath.Join(home, filepath.FromSlash(f.Name))

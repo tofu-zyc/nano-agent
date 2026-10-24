@@ -45,6 +45,10 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		return
 	}
 	if m.Name == "Message" {
+		if !a.isAdmin(r.from) {
+			reply(false, "只有管理员能用 Message 给群和别的 agent 发消息")
+			return
+		}
 		raw := string(m.Args)
 		if raw == "" {
 			raw = "{}"

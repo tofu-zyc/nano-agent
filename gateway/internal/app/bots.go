@@ -47,11 +47,10 @@ func (a *App) MigrateAgents() error {
 	if _, err := os.Stat(dst); os.IsNotExist(err) {
 		if data, err := os.ReadFile(src); err == nil {
 			if err := os.WriteFile(dst, data, 0o600); err != nil {
-				a.log.Warn("把老版本的人格挪到默认 agent 下失败", "err", err)
-			} else if err := os.Remove(src); err != nil {
-				a.log.Warn("删掉老的 personas/default.md 失败", "err", err)
+				a.log.Warn("把老版本的人格复制到默认 agent 下失败", "err", err)
 			} else {
-				a.log.Info("老版本的默认人格已经挪到默认 agent 下", "file", dst)
+				// 原文件留着：升级失败自动退回旧版本时，旧版本还认 personas/default.md
+				a.log.Info("老版本的默认人格已经复制到默认 agent 下", "file", dst, "from", src)
 			}
 		}
 	}

@@ -22,6 +22,9 @@ import (
 	"nano-agent/gateway/internal/session"
 )
 
+// isRoomMemberSID 是 agent 在房间里旁听的会话（@<agent>/room:<id>）：内部用，不当普通会话显示。
+func isRoomMemberSID(sid string) bool { return strings.Contains(sid, "/room:") }
+
 // roomLogSID 是房间的聊天记录会话。
 func roomLogSID(id string) string { return "room:" + id }
 
@@ -336,6 +339,7 @@ type RoomPatch struct {
 	Paused  *bool     `json:"paused"`
 	Muted   *[]string `json:"muted"`
 	Budget  *int      `json:"budget"`
+	DM      *bool     `json:"dm"`
 }
 
 // CreateRoom 新建一个房间。
@@ -358,6 +362,24 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 	for _, m := range r.Members {
 		if _, ok := a.agentByID(m); !ok {
 			return RoomInfo{}, fmt.Errorf("没有这个 agent：%s", m)
+		}
+	}
+	// 私聊：正好两个 agent，名字自动取
+	if p.DM != nil && *p.DM {
+		if len(r.Members) != 2 {
+			return RoomInfo{}, errors.New("私聊正好两个人")
+		}
+		r.DM = r.Members
+		r.Mode = rooms.ModeMention
+		if strings.TrimSpace(r.Name) == "" {
+			na, nb := r.Members[0], r.Members[1]
+			if ag, ok := a.agentByID(na); ok {
+				na = ag.Name
+			}
+			if ag, ok := a.agentByID(nb); ok {
+				nb = ag.Name
+			}
+			r.Name = "@" + na + "+" + nb
 		}
 	}
 	got, err := a.roomStore.Create(r)

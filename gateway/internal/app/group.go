@@ -36,6 +36,8 @@ type groupRule struct {
 	MinGap    time.Duration // 两次发言之间至少隔多久
 	MaxLen    int           // 一条回复最多多少字
 	Parts     int           // 最多拆成几条发
+	Decisions int           // 一小时内最多判断几次（判断本身也是一次模型调用）
+	ThinkGap  time.Duration // 两次判断之间至少隔多久
 }
 
 // groupPerHour 把积极度换成每小时的主动发言上限。
@@ -55,7 +57,9 @@ func groupPerHour(v string) (string, int) {
 func (a *App) groupRuleOf(sid string) groupRule {
 	ag := a.agentOf(sid)
 	eag, per := groupPerHour(pickString(ag.GroupEagerness, "low"))
-	r := groupRule{Eagerness: eag, PerHour: per, Quiet: 20 * time.Second, MinGap: 10 * time.Second, MaxLen: 300, Parts: 3}
+	// “要不要说话”的判断本身也要花一次模型调用：除了说出口的额度，判断也单独限一下
+	r := groupRule{Eagerness: eag, PerHour: per, Quiet: 20 * time.Second, MinGap: 10 * time.Second, MaxLen: 300, Parts: 3,
+		Decisions: max(2, per*3), ThinkGap: time.Minute}
 	if d := parseLimitDuration(pickString(ag.GroupQuiet, "")); d > 0 {
 		r.Quiet = d
 	}
@@ -161,6 +165,20 @@ func (a *App) groupLoop() {
 }
 
 // groupTick 是一轮检查，测试里可以直接调。
+// groupMayThink 判断现在能不能做一次“要不要说话”的判断。判断本身也是一次模型调用，
+// 所以除了说出口的额度，判断也单独限：两次至少隔 ThinkGap，一小时内最多 Decisions 次。
+// 调用方持有锁。
+func (a *App) groupMayThink(s *sess, rule groupRule, now time.Time) bool {
+	if rule.Decisions <= 0 {
+		return false
+	}
+	if !s.groupThoughtAt.IsZero() && now.Sub(s.groupThoughtAt) < rule.ThinkGap {
+		return false
+	}
+	s.groupThoughts = cleanupGroupSpeaks(s.groupThoughts, now)
+	return len(s.groupThoughts) < rule.Decisions
+}
+
 func (a *App) groupTick() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -192,6 +210,11 @@ func (a *App) groupTick() {
 		if len(s.groupSpeaks) >= rule.PerHour {
 			continue
 		}
+		if !a.groupMayThink(s, rule, now) {
+			continue
+		}
+		s.groupThoughtAt = now
+		s.groupThoughts = append(s.groupThoughts, now)
 		s.groupFresh = false
 		s.groupProactive = true
 		s.queue = append(s.queue, queued{ep: s.groupEp, who: "group", trigger: true,

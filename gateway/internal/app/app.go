@@ -178,6 +178,8 @@ type sess struct {
 	groupTimer     *time.Timer
 	groupSpokeAt   time.Time
 	groupSpeaks    []time.Time
+	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
+	groupThoughts  []time.Time // 最近一小时判断了几次
 }
 
 // queued 是排队等处理的一条消息。trigger 是群聊里“该你说话了”的触发：

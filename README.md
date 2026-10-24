@@ -212,7 +212,7 @@ make install
 
 人格是**每个 agent 自己的**（v0.5 起）：`agents/<agent>/persona.md`，在它自己的节点里编辑，或者套用自带人格（小纳、大肥鱼）。
 
-- 从 v0.4 升级时，`personas/default.md` 会自动挪到 `agents/default/persona.md`。
+- 从 v0.4 升级时，`personas/default.md` 会**复制**到 `agents/default/persona.md`（原文件保留，退回旧版本还要用它），升级不会覆盖你改过的人格。
 - `personas/<会话ID>.md`：给某个会话单独设定，比如 `personas/main.md`（主会话）、`personas/tg:123456789.md`（某个人私聊机器人的会话）。会话 ID 在聊天里发 `/whoami` 查，网页拓扑图上点那个会话的节点，在“人格”里点“给这个会话单独设定人格”。
 
 **改完保存，下一条消息就生效，不用重启。** 历史里还留着旧人格说过的话，人格改动大的话可以发一次 `/reset` 清空上下文。

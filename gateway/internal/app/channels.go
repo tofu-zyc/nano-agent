@@ -146,7 +146,17 @@ func (a *App) Channels() []ChannelInfo {
 	}
 	var extra []string
 	for name := range a.runs {
-		if isBotChannel(name) && !slices.Contains(channelOrder, name) {
+		if isBotChannel(name) && !slices.Contains(channelOrder, name) && !slices.Contains(extra, name) {
+			extra = append(extra, name)
+		}
+	}
+	// 停用的机器人也要在图上：没在跑的时候 a.runs 里没有它
+	if a.botStore != nil {
+		for _, b := range a.botStore.List() {
+			name := agents.ChannelName(b)
+			if !isBotChannel(name) || slices.Contains(channelOrder, name) || slices.Contains(extra, name) {
+				continue
+			}
 			extra = append(extra, name)
 		}
 	}

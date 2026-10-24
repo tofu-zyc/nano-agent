@@ -102,7 +102,7 @@
         <button class="btn sm primary" onclick={() => (store.persona = { name: 'persona.md', isNew: false, agent: id })}><Icon name="pen" size={13} />编辑人格</button>
         <button class="btn sm" onclick={() => store.open({ type: 'session', sid: a!.default ? 'main' : '@' + a!.id + '/main' })}><Icon name="chat" size={13} />打开会话</button>
       </div>
-      <p class="p-note p-small">没写人格时用老版本的 personas/default.md；某个会话还可以有自己的专属人格。</p>
+      <p class="p-note p-small">没写就是没有人格。从 v0.4 升级时会把 personas/default.md 复制成这个文件（原文件留着，方便退回旧版本）；某个会话还可以有自己的专属人格。</p>
     </div>
 
     <h5 class="p-h">机器人 <span class="muted p-small">一个机器人只绑一个 agent</span></h5>

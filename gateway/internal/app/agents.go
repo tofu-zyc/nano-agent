@@ -70,7 +70,7 @@ func (a *App) agentByID(id string) (agents.Agent, bool) {
 //
 //	personas/<会话ID>.md      某个会话专属
 //	agents/<agent>/persona.md 这个 agent 自己的人格
-//	personas/default.md      老版本的人格（还没迁移过来时兜底）
+//	personas/default.md      老版本的人格（升级时复制到上面那个文件，原文件留着给退回旧版本用）
 //
 // 调用方持有锁。
 func (a *App) personaFor(sid string) (string, string) {
@@ -83,8 +83,12 @@ func (a *App) personaFor(sid string) (string, string) {
 			return t, p
 		}
 	}
-	if t, p := a.persona.File("default.md"); p != "" {
-		return t, p
+	// 正常安装升级时 MigrateAgents 已经把 personas/default.md 复制到 agents/<id>/persona.md；
+	// 这里不再兜底，免得同一个“默认人格”有两处能改。只有没有 agent 列表的老模式才用它。
+	if a.agentStore == nil {
+		if t, p := a.persona.File("default.md"); p != "" {
+			return t, p
+		}
 	}
 	return "", ""
 }
@@ -320,7 +324,7 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 			Value:     ptrAny(ag.IdleCompactMin),
 			Effective: pickPositiveFloat(ag.IdleCompactMin, c.Context.IdleCompactMin)},
 		{Key: "group_eagerness", Label: "群里插话积极度", Type: "enum", Options: []string{"off", "low", "normal", "high"},
-			Help:      "off 只回被叫到的；low 每小时最多主动说 2 次；normal 6 次；high 15 次",
+			Help:      "off 只回被叫到的；low 每小时最多主动说 2 次；normal 6 次；high 15 次；要不要说话的判断本身也是一次模型调用，所以每小时最多判断三倍这么多次、两次判断至少隔一分钟",
 			Global:    "low",
 			Value:     ptrAny(ag.GroupEagerness),
 			Effective: pickString(ag.GroupEagerness, "low")},
@@ -398,7 +402,22 @@ func durText(d time.Duration) string {
 	if d <= 0 {
 		return "不限"
 	}
-	return d.String()
+	// 30m0s 这种写出来太啰嗦：按 2h / 1h30m / 30m / 20s 写
+	h, m, s := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
+	var b strings.Builder
+	if h > 0 {
+		fmt.Fprintf(&b, "%dh", h)
+	}
+	if m > 0 {
+		fmt.Fprintf(&b, "%dm", m)
+	}
+	if s > 0 && h == 0 {
+		fmt.Fprintf(&b, "%ds", s)
+	}
+	if b.Len() == 0 {
+		return "0s"
+	}
+	return b.String()
 }
 
 // agentInfo 是一个 agent 的概况。调用方持有锁。
@@ -734,7 +753,13 @@ func agentIDSuggestion(s *agents.Store, name string) string {
 	}
 	base := strings.Trim(b.String(), "-")
 	if base == "" {
-		base = "agent"
+		// 名字里没有拉丁字母（比如“小鲍”）：用短的随机 ID，面板上显示名字
+		for {
+			id := "a-" + randHex(3)
+			if _, ok := s.Get(id); !ok {
+				return id
+			}
+		}
 	}
 	if _, ok := s.Get(base); !ok {
 		return base

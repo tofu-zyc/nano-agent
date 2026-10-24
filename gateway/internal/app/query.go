@@ -100,6 +100,9 @@ func (a *App) Snapshot() Snapshot {
 	defer a.mu.Unlock()
 	snap := Snapshot{Started: a.started.UnixMilli(), Totals: a.totals, Kernels: a.kernelList(), Machines: a.machineList(), Workspaces: a.workspaceInfos()}
 	for _, sid := range a.sessionIDs() {
+		if isRoomMemberSID(sid) {
+			continue // agent 在房间里旁听的会话，用户看群那个会话就够了
+		}
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
 	}
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })
