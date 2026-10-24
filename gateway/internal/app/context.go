@@ -62,7 +62,8 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
-	if st.Prefix != nil && st.Prefix.System == system {
+	// 群聊和房间的工具由白名单单独算，不套用旧快照（旧快照可能是普通会话的整套工具）
+	if st.Prefix != nil && st.Prefix.System == system && !a.isGroupSession(sid) {
 		tools = st.Prefix.Tools
 	}
 	m, _, _ := a.modelOf(sid)

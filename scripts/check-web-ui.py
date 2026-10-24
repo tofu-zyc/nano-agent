@@ -161,7 +161,12 @@ def run(page, url, nano):
     page.fill("input[type=password]", PASSWORD)
     page.keyboard.press("Enter")
     page.wait_for_selector("g.node.gateway", timeout=15000)
-    page.wait_for_timeout(800)
+    # 节点有 0.45 秒的淡入：等它们真的画出来再截图，免得截到空白
+    page.wait_for_function(
+        "() => { const n = document.querySelector('g.node.agent'); return n && getComputedStyle(n).opacity === '1'; }",
+        timeout=8000,
+    )
+    page.wait_for_timeout(400)
     page.screenshot(path=os.path.join(SHOTS, "topology.png"))
 
     # ---- 左边只剩拓扑和会话 ----
@@ -237,6 +242,42 @@ def run(page, url, nano):
             ok("Telegram 节点里能改它绑的 agent")
         else:
             fail("Telegram 节点里没有绑定 agent 的地方")
+
+    # ---- 网关内部的群：建一个，看节点、面板、会话标题 ----
+    code, room = api(page, "POST", "/api/rooms", {"name": "自检群", "members": ["default"], "mode": "mention"})
+    if code == 200 and room.get("sid"):
+        page.reload()
+        page.wait_for_selector("g.node.gateway")
+        page.wait_for_timeout(600)
+        ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
+        if ("rm:" + room["id"]) in ids and "add:room" in ids:
+            ok("建群后图上有群节点和创建群节点")
+        else:
+            fail("群节点没上图：" + json.dumps(ids, ensure_ascii=False))
+        open_node(page, "rm:" + room["id"])
+        page.screenshot(path=os.path.join(SHOTS, "room.png"))
+        text = page.locator(".insp").inner_text()
+        if "成员" in text and "怎么说话" in text and "每天最多多少 token" in text:
+            ok("群面板能改成员、说话方式和预算")
+        else:
+            fail("群面板缺东西：" + text[:200])
+        sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
+        if sessions.get(room["sid"], {}).get("title") == "自检群":
+            ok("群的会话在列表里显示群名")
+        else:
+            fail("群的会话标题不对：" + json.dumps(sessions.get(room["sid"], {}).get("title"), ensure_ascii=False))
+        # 暂停一下，看看面板和接口对得上
+        api(page, "PATCH", "/api/rooms/" + room["id"], {"paused": True})
+        page.reload()
+        page.wait_for_selector("g.node.gateway")
+        page.wait_for_timeout(600)
+        if api(page, "GET", "/api/rooms")[1]["items"][0]["paused"] is True:
+            ok("群能暂停")
+        else:
+            fail("暂停没生效")
+        api(page, "DELETE", "/api/rooms/" + room["id"])
+    else:
+        fail("建群接口失败：" + str(code) + " " + json.dumps(room, ensure_ascii=False))
 
     # ---- 改设置：数字、文本、开关、列表，刷新后还在 ----
     open_node(page, "agdefault")

@@ -46,6 +46,7 @@ var Commands = []Command{
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
+	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -402,6 +403,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	switch cmd {
 	case "help":
 		a.tell(a.boundSession(ep, m), ep, helpText)
+		return
+	case "room":
+		a.cmdRoom(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who}, arg)
 		return
 	case "agent":
 		a.cmdAgent(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
@@ -1093,9 +1097,13 @@ func (a *App) finish(s *sess, status, detail string) {
 		}
 		a.deliver(o.ep, text, "")
 	}
-	// agent 在房间里的回复：记进群记录，转给其他成员
-	if inRoom && roomLogSID(roomOf.ID) != s.sid && strings.TrimSpace(body) != "" {
-		a.roomAgentSay(roomOf, roomSender(s.sid), body)
+	// agent 在房间里的回复：记进群记录，转给其他成员；顺手记用量
+	if inRoom {
+		if roomLogSID(roomOf.ID) != s.sid && strings.TrimSpace(body) != "" {
+			s.groupSpokeAt = a.now()
+			a.roomAgentSay(roomOf, roomSender(s.sid), body)
+		}
+		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)

@@ -16,6 +16,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -170,6 +171,12 @@ func (a *App) groupTick() {
 		}
 		if s.run != nil || len(s.queue) > 0 || s.compacting || s.groupTimer != nil || !s.groupFresh {
 			continue
+		}
+		// 房间里的成员：点名模式下永远不主动开口，只有自由模式交给这里按额度插话
+		if room, ok := a.roomOfSession(s.sid); ok {
+			if s.sid == roomLogSID(room.ID) || room.Paused || room.Mode != rooms.ModeFree || room.MutedAgent(roomSender(s.sid)) {
+				continue
+			}
 		}
 		rule := a.groupRuleOf(s.sid)
 		if rule.PerHour <= 0 {

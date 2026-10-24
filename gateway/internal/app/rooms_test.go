@@ -8,6 +8,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/rooms"
+	"time"
 )
 
 // 房间：人在群里说话转给所有成员；被叫到的 2 秒后回一句；群记录里能看到。
@@ -73,4 +74,99 @@ func TestRoomDM(t *testing.T) {
 	if r2.ID != r.ID {
 		t.Fatalf("同一个私聊应该复用一个房间：%s %s", r.ID, r2.ID)
 	}
+}
+
+// /room 列出、暂停、恢复。
+func TestRoomCommand(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, err := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.SetRooms(st)
+	room, err := st.Create(rooms.Room{Name: "产品组", Members: []string{"default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := in{s: e.a.sessOf(e.sid), ep: endpoint{ch: "fake", chat: "c1"}, who: "fake:u1"}
+	e.a.mu.Lock()
+	e.a.cmdRoom(c, "")
+	e.a.mu.Unlock()
+	got := e.ch.wait(t, "产品组")
+	if !strings.Contains(got, "在聊") {
+		t.Fatalf("/room 没列出状态：%q", got)
+	}
+	e.a.mu.Lock()
+	e.a.cmdRoom(c, "产品组 pause")
+	e.a.mu.Unlock()
+	e.ch.wait(t, "已暂停")
+	if r, _ := st.Get(room.ID); !r.Paused {
+		t.Fatal("没真的暂停")
+	}
+	e.a.mu.Lock()
+	e.a.cmdRoom(c, "产品组 resume")
+	e.a.mu.Unlock()
+	e.ch.wait(t, "恢复了")
+	if r, _ := st.Get(room.ID); r.Paused {
+		t.Fatal("没真的恢复")
+	}
+}
+
+// 建群时把群记录会话的标题设成群名（会话列表里好看）。
+func TestRoomTitle(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(st)
+	name := "产品组"
+	info, err := e.a.CreateRoom(RoomPatch{Name: &name, Members: &[]string{"default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	title := e.a.store.Settings(info.SID).Title
+	e.a.mu.Unlock()
+	if title != "产品组" {
+		t.Fatalf("会话标题没设成群名：%q", title)
+	}
+}
+
+// Message 工具：给某个 agent 发消息会自动建两人私聊，并让对方那边跑一轮。
+func TestMessageToolToAgent(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(st)
+	if err := e.a.agentStore.Create(testAgent("bob")); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	e.a.messageTool(mainSID, "{\"to\":\"agent:bob\",\"text\":\"有空吗\"}", func(ok bool, text string) {
+		done <- text
+	})
+	select {
+	case text := <-done:
+		if !strings.Contains(text, "发进") {
+			t.Fatalf("Message 结果不对：%q", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Message 没回复")
+	}
+	e.a.mu.Lock()
+	var dm rooms.Room
+	for _, r := range e.a.roomStore.List() {
+		if r.IsDM() {
+			dm = r
+		}
+	}
+	member := e.a.roomMemberSID("bob", dm.ID)
+	hist := e.a.store.History(member)
+	e.a.mu.Unlock()
+	if len(hist) == 0 || !strings.Contains(hist[len(hist)-1].Content, "有空吗") {
+		t.Fatalf("对方没收到：%+v", hist)
+	}
+	e.a.mu.Lock()
+	e.a.roomState(dm.ID).Pending = map[string][]chan string{}
+	e.a.mu.Unlock()
 }

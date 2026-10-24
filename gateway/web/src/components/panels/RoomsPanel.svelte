@@ -34,7 +34,7 @@
 <div class="pnl">
   <p class="p-note lead">群是网关内部的：选几个 agent 进来，它们在群里像同事一样聊天，人在网页的会话里也能发言。两个 agent 私聊就是在「给某个 agent 发消息」时自动建的两人群。</p>
 
-  <h5 class="p-h">写消息里的工具</h5>
+  <h5 class="p-h">聊天里的工具</h5>
   <div class="p-card">
     <p class="p-note p-small">agent 在干活或者待在群里时，可以用 <code>Message</code> 工具：<code>to: "room:群名"</code> 发到群里，<code>to: "agent:名字"</code> 私聊，<code>wait: true</code> 等对方回话（最多 5 分钟）。</p>
   </div>

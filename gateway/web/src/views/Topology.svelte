@@ -720,7 +720,6 @@
       case 'add':
       case 'agentdefaults':
       case 'botadd':
-      case 'agentdefaults':
         return n.target ? { title: '', items: [open] } : null;
       case 'more':
         return { title: '会话', items: [{ label: '查看全部会话', icon: 'chat', run: () => (location.hash = '#/sessions') }] };
@@ -1052,6 +1051,7 @@
     <span style="--c: var(--c-session)">会话</span>
     <i>→</i>
     <span style="--c: var(--c-agent)">Agent</span>
+    <span style="--c: var(--accent-2)">群</span>
     <i>→</i>
     <span style="--c: var(--c-gateway)">网关</span>
     <i>→</i>
@@ -1169,6 +1169,11 @@
   }
   .node.dimmed {
     opacity: 0.45;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .node {
+      animation: none;
+    }
   }
   .node.dragging {
     cursor: grabbing;

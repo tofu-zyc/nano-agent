@@ -81,6 +81,10 @@
       <label class="p-label">名字
         <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
       </label>
+      <label class="p-label">每天最多多少 token（0 表示不限，超了自动暂停）
+        <input class="p-input" value={r.budget ?? 0} inputmode="numeric"
+          onchange={(e) => patch({ budget: Number((e.target as HTMLInputElement).value) || 0 })} />
+      </label>
     </div>
 
     <div class="p-danger-zone">

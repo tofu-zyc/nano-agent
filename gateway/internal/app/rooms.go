@@ -67,10 +67,6 @@ func (a *App) roomHumanSay(room rooms.Room, name, text string) {
 		name = "有人"
 	}
 	line := fmt.Sprintf("[%s] %s", name, text)
-	// 房间被暂停了：消息照样记进记录，但没有人说话
-	if room.Paused {
-		return
-	}
 	for _, member := range room.Members {
 		sid := a.roomMemberSID(member, room.ID)
 		st := a.store.Settings(sid)
@@ -88,7 +84,8 @@ func (a *App) roomHumanSay(room rooms.Room, name, text string) {
 		s.groupFresh = true
 		s.groupLast = a.now()
 		s.groupEp = endpoint{ch: "room", chat: room.ID}
-		if room.MutedAgent(member) {
+		// 暂停了：消息照样进成员的会话（它们还能听到），只是不叫人回
+		if room.Paused || room.MutedAgent(member) {
 			continue
 		}
 		if a.roomShouldSpeak(room, member, text) {
@@ -112,8 +109,8 @@ func (a *App) roomShouldSpeak(room rooms.Room, member, text string) bool {
 	if strings.Contains(text, "@"+ag.Name) || groupMentionsName(text, ag.Name) {
 		return true
 	}
-	// 自由模式：按积极度插话
-	return room.Mode == rooms.ModeFree
+	// 自由模式不在这里直接回：交给 groupTick 按安静时长和每小时额度决定
+	return false
 }
 
 // roomTrigger 让某个成员在房间里说一句（走群聊那一套：先攒 2 秒）。调用方持有锁。
@@ -176,6 +173,22 @@ func (a *App) roomAgentSay(room rooms.Room, member, text string) {
 	}
 	a.signalRoomWaiters(room.ID, member, text)
 	a.roomGuard(room, member)
+}
+
+// roomUsage 累加一个群今天的 token 用量，超过预算就暂停。调用方持有锁。
+func (a *App) roomUsage(room rooms.Room, prompt, completion int) {
+	if room.Budget <= 0 {
+		return
+	}
+	st := a.roomState(room.ID)
+	day := a.now().In(a.loc).Format("2006-01-02")
+	if st.TokenDay != day {
+		st.TokenDay, st.Tokens = day, 0
+	}
+	st.Tokens += prompt + completion
+	if st.Tokens > room.Budget {
+		a.pauseRoom(room, fmt.Sprintf("今天的 token 用量到了预算（%d），先暂停，明天或者你恢复", room.Budget))
+	}
 }
 
 // roomGuard 防止几个 agent 在群里聊个不停。调用方持有锁。
@@ -246,7 +259,7 @@ func (a *App) pauseRoom(room rooms.Room, why string) {
 	a.log.Info("房间已暂停", "room", room.ID, "why", why)
 }
 
-// signalRoomWaiters 叫醒等某个 agent 在群里说话的调研。调用方持有锁。
+// signalRoomWaiters 叫醒在等某个 agent 回话的调用（Message 工具的 wait）。调用方持有锁。
 func (a *App) signalRoomWaiters(roomID, member, text string) {
 	st := a.roomState(roomID)
 	chans := st.Pending[member]
@@ -282,13 +295,14 @@ type RoomInfo struct {
 	Paused  bool     `json:"paused"`
 	Muted   []string `json:"muted"`
 	DM      bool     `json:"dm"`
-	SID     string   `json:"sid"` // 记录会话（网页里打开它就能看聊天）
+	Budget  int      `json:"budget"` // 每天最多的 token（0 不限）
+	SID     string   `json:"sid"`    // 记录会话（网页里打开它就能看聊天）
 	Count   int      `json:"count"`
 }
 
 func (a *App) roomInfo(r rooms.Room) RoomInfo {
 	out := RoomInfo{ID: r.ID, Name: r.Name, Members: r.Members, Mode: r.Mode, Paused: r.Paused, Muted: r.Muted,
-		DM: r.IsDM(), SID: roomLogSID(r.ID)}
+		DM: r.IsDM(), Budget: r.Budget, SID: roomLogSID(r.ID)}
 	if out.Members == nil {
 		out.Members = []string{}
 	}
@@ -321,6 +335,7 @@ type RoomPatch struct {
 	Mode    *string   `json:"mode"`
 	Paused  *bool     `json:"paused"`
 	Muted   *[]string `json:"muted"`
+	Budget  *int      `json:"budget"`
 }
 
 // CreateRoom 新建一个房间。
@@ -349,6 +364,7 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 	if err != nil {
 		return RoomInfo{}, err
 	}
+	a.setRoomTitle(got.ID, got.Name)
 	a.log.Info("新建房间", "id", got.ID, "name", got.Name, "members", len(got.Members))
 	a.publish(events.Event{T: "rooms"})
 	return a.roomInfo(got), nil
@@ -390,11 +406,31 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if p.Muted != nil {
 		r.Muted = *p.Muted
 	}
+	if p.Budget != nil {
+		if *p.Budget < 0 {
+			return RoomInfo{}, errors.New("预算不能是负数")
+		}
+		r.Budget = *p.Budget
+	}
 	if err := a.roomStore.Update(r); err != nil {
 		return RoomInfo{}, err
 	}
+	a.setRoomTitle(r.ID, r.Name)
 	a.publish(events.Event{T: "rooms"})
 	return a.roomInfo(r), nil
+}
+
+// setRoomTitle 让群记录那个会话在会话列表里显示群名。调用方持有锁。
+func (a *App) setRoomTitle(id, name string) {
+	sid := roomLogSID(id)
+	st := a.store.Settings(sid)
+	if st.Title == name {
+		return
+	}
+	st.Title = name
+	if err := a.store.SaveSettings(sid, st); err != nil {
+		a.log.Warn("保存群会话标题失败", "sid", sid, "err", err)
+	}
 }
 
 // DeleteRoom 删掉一个房间（聊天记录留着，可以在会话里找到）。
@@ -509,7 +545,11 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 		if target.MutedAgent(m) {
 			continue
 		}
-		if targetMember == "" || m == targetMember {
+		if targetMember != "" {
+			if m == targetMember {
+				a.roomTrigger(s, m, target)
+			}
+		} else if a.roomShouldSpeak(target, m, text) {
 			a.roomTrigger(s, m, target)
 		}
 	}
@@ -541,6 +581,88 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 		case <-a.ctx.Done():
 		}
 	}()
+}
+
+// cmdRoom 是 /room：列出网关里的群，暂停 / 恢复某个群。
+func (a *App) cmdRoom(c in, arg string) {
+	if !a.isAdmin(c.who) {
+		a.answer(c, "只有管理员能看和管网关里的群")
+		return
+	}
+	if a.roomStore == nil {
+		a.answer(c, "还没有群")
+		return
+	}
+	list := a.roomStore.List()
+	if len(list) == 0 {
+		a.answer(c, "还没有群。管理员可以在网页拓扑图的 Agent 列点「创建群」。")
+		return
+	}
+	args := strings.Fields(arg)
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("网关里的群：")
+		for _, r := range list {
+			state := "在聊"
+			if r.Paused {
+				state = "暂停"
+			}
+			fmt.Fprintf(&b, "\n%s（%d 人 · %s）", r.Name, len(r.Members), state)
+		}
+		b.WriteString("\n/room <群名> pause 暂停、/room <群名> resume 恢复；聊天记录在会话「群名」里。")
+		a.answer(c, b.String())
+		return
+	}
+	name := args[0]
+	r := a.roomByName(name)
+	if r == nil {
+		a.answer(c, "没有这个群："+name)
+		return
+	}
+	action := ""
+	if len(args) > 1 {
+		action = strings.ToLower(args[1])
+	}
+	switch action {
+	case "", "info":
+		var names []string
+		for _, m := range r.Members {
+			n := m
+			if ag, ok := a.agentByID(m); ok {
+				n = ag.Name
+			}
+			names = append(names, n)
+		}
+		state, mode := "在聊", "点名"
+		if r.Paused {
+			state = "暂停"
+		}
+		if r.Mode == rooms.ModeFree {
+			mode = "自由"
+		}
+		a.answer(c, fmt.Sprintf("群「%s」：%s · %s · 成员 %s", r.Name, state, mode, strings.Join(names, "、")))
+	case "pause":
+		room := *r
+		room.Paused = true
+		if err := a.roomStore.Update(room); err != nil {
+			a.answer(c, "没暂停成："+err.Error())
+			return
+		}
+		a.publish(events.Event{T: "rooms"})
+		a.answer(c, "群「"+r.Name+"」已暂停，等你恢复。")
+	case "resume":
+		room := *r
+		room.Paused = false
+		if err := a.roomStore.Update(room); err != nil {
+			a.answer(c, "没恢复成："+err.Error())
+			return
+		}
+		a.roomState(room.ID).Tail = nil
+		a.publish(events.Event{T: "rooms"})
+		a.answer(c, "群「"+r.Name+"」恢复了。")
+	default:
+		a.answer(c, "不认识的用法：/room <群名> pause|resume")
+	}
 }
 
 // roomByName 按名字（或 ID）找群。调用方持有锁。

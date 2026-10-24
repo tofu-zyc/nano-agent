@@ -31,8 +31,9 @@ type Room struct {
 	Members []string `json:"members"` // agent ID
 	Mode    string   `json:"mode"`    // mention | free
 	Paused  bool     `json:"paused,omitempty"`
-	Muted   []string `json:"muted,omitempty"` // 被禁言的 agent
-	DM      []string `json:"dm,omitempty"`    // 两个 agent 的私聊：成员就是这两个
+	Muted   []string `json:"muted,omitempty"`  // 被禁言的 agent
+	DM      []string `json:"dm,omitempty"`     // 两个 agent 的私聊：成员就是这两个
+	Budget  int      `json:"budget,omitempty"` // 一天最多用多少 token（0 表示不限），超了就暂停
 	Created int64    `json:"created,omitempty"`
 }
 

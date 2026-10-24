@@ -277,6 +277,7 @@ export type RoomInfo = {
   paused: boolean;
   muted: string[];
   dm: boolean;
+  budget?: number;
   sid: string;
   count: number;
 };
