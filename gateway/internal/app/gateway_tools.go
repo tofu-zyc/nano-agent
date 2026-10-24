@@ -59,7 +59,8 @@ const gatewayAdminSchema = `{
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
     "name":{"type":"string","description":"接口或 SSH 连接的名字；agent_save 时是 agent 的名字"},
     "emoji":{"type":"string","description":"agent_save：头像，一个 emoji"},
-    "settings":{"type":"object","description":"agent_save：这个 agent 覆盖的全局设置（键见 Gateway settings，比如 max_steps、mode、compact_at）；值为 null 表示恢复跟随全局"},
+    "style":{"type":"string","enum":["tool","life"],"description":"agent_save：类型。tool 工具型（有人找才干活，群里只回被叫到的）；life 拟人型（有作息，没事时自己上网、想事情、找人聊天，群里会插话）"},
+    "settings":{"type":"object","description":"agent_save：这个 agent 自己的设置（键见 Gateway agents 里每个 agent 的 settings，比如 max_steps、mode、compact_at、group_eagerness、life_awake、life_level、life_reach、memory、dream_when）；值为 null 表示恢复跟随全局或默认"},
     "host":{"type":"string","description":"SSH 主机地址或 SSH 别名；添加工作目录时是机器名"},
     "port":{"type":"integer","description":"SSH 端口"},
     "user":{"type":"string","description":"SSH 用户"},
@@ -238,6 +239,7 @@ type gatewayArgs struct {
 	What                                                                 string
 	Lines                                                                int
 	Emoji                                                                string
+	Style                                                                string
 	Agent                                                                string
 	Settings                                                             map[string]any
 }
@@ -477,6 +479,9 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 		}
 		if args.Thinking != "" {
 			p.Thinking = &args.Thinking
+		}
+		if args.Style != "" {
+			p.Style = &args.Style
 		}
 		ip := args.ID
 		if ip == "" && args.Agent != "" {

@@ -375,6 +375,8 @@
 
 ## 阶段 9：知识库（长期记忆）（v0.6）
 
+> **已做（dev/v0.6）**，实际设计以 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md) 为准。和下面的出入：记忆不放进系统提示，而是像环境说明一样放在用户消息前面（变了才放）；每轮还按关键词“想起来”几条；人物画像单独成类（`people/`），过时的标 `invalid` 不删；`Knowledge` 多了 `invalidate`、`person`；可见范围按会话自动定；`/forget` 是标过时。v0.6 还加了这里没有的“两种 agent（工具型 / 拟人型）”和拟人型的内心活动、统一聊天循环。
+
 ### 存放
 
 - 每个 agent 在 `agents/<agent>/knowledge/` 下有自己的知识，所有 agent 共用的放在 `knowledge/`。
@@ -422,6 +424,8 @@
   - agent 技能覆盖全局技能。
 
 ## 阶段 10：睡觉和做梦（v0.6）
+
+> **已做（dev/v0.6）**，见 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)。出入：触发多了 `sleep`（拟人型睡着时，按作息）；做梦期间不打断（会话之间本来并行）；进度在 `dream-state.json` 的 `done`；梦境日志也记进拟人型的内心会话。
 
 agent 空闲时“睡觉”，睡觉时“做梦”：读最近的对话记录（日记），把该记住的内化进知识库和技能，并清理重复、过时的条目。
 
