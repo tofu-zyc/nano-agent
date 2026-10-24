@@ -4,22 +4,10 @@
   import { score } from '../lib/fuzzy';
   import { ago, channelMeta, truncate } from '../lib/format';
   import type { FieldState, Target } from '../lib/types';
+  import { homeOf } from '../lib/nodes';
   import Icon from './Icon.svelte';
 
   type Item = { id: string; icon: string; title: string; sub?: string; kind: string; text: string; color?: string; run: () => void };
-
-  const groupInfo: Record<string, { label: string; target: Target; icon: string; color: string }> = {
-    memory: { label: '上下文与记忆', target: { type: 'memory' }, icon: 'brain', color: 'var(--c-memory)' },
-    search: { label: '网络搜索', target: { type: 'search' }, icon: 'search', color: 'var(--c-search)' },
-    chat: { label: '消息与显示', target: { type: 'channel', name: 'cli' }, icon: 'chat', color: 'var(--c-session)' },
-    llm: { label: '模型请求', target: { type: 'model' }, icon: 'sparkles', color: 'var(--c-model)' },
-    gateway: { label: '网关', target: { type: 'gateway' }, icon: 'hub', color: 'var(--c-gateway)' },
-    kernel: { label: '内核', target: { type: 'kernel' }, icon: 'shield', color: 'var(--c-kernel)' },
-    workspace: { label: '工作目录与沙箱', target: { type: 'workspace' }, icon: 'folder', color: 'var(--c-dir)' },
-    cli: { label: '命令行', target: { type: 'channel', name: 'cli' }, icon: 'terminal', color: 'var(--c-cli)' },
-    telegram: { label: 'Telegram', target: { type: 'channel', name: 'telegram' }, icon: 'send', color: 'var(--c-telegram)' },
-    feishu: { label: '飞书', target: { type: 'channel', name: 'feishu' }, icon: 'feishu', color: 'var(--c-feishu)' },
-  };
 
   let q = $state('');
   let sel = $state(0);
@@ -39,16 +27,23 @@
     return String(typeof f.value === 'object' ? JSON.stringify(f.value) : f.value);
   }
 
+  function node(id: string, t: Target, icon: string, color: string, title: string, sub: string, text: string): Item {
+    return { id, icon, color, title, sub, kind: '节点', text, run: () => { store.openOnMap(t); close(); } };
+  }
+
   const items = $derived.by(() => {
     const out: Item[] = [
-      { id: 'v:topology', icon: 'graph', title: '拓扑', sub: '网关、渠道、会话、模型、内核的全貌', kind: '页面', text: '拓扑 首页 topology graph', run: go('#/') },
-      { id: 'v:schedules', icon: 'clock', title: '定时任务', sub: '查看下次运行、结果，创建和编辑任务', kind: '页面', text: '定时任务 cron schedule 提醒', run: go('#/schedules') },
-      { id: 'n:search', icon: 'search', color: 'var(--c-search)', title: '网络搜索', sub: '开关、key、今天搜了几次', kind: '节点', text: '网络搜索 联网 上网 搜索 web search deepseek', run: () => { store.open({ type: 'search' }); close(); } },
-      { id: 'n:memory', icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: '自动整理、空闲整理、归档', kind: '节点', text: '上下文 记忆 整理 压缩 归档 memory context compact', run: () => { store.open({ type: 'memory' }); close(); } },
+      { id: 'v:topology', icon: 'graph', title: '拓扑', sub: '所有东西的状态、操作和设置都在节点上', kind: '页面', text: '拓扑 首页 topology graph 设置 settings', run: go('#/') },
       { id: 'v:sessions', icon: 'chat', title: '会话', sub: '所有对话，网页聊天', kind: '页面', text: '会话 对话 聊天 sessions chat', run: go('#/sessions') },
-      { id:'v:devices',icon:'terminal',title:'设备与服务器',sub:'下载电脑启动包，添加和连接 SSH 服务器',kind:'页面',text:'设备 服务器 安装包 启动器 SSH Windows Linux 连接',run:go('#/devices') },
-      { id: 'v:personas', icon: 'persona', title: '人格', sub: '编辑系统提示词', kind: '页面', text: '人格 系统提示词 persona prompt', run: go('#/personas') },
-      { id: 'v:settings', icon: 'sliders', title: '全部设置', sub: '按对象分组的所有配置项', kind: '页面', text: '设置 配置 settings config', run: go('#/settings') },
+      node('n:gateway', { type: 'gateway' }, 'hub', 'var(--c-gateway)', '网关', '版本和更新、重启、代理、改过的设置', '网关 版本 更新 升级 重启 代理 update restart proxy'),
+      node('n:agent', { type: 'agent' }, 'persona', 'var(--c-agent)', 'Agent', '人格、每条消息的上限、权限、显示档位', 'agent 人格 系统提示词 persona prompt 上限 权限 管理员 显示'),
+      node('n:model', { type: 'model' }, 'sparkles', 'var(--c-model)', '模型', '接口、模型、默认模型、请求参数', '模型 接口 model endpoint'),
+      node('n:search', { type: 'search' }, 'search', 'var(--c-search)', '网络搜索', '开关、key、今天搜了几次', '网络搜索 联网 上网 搜索 web search deepseek'),
+      node('n:memory', { type: 'memory' }, 'brain', 'var(--c-memory)', '上下文与记忆', '自动整理、空闲整理、归档', '上下文 记忆 整理 压缩 归档 memory context compact'),
+      node('n:skills', { type: 'skills' }, 'book', 'var(--c-skill)', '技能', '技能列表和目录', '技能 skill'),
+      node('n:schedules', { type: 'schedules' }, 'clock', 'var(--c-cron)', '定时任务', '查看、新建、编辑、立即运行', '定时任务 cron schedule 提醒'),
+      node('n:machines', { type: 'machines' }, 'laptop', 'var(--c-kernel)', '接入机器', '别的电脑装内核连进来、添加 SSH 服务器、确认配对', '设备 电脑 服务器 安装 配对 SSH Windows Linux 连接 devices'),
+      node('n:workspaces', { type: 'workspace' }, 'folder', 'var(--c-dir)', '工作目录', '全部工作目录、添加', '工作目录 目录 workspace'),
       {
         id: 'a:test', icon: 'zap', title: '测试默认模型', sub: '发一个很小的请求，看通不通、多快', kind: '操作', text: '测试 模型 连接 test model ping',
         run: async () => {
@@ -110,7 +105,7 @@
       const m = channelMeta[c.name];
       out.push({
         id: 'c:' + c.name, icon: m?.icon ?? 'link', color: m?.color, title: m?.label ?? c.name, sub: c.status.identity ?? c.status.state, kind: '渠道',
-        text: `${m?.label} ${c.name} 渠道 机器人 bot`, run: () => { store.open({ type: 'channel', name: c.name }); close(); },
+        text: `${m?.label} ${c.name} 渠道 机器人 bot`, run: () => { store.openOnMap({ type: 'channel', name: c.name }); close(); },
       });
     }
     for (const s of store.ov?.sessions ?? []) {
@@ -120,8 +115,7 @@
       });
     }
     for (const f of store.fields) {
-      const g = groupInfo[f.group];
-      if (!g || f.group === 'model') continue; // 模型的设置在模型节点面板
+      const g = homeOf(f);
       out.push({
         id: 'f:' + f.key, icon: g.icon, color: g.color, title: f.label, sub: `${g.label}${f.section ? ' · ' + f.section : ''} · ${truncate(valuePreview(f), 40)}`, kind: '设置',
         text: `${f.label} ${f.key} ${g.label} ${f.section ?? ''} ${f.help ?? ''} ${f.keywords ?? ''}`,
@@ -182,7 +176,7 @@
   <div class="pal" onclick={(e) => e.stopPropagation()}>
     <div class="search">
       <Icon name="search" size={17} />
-      <input bind:this={input} bind:value={q} onkeydown={onkey} placeholder="搜索设置、会话、操作……比如“代理”、“token”、“思考”" />
+      <input bind:this={input} bind:value={q} onkeydown={onkey} placeholder="搜索设置、节点、会话、操作……比如“代理”、“上限”、“token”" />
       <span class="kbd">Esc</span>
     </div>
     <div class="list">

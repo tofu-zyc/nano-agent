@@ -29,8 +29,8 @@ const gatewaySchema = `{
     "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings"],
       "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态，或设置项（当前值和说明）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
-    "group":{"type":"string","enum":["memory","search","chat","llm","gateway","workspace","telegram","feishu","cli","kernel"],
-      "description":"settings 只看这一组：memory 上下文与记忆、search 网络搜索、chat 消息与显示（显示档位、消息时间、时区）、llm 模型请求、gateway 网关（访问控制、代理、更新）……不填就是全部"}
+    "group":{"type":"string","enum":["agent","gateway","web","cli","telegram","feishu","model","memory","search","skills","local","machines"],
+      "description":"settings 只看拓扑图上这个节点的设置：agent（每条消息最多请求模型几次、时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
   }
 }`
 
@@ -574,9 +574,9 @@ func settingChangeable(f config.Field) (bool, string) {
 	case f.ReadOnly:
 		return false, "只能在配置文件里改"
 	case f.Restart:
-		return false, "要重启网关才生效，请在网页设置页改"
+		return false, "要重启网关才生效，请在网页拓扑图的「" + nodeLabel(f.Group) + "」节点里改"
 	case f.Type == "secret" && f.Key != "search.api_key":
-		return false, "这类密钥请在网页设置页填"
+		return false, "这类密钥请在网页拓扑图的「" + nodeLabel(f.Group) + "」节点里填"
 	}
 	return true, ""
 }
@@ -591,7 +591,7 @@ func (a *App) settingsView(group string) (any, error) {
 		if group != "" && f.Group != group {
 			continue
 		}
-		item := map[string]any{"key": f.Key, "group": f.Group, "label": f.Label, "type": f.Type, "value": f.Value, "source": f.Source}
+		item := map[string]any{"key": f.Key, "group": f.Group, "node": nodeLabel(f.Group), "label": f.Label, "type": f.Type, "value": f.Value, "source": f.Source}
 		if f.Section != "" {
 			item["section"] = f.Section
 		}
@@ -617,7 +617,17 @@ func (a *App) settingsView(group string) (any, error) {
 	return out, nil
 }
 
-// setSetting 是 GatewayAdmin settings_set：和网页设置页改一项一样，写进 data/config.json，立即生效
+// nodeLabel 是设置项所在节点的名字（冒号前面那段），告诉用户去哪儿改
+func nodeLabel(group string) string {
+	n, ok := config.NodeByID(group)
+	if !ok {
+		return group
+	}
+	name, _, _ := strings.Cut(n.Label, "：")
+	return name
+}
+
+// setSetting 是 GatewayAdmin settings_set：和网页节点面板里改一项一样，写进 data/config.json，立即生效
 func (a *App) setSetting(key string, value any) (string, error) {
 	if a.confStore == nil {
 		return "", errors.New("设置存储没有接上")

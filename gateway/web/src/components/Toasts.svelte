@@ -3,12 +3,12 @@
   import Icon from './Icon.svelte';
 
   const icons = { info: 'activity', ok: 'check', err: 'alert', approval: 'shield', pair: 'link' } as const;
-  // 正在看的那个会话里已经有审批卡片了、设备页上已经有配对请求了，不用再弹
+  // 正在看的那个会话里已经有审批卡片了、「接入机器」面板里已经有配对请求了，不用再弹
   const shown = $derived(
     store.toasts.filter(
       (t) =>
         !(t.approval && store.route.view === 'sessions' && store.route.arg === t.approval.sid) &&
-        !(t.pair && store.route.view === 'devices'),
+        !(t.pair && store.inspector?.type === 'machines'),
     ),
   );
 </script>
@@ -33,7 +33,7 @@
           <div class="acts">
             <button class="btn sm primary" onclick={() => store.decidePair(t.pair!, true)}><Icon name="check" size={13} />允许</button>
             <button class="btn sm" onclick={() => store.decidePair(t.pair!, false)}>拒绝</button>
-            <a class="btn sm ghost" href="#/devices">设备页</a>
+            <button class="btn sm ghost" onclick={() => store.openOnMap({ type: 'machines' })}>接入机器</button>
           </div>
         {:else if t.detail}
           <div class="who">{t.detail}</div>

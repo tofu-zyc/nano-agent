@@ -29,6 +29,8 @@
   --c-search: #fb923c;
   --c-memory: #e879f9;
   --c-cron: #fda4af;
+  --c-agent: #c4b5fd;
+  --c-skill: #a5b4fc;
 
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   --radius: 14px;
@@ -62,6 +64,10 @@
     --c-search: #ea580c;
     --c-memory: #c026d3;
     --c-cron: #e11d48;
+  --c-agent: #7c3aed;
+  --c-skill: #4f46e5;
+    --c-agent: #7c3aed;
+    --c-skill: #4f46e5;
     --shadow: 0 12px 36px rgba(40, 40, 70, 0.14);
     color-scheme: light;
   }

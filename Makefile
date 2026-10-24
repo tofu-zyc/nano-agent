@@ -1,4 +1,4 @@
-.PHONY: all kernel gateway web test test-win test-install test-macos run chat clean install installer install-kernel release release-kernel release-linux release-windows release-macos release-gateway
+.PHONY: all kernel gateway web test test-ui test-win test-install test-macos run chat clean install installer install-kernel release release-kernel release-linux release-windows release-macos release-gateway
 
 all: kernel gateway
 
@@ -18,6 +18,8 @@ test: all
 	cd gateway && go test -race ./...
 	./scripts/e2e.sh
 	python3 scripts/e2e-control.py
+	@if python3 -c "import playwright" 2>/dev/null; then python3 scripts/check-web-ui.py; \
+	else echo "（没有 playwright，跳过网页界面检查：pip install playwright && python3 -m playwright install chromium-headless-shell）"; fi
 	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -f kernel/build/nano-kernel.exe ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  python3 scripts/e2e-win.py; \
 	else echo "（没有 Windows 内核或 WSL interop，跳过 Windows 内核端到端测试）"; fi
@@ -25,6 +27,10 @@ test: all
 	$(MAKE) test-macos
 
 # 只跑 Windows 执行器和内核的测试（需要 zig、build/tools/rg.exe、WSL interop）
+# 网页界面检查：浏览器把拓扑图的节点逐个点开，每个配置项恰好在一个节点里、改了能保存（要 playwright）
+test-ui: all
+	python3 scripts/check-web-ui.py
+
 test-win:
 	$(MAKE) -C kernel test-win
 	python3 scripts/e2e-win.py

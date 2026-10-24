@@ -318,7 +318,7 @@ static char *print_connection(const ctl_t *c, long pid)
         }
     } else if (!strcmp(state, "pairing")) {
         const char *code = jstr(st, "code");
-        printf(" · 等网关确认接入：在网关网页的「设备」里核对确认码 %.3s %s，点允许", code ? code : "?",
+        printf(" · 等网关确认接入：在网关网页上核对确认码 %.3s %s，点允许", code ? code : "?",
                code && strlen(code) > 3 ? code + 3 : "");
     } else if (!strcmp(state, "denied")) {
         printf(" · 网关没有同意这台电脑接入（重新申请：nano-kernel restart）");
@@ -758,7 +758,7 @@ static const struct {
       "  网关地址     192.168.1.2、192.168.1.2:7700、tcp:主机:端口 或 unix:/路径（只写主机时端口是 7700）\n"
       "  --name 名字  这台电脑在网关里显示的名字\n"
       "不带参数时显示现在连的网关。\n"
-      "换了网关的话，新网关不认原来的配对口令：内核会自动重新申请接入，到新网关网页的「设备」里点允许。" },
+      "换了网关的话，新网关不认原来的配对口令：内核会自动重新申请接入，到新网关的网页上点允许。" },
     { "logs", "nano-kernel logs [-f] [-n 行数]",
       "看日志。\n"
       "  -f       持续输出新日志（Ctrl-C 退出）\n"

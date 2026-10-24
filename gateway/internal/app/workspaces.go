@@ -228,7 +228,7 @@ func isWindowsAbs(p string) bool {
 // 路径属于那台机器：远程机器的路径网关不解析，只检查机器存在，交给那台机器的执行器。
 func (a *App) checkWorkspace(hostName, path string) error {
 	if !a.knownHost(hostName) {
-		return fmt.Errorf("没有叫 %s 的机器（本机、在「设备」里添加的 SSH 服务器、或者连上来的内核）", hostName)
+		return fmt.Errorf("没有叫 %s 的机器（本机、在拓扑图「接入机器」里添加的 SSH 服务器、或者连上来的内核）", hostName)
 	}
 	if hostName == host.LocalName {
 		if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") {

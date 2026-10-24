@@ -173,7 +173,7 @@ func rewriteTomlSecrets(path string, move map[string]string) (string, error) {
 				if comment != "" {
 					line += "  " + comment
 				}
-				line += "  # 已加密保存在 data/config.json，在网页设置里改" + nl
+				line += "  # 已加密保存在 data/config.json，在网页拓扑图对应的节点里改" + nl
 			}
 		}
 		out.WriteString(line)

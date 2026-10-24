@@ -776,7 +776,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     }
     if (!strcmp(t, "pairing")) {
         k->backoff = 1000;
-        log_info("等待网关确认接入：打开网关网页的「设备」页面，核对确认码 %s 后点「允许」",
+        log_info("等待网关确认接入：打开网关网页（会弹出接入请求），核对确认码 %s 后点「允许」",
                  sget(m, "code") ? sget(m, "code") : "?");
         set_state(k, "pairing", NULL, sget(m, "code"));
         return;

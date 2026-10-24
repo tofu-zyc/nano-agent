@@ -1,6 +1,7 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { Approval, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import type { Approval, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import { HOMES } from './nodes';
 
 export type Toast = {
   id: number;
@@ -11,24 +12,50 @@ export type Toast = {
   pair?: PairRequest;
 };
 
-export type PairRequest = { id: string; node: string; addr: string; code: string; at: string };
+export type { PairRequest };
 
-export type View = 'topology' | 'sessions' | 'personas' | 'settings' | 'devices' | 'schedules';
-export type Route = { view: View; arg?: string; focus?: string };
+// 只有两个页面：拓扑图（所有对象的状态、操作和设置都在节点上）和会话（聊天）
+export type View = 'topology' | 'sessions';
+export type Route = { view: View; arg?: string };
 
-function parseRoute(): Route {
+// 以前的页面（设置、设备、定时任务、人格）的链接：跳到拓扑图，打开对应的节点
+type Legacy = { target: Target; focus?: string; persona?: { name: string; isNew: boolean } };
+
+function parseHash(): { route: Route; legacy?: Legacy } {
   const h = location.hash.replace(/^#\/?/, '');
   const [path, query] = h.split('?');
   const [view, ...rest] = path.split('/');
   const params = new URLSearchParams(query || '');
   const arg = rest.length && rest[0] ? decodeURIComponent(rest.join('/')) : undefined;
-  if (view === 'sessions' || view === 'personas' || view === 'settings' || view === 'devices' || view === 'schedules') {
-    return { view, arg, focus: params.get('focus') ?? undefined };
+  const topo: Route = { view: 'topology' };
+  switch (view) {
+    case 'sessions':
+      return { route: { view, arg } };
+    case 'settings':
+      return { route: topo, legacy: { target: { type: 'gateway' }, focus: params.get('focus') ?? undefined } };
+    case 'devices':
+      return { route: topo, legacy: { target: { type: 'machines' } } };
+    case 'schedules':
+      return { route: topo, legacy: { target: { type: 'schedules' } } };
+    case 'personas':
+      return { route: topo, legacy: { target: { type: 'agent' }, persona: { name: arg ?? 'default.md', isNew: params.get('new') === '1' } } };
   }
-  return { view: 'topology' };
+  return { route: topo };
 }
 
+
+
 type Theme = 'auto' | 'dark' | 'light';
+
+function loadWidth(): number {
+  try {
+    const w = Number(localStorage.getItem('nano.panel'));
+    if (w >= 380) return w;
+  } catch {
+    /* 隐私模式之类，忽略 */
+  }
+  return 440;
+}
 
 function loadTheme(): Theme {
   try {
@@ -49,11 +76,15 @@ class Store {
   log = $state<Ev[]>([]);
   toasts = $state<Toast[]>([]);
   inspector = $state<Target | null>(null);
-  focus = $state<string | null>(null); // 设置面板里要高亮的配置项
+  focus = $state<string | null>(null); // 节点面板里要高亮的配置项
   private pendingOpen: { t: Target; focus: string | null } | null = null;
   palette = $state(false);
   modelIntent = $state<'model' | 'endpoint' | null>(null); // 打开模型面板后直接进添加模型/接口
-  route = $state<Route>(parseRoute());
+  route = $state<Route>(parseHash().route);
+  devices = $state<Devices | null>(null); // SSH 连接、配对请求、配对过的电脑（机器节点和“接入机器”用）
+  persona = $state<{ name: string; isNew: boolean } | null>(null); // 正在编辑的人格文件
+  scheduleNew = $state(false); // 打开定时任务节点后直接新建
+  panelWidth = $state(loadWidth());
   theme = $state<Theme>(loadTheme());
   connected = $state(false);
   historyTick = $state<Record<string, number>>({});
@@ -70,13 +101,15 @@ class Store {
   constructor() {
     window.addEventListener('hashchange', () => {
       const prev = this.route;
-      this.route = parseRoute();
-      // 换了页面：右侧的设置面板关掉，除非是“去某个页面并打开某个对象”
+      const { route, legacy } = parseHash();
+      this.route = route;
+      if (legacy) return this.openLegacy(legacy);
+      // 换了页面：右侧的面板关掉，除非是“去某个页面并打开某个对象”
       if (this.route.view !== prev.view) {
         this.inspector = this.pendingOpen?.t ?? null;
         this.focus = this.pendingOpen?.focus ?? null;
       } else if (this.route.view === 'sessions' && this.route.arg !== prev.arg && this.inspector?.type === 'session') {
-        // 在会话列表里切换会话：设置面板跟着换成当前会话；没选会话就收起
+        // 在会话列表里切换会话：面板跟着换成当前会话；没选会话就收起
         this.inspector = this.route.arg ? { type: 'session', sid: this.route.arg } : null;
         this.focus = null;
       }
@@ -93,6 +126,18 @@ class Store {
     location.hash = hash;
   }
 
+  /** 以前页面的链接：换成拓扑图上的节点 */
+  private openLegacy(l: Legacy) {
+    history.replaceState(null, '', location.pathname + '#/');
+    this.route = { view: 'topology' };
+    // 设置项按它的 group 找到所在的节点
+    const f = l.focus ? this.fields.find((x) => x.key === l.focus) : undefined;
+    const t = (f && HOMES[f.group]?.target) || l.target;
+    this.inspector = t;
+    this.focus = l.focus ?? null;
+    if (l.persona) this.persona = l.persona;
+  }
+
   /** 打开模型节点面板，可选直接进添加模型/接口 */
   openModel(intent: 'model' | 'endpoint' | null = null) {
     this.openOnMap({ type: 'model' });
@@ -106,7 +151,7 @@ class Store {
     const m = location.hash.match(/[#&]k=([^&]+)/);
     if (m) {
       history.replaceState(null, '', location.pathname + '#/');
-      this.route = parseRoute();
+      this.route = parseHash().route;
       try {
         await api.post('/api/login', { password: decodeURIComponent(m[1]) });
       } catch {
@@ -136,6 +181,8 @@ class Store {
 
   private async start() {
     await Promise.all([this.refresh(), this.loadFields()]);
+    const { legacy } = parseHash();
+    if (legacy) this.openLegacy(legacy);
     this.connect();
     this.checkPairing(); // 打开网页前就有电脑在等确认
   }
@@ -336,6 +383,7 @@ class Store {
           ov.kernels = ov.kernels.filter((k) => k.node !== e.name);
           if (e.data) ov.kernels = [...ov.kernels, e.data].sort((a, b) => a.node.localeCompare(b.node));
         }
+        this.loadDevicesSoon();
         break;
       case 'machines':
         // 机器能不能用变了：会话里工作目录怎么执行也跟着变，过一会儿整体重新读一遍
@@ -344,6 +392,7 @@ class Store {
           clearTimeout(this.reloadTimer);
           this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 400);
         }
+        this.loadDevicesSoon();
         break;
       case 'skills':
         if (ov && e.data) ov.skills = { ...ov.skills, list: e.data };
@@ -489,15 +538,38 @@ class Store {
 
   // ---- 操作 ----
 
-  // 有电脑请求配对：不在设备页时弹一个带“允许/拒绝”的提示；处理掉的请求收起提示
+  /** 重新读 SSH 连接、配对请求、配对过的电脑 */
+  async loadDevices() {
+    try {
+      this.devices = await api.get<Devices>('/api/devices');
+    } catch {
+      /* 下次再说 */
+    }
+    return this.devices;
+  }
+
+  private devicesTimer: ReturnType<typeof setTimeout> | undefined;
+  private loadDevicesSoon() {
+    clearTimeout(this.devicesTimer);
+    this.devicesTimer = setTimeout(() => this.loadDevices(), 300);
+  }
+
+  /** 设置面板宽度（拖面板左边缘），记在浏览器里 */
+  setPanelWidth(w: number) {
+    this.panelWidth = Math.round(Math.min(Math.max(w, 380), Math.max(380, window.innerWidth - 160)));
+    try {
+      localStorage.setItem('nano.panel', String(this.panelWidth));
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  // 有电脑请求配对：弹一个带“允许/拒绝”的提示，「接入机器」节点上也有标记；处理掉的请求收起提示
   private pairToasts = new Map<string, number>();
   async checkPairing() {
-    let reqs: PairRequest[] = [];
-    try {
-      reqs = (await api.get<{ pairing: PairRequest[] }>('/api/devices')).pairing ?? [];
-    } catch {
-      return;
-    }
+    const d = await this.loadDevices();
+    if (!d) return;
+    const reqs: PairRequest[] = d.pairing ?? [];
     for (const [id, tid] of this.pairToasts) {
       if (!reqs.some((r) => r.id === id)) {
         this.dismiss(tid);

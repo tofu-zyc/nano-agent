@@ -1,26 +1,41 @@
 <script lang="ts">
+  // 拓扑图就是控制台：每个能配置的东西都是一个节点，点开就是它全部的状态、操作和设置。
+  // 从左到右：入口 → 会话 → Agent → 网关 → 能力（记忆、搜索、技能、模型）/ 内核 → 机器 → 工作目录。
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
   import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate, whenText } from '../lib/format';
+  import { portal } from '../lib/portal';
   import Icon from '../components/Icon.svelte';
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
   import type { Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'schedule' | 'session' | 'gateway' | 'model' | 'search' | 'memory' | 'kernel' | 'machine' | 'workspace' | 'more';
-  type N = { id: string; kind: Kind; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
+  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
+  type Col = 'in' | 'sess' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
+  type N = { id: string; kind: Kind; col: Col; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
+  // 节点上的标记：有问题要处理（err / warn），或者有新东西（info）
+  type Issue = { level: 'err' | 'warn' | 'info'; text: string; n?: number };
 
   const MAX_SESSIONS = 9;
   const ORDER = ['cli', 'web', 'telegram', 'feishu'];
-  const X = { chan: 0, sess: 290, gw: 640, right: 850, mach: 1170, ws: 1490 };
+  const X = { chan: 0, sess: 280, agent: 570, gw: 880, right: 1030, mach: 1360, ws: 1680 };
+  const COLS: { col: Col; x: number; w: number; label: string }[] = [
+    { col: 'in', x: X.chan, w: 200, label: '入口' },
+    { col: 'sess', x: X.sess, w: 220, label: '会话' },
+    { col: 'agent', x: X.agent, w: 210, label: 'Agent' },
+    { col: 'gw', x: X.gw - 62, w: 124, label: '网关' },
+    { col: 'caps', x: X.right, w: 250, label: '能力和内核' },
+    { col: 'mach', x: X.mach, w: 250, label: '机器' },
+    { col: 'ws', x: X.ws, w: 210, label: '工作目录' },
+  ];
 
   // 拖动过的节点记下偏移量（存在浏览器里，下次打开还是这样摆）
   function loadOffsets(): Record<string, { x: number; y: number }> {
     try {
-      return JSON.parse(localStorage.getItem('nano.layout') || '{}');
+      return JSON.parse(localStorage.getItem('nano.layout2') || '{}');
     } catch {
       return {};
     }
@@ -28,7 +43,7 @@
   let offsets = $state<Record<string, { x: number; y: number }>>(loadOffsets());
   function saveOffsets() {
     try {
-      localStorage.setItem('nano.layout', JSON.stringify(offsets));
+      localStorage.setItem('nano.layout2', JSON.stringify(offsets));
     } catch {
       /* 忽略 */
     }
@@ -39,8 +54,21 @@
     fit();
   }
 
+  // 默认人格的名字（第一行标题），显示在 Agent 节点上
+  let personaName = $state('');
+  $effect(() => {
+    store.personaTick;
+    (async () => {
+      const list = await api.get<{ items: { name: string }[] }>('/api/personas').then((r) => r.items ?? [], () => []);
+      if (!list.some((p) => p.name === 'default.md')) return (personaName = '');
+      const r = await api.get<{ text: string }>('/api/personas/default.md').catch(() => ({ text: '' }));
+      personaName = (r.text.match(/^#\s*(.+)$/m)?.[1] ?? '').trim();
+    })();
+  });
+
   // 正在跑任务的内核（连线上有流动的效果）
   const busyKernels = $derived(new Set((store.ov?.sessions ?? []).filter((s) => s.running).map((s) => s.run_node)));
+  const anyRunning = $derived((store.ov?.sessions ?? []).some((s) => s.running));
 
   const layout = $derived.by(() => {
     const ov = store.ov!;
@@ -57,86 +85,90 @@
 
     const chans = ov.channels;
     const nS = shown.length + (more > 0 ? 1 : 0);
-    // 左边一列：渠道，最下面是定时任务（按时自己发起对话，和渠道一样是消息的来源）
-    const nL = chans.length + 1;
-    // 右边一列从上到下：记忆、搜索、模型（网关用的服务），下面是内核
-    const H = Math.max(680, nS * 64 + 120, nL * 96 + 120, 2 * (70 + Math.max(1, store.machines.length, ov.kernels?.length ?? 0) * 96));
+    const nL = chans.length + 1; // 渠道，最下面是定时任务
+    const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
+      Number(!!b.managed) - Number(!!a.managed) || Number(b.local) - Number(a.local) || a.node.localeCompare(b.node));
+    const nM = store.machines.length + 1; // 机器，最下面是“接入机器”
+    const H = Math.max(900, nS * 64 + 160, nL * 96 + 160, 2 * (70 + Math.max(1, nM, kernels.length) * 96));
     const cy = H / 2;
     const leftY = (i: number) => cy + (i - (nL - 1) / 2) * 96;
 
     chans.forEach((c, i) => {
       const y = leftY(i);
       const meta = channelMeta[c.name] ?? { label: c.name, color: 'var(--c-session)', icon: 'link' };
-      nodes.push({ id: 'c:' + c.name, kind: 'channel', x: X.chan, y: y - 32, w: 200, h: 64, color: meta.color,
+      nodes.push({ id: 'c:' + c.name, kind: 'channel', col: 'in', x: X.chan, y: y - 32, w: 200, h: 64, color: meta.color,
         target: { type: 'channel', name: c.name }, data: { ...c, meta } });
     });
+    const sc = ov.schedules;
+    nodes.push({ id: 'sched', kind: 'schedule', col: 'in', x: X.chan, y: leftY(chans.length) - 32, w: 200, h: 64, color: sc?.total ? 'var(--c-cron)' : 'var(--muted)',
+      target: { type: 'schedules' }, data: sc });
 
-    // 会话连到它接着的窗口所在的渠道（一个会话可以接好几个渠道的窗口）；没有窗口接着的只能在网页里聊
+    // 会话连到它接着的窗口所在的渠道（一个会话可以接好几个渠道的窗口），再连到 Agent
     shown.forEach((s, j) => {
       const y = cy + (j - (nS - 1) / 2) * 64;
       const color = s.sid === 'main' ? 'var(--accent)' : (channelMeta[s.channel]?.color ?? 'var(--c-session)');
-      nodes.push({ id: 's:' + s.sid, kind: 'session', x: X.sess, y: y - 24, w: 220, h: 48, color,
+      nodes.push({ id: 's:' + s.sid, kind: 'session', col: 'sess', x: X.sess, y: y - 24, w: 220, h: 48, color,
         target: { type: 'session', sid: s.sid }, data: s });
       for (const ch of sessionChannels(s)) {
         const cc = channelMeta[ch]?.color ?? 'var(--c-session)';
         edges.push({ id: `c:${ch}>s:${s.sid}`, from: 'c:' + ch, to: 's:' + s.sid, color: cc, flow: s.running });
       }
       if (s.sid.startsWith('cron:')) edges.push({ id: `sched>s:${s.sid}`, from: 'sched', to: 's:' + s.sid, color: 'var(--c-cron)', flow: s.running });
-      edges.push({ id: `s:${s.sid}>gw`, from: 's:' + s.sid, to: 'gw', color: 'var(--c-session)', flow: s.running });
+      edges.push({ id: `s:${s.sid}>agent`, from: 's:' + s.sid, to: 'agent', color: 'var(--c-session)', flow: s.running });
     });
-    const sc = ov.schedules;
-    nodes.push({ id: 'sched', kind: 'schedule', x: X.chan, y: leftY(chans.length) - 32, w: 200, h: 64, color: sc?.total ? 'var(--c-cron)' : 'var(--muted)',
-      target: { type: 'schedules' }, data: sc });
-    if (!shown.some((s) => s.sid.startsWith('cron:'))) {
-      edges.push({ id: 'sched>gw', from: 'sched', to: 'gw', color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true });
-    }
     if (more > 0) {
       const y = cy + (nS - 1 - (nS - 1) / 2) * 64;
-      nodes.push({ id: 'more', kind: 'more', x: X.sess, y: y - 20, w: 220, h: 40, color: 'var(--muted)', data: more });
+      nodes.push({ id: 'more', kind: 'more', col: 'sess', x: X.sess, y: y - 20, w: 220, h: 40, color: 'var(--muted)', data: more });
     }
-    // 没有会话的已启用渠道直接连到网关，表示“接上了”
+    // 没有会话的已启用渠道、没有任务会话的定时任务直接连到 Agent，表示“接上了”
     for (const c of chans) {
       if (c.status.state !== 'disabled' && !shown.some((s) => sessionChannels(s).includes(c.name))) {
-        edges.push({ id: `c:${c.name}>gw`, from: 'c:' + c.name, to: 'gw', color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true });
+        edges.push({ id: `c:${c.name}>agent`, from: 'c:' + c.name, to: 'agent', color: channelMeta[c.name]?.color ?? 'var(--muted)', dashed: true });
       }
     }
+    if (!shown.some((s) => s.sid.startsWith('cron:'))) {
+      edges.push({ id: 'sched>agent', from: 'sched', to: 'agent', color: sc?.enabled ? 'var(--c-cron)' : 'var(--muted)', dashed: true });
+    }
 
-    nodes.push({ id: 'gw', kind: 'gateway', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
-    nodes.push({ id: 'model', kind: 'model', x: X.right, y: cy - 118, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
-    edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
+    nodes.push({ id: 'agent', kind: 'agent', col: 'agent', x: X.agent, y: cy - 46, w: 210, h: 92, color: 'var(--c-agent)', target: { type: 'agent' } });
+    edges.push({ id: 'agent>gw', from: 'agent', to: 'gw', color: 'var(--c-agent)', flow: anyRunning });
+    nodes.push({ id: 'gw', kind: 'gateway', col: 'gw', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
+
+    // 能力：网关用的服务，从上到下是记忆、搜索、技能、模型（模型离中间最近，光点最多）
+    nodes.push({ id: 'memory', kind: 'memory', col: 'caps', x: X.right, y: cy - 380, w: 250, h: 72, color: 'var(--c-memory)', target: { type: 'memory' }, data: ov.memory });
+    edges.push({ id: 'gw>memory', from: 'gw', to: 'memory', color: 'var(--c-memory)' });
     const si = ov.search;
     const searchOn = !!si?.enabled && !!si?.key;
-    nodes.push({ id: 'search', kind: 'search', x: X.right, y: cy - 206, w: 250, h: 72, color: searchOn ? 'var(--c-search)' : 'var(--muted)', target: { type: 'search' }, data: si });
+    nodes.push({ id: 'search', kind: 'search', col: 'caps', x: X.right, y: cy - 296, w: 250, h: 72, color: searchOn ? 'var(--c-search)' : 'var(--muted)', target: { type: 'search' }, data: si });
     edges.push({ id: 'gw>search', from: 'gw', to: 'search', color: searchOn ? 'var(--c-search)' : 'var(--muted)', dashed: !searchOn });
-    nodes.push({ id: 'memory', kind: 'memory', x: X.right, y: cy - 292, w: 250, h: 72, color: 'var(--c-memory)', target: { type: 'memory' }, data: ov.memory });
-    edges.push({ id: 'gw>memory', from: 'gw', to: 'memory', color: 'var(--c-memory)' });
+    nodes.push({ id: 'skills', kind: 'skills', col: 'caps', x: X.right, y: cy - 212, w: 250, h: 72, color: 'var(--c-skill)', target: { type: 'skills' }, data: ov.skills });
+    edges.push({ id: 'gw>skills', from: 'gw', to: 'skills', color: 'var(--c-skill)' });
+    nodes.push({ id: 'model', kind: 'model', col: 'caps', x: X.right, y: cy - 124, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
+    edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
 
-    // 内核：连着网关的 agent，各自跑在某台机器上（网关启动的本机内核排在最前面）
-    const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
-      Number(!!b.managed) - Number(!!a.managed) || Number(b.local) - Number(a.local) || a.node.localeCompare(b.node));
+    // 内核：跑对话循环的程序，各自在某台机器上（网关启动的本机内核排在最前面）
     const top = cy + 38;
     kernels.forEach((k, i) => {
       const id = 'k:' + k.node;
-      nodes.push({ id, kind: 'kernel', x: X.right, y: top + i * 86, w: 250, h: 70, color: 'var(--c-kernel)',
+      nodes.push({ id, kind: 'kernel', col: 'caps', x: X.right, y: top + i * 86, w: 250, h: 70, color: 'var(--c-kernel)',
         target: { type: 'kernel', node: k.node }, data: k });
       edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: 'var(--c-kernel)', flow: busyKernels.has(k.node) });
     });
     if (!kernels.length) {
-      nodes.push({ id: 'k:none', kind: 'kernel', x: X.right, y: top, w: 250, h: 70, color: 'var(--muted)', target: { type: 'kernel' }, data: null });
+      nodes.push({ id: 'k:none', kind: 'kernel', col: 'caps', x: X.right, y: top, w: 250, h: 70, color: 'var(--muted)', target: { type: 'kernel' }, data: null });
       edges.push({ id: 'gw>k:none', from: 'gw', to: 'k:none', color: 'var(--err)', dashed: true });
     }
 
-    // 机器：本机（网关所在的）、装了内核的电脑、SSH 服务器。内核连到它所在的机器；SSH 服务器由网关直接连
-    // 有内核的机器按内核的顺序排在前面，SSH 服务器和不在线的放后面，连线少交叉
+    // 机器：本机、装了内核的电脑、SSH 服务器，最后是“接入机器”。内核连到它所在的机器；SSH 服务器由网关直接连
     const kidx = (m: MachineInfo) => {
       const i = kernels.findIndex((k) => (k.local ? '本机' : k.node) === m.name);
       return i < 0 ? kernels.length + (m.kind === 'ssh' ? 0 : 1) : i;
     };
     const machines: MachineInfo[] = store.machines.slice().sort((a, b) => kidx(a) - kidx(b));
-    const mtop = top + Math.max(0, (Math.max(1, kernels.length) * 86 - machines.length * 96) / 2);
+    const mtop = top + Math.max(0, (Math.max(1, kernels.length) * 86 - nM * 96) / 2);
     machines.forEach((m, i) => {
       const id = 'm:' + m.name;
-      nodes.push({ id, kind: 'machine', x: X.mach, y: mtop + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
+      nodes.push({ id, kind: 'machine', col: 'mach', x: X.mach, y: mtop + i * 96, w: 250, h: 80, color: m.online ? 'var(--c-kernel)' : 'var(--muted)',
         target: { type: 'machine', name: m.name }, data: m });
       const ks = kernels.filter((k) => (k.local ? '本机' : k.node) === m.name);
       for (const k of ks) edges.push({ id: `k:${k.node}>${id}`, from: 'k:' + k.node, to: id, color: 'var(--c-kernel)' });
@@ -145,22 +177,22 @@
         edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--accent-2)' : 'var(--err)', dashed: !m.online });
       }
     });
+    const pairing = store.devices?.pairing?.length ?? 0;
+    nodes.push({ id: 'add:machine', kind: 'add', col: 'mach', x: X.mach, y: mtop + machines.length * 96 + 8, w: 250, h: 60, color: pairing ? 'var(--accent)' : 'var(--c-kernel)',
+      target: { type: 'machines' }, data: { icon: 'plus', title: pairing ? `${pairing} 台电脑请求接入` : '接入机器', sub: pairing ? '点开核对确认码' : '别的电脑、SSH 服务器' } });
 
     const order = (h: string) => machines.findIndex((m) => m.name === h);
     const list = (ov.workspaces ?? []).filter((w) => order(w.host) >= 0).sort((a, b) => order(a.host) - order(b.host)).slice(0, 10);
     const mcy = mtop + (machines.length * 96 - 16) / 2;
     list.forEach((w, i) => {
       const y = mcy + (i - (list.length - 1) / 2) * 56;
-      nodes.push({ id: 'w:' + w.id, kind: 'workspace', x: X.ws, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
+      nodes.push({ id: 'w:' + w.id, kind: 'workspace', col: 'ws', x: X.ws, y: y - 22, w: 210, h: 44, color: 'var(--c-dir)',
         target: { type: 'workspace', id: w.id }, data: w });
       edges.push({ id: `m:${w.host}>w:${w.id}`, from: 'm:' + w.host, to: 'w:' + w.id, color: 'var(--c-dir)', dashed: !w.online });
     });
-    if (list.length === 0 && machines.length) {
-      const m = 'm:' + machines[0].name;
-      nodes.push({ id: 'w:none', kind: 'workspace', x: X.ws, y: mcy - 22, w: 210, h: 44, color: 'var(--muted)',
-        target: { type: 'workspace' }, data: null });
-      edges.push({ id: `${m}>w:none`, from: m, to: 'w:none', color: 'var(--muted)', dashed: true });
-    }
+    const wsBottom = list.length ? mcy + ((list.length - 1) / 2) * 56 + 22 : mcy - 22;
+    nodes.push({ id: 'add:ws', kind: 'add', col: 'ws', x: X.ws, y: wsBottom + (list.length ? 14 : 0), w: 210, h: 44, color: 'var(--c-dir)',
+      target: { type: 'workspace' }, data: { icon: 'plus', title: list.length ? '添加工作目录' : '还没有工作目录', sub: list.length ? '' : '点击添加一个' } });
 
     for (const n of nodes) {
       const o = offsets[n.id];
@@ -169,12 +201,45 @@
         n.y += o.y;
       }
     }
+    // 列名放在每一列最上面那个节点的上方
+    const heads = COLS.map((c) => {
+      const ys = nodes.filter((n) => n.col === c.col).map((n) => n.y);
+      return { ...c, y: (ys.length ? Math.min(...ys) : cy) - 26 };
+    });
     const byId = new Map(nodes.map((n) => [n.id, n]));
-    return { nodes, edges, byId, W: X.ws + 210, H, shownSids: new Set(shown.map((s) => s.sid)) };
+    return { nodes, edges, byId, heads, W: X.ws + 210, H, shownSids: new Set(shown.map((s) => s.sid)) };
   });
 
+  // ---- 节点上的标记 ----
+
+  const pendingRestart = $derived(store.fields.filter((f) => f.pending).length);
+  function issueOf(n: N): Issue | null {
+    const ov = store.ov!;
+    switch (n.kind) {
+      case 'channel':
+        return n.data.status.state === 'error' ? { level: 'err', text: n.data.status.error || '出错了' } : null;
+      case 'search':
+        return n.data?.enabled && !n.data?.key ? { level: 'warn', text: '开着但没有可用的 key' } : null;
+      case 'model':
+        return ov.models?.models?.length ? null : { level: 'warn', text: '还没有模型：点开添加接口和模型' };
+      case 'kernel':
+        return n.data ? null : { level: 'err', text: '没有内核在线' };
+      case 'machine':
+        return n.data.online ? null : { level: 'err', text: n.data.detail || '现在用不了' };
+      case 'schedule':
+        return n.data?.error ? { level: 'err', text: n.data.error } : null;
+      case 'gateway':
+        if (pendingRestart) return { level: 'warn', text: `${pendingRestart} 项改动要重启网关才生效`, n: pendingRestart };
+        if (ov.runtime?.update?.available) return { level: 'info', text: `有新版本 ${ov.runtime.update.latest}` };
+        return null;
+      case 'add':
+        if (n.id === 'add:machine' && store.devices?.pairing?.length) return { level: 'warn', text: '有电脑在等你确认', n: store.devices.pairing.length };
+        return null;
+    }
+    return null;
+  }
+
   function anchor(n: N, side: 'l' | 'r') {
-    if (n.kind === 'gateway') return { x: n.x + (side === 'l' ? 0 : n.w), y: n.y + n.h / 2 };
     return { x: n.x + (side === 'l' ? 0 : n.w), y: n.y + n.h / 2 };
   }
 
@@ -231,6 +296,7 @@
   let swallowClick = false;
 
   function onDown(e: PointerEvent) {
+    if (e.button !== 0) return;
     const g = (e.target as Element).closest('.node') as SVGGElement | null;
     swallowClick = false;
     if (g) {
@@ -238,7 +304,7 @@
       const id = g.dataset.id!;
       const o = offsets[id] ?? { x: 0, y: 0 };
       nodeDrag = { id, x: e.clientX, y: e.clientY, ox: o.x, oy: o.y, moved: false };
-    } else {
+    } else if (!isChrome(e)) {
       drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
       el.setPointerCapture(e.pointerId);
     }
@@ -323,8 +389,10 @@
   const busyModel = new Map<string, number>();
   const lastDelta = new Map<string, number>();
 
-  function sessEdge(sid: string) {
-    return layout.shownSids.has(sid);
+  // 消息从入口进来：入口 → 会话 → Agent → 网关（会话不在图上时：入口 → Agent → 网关）
+  function inbound(sid: string, ch: string): [string, boolean][] {
+    if (layout.shownSids.has(sid)) return [[`c:${ch}>s:${sid}`, false], [`s:${sid}>agent`, false], ['agent>gw', false]];
+    return [[`c:${ch}>agent`, false], ['agent>gw', false]];
   }
 
   // 每个会话正在处理的这一轮是从哪个渠道来的：回复的光点流回那里
@@ -358,10 +426,10 @@
     const s = store.session(sid);
     const ch = (e.t === 'message' ? e.data?.channel : origin.get(sid)) ?? s?.channel ?? 'web';
     const chColor = channelMeta[ch]?.color ?? 'var(--c-session)';
+    const back = (): [string, boolean][] => inbound(sid, ch).map(([x]) => [x, true] as [string, boolean]).reverse();
     switch (e.t) {
       case 'message':
-        if (sessEdge(sid)) chain([[`c:${ch}>s:${sid}`, false], [`s:${sid}>gw`, false]], chColor);
-        else pulse(`c:${ch}>gw`, chColor);
+        chain(inbound(sid, ch), chColor);
         break;
       case 'model':
         if (e.kind === 'start') {
@@ -381,7 +449,8 @@
         busyModel.delete(sid);
         const color = e.kind === 'reasoning' ? 'var(--c-model)' : 'var(--accent-2)';
         pulse('gw>model', color, { reverse: true, dur: 600, r: 3 });
-        if (sessEdge(sid)) pulse(`s:${sid}>gw`, color, { reverse: true, delay: 420, dur: 600, r: 3 });
+        pulse('agent>gw', color, { reverse: true, delay: 380, dur: 600, r: 3 });
+        if (layout.shownSids.has(sid)) pulse(`s:${sid}>agent`, color, { reverse: true, delay: 760, dur: 600, r: 3 });
         break;
       }
       case 'tool': {
@@ -389,6 +458,11 @@
           // 网络搜索由网关自己调 DeepSeek
           lastPath.set(sid, 'gw>search');
           pulse('gw>search', 'var(--c-search)', { dur: 600 });
+          break;
+        }
+        if (e.name === 'Skill') {
+          lastPath.set(sid, 'gw>skills');
+          pulse('gw>skills', 'var(--c-skill)', { dur: 600 });
           break;
         }
         // 工具在工作目录所在的机器上执行：沿着 网关 → 内核 → 机器 → 工作目录（或者 网关 → 机器）流过去
@@ -405,24 +479,31 @@
         break;
       }
       case 'say':
-        if (sessEdge(sid)) chain([[`s:${sid}>gw`, true], [`c:${ch}>s:${sid}`, true]], chColor);
-        else pulse(`c:${ch}>gw`, chColor, { reverse: true });
+        chain(back(), chColor);
+        break;
+      case 'context':
+        if (e.kind === 'start') pulse('gw>memory', 'var(--c-memory)', { dur: 700 });
         break;
       case 'run':
         if (e.kind === 'start' && e.data?.channel) origin.set(sid, e.data.channel);
         if (e.kind === 'end') {
           clearInterval(busyModel.get(sid));
           busyModel.delete(sid);
-          if (sessEdge(sid)) chain([[`s:${sid}>gw`, true], [`c:${ch}>s:${sid}`, true]], 'var(--accent-2)');
+          chain(back(), 'var(--accent-2)');
         }
         break;
     }
   }
 
+  // 画布窄的时候（右边开着面板、窗口小），图例只留颜色，不放操作说明
+  let narrow = $state(false);
   onMount(() => {
     const off = store.on(onEvent);
+    const ro = new ResizeObserver(() => (narrow = el.clientWidth < 1100));
+    ro.observe(el);
     return () => {
       off();
+      ro.disconnect();
       cancelAnimationFrame(raf);
       for (const t of busyModel.values()) clearInterval(t);
     };
@@ -432,7 +513,7 @@
 
   const phases = $derived(Object.values(store.phase));
   const modelBusy = $derived(phases.includes('thinking') || phases.includes('writing'));
-  // 正在执行工具的会话挂着的机器、正在跑任务的内核
+  // 正在执行工具的会话挂着的机器
   const busyHosts = $derived(
     new Set((store.ov?.sessions ?? []).filter((s) => store.phase[s.sid] === 'tool').flatMap((s) => s.workspaces.map((m) => m.host))),
   );
@@ -454,6 +535,11 @@
       return u;
     }
   }
+  function agentSub() {
+    const steps = Number(store.field('agent.max_steps')?.value ?? 200);
+    const mode = String(store.field('workspace.mode')?.value ?? 'ask');
+    return `每条 ${steps > 0 ? '≤' + steps + ' 次' : '不限次数'} · ${modeMeta[mode]?.label ?? mode}`;
+  }
 
   function machineSub(m: MachineInfo) {
     if (!m.online) return truncate(m.detail || '现在用不了', 18);
@@ -474,11 +560,7 @@
     return `${mode} · ${s.last_at ? ago(s.last_at * 1000) : '新会话'}`;
   }
 
-  async function startWebChat() {
-    location.hash = '#/sessions/main';
-  }
-
-  // ---- 右键菜单：常用操作 ----
+  // ---- 右键菜单：常用操作（和面板里的操作一样） ----
 
   let menu = $state<{ x: number; y: number; title: string; items: MenuItem[] } | null>(null);
   let mountFor = $state<SessionInfo | null>(null); // 给这个会话挂载工作目录
@@ -494,10 +576,11 @@
   }
 
   async function sshAction(name: string, op: 'connect' | 'disconnect') {
-    const d = await api.get<{ connections: { id: string; name: string }[] }>('/api/devices');
-    const c = d.connections.find((x) => x.name === name);
+    const d = store.devices ?? (await store.loadDevices());
+    const c = d?.connections.find((x) => x.name === name);
     if (!c) throw new Error('没有找到这台服务器的连接');
     await api.post(`/api/devices/${c.id}/${op}`);
+    store.loadDevices();
   }
 
   function menuFor(n: N): { title: string; items: MenuItem[] } | null {
@@ -507,11 +590,11 @@
         const s = n.data as SessionInfo;
         return { title: '会话 · ' + s.title, items: [
           { label: '打开对话', icon: 'chat', run: () => (location.hash = '#/sessions/' + encodeURIComponent(s.sid)) },
-          { label: '挂载 / 取下工作目录…', icon: 'folder', run: () => (mountFor = s) },
           open,
+          { label: '挂载 / 取下工作目录…', icon: 'folder', run: () => (mountFor = s) },
           'sep',
           { label: '停止当前任务', icon: 'stop', disabled: !s.running, run: () => act(() => api.post(`${sidPath(s.sid)}/stop`), '已停止') },
-          { label: '清空上下文', icon: 'trash', run: () => confirm(`清空「${s.title}」的上下文？`) && act(() => api.post(`${sidPath(s.sid)}/reset`), '上下文已清空') },
+          { label: '归档并重置上下文', icon: 'undo', run: () => confirm(`归档「${s.title}」的历史并清空上下文？`) && act(() => api.post(`${sidPath(s.sid)}/reset`), '上下文已清空') },
           ...(s.sid === 'main' ? [] : [{ label: '删除会话', icon: 'trash', danger: true,
             run: () => confirm(`删除会话「${s.title}」？历史和设置都会删掉。`) && act(() => api.del(sidPath(s.sid)), '会话已删除') } as MenuItem]),
         ] };
@@ -523,9 +606,19 @@
           run: () => store.setConfig({ [`${c.name}.enabled`]: !on }) }];
         return { title: c.meta.label, items: [open, ...toggle] };
       }
+      case 'schedule':
+        return { title: '定时任务', items: [open, { label: '新建任务…', icon: 'plus', run: () => { store.scheduleNew = true; store.open({ type: 'schedules' }); } }] };
+      case 'agent':
+        return { title: 'Agent', items: [open, { label: '编辑人格…', icon: 'pen', run: () => (store.persona = { name: 'default.md', isNew: false }) }] };
+      case 'gateway':
+        return { title: '网关', items: [
+          open,
+          { label: '检查更新', icon: 'refresh', run: () => store.checkUpdate() },
+          { label: '重启网关', icon: 'refresh', run: () => confirm('重启网关？正在处理的消息会中断，页面会自动重连。') && store.restartGateway() },
+        ] };
       case 'kernel': {
         const k = n.data as KernelInfo | null;
-        if (!k) return { title: '内核', items: [open, { label: '去“设备”页接入电脑', icon: 'laptop', run: () => store.go('#/devices') }] };
+        if (!k) return { title: '内核', items: [open, { label: '接入电脑…', icon: 'laptop', run: () => store.open({ type: 'machines' }) }] };
         const paired = !k.local;
         return { title: '内核 · ' + k.node, items: [
           open,
@@ -537,31 +630,29 @@
       case 'machine': {
         const m = n.data as MachineInfo;
         const items: MenuItem[] = [
-          { label: '浏览目录，添加工作目录…', icon: 'folder', disabled: !m.online, run: () => (browseOn = m) },
           open,
+          { label: '浏览目录，添加工作目录…', icon: 'folder', disabled: !m.online, run: () => (browseOn = m) },
         ];
         if (m.kind === 'ssh') {
           items.push('sep',
             m.online
               ? { label: '断开 SSH 连接', icon: 'stop', run: () => act(() => sshAction(m.name, 'disconnect'), '正在断开') }
-              : { label: '连接', icon: 'link', run: () => act(() => sshAction(m.name, 'connect'), '正在连接') },
-            { label: '在“设备”里管理', icon: 'server', run: () => store.go('#/devices') });
+              : { label: '连接', icon: 'link', run: () => act(() => sshAction(m.name, 'connect'), '正在连接') });
         }
         return { title: (m.kind === 'local' ? '本机 · 网关所在的机器' : machineMeta[m.kind].label + ' · ' + m.name), items };
       }
       case 'workspace': {
-        const w = n.data as WorkspaceInfo | null;
-        if (!w) return { title: '工作目录', items: [open] };
+        const w = n.data as WorkspaceInfo;
         const main = store.session('main');
         const mounted = main?.workspaces.some((x) => x.id === w.id);
         return { title: `${w.host}:${w.path}`, items: [
+          open,
           ...(main ? [{ label: mounted ? '从主会话取下' : '挂到主会话', icon: 'hub',
             run: () => act(async () => store.upsertSession(await api.patch<SessionInfo>(sidPath('main'),
               { workspaces: mounted ? main.workspaces.filter((x) => x.id !== w.id).map((x) => x.id) : [...main.workspaces.map((x) => x.id), w.id] })),
               mounted ? '已从主会话取下' : '已挂到主会话') } as MenuItem] : []),
           { label: w.default ? '新会话不再默认挂它' : '新会话默认挂上它', icon: 'check',
             run: () => act(() => api.put('/api/workspaces/default', { id: w.id, default: !w.default })) },
-          open,
           'sep',
           { label: '从列表里删掉', icon: 'trash', danger: true,
             run: () => confirm(`从列表里删掉 ${w.host}:${w.path}？机器上的文件不会动。`) && act(() => api.del(`/api/workspaces/${w.id}`), '已删掉') },
@@ -581,8 +672,11 @@
             }) },
         ] };
       }
-      case 'gateway':
-        return { title: '网关', items: [open, { label: '全部设置', icon: 'sliders', run: () => store.go('#/settings') }] };
+      case 'memory':
+      case 'search':
+      case 'skills':
+      case 'add':
+        return n.target ? { title: '', items: [open] } : null;
       case 'more':
         return { title: '会话', items: [{ label: '查看全部会话', icon: 'chat', run: () => (location.hash = '#/sessions') }] };
     }
@@ -599,7 +693,10 @@
   async function addOn(path: string) {
     const m = browseOn!;
     browseOn = null;
-    await act(() => api.post('/api/workspaces', { host: m.name, path }), `已添加 ${m.name}:${path}`);
+    await act(async () => {
+      const w = await api.post<WorkspaceInfo>('/api/workspaces', { host: m.name, path });
+      store.open({ type: 'workspace', id: w.id });
+    }, `已添加 ${m.name}:${path}`);
   }
 
   // 画布上的浮层（按钮、统计、提示、图例）不是空白，别把它们的右键/双击当成画布操作
@@ -607,18 +704,16 @@
     return !!(e.target as Element).closest('.node, button, .hint, .legend, .tools, .stats');
   }
 
-  // 右键画布空白：新建。节点自己的右键菜单会 stopPropagation，不会走到这里。
+  // 右键画布空白：添加东西。节点自己的右键菜单会 stopPropagation，不会走到这里。
   function openBlankMenu(ev: MouseEvent) {
     ev.preventDefault();
     if (isChrome(ev)) return;
     menu = { x: ev.clientX, y: ev.clientY, title: '画布', items: [
-      { label: '新增接口（模型服务）', icon: 'plus', run: () => store.openModel('endpoint') },
-      { label: '新增工作目录…', icon: 'folder', run: () => {
-        const m = store.machines.find((x) => x.online);
-        if (m) browseOn = m;
-        else store.toast({ kind: 'err', text: '还没有可用的机器，先去「设备」接入一台' }, 2600);
-      } },
-      { label: '接入电脑 / SSH 服务器…', icon: 'laptop', run: () => store.go('#/devices') },
+      { label: '接入电脑 / SSH 服务器…', icon: 'laptop', run: () => store.open({ type: 'machines' }) },
+      { label: '添加工作目录…', icon: 'folder', run: () => store.open({ type: 'workspace' }) },
+      { label: '新增模型接口…', icon: 'plus', run: () => store.openModel('endpoint') },
+      { label: '新建定时任务…', icon: 'clock', run: () => { store.scheduleNew = true; store.open({ type: 'schedules' }); } },
+      { label: '搜索设置…', icon: 'search', run: () => (store.palette = true) },
       'sep',
       { label: '适应窗口', icon: 'fit', run: () => fit() },
     ] };
@@ -632,6 +727,24 @@
     if (n.kind === 'more') location.hash = '#/sessions';
     else if (n.target) store.open(n.target);
   }
+
+  const selectedId = $derived.by(() => {
+    const t = store.inspector;
+    if (!t) return null;
+    switch (t.type) {
+      case 'channel': return 'c:' + t.name;
+      case 'session': return 's:' + t.sid;
+      case 'schedules': return 'sched';
+      case 'agent': return 'agent';
+      case 'gateway': return 'gw';
+      case 'model': case 'search': case 'memory': case 'skills': return t.type;
+      case 'kernel': return t.node ? 'k:' + t.node : 'k:none';
+      case 'machine': return 'm:' + t.name;
+      case 'machines': return 'add:machine';
+      case 'workspace': return t.id ? 'w:' + t.id : 'add:ws';
+    }
+    return null;
+  });
 </script>
 
 <div
@@ -669,6 +782,11 @@
     <rect width="100%" height="100%" fill="url(#dots)" />
 
     <g transform="translate({view.x} {view.y}) scale({view.k})">
+      <!-- 列名 -->
+      {#each layout.heads as h (h.col)}
+        <text x={h.x + (h.col === 'gw' ? h.w / 2 : 2)} y={h.y} class="colhead" class:center={h.col === 'gw'}>{h.label}</text>
+      {/each}
+
       <!-- 连线 -->
       {#each layout.edges as e (e.id)}
         <path
@@ -690,9 +808,11 @@
 
       <!-- 节点 -->
       {#each layout.nodes as n (n.id)}
+        {@const issue = issueOf(n)}
         <g
           class="node {n.kind}"
           class:dragging={dragged === n.id}
+          class:selected={selectedId === n.id}
           data-id={n.id}
           class:dimmed={hover !== null && hover !== n.id && !layout.edges.some((e) => (e.from === hover && e.to === n.id) || (e.to === hover && e.from === n.id))}
           transform="translate({n.x} {n.y})"
@@ -701,7 +821,7 @@
           tabindex="0"
           onclick={() => activate(n)}
           oncontextmenu={(ev) => openMenu(ev, n)}
-          ondblclick={() => n.kind === 'session' && (location.hash = '#/sessions/' + encodeURIComponent(n.data.sid))}
+          ondblclick={(ev) => { ev.stopPropagation(); if (n.kind === 'session') location.hash = '#/sessions/' + encodeURIComponent(n.data.sid); }}
           onkeydown={(ev) => ev.key === 'Enter' && activate(n)}
           onmouseenter={() => (hover = n.id)}
           onmouseleave={() => (hover = null)}
@@ -715,7 +835,7 @@
             <g class="ico"><Icon name={c.meta.icon} x={23} y={21} size={22} /></g>
             <text x="62" y="28" class="t1">{c.meta.label}</text>
             <text x="62" y="47" class="t2" class:errt={c.status.state === 'error'}>
-              {off ? '未启用 · 点击配置' : c.status.state === 'error' ? truncate(c.status.error || '出错', 14) : c.status.identity || stateLabel[c.status.state]}
+              {off ? '未启用 · 点击配置' : c.status.state === 'error' ? truncate(c.status.error || '出错', 14) : truncate(c.status.identity || stateLabel[c.status.state] || '', 16)}
             </text>
             <circle cx={n.w - 16} cy="16" r="4" class="sdot {c.status.state}" />
           {:else if n.kind === 'session'}
@@ -740,6 +860,13 @@
           {:else if n.kind === 'more'}
             <rect class="card more" width={n.w} height={n.h} rx="20" />
             <text x={n.w / 2} y="25" class="t2 center">还有 {n.data} 个会话 →</text>
+          {:else if n.kind === 'agent'}
+            <rect class="card agent-card" class:active={anyRunning} width={n.w} height={n.h} rx="20" />
+            <circle class="disc" cx="38" cy="46" r="23" />
+            <g class="ico"><Icon name="persona" x={25} y={33} size={26} /></g>
+            <text x="72" y="30" class="t3">AGENT</text>
+            <text x="72" y="51" class="t1">{truncate(personaName || '默认人格', 9)}</text>
+            <text x="72" y="70" class="t2">{agentSub()}</text>
           {:else if n.kind === 'gateway'}
             <g transform="translate(62 62)">
               <circle r="92" class="halo" filter="url(#soft)" />
@@ -758,7 +885,7 @@
             {@const dm = ov.models?.models?.find((m) => m.default)}
             {@const de = ov.models?.endpoints?.find((e) => e.id === dm?.endpoint)}
             {@const mn = ov.models?.models?.length ?? 0}
-            <rect class="card" class:active={modelBusy} width={n.w} height={n.h} rx="16" />
+            <rect class="card" class:active={modelBusy} class:off={!dm} width={n.w} height={n.h} rx="16" />
             <circle class="disc" cx="36" cy="40" r="20" />
             <g class="ico"><Icon name="sparkles" x={24} y={28} size={24} /></g>
             {#if dm}
@@ -779,7 +906,6 @@
             <text x="62" y="24" class="t3">网络搜索 · DeepSeek</text>
             <text x="62" y="43" class="t1">{!si?.enabled ? '已关闭' : on ? '模型可以搜网页' : '没有可用的 key'}</text>
             <text x="62" y="60" class="t2" class:errt={si?.enabled && !on}>{on ? `今天搜索 ${si.today.search} 次 · 读网页 ${si.today.fetch} 次` : si?.enabled ? '点开填 key' : '点开打开'}</text>
-            <circle cx={n.w - 16} cy="16" r="4" class="sdot {on ? 'online' : si?.enabled ? 'error' : 'disabled'}" />
           {:else if n.kind === 'memory'}
             {@const mi = n.data as MemoryInfo | undefined}
             <rect class="card" width={n.w} height={n.h} rx="16" />
@@ -788,6 +914,14 @@
             <text x="62" y="24" class="t3">上下文与记忆</text>
             <text x="62" y="43" class="t1">到 {pctOf('context.compact_at', 0.75)} 自动整理到 {pctOf('context.compact_to', 0.4)}</text>
             <text x="62" y="60" class="t2">{mi?.summarized ?? 0} 个会话整理过 · {mi?.archives ?? 0} 份归档</text>
+          {:else if n.kind === 'skills'}
+            {@const list = n.data?.list ?? []}
+            <rect class="card" width={n.w} height={n.h} rx="16" />
+            <circle class="disc" cx="34" cy="36" r="18" />
+            <g class="ico"><Icon name="book" x={23} y={25} size={22} /></g>
+            <text x="62" y="24" class="t3">技能</text>
+            <text x="62" y="43" class="t1">{list.length} 个技能</text>
+            <text x="62" y="60" class="t2">{truncate(list.map((s: { name: string }) => s.name).join('、') || '还没有技能', 22)}</text>
           {:else if n.kind === 'schedule'}
             {@const sc = n.data as ScheduleSummary | undefined}
             <rect class="card" class:off={!sc?.total} width={n.w} height={n.h} rx="16" />
@@ -796,7 +930,7 @@
             <g class="ico"><Icon name="clock" x={23} y={21} size={22} /></g>
             <text x="62" y="28" class="t1">定时任务</text>
             <text x="62" y="47" class="t2" class:errt={!!sc?.error}>
-              {sc?.error ? '读不了任务文件' : !sc?.total ? '还没有任务 · 点击查看' : sc.running ? `${sc.running} 个正在运行` : sc.enabled ? `${sc.enabled} 个开着 · 下次 ${whenText(sc.next)}` : `${sc.total} 个，都暂停了`}
+              {sc?.error ? '读不了任务文件' : !sc?.total ? '还没有任务 · 点击新建' : sc.running ? `${sc.running} 个正在运行` : sc.enabled ? `${sc.enabled} 个开着 · 下次 ${whenText(sc.next)}` : `${sc.total} 个，都暂停了`}
             </text>
             {#if sc?.total}<circle cx={n.w - 16} cy="16" r="4" class="sdot {sc.running ? 'starting' : sc.enabled ? 'online' : 'disabled'}" />{/if}
           {:else if n.kind === 'kernel'}
@@ -807,11 +941,11 @@
             {#if k}
               <text x="62" y="24" class="t3">{k.managed ? '内核 · 网关启动的' : k.local ? '内核 · 在本机' : '内核 · 在别的电脑上'}</text>
               <text x="62" y="43" class="t1">{truncate(k.node, 18)}</text>
-              <text x="62" y="59" class="t2">{[osLabel(k.os), k.version ? 'v' + k.version : '', k.landlock > 0 ? `Landlock v${k.landlock} 沙箱` : '没有沙箱', busyKernels.has(k.node) ? '正在跑' : ''].filter(Boolean).join(' · ')}</text>
+              <text x="62" y="59" class="t2">{truncate([osLabel(k.os), k.version ? 'v' + k.version : '', k.landlock > 0 ? `Landlock v${k.landlock}` : '没有沙箱', busyKernels.has(k.node) ? '正在跑' : ''].filter(Boolean).join(' · '), 26)}</text>
               <circle cx={n.w - 16} cy="16" r="4" class="sdot online" />
             {:else}
               <text x="62" y="31" class="t1 errt">没有内核在线</text>
-              <text x="62" y="49" class="t2">网关会在本机启动一个</text>
+              <text x="62" y="49" class="t2">点开看怎么办</text>
             {/if}
           {:else if n.kind === 'machine'}
             {@const m = n.data as MachineInfo}
@@ -823,16 +957,25 @@
             <text x="66" y="66" class="t2" class:errt={!m.online}>{machineSub(m)}</text>
             <circle cx={n.w - 16} cy="16" r="4" class="sdot {m.online ? 'online' : 'error'}" />
           {:else if n.kind === 'workspace'}
-            {@const w = n.data as WorkspaceInfo | null}
-            <rect class="card" class:off={!w} width={n.w} height={n.h} rx="12" />
+            {@const w = n.data as WorkspaceInfo}
+            <rect class="card" width={n.w} height={n.h} rx="12" />
             <g class="ico small"><Icon name="folder" x={13} y={12} size={20} /></g>
-            {#if !w}
-              <text x="42" y="20" class="t1">还没有工作目录</text>
-              <text x="42" y="35" class="t2">点击添加一个</text>
-            {:else}
-              <text x="42" y="20" class="t1 mono">{shortPath(homeShort(w.path), 22)}</text>
-              <text x="42" y="35" class="t2">{w.default ? '默认 · ' : ''}{w.sessions} 个会话</text>
-            {/if}
+            <text x="42" y="20" class="t1 mono">{shortPath(homeShort(w.path), 22)}</text>
+            <text x="42" y="35" class="t2">{w.default ? '默认 · ' : ''}{w.sessions} 个会话</text>
+          {:else if n.kind === 'add'}
+            {@const a = n.data}
+            <rect class="card ghost" width={n.w} height={n.h} rx="14" />
+            <circle class="disc" cx={n.h / 2} cy={n.h / 2} r={n.h > 50 ? 15 : 12} />
+            <g class="ico"><Icon name={a.icon} x={n.h / 2 - 8} y={n.h / 2 - 8} size={16} /></g>
+            <text x={n.h + 4} y={a.sub ? n.h / 2 - 3 : n.h / 2 + 4} class="t1 addt">{a.title}</text>
+            {#if a.sub}<text x={n.h + 4} y={n.h / 2 + 14} class="t2">{a.sub}</text>{/if}
+          {/if}
+          {#if issue}
+            <g class="issue {issue.level}" transform="translate({n.kind === 'gateway' ? 104 : n.w - 2} {n.kind === 'gateway' ? 14 : 2})">
+              <title>{issue.text}</title>
+              <circle r="9" />
+              <text y="4">{issue.n ?? (issue.level === 'info' ? '↑' : '!')}</text>
+            </g>
           {/if}
         </g>
       {/each}
@@ -845,30 +988,34 @@
       <div>
         <strong>还没有会话</strong>
         <p>在命令行、网页或聊天平台发一条消息，会话就会出现在图上，数据流动时连线会亮起来。</p>
-        <button class="btn sm primary" onclick={startWebChat}>在网页里聊一句</button>
+        <button class="btn sm primary" onclick={() => (location.hash = '#/sessions/main')}>在网页里聊一句</button>
       </div>
     </div>
   {/if}
 
-  <div class="legend">
-    <span style="--c: var(--c-telegram)">渠道</span>
+  <div class="legend" class:narrow>
+    <span style="--c: var(--c-telegram)">入口</span>
     <i>→</i>
     <span style="--c: var(--c-session)">会话</span>
+    <i>→</i>
+    <span style="--c: var(--c-agent)">Agent</span>
     <i>→</i>
     <span style="--c: var(--c-gateway)">网关</span>
     <i>→</i>
     <span style="--c: var(--c-model)">模型</span>
     <span style="--c: var(--c-search)">搜索</span>
     <span style="--c: var(--c-memory)">记忆</span>
+    <span style="--c: var(--c-skill)">技能</span>
     <span style="--c: var(--c-kernel)">内核</span>
     <i>→</i>
     <span style="--c: var(--c-kernel)">机器</span>
     <i>→</i>
     <span style="--c: var(--c-dir)">工作目录</span>
-    <em>点节点查看和修改设置 · 右键节点有常用操作 · 拖动节点调整位置 · 滚轮缩放 · 拖动空白处平移 · 双击空白处适应窗口</em>
+    <em>点节点：状态、操作、设置都在右边 · 右键节点：常用操作 · ＋ 节点：添加 · Ctrl/⌘ K：搜索设置 · 拖动节点调整位置 · 双击空白处适应窗口</em>
   </div>
 
   <div class="tools">
+    <button class="btn sm" onclick={() => (store.palette = true)} title="搜索设置、节点、会话（Ctrl/⌘ K）"><Icon name="search" size={14} />搜索设置</button>
     {#if Object.keys(offsets).length}
       <button class="btn sm" onclick={resetLayout} title="把拖动过的节点放回原位"><Icon name="undo" size={14} />重置布局</button>
     {/if}
@@ -885,17 +1032,20 @@
   {#if menu}
     <ContextMenu x={menu.x} y={menu.y} title={menu.title} items={menu.items} onclose={() => (menu = null)} />
   {/if}
-
 </div>
 
 {#if mountFor}
   {@const cur = store.session(mountFor.sid) ?? mountFor}
-  <WorkspacePicker title="给「{cur.title}」挂载工作目录" mounted={cur.workspaces.map((m) => m.id)}
-    onchange={(ids) => act(async () => store.upsertSession(await api.patch<SessionInfo>(sidPath(cur.sid), { workspaces: ids })))}
-    onclose={() => (mountFor = null)} />
+  <div use:portal>
+    <WorkspacePicker title="给「{cur.title}」挂载工作目录" mounted={cur.workspaces.map((m) => m.id)}
+      onchange={(ids) => act(async () => store.upsertSession(await api.patch<SessionInfo>(sidPath(cur.sid), { workspaces: ids })))}
+      onclose={() => (mountFor = null)} />
+  </div>
 {/if}
 {#if browseOn}
-  <DirPicker host={browseOn.kind === 'local' ? '' : browseOn.name} onpick={addOn} onclose={() => (browseOn = null)} />
+  <div use:portal>
+    <DirPicker host={browseOn.kind === 'local' ? '' : browseOn.name} onpick={addOn} onclose={() => (browseOn = null)} />
+  </div>
 {/if}
 
 <style>
@@ -913,6 +1063,16 @@
   }
   .dotgrid {
     fill: color-mix(in srgb, var(--text) 9%, transparent);
+  }
+  .colhead {
+    fill: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    opacity: 0.75;
+  }
+  .colhead.center {
+    text-anchor: middle;
   }
 
   /* 连线 */
@@ -979,6 +1139,14 @@
     stroke: var(--c);
     filter: drop-shadow(0 0 12px color-mix(in srgb, var(--c) 40%, transparent));
   }
+  .node.selected .card {
+    stroke: var(--c);
+    stroke-width: 2.2;
+  }
+  .node.gateway.selected .core-edge {
+    stroke: #fff;
+    stroke-width: 2.5;
+  }
   .card.off {
     stroke-dasharray: 5 5;
     fill: color-mix(in srgb, var(--panel-solid) 55%, transparent);
@@ -994,6 +1162,19 @@
   .card.more {
     fill: transparent;
     stroke-dasharray: 4 5;
+  }
+  .card.ghost {
+    fill: color-mix(in srgb, var(--c) 5%, transparent);
+    stroke: color-mix(in srgb, var(--c) 45%, var(--line));
+    stroke-dasharray: 5 5;
+  }
+  .card.agent-card {
+    fill: color-mix(in srgb, var(--c) 7%, var(--panel-solid));
+    stroke: color-mix(in srgb, var(--c) 55%, var(--line));
+    stroke-width: 1.5;
+  }
+  .addt {
+    fill: var(--c);
   }
   @keyframes breathe {
     50% {
@@ -1106,6 +1287,29 @@
     font-weight: 800;
     text-anchor: middle;
   }
+  /* 节点右上角的标记 */
+  .issue circle {
+    stroke: var(--panel-solid);
+    stroke-width: 2;
+  }
+  .issue.err circle {
+    fill: var(--err);
+  }
+  .issue.warn circle {
+    fill: var(--warn);
+  }
+  .issue.info circle {
+    fill: var(--accent);
+  }
+  .issue text {
+    fill: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    text-anchor: middle;
+  }
+  .issue.warn text {
+    fill: #241a00;
+  }
 
   /* 网关 */
   .halo {
@@ -1184,6 +1388,7 @@
   .legend {
     position: absolute;
     left: 18px;
+    right: 260px;
     bottom: 14px;
     display: flex;
     flex-wrap: wrap;
@@ -1212,8 +1417,15 @@
   }
   .legend em {
     font-style: normal;
-    margin-left: 10px;
+    flex-basis: 100%;
     opacity: 0.8;
+  }
+  .legend.narrow em {
+    display: none;
+  }
+  .legend.narrow {
+    right: 200px;
+    font-size: 11px;
   }
   .tools {
     position: absolute;

@@ -109,7 +109,7 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         else if (!strcmp(key, "exec")) set_str(&k->exec, val);
         else if (!strcmp(key, "skills")) set_str(&k->skills, val);
         else if (!strcmp(key, "remote") || !strcmp(key, "ssh")) {
-            snprintf(err, errlen, "%s 第 %d 行：%s 已经不用了（SSH 服务器改由网关连接，在网页「设备」里添加），"
+            snprintf(err, errlen, "%s 第 %d 行：%s 已经不用了（SSH 服务器改由网关连接，在网关网页里添加），"
                      "删掉这一行即可", path, lineno, key);
             rc = -1;
             break;

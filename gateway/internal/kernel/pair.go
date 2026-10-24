@@ -216,7 +216,7 @@ func (h *Hub) pair(nc net.Conn, sc *bufio.Scanner, hello *proto.Msg) {
 	case h.pairPath == "":
 		why = "这个网关没有打开配对，请在 kernel.conf 里填 token"
 	case h.paired[node].Hash != "":
-		why = fmt.Sprintf("名字 %s 已经有电脑配对过了。换个名字，或者先在网关网页的「设备」里移除旧的", node)
+		why = fmt.Sprintf("名字 %s 已经有电脑配对过了。换个名字，或者先在网关网页的拓扑图上点那台电脑，移除旧的", node)
 	case h.conns[node] != nil:
 		why = fmt.Sprintf("已经有叫 %s 的内核在线，换个名字", node)
 	case len(h.pending) >= maxPending:

@@ -5,11 +5,11 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 
 # 网关设置
 
-管理员会话有 `Gateway`（查询）和 `GatewayAdmin`（修改，每次审批）。设置项和网页「设置」页是同一份，改完立即生效，存在 `data/config.json`，不用改 `gateway.toml`。
+管理员会话有 `Gateway`（查询）和 `GatewayAdmin`（修改，每次审批）。设置项和网页拓扑图上各节点面板里的设置是同一份（每一项只在一个节点里），改完立即生效，存在 `data/config.json`，不用改 `gateway.toml`。
 
 ## 先查
 
-`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看一组：`memory`（上下文与记忆）、`search`（网络搜索）、`chat`（消息与显示：显示档位、消息时间、时区）、`llm`（模型请求）、`gateway`（访问控制、代理、更新）、`workspace`、`telegram`、`feishu`、`cli`、`kernel`（每条消息的上限、内核怎么连进来）。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因（要重启才生效的、网页密码和渠道 token 这类密钥），让用户去网页设置页改。
+`Gateway {"what":"settings"}` 列出全部设置项；加 `"group"` 只看拓扑图上一个节点的：`agent`（每条消息的上限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、`gateway`（代理、更新、脱敏、内核连接、存储）、`web`（网页地址、密码）、`cli`、`telegram`、`feishu`、`model`（模型请求参数）、`memory`（上下文与记忆）、`search`（网络搜索）、`skills`、`local`（本机内核）、`machines`（电脑接入地址）。每一项还带 `node`：它在哪个节点上，让用户去网页改时就说这个节点。每一项有 `key`、`label`、`type`、当前 `value`、`source`（default / file / web / env）、`help`，密钥只有 `is_set`。标着 `"changeable": false` 的在聊天里改不了，`why` 写着原因和该去哪个节点改（要重启才生效的、网页密码和渠道 token 这类密钥）。
 
 ## 再改
 
@@ -29,7 +29,7 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 - `telegram.show`、`feishu.show`：只改这个机器人，空字符串表示跟随全局；
 - 只改当前这个聊天窗口：让用户发 `/show 详细`（`/show default` 恢复跟随默认）。
 
-**每条消息的上限**（`kernel` 组，网关每一轮带给内核）：`agent.max_steps`（最多请求模型几次，模型调一轮工具算一次，默认 200，0 不限）、`agent.run_timeout`（最长处理多久，如 `2h`，`0` 不限，默认不限）、`agent.approval_timeout`（等审批多久，默认 `30m`，`0` 一直等）、`agent.max_output_kb`（一个工具结果最多保留多少 KB，默认 64）。用户说“做到一半停了”“工具调用次数到上限”时改这里；停下以后让用户发“继续”。
+**每条消息的上限**（`agent` 组，网关每一轮带给内核）：`agent.max_steps`（最多请求模型几次，模型调一轮工具算一次，默认 200，0 不限）、`agent.run_timeout`（最长处理多久，如 `2h`，`0` 不限，默认不限）、`agent.approval_timeout`（等审批多久，默认 `30m`，`0` 一直等）、`agent.max_output_kb`（一个工具结果最多保留多少 KB，默认 64）。用户说“做到一半停了”“工具调用次数到上限”时改这里；停下以后让用户发“继续”。
 
 **其他**：`session.timestamps`（用户消息前加发送时间）、`session.timezone`（时区，比如 `Asia/Shanghai`，定时任务也按它）、`access.guest`（其他人能用的工具：`none` 只聊天，`readonly` 只读）、`network.proxy`（默认代理；检查更新、下载新版本也走它。网关作为服务运行时终端里的 `HTTPS_PROXY` 传不进来，要代理就填地址）、`update.check` / `update.kernels`（检查新版本、内核自动跟网关同版本）。
 

@@ -189,7 +189,7 @@ if [ "$UNINSTALL" = 1 ]; then
 	fi
 	rm -rf "$DIR"
 	[ "$OLD_DIR" = "$DIR" ] || rm -rf "$OLD_DIR"
-	say "已卸载。网关网页「设备」里配对过的这台电脑可以一并移除。"
+	say "已卸载。网关网页拓扑图上配对过的这台电脑可以一并移除。"
 	exit 0
 fi
 
@@ -328,7 +328,7 @@ else
 	if [ -z "$GATEWAY" ]; then
 		[ -n "$TTY" ] && [ "$YES" = 0 ] || die "没有网关地址：加上 --gateway 地址（例如 --gateway 192.168.1.2:7700）"
 		say "网关的地址就是运行网关的那台机器的 IP（或域名）加电脑接入端口，默认端口 7700。"
-		say "在网关网页的「设备」页面能看到，要先在那里启用电脑接入。"
+		say "在网关网页拓扑图的「接入机器」里能看到，要先在那里启用电脑接入。"
 		while [ -z "$GATEWAY" ]; do ask "网关地址" ""; GATEWAY="$REPLY"; done
 	fi
 	GATEWAY=$(normalize_gateway "$GATEWAY")
@@ -512,7 +512,7 @@ while [ $i -lt 150 ]; do
 			say ""
 			say "  确认码：$(echo "$code" | cut -c1-3) $(echo "$code" | cut -c4-)"
 			say ""
-			say "打开网关网页的「设备」页面，核对确认码一致后点「允许接入」。"
+			say "打开网关网页（会弹出接入请求），核对确认码一致后点「允许接入」。"
 			say "（可以 Ctrl-C 先走开，内核会在后台一直等着。）"
 			i=0
 		fi
@@ -529,7 +529,7 @@ if [ -n "$code" ]; then
 else
 	say "暂时没连上网关，内核会在后台一直重试。最近的日志："
 	new_log | tail -n 5
-	say "检查：网关地址对不对（$GATEWAY）、网关网页「设备」里电脑接入有没有启用、防火墙是否放行端口。"
+	say "检查：网关地址对不对（$GATEWAY）、网关网页拓扑图「接入机器」里电脑接入有没有启用、防火墙是否放行端口。"
 	say "看状态：nano-kernel status；看日志：nano-kernel logs -f"
 fi
 exit 0

@@ -482,7 +482,7 @@ def old_ssh_config():
     with open(conf, "w") as f:
         f.write(f"gateway = unix:{T}/none.sock\ntoken = x\nexec = {EXEC}\nremote = box box\n")
     r = subprocess.run([KERNEL, "-t", "-c", conf], capture_output=True, text=True)
-    if r.returncode != 0 and "网页「设备」" in r.stderr:
+    if r.returncode != 0 and "网关网页里添加" in r.stderr:
         print("  ok   旧的 remote = 配置给出提示")
     else:
         FAILS.append("old remote config")

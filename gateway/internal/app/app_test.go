@@ -1039,5 +1039,5 @@ func TestInputCarriesAgentLimits(t *testing.T) {
 		t.Fatalf("default limits: %+v", in)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusTimeout})
-	e.ch.wait(t, "时限在网页拓扑图的内核节点里改")
+	e.ch.wait(t, "时限在网页拓扑图的 Agent 节点里改")
 }

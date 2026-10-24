@@ -225,18 +225,33 @@ export type LiveItem =
   | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string }
   | { kind: 'say'; text: string; at: number };
 
-// 拓扑图里可以点开的对象
+// 拓扑图里可以点开的对象。每个对象的面板就是它全部的状态、操作和设置（没有单独的设置页）
 export type Target =
   | { type: 'gateway' }
+  | { type: 'agent' } // Agent：人格、每条消息的上限、权限、回复方式
   | { type: 'model' }
-  | { type: 'kernel'; node?: string } // 在线的内核（node 是某一个）、技能和连接设置
-  | { type: 'machine'; name?: string } // 一台机器；没有名字时是所有机器
-  | { type: 'workspace'; id?: string } // 一个工作目录；没有 ID 时是工作目录列表和默认设置
+  | { type: 'kernel'; node?: string } // 在线的内核（node 是某一个）
+  | { type: 'machine'; name: string } // 一台机器：本机、装了内核的电脑、SSH 服务器
+  | { type: 'machines' } // ＋ 接入机器：配对请求、安装命令、添加 SSH 服务器、电脑接入地址
+  | { type: 'workspace'; id?: string } // 一个工作目录；没有 ID 时是添加工作目录
   | { type: 'channel'; name: string }
   | { type: 'session'; sid: string }
   | { type: 'search' }
   | { type: 'memory' }
+  | { type: 'skills' }
   | { type: 'schedules' };
+
+// /api/devices：SSH 连接、配对请求、配对过的电脑、电脑接入地址
+export type SshConnection = {
+  id: string; name: string; host: string; port: number; user: string; identity_file: string;
+  has_password: boolean; auto_connect: boolean; state: string; detail?: string;
+};
+export type PairRequest = { id: string; node: string; addr: string; code: string; at: string };
+export type PairedComputer = { node: string; addr: string; since: string; online: boolean };
+export type Devices = {
+  connections: SshConnection[]; ssh_hosts: string[]; listener: string; primary_listener: string; arch: string;
+  pairing: PairRequest[]; paired: PairedComputer[]; addrs: string[]; download_base?: string;
+};
 
 export type Persona = { name: string; sid?: string; size: number; mod: number; sessions: string[] };
 export type PersonaPreset = { id: string; name: string; desc: string; text: string };

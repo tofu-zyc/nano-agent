@@ -56,7 +56,7 @@ sh nano-kernel-install.sh --gateway 192.168.1.2:7700
 - `Permission denied (publickey,password)`：SSH 认证失败，检查用户、密码、密钥路径和 SSH 配置。
 - `Connection refused`、超时：地址、端口、网络、服务器上 sshd 有没有起来。
 - 提示服务器上没有 `cc`：架构和网关不一样，要在服务器上装编译器（Debian/Ubuntu `build-essential`，Fedora `gcc make`）后重连。
-- 安装脚本说“暂时没连上网关”：网关地址对不对（别的电脑访问不了 `127.0.0.1`，用网关的局域网 IP）、“设备”里电脑接入有没有启用、防火墙放没放行端口；网关在 WSL 里时，Windows 还要做端口转发或开镜像网络。
+- 安装脚本说“暂时没连上网关”：网关地址对不对（别的电脑访问不了 `127.0.0.1`，用网关的局域网 IP）、网页拓扑图「＋ 接入机器」节点里电脑接入有没有启用、防火墙放没放行端口；网关在 WSL 里时，Windows 还要做端口转发或开镜像网络。
 - 提示“名字已经有电脑配对过了”：换个名字（重新运行安装脚本加 `--name`），或者用 `GatewayAdmin {"action":"pair_remove","node":"旧名字"}` 移除旧的。
 - 被拒绝后内核退出；`nano-kernel restart` 重新申请。移除过的电脑会自动重新申请。
 - 内核没在运行（`nano-kernel status` 显示“没有运行”）：`nano-kernel start`。Windows 上 status 提示“任务计划里没有 …”时，是旧版安装脚本用普通用户建任务失败了：重新运行一次安装命令就好（新版只给当前用户建任务，建不了自动改用「启动」文件夹）。

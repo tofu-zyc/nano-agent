@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { store } from '../lib/state.svelte';
-  import { api } from '../lib/api';
-  import { ago } from '../lib/format';
-  import { markdown } from '../lib/markdown';
-  import type { Persona, PersonaPreset } from '../lib/types';
-  import Icon from '../components/Icon.svelte';
+  // 人格编辑器：从 Agent 节点或会话节点打开，盖在页面上。左边是人格文件和自带人格，右边编辑。
+  import { store } from '../../lib/state.svelte';
+  import { api } from '../../lib/api';
+  import { ago } from '../../lib/format';
+  import { markdown } from '../../lib/markdown';
+  import { portal } from '../../lib/portal';
+  import type { Persona, PersonaPreset } from '../../lib/types';
+  import Icon from '../Icon.svelte';
 
   let items = $state<Persona[]>([]);
   let dir = $state('');
@@ -15,12 +17,10 @@
   let busy = $state(false);
   let presets = $state<PersonaPreset[]>([]);
 
-  const name = $derived(store.route.arg ?? 'default.md');
-  const isNew = $derived(location.hash.includes('new=1'));
+  const name = $derived(store.persona?.name ?? 'default.md');
   const dirty = $derived(text !== saved || !exists);
   const current = $derived(items.find((i) => i.name === name));
   const same = (a: string, b: string) => a.trim() === b.trim();
-  // 编辑框里的内容原样是哪个自带人格
   const matched = $derived(presets.find((p) => same(p.text, text)));
   const sidOf = (n: string) => (n === 'default.md' ? '' : decodeURIComponent(n.replace(/\.md$/, '')));
   const titleOf = (n: string) => {
@@ -40,6 +40,7 @@
   }
 
   async function loadFile(n: string) {
+    preview = false;
     try {
       const r = await api.get<{ text: string }>('/api/personas/' + encodeURIComponent(n));
       text = saved = r.text;
@@ -49,31 +50,14 @@
       exists = false;
       saved = '';
       try {
-        const d = await api.get<{ text: string }>('/api/personas/default.md');
-        text = d.text;
+        text = (await api.get<{ text: string }>('/api/personas/default.md')).text;
       } catch {
         text = '';
       }
     }
   }
 
-  async function loadPresets() {
-    try {
-      presets = (await api.get<{ items: PersonaPreset[] }>('/api/persona-presets')).items;
-    } catch {
-      presets = [];
-    }
-  }
-  loadPresets();
-
-  // 套用自带人格：填进编辑框，保存后才生效
-  function usePreset(p: PersonaPreset) {
-    if (same(p.text, text)) return;
-    if (text.trim() && !matched && !confirm(`用「${p.name}」替换编辑框里现在的内容？保存后才生效。`)) return;
-    text = p.text;
-    preview = false;
-    store.toast({ kind: 'ok', text: `已填入「${p.name}」，保存后生效` });
-  }
+  api.get<{ items: PersonaPreset[] }>('/api/persona-presets').then((r) => (presets = r.items)).catch(() => (presets = []));
 
   $effect(() => {
     store.personaTick;
@@ -82,6 +66,25 @@
   $effect(() => {
     loadFile(name);
   });
+
+  function usePreset(p: PersonaPreset) {
+    if (same(p.text, text)) return;
+    if (text.trim() && !matched && !confirm(`用「${p.name}」替换编辑框里现在的内容？保存后才生效。`)) return;
+    text = p.text;
+    preview = false;
+    store.toast({ kind: 'ok', text: `已填入「${p.name}」，保存后生效` });
+  }
+
+  function leave(): boolean {
+    return !(exists && text !== saved) || confirm('有没保存的修改，不要了？');
+  }
+  function open(n: string) {
+    if (n === name || !leave()) return;
+    store.persona = { name: n, isNew: false };
+  }
+  function close() {
+    if (leave()) store.persona = null;
+  }
 
   async function save() {
     busy = true;
@@ -102,7 +105,8 @@
     if (!confirm(`删除「${titleOf(name)}」？这个会话会改用默认人格。`)) return;
     try {
       await api.del('/api/personas/' + encodeURIComponent(name));
-      location.hash = '#/personas/default.md';
+      saved = text;
+      store.persona = { name: 'default.md', isNew: false };
     } catch (err) {
       store.fail(err);
     }
@@ -112,101 +116,111 @@
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
       if (dirty) save();
+    } else if (e.key === 'Escape' && !e.isComposing) {
+      e.preventDefault();
+      close();
     }
   }
 </script>
 
 <svelte:window onkeydown={onkey} />
 
-<div class="personas">
-  <aside class="list">
-    <div class="head">
-      <strong>人格文件</strong>
-      <span class="muted small">{dir}</span>
-    </div>
-    {#each items as it (it.name)}
-      <a class="item" class:active={it.name === name} href="#/personas/{encodeURIComponent(it.name)}">
-        <div class="ic" class:def={it.name === 'default.md'}><Icon name={it.name === 'default.md' ? 'persona' : 'chat'} size={15} /></div>
-        <div class="txt">
-          <div class="t">{titleOf(it.name)}</div>
-          <div class="s">{it.sessions.length} 个会话在用 · {ago(it.mod)}修改</div>
-        </div>
-      </a>
-    {/each}
-    {#if isNew && !exists}
-      <div class="item active">
-        <div class="ic"><Icon name="plus" size={15} /></div>
-        <div class="txt">
-          <div class="t">{titleOf(name)}</div>
-          <div class="s">新建 · 还没保存</div>
-        </div>
+<div class="backdrop" use:portal onclick={(e) => e.target === e.currentTarget && close()} role="presentation">
+  <div class="sheet" role="dialog" aria-label="编辑人格">
+    <aside class="list">
+      <div class="head">
+        <strong>人格文件</strong>
+        <span class="muted small">{dir}</span>
       </div>
-    {/if}
-    <p class="tip">
-      每个会话默认用 <code>default.md</code>。要给某个群或某个人单独设定，到它的会话设置里点“给这个会话单独设定人格”；聊天里也可以发 <code>/persona</code> 给那个会话换上自带人格。
-    </p>
-    {#if presets.length}
-      <div class="head presets-head">
-        <strong>自带人格</strong>
-        <span class="muted small">点一下填进「{titleOf(name)}」，保存后生效</span>
-      </div>
-      {#each presets as p (p.id)}
-        <button class="preset" class:on={matched?.id === p.id} onclick={() => usePreset(p)}>
-          <div class="t">{p.name}{#if matched?.id === p.id}<span class="tag">编辑框里就是它</span>{/if}</div>
-          <div class="s">{p.desc}</div>
+      {#each items as it (it.name)}
+        <button class="item" class:active={it.name === name} onclick={() => open(it.name)}>
+          <span class="ic" class:def={it.name === 'default.md'}><Icon name={it.name === 'default.md' ? 'persona' : 'chat'} size={15} /></span>
+          <span class="txt">
+            <span class="t">{titleOf(it.name)}</span>
+            <span class="s">{it.sessions.length} 个会话在用 · {ago(it.mod)}修改</span>
+          </span>
         </button>
       {/each}
-    {/if}
-  </aside>
-
-  <section class="editor">
-    <header>
-      <div>
-        <h3>{titleOf(name)}</h3>
-        <div class="muted small">
-          <code>{name}</code>
-          {#if current}· {current.sessions.length} 个会话在用{/if}
-          {#if matched}· 自带人格「{matched.name}」{/if}
-          {#if !exists}· <span class="warnt">新文件，保存后生效</span>{:else if dirty}· <span class="warnt">有未保存的修改</span>{/if}
+      {#if !exists}
+        <div class="item active">
+          <span class="ic"><Icon name="plus" size={15} /></span>
+          <span class="txt"><span class="t">{titleOf(name)}</span><span class="s">新建 · 还没保存</span></span>
         </div>
-      </div>
-      <div class="acts">
+      {/if}
+      {#if presets.length}
+        <div class="head presets">
+          <strong>自带人格</strong>
+          <span class="muted small">点一下填进「{titleOf(name)}」，保存后生效</span>
+        </div>
+        {#each presets as p (p.id)}
+          <button class="preset" class:on={matched?.id === p.id} onclick={() => usePreset(p)}>
+            <span class="t">{p.name}{#if matched?.id === p.id}<span class="ptag">编辑框里就是它</span>{/if}</span>
+            <span class="s">{p.desc}</span>
+          </button>
+        {/each}
+      {/if}
+    </aside>
+
+    <section class="editor">
+      <header>
+        <div class="ttl">
+          <h3>{titleOf(name)}</h3>
+          <div class="muted small">
+            <code>{name}</code>
+            {#if current}· {current.sessions.length} 个会话在用{/if}
+            {#if matched}· 自带人格「{matched.name}」{/if}
+            {#if !exists}· <span class="warnt">新文件，保存后生效</span>{:else if dirty}· <span class="warnt">有未保存的修改</span>{/if}
+          </div>
+        </div>
         <div class="seg">
           <button class:active={!preview} onclick={() => (preview = false)}>编辑</button>
           <button class:active={preview} onclick={() => (preview = true)}>预览</button>
         </div>
         {#if name !== 'default.md' && exists}
-          <button class="btn ghost danger" onclick={remove}><Icon name="trash" size={14} /></button>
+          <button class="btn ghost danger" title="删除这个会话的专属人格" onclick={remove}><Icon name="trash" size={14} /></button>
         {/if}
-        <button class="btn primary" onclick={save} disabled={!dirty || busy}>
-          <Icon name="check" size={14} />保存 <span class="kbd">⌘S</span>
-        </button>
-      </div>
-    </header>
-    {#if preview}
-      <div class="preview">{@html markdown(text)}</div>
-    {:else}
-      <textarea bind:value={text} spellcheck="false" placeholder="写下机器人的性格、说话方式、要遵守的规矩……"></textarea>
-    {/if}
-    <footer class="muted small">
-      {Array.from(text).length} 字 · 保存后下一条消息就生效，不用重启；人格改动大的话，可以清空相关会话的上下文。
-    </footer>
-  </section>
+        <button class="btn primary" onclick={save} disabled={!dirty || busy}><Icon name="check" size={14} />保存</button>
+        <button class="btn ghost" onclick={close} aria-label="关闭"><Icon name="x" size={15} /></button>
+      </header>
+      {#if preview}
+        <div class="preview">{@html markdown(text)}</div>
+      {:else}
+        <textarea bind:value={text} spellcheck="false" placeholder="写下机器人的性格、说话方式、要遵守的规矩……"></textarea>
+      {/if}
+      <footer class="muted small">{Array.from(text).length} 字 · Ctrl/⌘ S 保存 · 保存后下一条消息就生效，不用重启；人格改动大的话，可以清空相关会话的上下文。</footer>
+    </section>
+  </div>
 </div>
 
 <style>
-  .personas {
-    flex: 1;
-    min-width: 0;
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: color-mix(in srgb, var(--bg) 60%, transparent);
+    backdrop-filter: blur(4px);
+  }
+  .sheet {
+    width: min(1100px, 100%);
+    height: min(820px, 100%);
     display: flex;
+    border-radius: 18px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-solid);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    animation: rise 0.2s ease;
   }
   .list {
-    width: 290px;
+    width: 270px;
     flex: none;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 12px 8px;
+    padding: 14px 8px;
     border-right: 1px solid var(--line);
     overflow: auto;
   }
@@ -214,6 +228,10 @@
     display: flex;
     flex-direction: column;
     padding: 2px 8px 10px;
+  }
+  .head.presets {
+    margin-top: 16px;
+    padding-bottom: 6px;
   }
   .small {
     font-size: 11.5px;
@@ -223,9 +241,13 @@
     display: flex;
     gap: 10px;
     padding: 9px 10px;
+    border: none;
     border-radius: 11px;
-    text-decoration: none;
+    background: none;
     color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
   }
   .item:hover {
     background: var(--panel-2);
@@ -244,11 +266,13 @@
     background: color-mix(in srgb, var(--c-session) 14%, transparent);
   }
   .ic.def {
-    color: var(--accent-2);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--c-agent);
+    background: color-mix(in srgb, var(--c-agent) 16%, transparent);
   }
   .txt {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
   }
   .t {
     font-weight: 600;
@@ -261,12 +285,9 @@
     font-size: 11.5px;
     color: var(--muted);
   }
-  .presets-head {
-    margin-top: 18px;
-    padding-bottom: 6px;
-  }
   .preset {
-    display: block;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     margin: 0 0 6px;
     padding: 9px 10px;
@@ -289,32 +310,26 @@
     margin-top: 2px;
     line-height: 1.5;
   }
-  .tag {
+  .ptag {
     margin-left: 6px;
     font-size: 11px;
     font-weight: 500;
     color: var(--accent-2);
-  }
-  .tip {
-    margin: 14px 8px 0;
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.6;
   }
   .editor {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    padding: 16px 22px 12px;
+    padding: 16px 18px 12px 22px;
     gap: 12px;
   }
   header {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
   }
-  header > div:first-child {
+  .ttl {
     flex: 1;
     min-width: 0;
   }
@@ -324,16 +339,6 @@
   }
   .warnt {
     color: var(--warn);
-  }
-  .acts {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .acts .kbd {
-    margin-left: 4px;
-    border-color: rgba(255, 255, 255, 0.35);
-    color: rgba(255, 255, 255, 0.85);
   }
   .seg {
     display: inline-flex;
@@ -364,12 +369,13 @@
     padding: 18px 20px;
     border-radius: 14px;
     border: 1px solid var(--line);
-    background: var(--panel-solid);
+    background: var(--bg-2);
     font-family: var(--mono);
     font-size: 13.5px;
     line-height: 1.75;
     outline: none;
     resize: none;
+    color: var(--text);
   }
   textarea:focus {
     border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
@@ -386,5 +392,10 @@
   }
   .preview :global(ul) {
     padding-left: 20px;
+  }
+  @media (max-width: 760px) {
+    .list {
+      display: none;
+    }
   }
 </style>
