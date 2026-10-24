@@ -176,6 +176,19 @@ def run(page, url, nano):
     else:
         fail(f"左边的页面：{rail}")
 
+    # ---- 同一个东西在图上只有一个节点（比如内置 Telegram 不能出现两次） ----
+    titles = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id + '|' + (e.querySelector('.t1')?.textContent ?? ''))")
+    seen_t = {}
+    for t in titles:
+        nid, title = t.split("|", 1)
+        if nid.startswith("c:"):
+            seen_t.setdefault(title.strip(), []).append(nid)
+    dups = {k: v for k, v in seen_t.items() if len(v) > 1}
+    if dups:
+        fail(f"入口列里有重复的节点：{dups}")
+    else:
+        ok("入口列里每个渠道、机器人只有一个节点")
+
     # ---- 每个配置项恰好在一个节点里 ----
     all_fields = fields(page)
     seen = {}

@@ -150,10 +150,11 @@ func (a *App) Channels() []ChannelInfo {
 			extra = append(extra, name)
 		}
 	}
-	// 停用的机器人也要在图上：没在跑的时候 a.runs 里没有它
+	// 停用的机器人也要在图上：没在跑的时候 a.runs 里没有它。
+	// 用 botRunKey：内置的 Telegram 在 runs 和图上叫 telegram，它的消息渠道名却是 tg，按渠道名会多出一个“Telegram”
 	if a.botStore != nil {
 		for _, b := range a.botStore.List() {
-			name := agents.ChannelName(b)
+			name := botRunKey(b)
 			if !isBotChannel(name) || slices.Contains(channelOrder, name) || slices.Contains(extra, name) {
 				continue
 			}

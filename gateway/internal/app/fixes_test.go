@@ -132,6 +132,14 @@ func TestChannelsIncludeDisabledBots(t *testing.T) {
 	if !found {
 		t.Fatal("停用的机器人不在 Channels 里")
 	}
+	// 内置的两个机器人只出现一次（内置 Telegram 的消息渠道名是 tg，图上叫 telegram）
+	var names []string
+	for _, c := range e.a.Channels() {
+		names = append(names, c.Name)
+	}
+	if strings.Join(names, ",") != "cli,web,telegram,feishu,tg.work" {
+		t.Fatalf("渠道列表：%v", names)
+	}
 	// 群里 agent 旁听的会话不当普通会话显示
 	e.a.mu.Lock()
 	sid := e.a.roomMemberSID("default", "x1")

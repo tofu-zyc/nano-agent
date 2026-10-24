@@ -29,6 +29,8 @@ v0.5 是多 agent、机器人绑定、群聊（[PLAN-roadmap.md](PLAN-roadmap.md
 - **拓扑图**：群（房间）单独一列（`群` 在会话和 Agent 之间），群的聊天记录连到群节点而不是默认 agent；两个 agent 的私聊不再当普通群，画成一个虚线小节点；每个机器人（含停用的）都是入口列一个节点，并画出到它绑的 agent 的连线；入口直接连 agent 的线（没有会话的机器人、定时任务）从画布最下面绕，不横穿会话和群的卡片。停用的机器人在后端 `Channels()` 里也要出现（原来只在 `a.runs` 里有）。agent 在群里旁听的会话（`@<agent>/room:<id>`）不再当成普通会话显示。网页检查用「3 个 agent、2 个群、1 个私聊、1 个停用的机器人」的场景截图并断言连线（`topology-groups.png`）。
 - **群聊插话的判断也花模型调用**：以前只有说出口的才记额度，每次「要不要说话」的判断都是白花的模型调用。现在除了每小时说几次，还限判断次数（积极度 low/normal/high → 每小时最多 6/18/45 次，两次判断至少隔 1 分钟），写进了 agent 面板「群里插话积极度」的说明；`TestGroupThoughtBudget`。
 - **小问题**：中文名字的 agent 以前 ID 会变成 `agent`、`agent-2`，现在取不出拉丁字母时用短的随机 ID（`a-1f2e3d`），面板上仍然显示名字；时长不再显示 `30m0s` 而是 `30m`（`durText`）；agent 面板里关于 `personas/default.md` 的说明按修完后的真实行为改了；README 里升级那句话也改了。
+- **第二轮验收发现：内置 Telegram 在图上出现两次**（一个一直是停用的）。“停用的机器人也上图”那段按机器人的消息渠道名找，内置 Telegram 的消息渠道名是 `tg`，而 runs 和图上它叫 `telegram`；改成用 `botRunKey`。只影响显示，路由一直是对的（消息带的渠道名就是 `tg`）。`TestChannelsIncludeDisabledBots` 检查渠道列表正好是 cli、web、telegram、feishu 加另外的机器人；`check-web-ui.py` 检查入口列没有重名的节点。
+- 还可以再好看点（没改）：没有会话的机器人到 agent 的虚线从画布最下面绕过去，再从下往上接到 agent 卡片的底边，会穿过下面几个 agent；能看清，但不够干净。
 
 ### 阶段 6：多 agent 和机器人绑定
 
