@@ -152,7 +152,7 @@ release-gateway: $(ZIG) $(RG)/linux-x86_64
 	  cp kernel/build/cross/linux-$$karch/nano-exec $$dir/lib/; \
 	  cp $(RG)/linux-$$karch $$dir/lib/rg; \
 	  cp gateway.example.toml $$dir/; \
-	  cp -a personas/. $$dir/personas/; \
+	  if [ -d personas ]; then cp -a personas/. $$dir/personas/; fi; \
 	  cp -a agents/. $$dir/agents/; \
 	  cp -a skills/. $$dir/skills/; \
 	  cp scripts/install-gateway.sh $$dir/; \

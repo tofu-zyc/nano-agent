@@ -81,7 +81,9 @@ def publish(ver, bins, persona_extra="", skill_extra=""):
     shutil.copy2(os.path.join(bins, "nano-gateway"), g)
     for b in ("nano-kernel", "nano-exec"):
         shutil.copy2(os.path.join(bins, b), os.path.join(g, "lib", b))
-    shutil.copytree(os.path.join(ROOT, "personas"), os.path.join(g, "personas"))
+    os.makedirs(os.path.join(g, "personas"))
+    if os.path.isdir(os.path.join(ROOT, "personas")):
+        shutil.copytree(os.path.join(ROOT, "personas"), os.path.join(g, "personas"), dirs_exist_ok=True)
     shutil.copytree(os.path.join(ROOT, "skills"), os.path.join(g, "skills"))
     os.makedirs(os.path.join(g, "agents", "default"))
     with open(os.path.join(g, "agents", "default", "persona.md"), "w") as f:
