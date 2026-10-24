@@ -98,10 +98,16 @@
     </div>
 
     <div class="p-card">
-      <div class="p-row"><span class="p-k">名字</span><span class="p-grow">{a.emoji} {a.name}{#if a.default}<span class="tag accent">默认</span>{/if}</span></div>
+      <label class="p-label">名字{#if a.default}<span class="tag accent">默认</span>{/if}
+        <input class="p-input" value={a.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
+      </label>
+      <label class="p-label">头像（一个 emoji）
+        <input class="p-input" value={a.emoji} placeholder="🦦" onchange={(e) => patch({ emoji: (e.target as HTMLInputElement).value })} />
+      </label>
       <div class="p-row"><span class="p-k">模型</span><span class="p-grow">{a.model || a.model_label}</span></div>
       <div class="p-row"><span class="p-k">人格</span><span class="p-grow">{a.persona_chars ? a.persona_chars + ' 字' : '还没有写'}</span></div>
       <div class="p-row"><span class="p-k">会话 ID</span><code class="p-grow">{a.default ? 'main' : '@' + a.id + '/main'}</code></div>
+      <p class="p-note p-small">改名、换头像不影响会话 ID，历史和绑定的机器人都还在。</p>
     </div>
 
     <h5 class="p-h">人格 <span class="muted p-small">agents/{a.id}/persona.md，保存后下一条消息生效</span></h5>
