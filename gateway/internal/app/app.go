@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
@@ -43,6 +44,7 @@ var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
+	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -94,6 +96,10 @@ type App struct {
 	llm               llm.Client
 	store             *session.Store
 	persona           *persona.Loader
+	personaAgent      *persona.Loader // agents/<id>/persona.md
+	agentStore        *agents.Store   // agent 列表（data/agents.json）
+	botStore          *agents.Bots    // 机器人（data/bots.json）
+	agentRoot         string          // agents 目录
 	hub               *kernel.Hub
 	log               *slog.Logger
 	bus               *events.Bus
@@ -371,6 +377,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	switch cmd {
 	case "help":
 		a.tell(a.boundSession(ep, m), ep, helpText)
+		return
+	case "agent":
+		a.cmdAgent(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
 		return
 	case "whoami":
 		sid := a.boundSession(ep, m)
@@ -737,11 +746,11 @@ func (a *App) startRun(s *sess) {
 	mode := a.runMode(w, r.from)
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
-	ag := a.cfg.Agent
-	in.MaxSteps = wireLimit(ag.Steps())
-	in.RunTimeoutMs = wireMs(ag.RunLimit())
-	in.ApprovalTimeoutMs = wireMs(ag.ApprovalLimit())
-	in.MaxOutput = ag.OutputBytes()
+	ag := a.limitsOf(s.sid)
+	in.MaxSteps = wireLimit(ag.Steps)
+	in.RunTimeoutMs = wireMs(ag.Run)
+	in.ApprovalTimeoutMs = wireMs(ag.Approval)
+	in.MaxOutput = ag.Output
 	if r.scheduled != nil {
 		limit, _ := schedule.Timeout(*r.scheduled)
 		in.RunTimeoutMs = int(limit / time.Millisecond)
@@ -1021,7 +1030,7 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)
-	if s.run == nil && !strings.HasPrefix(s.sid, "cron:") {
+	if s.run == nil && !isCronSID(s.sid) {
 		a.maybeCompact(s, false)
 	}
 }

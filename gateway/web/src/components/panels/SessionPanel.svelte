@@ -97,6 +97,15 @@
       <div class="p-stat"><b>{num(sess.usage.prompt_tokens)}</b><span>累计输入</span></div>
     </div>
 
+    <h5 class="p-h">属于哪个 agent <span class="muted p-small">换 agent 就是换个机器人聊</span></h5>
+    <div class="p-card">
+      <div class="p-row">
+        <span class="p-grow">{store.agent(sess.agent)?.emoji} {store.agent(sess.agent)?.name ?? sess.agent}</span>
+        <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去它的节点</button>
+      </div>
+      <p class="p-note p-small">人格、模型、每条消息的上限都用这个 agent 的；会话里单独设过的优先。</p>
+    </div>
+
     <h5 class="p-h">接入的窗口 <span class="muted p-small">在哪个窗口说话都是同一段上下文</span></h5>
     <div class="p-card">
       {#each sess.endpoints ?? [] as e (e.key)}
@@ -182,8 +191,8 @@
       {:else}
         <div class="p-row">
           <Icon name="persona" size={15} />
-          <span class="p-grow">用 Agent 的默认人格</span>
-          <button class="btn sm" onclick={() => store.open({ type: 'agent' })}>去 Agent</button>
+          <span class="p-grow">用这个 agent 自己的人格</span>
+          <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去 Agent</button>
         </div>
         <button class="btn sm ghost" onclick={() => (store.persona = { name: sess.persona_file, isNew: true })}><Icon name="plus" size={13} />给这个会话单独设定人格</button>
       {/if}

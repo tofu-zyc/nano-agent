@@ -107,7 +107,7 @@ func uninstallGateway(home string, keepData, kernel bool) error {
 	}
 	remove := []string{"bin/nano-gateway", "lib", "run", "backup", "cache/releases", "update.json", shippedFile}
 	if !keepData {
-		remove = append(remove, "gateway.toml", "data", "secret.key", "personas", "skills")
+		remove = append(remove, "gateway.toml", "data", "secret.key", "agents", "personas", "skills")
 	}
 	var firstErr error
 	for _, rel := range remove {

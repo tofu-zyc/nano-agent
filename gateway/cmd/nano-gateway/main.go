@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
@@ -147,6 +148,23 @@ func main() {
 	// 模型全部在网页的模型节点里配置；没有模型时网关照样启动，聊天会提示去添加。
 	// 旧版 [llm] 里的模型会在 models.Open 时一次性导入成普通模型。
 	a := app.New(ctx, cfg, nil, store, personas, log)
+	// agent 列表（data/agents.json）和机器人（data/bots.json）：v0.5 起有多个 agent，
+	// 每个 agent 有自己的名字、人格（agents/<id>/persona.md）和设置覆盖。
+	agentStore, err := agents.Open(filepath.Join(cfg.Session.DataDir, "agents.json"))
+	if err != nil {
+		log.Error("读取 agent 列表失败", "err", err)
+		os.Exit(1)
+	}
+	botStore, err := agents.OpenBots(filepath.Join(cfg.Session.DataDir, "bots.json"))
+	if err != nil {
+		log.Error("读取机器人列表失败", "err", err)
+		os.Exit(1)
+	}
+	a.SetAgents(agentStore, botStore, filepath.Join(cfg.Dir, "agents"))
+	if err := a.MigrateAgents(); err != nil {
+		log.Error("升级 agent 数据失败", "err", err)
+		os.Exit(1)
+	}
 	a.SetConfigStore(conf)
 	a.SetRuntime(version.Version, runtimeMode(), "")
 	a.SetRestarter(func(req app.RestartRequest) error {

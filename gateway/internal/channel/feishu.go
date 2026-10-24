@@ -35,6 +35,7 @@ type Feishu struct {
 	groupAll bool
 
 	botOpenID string
+	name      string       // 渠道名：内置的是 feishu，另外加的机器人是 feishu.<id>
 	media     *media.Store // 用户发来的图片存这里，nil 时不收图片
 	queue     chan any     // *larkim.P2MessageReceiveV1 或 *larkim.P2MessageRecalledV1，按收到的顺序处理
 
@@ -53,6 +54,7 @@ func NewFeishu(c config.Feishu, store *media.Store, log *slog.Logger) (*Feishu, 
 		base = lark.LarkBaseUrl
 	}
 	f := &Feishu{
+		name:     "feishu",
 		cfg:      c,
 		base:     base,
 		log:      log.With("channel", "feishu"),
@@ -70,7 +72,16 @@ func NewFeishu(c config.Feishu, store *media.Store, log *slog.Logger) (*Feishu, 
 	return f, nil
 }
 
-func (f *Feishu) Name() string { return "feishu" }
+func (f *Feishu) Name() string { return f.name }
+
+// SetName 给另外加的机器人换渠道名（feishu.<id>），内置的机器人不用调。
+func (f *Feishu) SetName(name string) {
+	if name == "" || name == f.name {
+		return
+	}
+	f.name = name
+	f.log = f.log.With("channel", name)
+}
 
 func (f *Feishu) Run(ctx context.Context, h Handler) error {
 	f.setState(StateStarting, "")

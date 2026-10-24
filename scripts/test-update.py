@@ -83,8 +83,11 @@ def publish(ver, bins, persona_extra="", skill_extra=""):
         shutil.copy2(os.path.join(bins, b), os.path.join(g, "lib", b))
     shutil.copytree(os.path.join(ROOT, "personas"), os.path.join(g, "personas"))
     shutil.copytree(os.path.join(ROOT, "skills"), os.path.join(g, "skills"))
+    os.makedirs(os.path.join(g, "agents", "default"))
+    with open(os.path.join(g, "agents", "default", "persona.md"), "w") as f:
+        f.write("你是小纳\n")
     if persona_extra:
-        with open(os.path.join(g, "personas", "default.md"), "a") as f:
+        with open(os.path.join(g, "agents", "default", "persona.md"), "a") as f:
             f.write(persona_extra)
     if skill_extra:
         with open(os.path.join(g, "skills", "model-setup", "SKILL.md"), "a") as f:
@@ -201,7 +204,7 @@ try:
 
     @case("update --check 和 update：换成 0.0.2，改过的人格放成 .new")
     def _():
-        with open(os.path.join(NANO, "personas", "default.md"), "a") as f:
+        with open(os.path.join(NANO, "agents", "default", "persona.md"), "a") as f:
             f.write("\n我自己加的话\n")
         set_latest("0.0.2")
         r = gw("update", "--check")
@@ -211,9 +214,9 @@ try:
         assert "版本 0.0.2" in status(), status()
         k = subprocess.run([os.path.join(NANO, "lib", "nano-kernel"), "--version"], capture_output=True, text=True).stdout
         assert k.strip() == "0.0.2", k
-        p = open(os.path.join(NANO, "personas", "default.md")).read()
+        p = open(os.path.join(NANO, "agents", "default", "persona.md")).read()
         assert "我自己加的话" in p and "新版本的人格补充" not in p, p
-        assert "新版本的人格补充" in open(os.path.join(NANO, "personas", "default.md.new")).read()
+        assert "新版本的人格补充" in open(os.path.join(NANO, "agents", "default", "persona.md.new")).read()
         assert "新版本的技能说明" in open(os.path.join(NANO, "skills", "model-setup", "SKILL.md")).read()
         assert os.listdir(os.path.join(NANO, "backup")), "没有备份"
         assert not os.path.exists(os.path.join(NANO, "update.json"))

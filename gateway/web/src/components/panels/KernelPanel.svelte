@@ -39,7 +39,7 @@
       <div class="p-row"><span class="p-k">正在跑</span><span class="p-grow">{busy.length ? busy.map((s) => s.title).join('、') : '没有'}</span></div>
       <button class="btn sm" onclick={() => store.open({ type: 'machine', name: machine })}><Icon name="hub" size={13} />它所在的机器：{machine}</button>
     </div>
-    <p class="p-note" style="margin-top: 10px">内核是跑对话循环、判断权限的程序，没有自己的设置：工具调用轮数上限、每条消息的时限这些在 <button class="p-lnk" onclick={() => store.open({ type: 'agent' }, 'agent.max_steps')}>Agent 节点</button>里设，网关每一轮带给它；它连哪个网关写在那台电脑的 kernel.conf 里（<code>nano-kernel connect 地址</code> 改）。版本自动跟网关一致。</p>
+    <p class="p-note" style="margin-top: 10px">内核是跑对话循环、判断权限的程序，没有自己的设置：工具调用轮数上限、每条消息的时限这些在 <button class="p-lnk" onclick={() => store.open({ type: 'agentDefaults' }, 'agent.max_steps')}>Agent 默认值</button>里设，网关每一轮带给它；它连哪个网关写在那台电脑的 kernel.conf 里（<code>nano-kernel connect 地址</code> 改）。版本自动跟网关一致。</p>
     {#if paired}
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={unpair}><Icon name="trash" size={13} />移除这台电脑（口令作废）</button>

@@ -77,6 +77,7 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
 
 export type SessionInfo = {
+  agent: string; // 这个会话属于哪个 agent
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
@@ -165,6 +166,8 @@ export type Overview = {
   search?: SearchInfo;
   schedules?: ScheduleSummary;
   memory?: MemoryInfo;
+  agents?: AgentInfo[]; // 所有 agent（v0.5 起）
+  bots?: BotInfo[]; // 所有机器人
 };
 
 /** 网络搜索的状态；key 是 settings（设置里填的）、endpoint:<接口名>（借用模型接口的）或空（没有可用的 key） */
@@ -225,10 +228,70 @@ export type LiveItem =
   | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string }
   | { kind: 'say'; text: string; at: number };
 
+// 一个 agent 可以覆盖的全局设置：全局值（global）、自己的值（value，null 表示跟随全局）、实际生效的值
+export type AgentSetting = {
+  key: string;
+  label: string;
+  type: 'int' | 'float' | 'string' | 'enum';
+  unit?: string;
+  help?: string;
+  options?: string[] | null;
+  global: any;
+  value: any;
+  effective: any;
+};
+
+// 绑在这个 agent 上的一个机器人
+export type AgentBot = { id: string; kind: string; name: string; channel: string; enabled: boolean };
+
+// 一个 agent：名字、头像、人格、模型，以及它覆盖了什么设置
+export type AgentInfo = {
+  id: string;
+  name: string;
+  emoji: string;
+  default: boolean;
+  model: string;
+  model_label: string;
+  thinking: string;
+  thinking_levels: string[] | null;
+  tools: string[];
+  group_tools: string[];
+  tools_available: string[];
+  bots: AgentBot[];
+  sessions: number;
+  running: boolean;
+  persona_file: string;
+  persona_chars: number;
+  settings: AgentSetting[];
+};
+
+// 一个机器人：绑一个 agent，凭据只回传有没有（不返回明文）
+export type BotInfo = {
+  id: string;
+  kind: 'telegram' | 'feishu';
+  name: string;
+  app_id: string;
+  agent: string;
+  show: string;
+  channel: string;
+  enabled: boolean;
+  legacy: boolean;
+  has_token: boolean;
+  has_secret: boolean;
+  proxy: string;
+  api_base: string;
+  domain: string;
+  group_all: boolean;
+};
+
 // 拓扑图里可以点开的对象。每个对象的面板就是它全部的状态、操作和设置（没有单独的设置页）
 export type Target =
   | { type: 'gateway' }
-  | { type: 'agent' } // Agent：人格、每条消息的上限、权限、回复方式
+  | { type: 'agent'; id: string } // 一个 agent：人格、模型、覆盖的设置、绑定的机器人
+  | { type: 'agentDefaults' } // Agent 的全局默认值：所有 agent 没覆盖的项
+  | { type: 'agents' } // ＋ 添加 agent
+  | { type: 'bot'; id: string } // 一个机器人
+  | { type: 'bots' } // ＋ 添加机器人
   | { type: 'model' }
   | { type: 'kernel'; node?: string } // 在线的内核（node 是某一个）
   | { type: 'machine'; name: string } // 一台机器：本机、装了内核的电脑、SSH 服务器

@@ -37,7 +37,8 @@ type workspace struct {
 
 func (a *App) workspaceOf(sid string) workspace {
 	st := a.store.Settings(sid)
-	w := workspace{mode: a.cfg.Workspace.Mode}
+	// 权限模式：会话自己的 > agent 的 > 全局默认
+	w := workspace{mode: a.agentModeDefault(sid)}
 	if st.Mode != "" {
 		w.mode = st.Mode
 	}

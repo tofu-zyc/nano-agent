@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
@@ -30,19 +31,32 @@ type modelClient struct {
 	client llm.Client
 }
 
-// modelOf 是会话用的模型；没有模型列表或者找不到时 ok 为 false。
+// modelFor 是一个 agent 用的模型：agent 指定了就用它，否则用默认模型。调用方持有锁。
+func (a *App) modelFor(ag agents.Agent) (models.Model, models.Endpoint, bool) {
+	if a.models == nil {
+		return legacyModel(a.cfg.LLM)
+	}
+	if ag.Model != "" {
+		if m, e, ok := a.models.Find(ag.Model); ok {
+			return m, e, true
+		}
+	}
+	return a.models.Find(a.models.Default())
+}
+
+// modelOf 是会话用的模型：会话自己选的优先，其次是所属 agent 的，最后是默认模型；
+// 没有模型列表或者找不到时 ok 为 false。调用方持有锁。
 // 没接模型列表时（测试/嵌入式）用旧的单模型配置凑一个，网关本身总是接 models.Store。
 func (a *App) modelOf(sid string) (models.Model, models.Endpoint, bool) {
 	if a.models == nil {
 		return legacyModel(a.cfg.LLM)
 	}
-	id := a.store.Settings(sid).Model
-	if id != "" {
+	if id := a.store.Settings(sid).Model; id != "" {
 		if m, e, ok := a.models.Find(id); ok {
 			return m, e, true
 		}
 	}
-	return a.models.Find(a.models.Default())
+	return a.modelFor(a.agentOf(sid))
 }
 
 // legacyModel 是没接模型列表时的单模型模式（只给测试/嵌入式用）。

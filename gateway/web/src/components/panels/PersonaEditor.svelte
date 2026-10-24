@@ -18,12 +18,16 @@
   let presets = $state<PersonaPreset[]>([]);
 
   const name = $derived(store.persona?.name ?? 'default.md');
+  // 正在编辑某个 agent 自己的人格：只有一个人格文件，左边不列会话专属的那些
+  const agentId = $derived(store.persona?.agent ?? '');
+  const agentName = $derived(store.agent(agentId)?.name ?? agentId);
   const dirty = $derived(text !== saved || !exists);
   const current = $derived(items.find((i) => i.name === name));
   const same = (a: string, b: string) => a.trim() === b.trim();
   const matched = $derived(presets.find((p) => same(p.text, text)));
   const sidOf = (n: string) => (n === 'default.md' ? '' : decodeURIComponent(n.replace(/\.md$/, '')));
   const titleOf = (n: string) => {
+    if (agentId) return agentName + ' 的人格';
     if (n === 'default.md') return '默认人格';
     const sid = sidOf(n);
     return (store.session(sid)?.title ?? sid) + ' 的专属人格';
@@ -41,6 +45,17 @@
 
   async function loadFile(n: string) {
     preview = false;
+    if (agentId) {
+      try {
+        const r = await api.get<{ text: string }>('/api/agents/' + encodeURIComponent(agentId) + '/persona');
+        text = saved = r.text ?? '';
+        exists = text.trim() !== '';
+      } catch {
+        text = saved = '';
+        exists = false;
+      }
+      return;
+    }
     try {
       const r = await api.get<{ text: string }>('/api/personas/' + encodeURIComponent(n));
       text = saved = r.text;
@@ -89,11 +104,16 @@
   async function save() {
     busy = true;
     try {
-      await api.put('/api/personas/' + encodeURIComponent(name), { text });
+      if (agentId) {
+        await api.put('/api/agents/' + encodeURIComponent(agentId) + '/persona', { text });
+      } else {
+        await api.put('/api/personas/' + encodeURIComponent(name), { text });
+      }
       saved = text;
-      exists = true;
+      exists = text.trim() !== '';
       store.toast({ kind: 'ok', text: '已保存，下一条消息开始生效' });
-      loadList();
+      if (!agentId) loadList();
+      store.refresh().catch(() => {});
     } catch (err) {
       store.fail(err);
     } finally {
@@ -127,7 +147,7 @@
 
 <div class="backdrop" use:portal onclick={(e) => e.target === e.currentTarget && close()} role="presentation">
   <div class="sheet" role="dialog" aria-label="编辑人格">
-    <aside class="list">
+    <aside class="list" class:hidden={!!agentId}>
       <div class="head">
         <strong>人格文件</strong>
         <span class="muted small">{dir}</span>
@@ -176,7 +196,7 @@
           <button class:active={!preview} onclick={() => (preview = false)}>编辑</button>
           <button class:active={preview} onclick={() => (preview = true)}>预览</button>
         </div>
-        {#if name !== 'default.md' && exists}
+        {#if !agentId && name !== 'default.md' && exists}
           <button class="btn ghost danger" title="删除这个会话的专属人格" onclick={remove}><Icon name="trash" size={14} /></button>
         {/if}
         <button class="btn primary" onclick={save} disabled={!dirty || busy}><Icon name="check" size={14} />保存</button>
@@ -392,6 +412,9 @@
   }
   .preview :global(ul) {
     padding-left: 20px;
+  }
+  .list.hidden {
+    display: none;
   }
   @media (max-width: 760px) {
     .list {

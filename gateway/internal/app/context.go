@@ -12,7 +12,7 @@ import (
 )
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
-	system, _ := a.persona.For(sid)
+	system, _ := a.personaFor(sid)
 	var tools []llm.Tool
 	rt := a.route(a.workspaceOf(sid))
 	admin := sid == mainSID
@@ -39,6 +39,8 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			tools = append(tools, toolOf(spec))
 		}
 	}
+	// agent 可以限定这个会话能用哪些工具（空表示全部）
+	tools = a.filterAgentTools(sid, tools)
 	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)

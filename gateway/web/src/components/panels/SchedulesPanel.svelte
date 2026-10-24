@@ -23,6 +23,7 @@
   let timeout = $state('30m');
   let deliver = $state<string[]>([]);
   let workspaces = $state<string[]>([]);
+  let agent = $state('default'); // 这个任务由哪个 agent 来跑
   const modes: Record<string, string> = { readonly: '只读', ask: '审批', auto: '自动' };
 
   // 结果能发到哪里：网页里的会话、各个聊天窗口
@@ -76,9 +77,12 @@
     timeout = t?.timeout || '30m';
     deliver = [...(t?.deliver ?? ['web:main'])];
     workspaces = [...(t?.workspaces ?? store.session('main')?.workspaces.map((w) => w.id) ?? [])];
+    agent = t?.agent || 'default';
     error = '';
     editing = true;
   }
+  // 任务会话的 ID：默认 agent 是 cron:<id>，别的 agent 是 @<agent>/cron:<id>
+  const cronSid = (t: ScheduleTask) => (t.agent && t.agent !== 'default' ? '@' + t.agent + '/cron:' + t.id : 'cron:' + t.id);
   const labelOf = (key: string) => destinations.find((d) => d.key === key)?.label ?? key;
   const toggle = (xs: string[], key: string, on: boolean) => (on ? [...new Set([...xs, key])] : xs.filter((x) => x !== key));
 
@@ -99,7 +103,7 @@
     busy = true;
     error = '';
     try {
-      await api.post('/api/schedules', { action: id ? 'update' : 'create', id, sid: 'main', name, when, prompt, mode, enabled, catch_up: catchUp, timeout, deliver, workspaces });
+      await api.post('/api/schedules', { action: id ? 'update' : 'create', id, sid: 'main', name, when, prompt, mode, agent, enabled, catch_up: catchUp, timeout, deliver, workspaces });
       editing = false;
       await load();
       store.toast({ kind: 'ok', text: '定时任务已保存' });
@@ -135,14 +139,14 @@
           <strong class="p-grow p-ellipsis">{t.name}</strong>
           <span class="muted p-small p-nowrap">{t.running ? '运行中' : t.enabled ? '下次 ' + whenText(t.next) : '已暂停'}</span>
         </div>
-        <div class="muted p-small"><code>{t.when}</code> · {modes[t.mode] ?? t.mode} · {t.catch_up ? '错过一小时内补跑一次' : '不补跑'} · 投递到 {t.deliver.map(labelOf).join('、')}</div>
+        <div class="muted p-small"><code>{t.when}</code> · {modes[t.mode] ?? t.mode} · 由 {store.agent(t.agent)?.name ?? t.agent} 执行 · {t.catch_up ? '错过一小时内补跑一次' : '不补跑'} · 投递到 {t.deliver.map(labelOf).join('、')}</div>
         <p class="prompt">{t.prompt}</p>
         {#if t.last}<div class="last" class:failed={!t.last.ok}>{t.last.ok ? '上次完成' : '上次没完成'} · {date(t.last.at)}<br />{t.last.summary.slice(0, 160)}</div>{/if}
         <div class="p-actions tight">
           <button class="btn sm" disabled={busy || t.running} onclick={() => act('run_now', t)}><Icon name="play" size={12} />立即运行</button>
           <button class="btn sm" disabled={busy || t.running} onclick={() => edit(t)}>编辑</button>
           <button class="btn sm" disabled={busy || t.running} onclick={() => act('update', t, { enabled: !t.enabled })}>{t.enabled ? '暂停' : '开启'}</button>
-          <a class="btn sm ghost" href={'#/sessions/' + encodeURIComponent('cron:' + t.id)} onclick={() => (store.inspector = null)}>任务会话</a>
+          <a class="btn sm ghost" href={'#/sessions/' + encodeURIComponent(cronSid(t))} onclick={() => (store.inspector = null)}>任务会话</a>
           <button class="btn sm ghost danger" disabled={busy || t.running} onclick={() => act('delete', t)} title="删除"><Icon name="trash" size={13} /></button>
         </div>
         {#if t.results?.length}
@@ -171,9 +175,14 @@
       </div>
       <label class="p-label">名称<input class="p-input" bind:value={name} required placeholder="早报" /></label>
       <label class="p-label">运行时间<input class="p-input" bind:value={when} required placeholder="0 8 * * *" /></label>
-      <p class="p-note p-small">每天 8 点：<code>0 8 * * *</code>；每隔半小时：<code>every 30m</code>；一次：<code>at 2026-10-24 08:00</code>。用 {view.timezone} 时区（在 Agent 节点里改）。</p>
+      <p class="p-note p-small">每天 8 点：<code>0 8 * * *</code>；每隔半小时：<code>every 30m</code>；一次：<code>at 2026-10-24 08:00</code>。用 {view.timezone} 时区（在 Agent 默认值节点里改）。</p>
       <label class="p-label">要做什么<textarea class="p-input area" bind:value={prompt} required rows="4" placeholder="搜索 AI 新闻，整理摘要并附上来源链接"></textarea></label>
       <div class="two">
+        <label class="p-label">由谁执行
+          <select class="p-select" bind:value={agent}>
+            {#each store.agents as a (a.id)}<option value={a.id}>{a.emoji} {a.name}</option>{/each}
+          </select>
+        </label>
         <label class="p-label">权限模式
           <select class="p-select" bind:value={mode}><option value="readonly">只读</option><option value="ask">审批</option><option value="auto">自动</option></select>
         </label>

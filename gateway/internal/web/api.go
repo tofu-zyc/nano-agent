@@ -112,6 +112,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"kernels":    snap.Kernels,
 		"model":      defaultModelInfo(s, cfg),
 		"channels":   s.app.Channels(),
+		"agents":     s.app.AgentList(),
+		"bots":       s.app.Bots(),
 		"sessions":   snap.Sessions,
 		"approvals":  snap.Approvals,
 		"totals":     snap.Totals,
@@ -185,11 +187,12 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) newSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title string `json:"title"`
+		Agent string `json:"agent"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	info, err := s.app.NewSession(req.Title)
+	info, err := s.app.NewSessionIn(req.Agent, req.Title)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

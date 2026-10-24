@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/session"
@@ -161,11 +162,15 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	key := ep.key()
 	r := a.eps[key]
 	changed := false
+	// 这个渠道（机器人）归哪个 agent：窗口接到的会话跟着它，一个机器人只属于一个 agent
+	agentID := a.agentForChannel(ep.ch)
+	base := key
+	if a.isAdmin(who) {
+		base = mainSID
+	}
+	want := agents.SessionFor(agentID, base)
 	if r == nil {
-		r = &epRec{Session: key}
-		if a.isAdmin(who) {
-			r.Session = mainSID
-		}
+		r = &epRec{Session: want}
 		a.eps[key] = r
 		changed = true
 		a.log.Info("新的聊天窗口", "endpoint", key, "session", r.Session)
@@ -179,6 +184,12 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 		} else {
 			a.markSeen(ep, r.Session, a.histEnd(r.Session), false)
 		}
+	}
+	if agents.SessionAgent(r.Session) != agentID {
+		// 机器人换绑了 agent：这个窗口跟着换到新 agent 的会话
+		a.log.Info("机器人换绑了 agent，聊天窗口跟着换会话", "endpoint", key, "from", r.Session, "to", want)
+		r.Session = want
+		changed = true
 	}
 	if m.ChatName != "" && r.Name != m.ChatName {
 		r.Name, changed = m.ChatName, true
@@ -280,11 +291,16 @@ func (a *App) orderedSessions() []SessionInfo {
 
 // newSession 新建一个会话。web 表示是在网页里新建的（网页接着它）。
 func (a *App) newSession(title string, web bool) (string, error) {
+	return a.newSessionIn(agents.DefaultID, title, web)
+}
+
+// newSessionIn 在某个 agent 下新建一个会话。
+func (a *App) newSessionIn(agentID, title string, web bool) (string, error) {
 	var sid string
 	for sid == "" || a.hasSession(sid) {
 		b := make([]byte, 3)
 		rand.Read(b)
-		sid = "s-" + hex.EncodeToString(b)
+		sid = agents.SessionFor(agentID, "s-"+hex.EncodeToString(b))
 	}
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -307,11 +323,16 @@ func (a *App) HasSession(sid string) bool {
 	return a.hasSession(sid)
 }
 
-// NewSession 新建一个会话。
+// NewSession 新建一个会话（默认 agent 下的）。
 func (a *App) NewSession(title string) (SessionInfo, error) {
+	return a.NewSessionIn(agents.DefaultID, title)
+}
+
+// NewSessionIn 在某个 agent 下新建一个会话。
+func (a *App) NewSessionIn(agentID, title string) (SessionInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	sid, err := a.newSession(title, true)
+	sid, err := a.newSessionIn(agentID, title, true)
 	if err != nil {
 		return SessionInfo{}, err
 	}

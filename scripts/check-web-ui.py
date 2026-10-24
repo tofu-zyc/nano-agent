@@ -194,8 +194,48 @@ def run(page, url, nano):
     if not (missing or dup or unknown):
         ok(f"{len(all_fields)} 个配置项都恰好在一个节点里（点开了 {len(nodes)} 个节点）")
 
+    # ---- v0.5 的节点：每个 agent、Agent 默认值、机器人 ----
+    agents = api(page, "GET", "/api/agents")[1]["items"]
+    bots = api(page, "GET", "/api/bots")[1]["items"]
+    node_ids = page.eval_on_selector_all("g.node", "els => els.map(e => e.dataset.id)")
+    for aid in [a["id"] for a in agents]:
+        if "ag:" + aid not in node_ids:
+            fail(f"agent {aid} 在图上没有节点")
+    if "agdefault" not in node_ids or "add:agent" not in node_ids or "add:bot" not in node_ids:
+        fail("图上缺 Agent 默认值 / 添加 agent / 添加机器人 节点")
+    else:
+        ok(f"{len(agents)} 个 agent 各有节点，另有 Agent 默认值、添加 agent、添加机器人")
+    title = open_node(page, "ag:default")
+    text = page.locator(".insp").inner_text()
+    if "人格" in text and "机器人" in text:
+        ok("agent 节点里有它自己的人格和绑定的机器人")
+    else:
+        fail("agent 节点里看不到人格或机器人：" + text[:200])
+    # 在 agent 节点里改一条覆盖设置：存进去的是它自己的值
+    first = page.locator(".insp .setting input, .insp .setting select").first
+    if first.count():
+        first.fill("42") if first.evaluate("e => e.tagName === 'INPUT'") else None
+        first.press("Enter")
+        page.wait_for_timeout(700)
+        got = api(page, "GET", "/api/agents")[1]["items"]
+        mine = [a for a in got if a["id"] == "default"][0]
+        vals = {s["key"]: s["value"] for s in mine["settings"]}
+        if any(v is not None for v in vals.values()):
+            ok("agent 自己的设置能保存（覆盖全局）")
+        else:
+            fail("agent 的设置没存上：" + json.dumps(vals, ensure_ascii=False))
+        api(page, "PATCH", "/api/agents/default", {"settings": {k: None for k in vals}})
+    # 机器人节点
+    if bots:
+        open_node(page, "c:telegram")
+        text = page.locator(".insp").inner_text()
+        if "绑定的 agent" in text:
+            ok("Telegram 节点里能改它绑的 agent")
+        else:
+            fail("Telegram 节点里没有绑定 agent 的地方")
+
     # ---- 改设置：数字、文本、开关、列表，刷新后还在 ----
-    open_node(page, "agent")
+    open_node(page, "agdefault")
     box = page.locator("#f-agent\\.max_steps input")
     box.fill("0")
     box.press("Enter")
@@ -224,7 +264,7 @@ def run(page, url, nano):
         ok("数字、文本、开关、列表改了自动保存，刷新后还在")
     else:
         fail(f"改设置没保存：{got}")
-    open_node(page, "agent")
+    open_node(page, "agdefault")
     v = page.locator("#f-agent\\.max_steps input").input_value()
     if v == "0":
         ok("刷新后面板里显示的是改过的值")
@@ -251,7 +291,7 @@ def run(page, url, nano):
         fail("网关节点没列出改过的设置")
     page.locator(".insp .p-srow", has_text="工具调用轮数上限").click()
     page.wait_for_timeout(500)
-    if page.locator(".insp header h3").inner_text() == "Agent" and page.locator("#f-agent\\.max_steps.hl").count():
+    if page.locator(".insp header h3").inner_text() == "Agent 默认值" and page.locator("#f-agent\\.max_steps.hl").count():
         ok("点改过的设置跳到它所在的节点并高亮")
     else:
         fail("点改过的设置没跳对")
@@ -272,9 +312,10 @@ def run(page, url, nano):
         page.fill(".sheet textarea", "# 测试人格\n你是界面检查用的人格。")
         page.click(".sheet button.primary")
         page.wait_for_timeout(600)
-        persona = os.path.join(nano, "personas", "default.md")
+        # 人格现在是每个 agent 自己的：默认 agent 的文件在 agents/default/persona.md
+        persona = os.path.join(nano, "agents", "default", "persona.md")
         if os.path.exists(persona) and "界面检查" in open(persona, encoding="utf-8").read():
-            ok("人格编辑器保存到 default.md")
+            ok("人格编辑器保存到 agents/default/persona.md")
         else:
             fail("人格没保存")
         page.keyboard.press("Escape")

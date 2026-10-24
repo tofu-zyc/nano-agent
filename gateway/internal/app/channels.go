@@ -3,7 +3,11 @@ package app
 import (
 	"context"
 	"reflect"
+	"slices"
+	"sort"
 	"time"
+
+	"nano-agent/gateway/internal/agents"
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
@@ -48,6 +52,14 @@ func (a *App) Web() *channel.Web { return a.web }
 
 // ReconcileChannels 让正在运行的渠道和配置一致：该开的开，该关的关，配置变了的重启。
 func (a *App) ReconcileChannels(cfg *config.Config) {
+	// 先取一份机器人列表（要拿 a.mu），再进 chMu：锁的顺序只能是 a.mu → chMu，
+	// 反过来的话会和 Status()（拿着 a.mu 读渠道）互相卡住
+	a.mu.Lock()
+	bots := []agents.Bot{}
+	if a.botStore != nil {
+		bots = a.botStore.List()
+	}
+	a.mu.Unlock()
 	a.chMu.Lock()
 	defer a.chMu.Unlock()
 	if a.runs == nil {
@@ -63,12 +75,7 @@ func (a *App) ReconcileChannels(cfg *config.Config) {
 	if a.cli != nil {
 		a.cli.SetDisplay(config.On(cfg.CLI.ShowReasoning), config.On(cfg.CLI.ShowUsage))
 	}
-	a.reconcile("telegram", cfg.Telegram.Enabled, cfg.TelegramConfig(), func() (channel.Channel, error) {
-		return channel.NewTelegram(cfg.TelegramConfig(), a.MediaStore(), a.log)
-	})
-	a.reconcile("feishu", cfg.Feishu.Enabled, cfg.FeishuConfig(), func() (channel.Channel, error) {
-		return channel.NewFeishu(cfg.FeishuConfig(), a.MediaStore(), a.log)
-	})
+	a.reconcileBotsLocked(cfg, bots)
 }
 
 func (a *App) reconcile(name string, want bool, conf any, build func() (channel.Channel, error)) {
@@ -128,7 +135,8 @@ func (a *App) stopChannel(name string) {
 	a.log.Info("渠道已停止", "channel", name)
 }
 
-// Channels 返回所有渠道（包括没启用的）的情况。
+// Channels 返回所有渠道（包括没启用的）的情况：终端、网页、内置的两个机器人，
+// 再加另外加的机器人渠道（tg.<id>、feishu.<id>）。
 func (a *App) Channels() []ChannelInfo {
 	a.chMu.Lock()
 	defer a.chMu.Unlock()
@@ -136,7 +144,48 @@ func (a *App) Channels() []ChannelInfo {
 	for _, name := range channelOrder {
 		out = append(out, a.channelInfo(name))
 	}
+	var extra []string
+	for name := range a.runs {
+		if isBotChannel(name) && !slices.Contains(channelOrder, name) {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(extra)
+	for _, name := range extra {
+		out = append(out, a.channelInfo(name))
+	}
 	return out
+}
+
+// reconcileBotsLocked 按机器人列表启动、停止、重启机器人渠道。调用方持有 chMu，不能再去拿 a.mu。
+func (a *App) reconcileBotsLocked(cfg *config.Config, bots []agents.Bot) {
+	seen := map[string]bool{}
+	for _, b := range bots {
+		key := botRunKey(b)
+		seen[key] = true
+		conf, build, want := a.botChannel(cfg, b)
+		if build == nil {
+			// 凭据还没填完：停掉，不报错
+			a.reconcile(key, false, nil, nil)
+			continue
+		}
+		a.reconcile(key, want, conf, build)
+	}
+	for name := range a.runs {
+		if !isBotChannel(name) || seen[name] || name == "web" || name == "cli" {
+			continue
+		}
+		a.stopChannel(name)
+	}
+}
+
+// botRunKey 是机器人在 runs 里的键：内置的 Telegram 是 telegram、飞书是 feishu（和老版本一致），
+// 另外加的就是它的渠道名。
+func botRunKey(b agents.Bot) string {
+	if b.Legacy && b.Kind == agents.KindTelegram {
+		return "telegram"
+	}
+	return agents.ChannelName(b)
 }
 
 func (a *App) channelInfo(name string) ChannelInfo {

@@ -14,6 +14,19 @@
   // 在这个渠道上聊过天的人（每个私聊是一个窗口）
   const people = $derived((ov.sessions ?? []).flatMap((s) => (s.endpoints ?? []).filter((e) => e.channel === name).map((e) => ({ e, s }))));
   const showDefault = $derived(String(store.field('channels.show')?.value ?? '过程'));
+  // 内置的 Telegram / 飞书也是一个机器人，绑在某个 agent 上（设置的“家”仍然在这个节点）
+  const bot = $derived(name === 'telegram' ? store.botOfChannel('tg') : name === 'feishu' ? store.botOfChannel('feishu') : undefined);
+
+  async function bindAgent(agent: string) {
+    if (!bot) return;
+    try {
+      await api.patch('/api/bots/' + encodeURIComponent(bot.id), { agent });
+      await store.refresh();
+      store.toast({ kind: 'ok', text: '换好了，新消息进新 agent 的会话' }, 2600);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
 
   async function moveEndpoint(e: EndpointInfo, sid: string) {
     try {
@@ -60,6 +73,18 @@
       {#if name !== 'web'}
         <p class="p-note p-small">聊天里显示多少过程：默认跟随 Agent（现在是「{showDefault}」），下面可以给{channelMeta[name]?.label ?? name}单独选；某个聊天窗口还可以发 <code>/show</code>。</p>
       {/if}
+    </div>
+  {/if}
+
+  {#if bot}
+    <h5 class="p-h">这个机器人是谁</h5>
+    <div class="p-card">
+      <label class="p-label">绑定的 agent
+        <select class="p-select" value={bot.agent} onchange={(e) => bindAgent((e.target as HTMLSelectElement).value)}>
+          {#each store.agents as a (a.id)}<option value={a.id}>{a.emoji} {a.name}{a.default ? '（默认）' : ''}</option>{/each}
+        </select>
+      </label>
+      <p class="p-note p-small">一个机器人只绑一个 agent：它上面的消息都进这个 agent 的会话。想给别的 agent 一个 Telegram，可以在拓扑图里「添加机器人」。</p>
     </div>
   {/if}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/proto"
@@ -179,7 +180,7 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	}
 	var task schedule.Task
 	if p.Action == "create" {
-		task = schedule.Task{ID: schedule.NewID(), Agent: "default", Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
+		task = schedule.Task{ID: schedule.NewID(), Agent: agents.SessionAgent(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
 		if s := a.sessions[sid]; s != nil && s.run != nil && len(s.run.outs) > 0 && s.run.outs[0].ep.ch != "web" {
 			task.Deliver = []string{s.run.outs[0].ep.key()}
 		} else {
@@ -228,8 +229,8 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	if task.Name == "" || task.Prompt == "" || task.When == "" {
 		return nil, errors.New("name、when、prompt 不能为空")
 	}
-	if task.Agent != "default" {
-		return nil, errors.New("当前只支持 default agent")
+	if _, ok := a.agentByID(task.Agent); !ok {
+		return nil, fmt.Errorf("没有这个 agent：%s", task.Agent)
 	}
 	if modeRank(task.Mode) < 0 || modeRank(task.Mode) > modeRank(mode) || modeRank(task.Mode) > modeRank(task.CreatorMode) {
 		return nil, errors.New("任务模式不能高于创建者或当前会话的模式")
@@ -335,6 +336,19 @@ func (a *App) ScheduleTick() {
 		}
 	}
 }
+
+// cronSID 是定时任务的会话 ID：默认 agent 是 cron:<id>，别的 agent 是 @<agent>/cron:<id>。
+func cronSID(t schedule.Task) string {
+	agent := t.Agent
+	if agent == "" {
+		agent = agents.DefaultID
+	}
+	return agents.SessionFor(agent, "cron:"+t.ID)
+}
+
+// isCronSID 判断会话是不是定时任务的会话。
+func isCronSID(sid string) bool { return strings.Contains(sid, "cron:") }
+
 func (a *App) saveTask(task schedule.Task) error {
 	tasks := a.schedules.List()
 	i := slices.IndexFunc(tasks, func(t schedule.Task) bool { return t.ID == task.ID })
@@ -353,7 +367,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if task.Running {
 		return errors.New("任务已在运行")
 	}
-	s := a.sessOf("cron:" + task.ID)
+	s := a.sessOf(cronSID(task))
 	if s.run != nil || s.compacting || len(s.queue) > 0 {
 		return errors.New("任务会话正在使用")
 	}
@@ -372,8 +386,11 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 		return err
 	}
 	fail := func(err error) error { a.completeSchedule(&task, false, err.Error()); return err }
-	if task.Agent != "default" || strings.TrimSpace(task.Prompt) == "" {
-		return fail(errors.New("任务 agent 或 prompt 无效"))
+	if strings.TrimSpace(task.Prompt) == "" {
+		return fail(errors.New("任务的 prompt 是空的"))
+	}
+	if _, ok := a.agentByID(task.Agent); !ok {
+		return fail(errors.New("任务指定的 agent 已经删掉了"))
 	}
 	if len(task.Deliver) == 0 {
 		return fail(errors.New("没有投递窗口"))
@@ -435,7 +452,7 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 		}
 	}
 	body := "[定时任务 " + task.Name + "]\n" + text
-	a.publish(events.Event{T: "say", SID: "cron:" + task.ID, Text: body})
+	a.publish(events.Event{T: "say", SID: cronSID(*task), Text: body})
 	for _, key := range task.Deliver {
 		ep := parseEndpoint(key)
 		if ep.ch == "web" {
