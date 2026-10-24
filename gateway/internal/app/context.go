@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/session"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge）就加一，
+// 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
+const prefixVer = 1
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -42,19 +47,26 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		for _, spec := range a.searchTools() {
 			all = append(all, toolOf(spec))
 		}
-		if spec, ok := a.skills.ToolSpec(); ok {
+		if spec, ok := a.skillSpec(sid); ok {
 			all = append(all, toolOf(spec))
+		}
+		if a.memoryOn(a.agentOf(sid)) {
+			all = append(all, toolOf(knowledgeTool()))
 		}
 		tools = a.groupTools(sid, all)
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
-			tools = a.toolsFor(n, false, admin)
+			tools = a.toolsFor(sid, n, false, admin)
 		}
 		if noTools {
 			tools = nil
 			for _, spec := range a.searchTools() {
 				tools = append(tools, toolOf(spec))
 			}
+		}
+		if a.memoryOn(a.agentOf(sid)) {
+			tools = append(tools, toolOf(knowledgeTool()))
+			sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		}
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
@@ -63,7 +75,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
 	// 群聊和房间的工具由白名单单独算，不套用旧快照（旧快照可能是普通会话的整套工具）
-	if st.Prefix != nil && st.Prefix.System == system && !a.isGroupSession(sid) {
+	if st.Prefix != nil && st.Prefix.System == system && st.Prefix.Ver == prefixVer && !a.isGroupSession(sid) {
 		tools = st.Prefix.Tools
 	}
 	m, _, _ := a.modelOf(sid)

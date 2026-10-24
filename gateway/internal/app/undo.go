@@ -108,8 +108,13 @@ func (a *App) undoTurn(s *sess) (text, note string, pending bool, err error) {
 		return "", "", false, fmt.Errorf("撤回失败：%w", err)
 	}
 	// 环境说明是跟着删掉的那条消息说的：下一条消息前面重新说一次
-	if st := a.store.Settings(s.sid); st.EnvNote != "" && strings.Contains(removed[0].Content, st.EnvNote) {
-		st.EnvNote = ""
+	if st := a.store.Settings(s.sid); st.EnvNote != "" && strings.Contains(removed[0].Content, st.EnvNote) || strings.Contains(removed[0].Content, memNoteOpen) {
+		if strings.Contains(removed[0].Content, st.EnvNote) {
+			st.EnvNote = ""
+		}
+		if strings.Contains(removed[0].Content, memNoteOpen) {
+			st.MemNote = "" // 记忆说明也是跟着这条说的
+		}
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存会话设置失败", "sid", s.sid, "err", err)
 		}

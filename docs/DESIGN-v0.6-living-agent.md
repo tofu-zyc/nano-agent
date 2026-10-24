@@ -231,7 +231,15 @@ invalid: 2026-10-30 已经换工作了，见「张三的新工作」   # 过时�
 
 分阶段做，每阶段 `make test` 过了单独提交，推到 `dev/v0.6`，更新这里。
 
-- [ ] **A 知识库**：`gateway/internal/knowledge` 包（存取、frontmatter、索引、BM25、可见性）；`Knowledge` 工具；记忆说明 + 想起来的；agent 自己的技能目录合并；`/memory` `/forget`；网页 API（`/api/agents/{id}/memory...`）。
+- [x] **A 知识库**（后端完成，网页面板在 E）：
+  - `gateway/internal/knowledge`：`entry.go`（frontmatter 解析/生成、`Slug`、`VisibleTo`）、`search.go`（`Tokens` 中文二元切分、BM25）、`store.go`（按修改时间刷新、`Write`/`WriteRaw`/`Edit`/`Invalidate`/`Delete`/`Search`/`Mentioned`/`Person`、自动写 `INDEX.md`；写入后直接更新缓存，不靠修改时间）。
+  - `app/memory.go`：`memStore`/`sharedMem`、`viewerOf`（群里只看 all，管理员和内心活动/做梦/定时任务全看，私聊看 all+对方）、`memoryNote`（`[记忆]…[/记忆]` 块：自我认知、对方画像、索引，约 2k token 封顶）、`recallNote`（`[想起来的]…[/想起来的]`：提到标题的 + BM25 命中 ≥2 个词的，最多 3 条，会话里提过的不再提）、`memoryNotes` 在 `startRun` 里放到消息前面（群里由触发开的一轮作为单独一条 user 消息）；会话设置 `MemNote`（哈希）、`Recalled`，压缩/清空/撤回时清掉。
+  - `Knowledge` 工具（`knowledgeCall`）：list/search/read/write/edit/invalidate/delete/person；`self.md`、`shared/` 前缀；群里只读；访客私聊里写的强制只给他自己看、不能真删；写入自动补 `source`、`updated`；没写 visible 时：群里 all，知识/流程/经验 all，其余主人会话 admin。工具定义加了 `prefixVer`（旧会话的工具快照作废一次，好让老会话拿到 Knowledge）。群聊白名单默认加了 Knowledge。
+  - 命令 `/memory [关键词]`、`/forget <标题或路径>`。
+  - 网页 API（`app/memory_web.go`、`web/agents.go`）：`GET /api/agents/{id}/memory`、`GET …/memory/search?q=`、`GET|PUT|DELETE …/memory/item?path=`（PUT 带 `{raw}`，path 为空就新建）、`POST …/memory/invalidate?path=`（`{reason, restore}`）、`PUT …/memory/self`（`{text}`）；事件 `{t:"memory", name:<agent>}`。
+  - agent 自己的技能目录：`skills.Merged`/`LoadAny`/`Body`/`ToolSpecFor`；`Reserved = dream, life` 不进 Skill 工具；`app.ownSkills`/`skillSpec`/`skillText`。
+  - 测试：`knowledge/knowledge_test.go`；`app/memory_test.go`（记忆说明只在变了时放、想起来的不重复、群里看不到私密、Knowledge 各动作和权限、关掉记忆、agent 技能覆盖、网页接口）。
+  - **网页那边要注意**：用户消息前面现在可能有 `[记忆]…[/记忆]`、`[想起来的]…[/想起来的]` 两个多行块（在 `[系统]` 环境说明之后、时间戳之前），`web/src/lib/format.ts` 的 `parseUser` 要把它们拆出来折叠显示（E 阶段做）。
 - [ ] **B 做梦**：`Diary` 工具、`dream` 会话、触发（idle/nightly/sleep/off、每天上限）、`dream-state.json`、梦境日志、自带 `skills/dream/SKILL.md`、`/sleep`、网页「现在整理」。
 - [ ] **C 两种类型 + 内心活动**：`style` 字段和设置分组（含修“跟随全局”）、拟人守则、`life` 会话和心跳、`data/life.json`、`Message` 的 `chat:` 和不追着发、近况说明、自带 `skills/life/SKILL.md`、`/wake`。
 - [ ] **D 统一聊天循环**：门槛 + 退避、工具型群里不插话、私聊拆条和 `[不回复]`、`FollowUp`、房间里 agent @ agent、房间发言计额度。

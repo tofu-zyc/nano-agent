@@ -75,6 +75,8 @@ func (s *Store) CommitCompact(sid string, cut int, summary string, now time.Time
 	}
 	st.Meter = Meter{}
 	st.Prefix = nil
+	// 记忆说明跟着旧对话一起被整理掉了：下一轮重新放
+	st.MemNote, st.Recalled = "", nil
 	st.CompactedAt = now.Unix()
 	if err := s.SaveSettings(sid, st); err != nil {
 		return err

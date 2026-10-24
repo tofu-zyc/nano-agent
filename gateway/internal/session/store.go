@@ -139,6 +139,7 @@ func (s *Store) Compact(sid string, high, low int, summary string) (int, error) 
 	if st.EnvNote != "" && !strings.Contains(st.Summary, st.EnvNote) {
 		st.Summary += "\n" + st.EnvNote
 	}
+	st.MemNote, st.Recalled = "", nil
 	if err := s.SaveSettings(sid, st); err != nil {
 		return 0, err
 	}
@@ -202,8 +203,9 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || len(st.Recalled) > 0 {
 		st.EnvNote, st.Base, st.Summary = "", 0, ""
+		st.MemNote, st.Recalled = "", nil
 		st.Meter = Meter{}
 		st.Prefix = nil
 		st.Omitted = nil

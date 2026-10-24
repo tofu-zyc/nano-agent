@@ -859,8 +859,8 @@ func TestCompactionKeepsRequestsAppendOnly(t *testing.T) {
 func TestGatewayToolsOnlyForAdmin(t *testing.T) {
 	e := setup(t)
 	e.a.mu.Lock()
-	admin := e.a.toolsFor(e.a.nodes["test"], false, true)
-	guest := e.a.toolsFor(e.a.nodes["test"], false, false)
+	admin := e.a.toolsFor(mainSID, e.a.nodes["test"], false, true)
+	guest := e.a.toolsFor(mainSID, e.a.nodes["test"], false, false)
 	e.a.mu.Unlock()
 	names := func(ts []llm.Tool) []string {
 		var out []string

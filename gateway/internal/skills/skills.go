@@ -114,9 +114,84 @@ func (r *Registry) find(name string) (Skill, bool) {
 	return Skill{}, false
 }
 
-// ToolSpec 是给模型的 Skill 工具定义；没有技能时返回 false。只随技能的名字和简介变化，方便前缀缓存。
-func (r *Registry) ToolSpec() (proto.ToolSpec, bool) {
-	list := r.List()
+// Reserved 是网关自己用的技能：dream（怎么整理记忆）、life（拟人型醒来干什么）。它们是策略，
+// 由网关在整理记忆、内心活动时放进提示词，不出现在 Skill 工具里。用户可以改，也可以在
+// agents/<id>/skills/ 下放自己的版本。
+var Reserved = []string{"dream", "life"}
+
+func reserved(name string) bool {
+	for _, r := range Reserved {
+		if r == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Merged 是全局技能加上 agent 自己的（同名时用 agent 的），不含保留的。own 可以是 nil。
+func Merged(global, own *Registry) []Skill {
+	byName := map[string]Skill{}
+	for _, r := range []*Registry{global, own} {
+		if r == nil {
+			continue
+		}
+		for _, s := range r.List() {
+			if !reserved(s.Name) {
+				byName[s.Name] = s
+			}
+		}
+	}
+	out := make([]Skill, 0, len(byName))
+	for _, s := range byName {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// LoadAny 按顺序在几个目录里找技能（agent 自己的放前面）。
+func LoadAny(name string, regs ...*Registry) (text string, files []host.File, hash string, ok bool) {
+	var first *Registry
+	for _, r := range regs {
+		if r == nil {
+			continue
+		}
+		if first == nil {
+			first = r
+		}
+		if _, found := r.find(name); found && !reserved(name) {
+			return r.Load(name)
+		}
+	}
+	if first == nil || reserved(name) {
+		return "没有这个技能：" + name, nil, "", false
+	}
+	return regs[len(regs)-1].Load(name)
+}
+
+// Body 是某个技能 SKILL.md 的正文（去掉 frontmatter），按顺序找，都没有时 ok 为 false。保留的技能用它。
+func Body(name string, regs ...*Registry) (string, bool) {
+	for _, r := range regs {
+		if r == nil {
+			continue
+		}
+		if s, found := r.find(name); found {
+			if md, err := readSmall(filepath.Join(s.Dir, "SKILL.md")); err == nil {
+				_, _, body := parse(md)
+				if strings.TrimSpace(body) != "" {
+					return strings.TrimSpace(body), true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// ToolSpec 是给模型的 Skill 工具定义（只有这个目录的技能）；没有技能时返回 false。
+func (r *Registry) ToolSpec() (proto.ToolSpec, bool) { return ToolSpecFor(Merged(r, nil)) }
+
+// ToolSpecFor 是给模型的 Skill 工具定义；没有技能时返回 false。只随技能的名字和简介变化，方便前缀缓存。
+func ToolSpecFor(list []Skill) (proto.ToolSpec, bool) {
 	if len(list) == 0 {
 		return proto.ToolSpec{}, false
 	}

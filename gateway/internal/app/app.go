@@ -20,6 +20,7 @@ import (
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/kernel"
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
@@ -47,6 +48,8 @@ var Commands = []Command{
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
 	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
+	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
+	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
@@ -150,6 +153,8 @@ type App struct {
 	nodeSeq       int
 	totals        Totals
 	sessions      map[string]*sess
+	mems          map[string]*knowledge.Store // 每个 agent 的知识库（memory.go），"" 是共用的
+	agentSkills   map[string]*skills.Registry  // 每个 agent 自己的技能目录
 	approvals     map[int]*approval
 	nextAppr      int
 	runSeq        uint64
@@ -465,6 +470,12 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "start":
 		a.answer(c, helpText)
 		return
+	case "memory":
+		a.cmdMemory(c, arg)
+		return
+	case "forget":
+		a.cmdForget(c, arg)
+		return
 	case "session":
 		a.cmdSession(c, arg)
 		return
@@ -735,6 +746,21 @@ func (a *App) startRun(s *sess) {
 	note := ""
 	if !group {
 		note = a.envNote(w, rt, admin)
+	}
+	// 长期记忆：记忆说明（变了才放）和这一轮想起来的几条，也放在消息前面（memory.go）
+	recallText := text
+	if head.trigger {
+		recallText = a.recentLines(s.sid, 3)
+	}
+	if mem := a.memoryNotes(s.sid, head.who, recallText, &st, &dirty); mem != "" {
+		if head.trigger {
+			// 群里由触发开的一轮：消息已经在历史里了，记忆单独作为一条放在后面
+			if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: mem}); err != nil {
+				a.log.Warn("保存记忆说明失败", "sid", s.sid, "err", err)
+			}
+		} else {
+			content = mem + "\n" + content
+		}
 	}
 	if note != st.EnvNote && note != "" {
 		content = note + "\n" + content
@@ -1135,8 +1161,8 @@ func (a *App) generateModel(s *sess) {
 	r := s.run
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
-	if st.Prefix == nil || st.Prefix.System != system {
-		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools}
+	if st.Prefix == nil || st.Prefix.System != system || st.Prefix.Ver != prefixVer {
+		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools, Ver: prefixVer}
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存提示快照失败", "err", err)
 		}

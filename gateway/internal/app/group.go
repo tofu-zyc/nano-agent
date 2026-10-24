@@ -227,7 +227,7 @@ func (a *App) groupTick() {
 func (a *App) groupTools(sid string, all []llm.Tool) []llm.Tool {
 	allow := a.agentOf(sid).GroupTools
 	if len(allow) == 0 {
-		allow = []string{"WebSearch", "WebFetch", "Skill"}
+		allow = []string{"WebSearch", "WebFetch", "Skill", knowledgeLabel}
 	}
 	out := make([]llm.Tool, 0, len(allow))
 	for _, t := range all {

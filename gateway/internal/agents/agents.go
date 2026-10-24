@@ -56,6 +56,19 @@ type Agent struct {
 	GroupParts     *int    `json:"group_parts,omitempty"`
 	GroupMinGap    *string `json:"group_min_gap,omitempty"`
 
+	// v0.6（docs/DESIGN-v0.6-living-agent.md）：类型、拟人型的内心活动、长期记忆和做梦
+	Style      string  `json:"style,omitempty"`       // tool（空也是）| life
+	LifeAwake  *string `json:"life_awake,omitempty"`  // 醒着的时间，如 08:00-23:30
+	LifeLevel  *string `json:"life_level,omitempty"`  // low | normal | high
+	LifeReach  *string `json:"life_reach,omitempty"`  // owner | all | off
+	LifeBudget *int    `json:"life_budget,omitempty"` // 内心活动每天最多用多少 token，0 不限
+	Memory     *string `json:"memory,omitempty"`      // on | off
+	DreamWhen  *string `json:"dream_when,omitempty"`  // idle | nightly | sleep | off
+	DreamAt    *string `json:"dream_at,omitempty"`    // nightly 时几点，如 03:00
+	DreamIdle  *string `json:"dream_idle,omitempty"`  // idle 时空闲多久，如 2h
+	DreamMax   *int    `json:"dream_max,omitempty"`   // 每天最多自动整理几次
+	DreamModel *string `json:"dream_model,omitempty"` // 整理记忆用的模型，空就用 agent 的
+
 	Created int64 `json:"created,omitempty"`
 }
 
@@ -206,8 +219,24 @@ func normalize(a *Agent) error {
 	if a.Mode != nil && *a.Mode != "" && !slices.Contains([]string{"auto", "ask", "readonly"}, *a.Mode) {
 		return errors.New("权限模式只能是 auto、ask、readonly，或者空（跟随全局）")
 	}
+	a.Style = strings.TrimSpace(a.Style)
+	if a.Style == StyleTool {
+		a.Style = ""
+	}
+	if a.Style != "" && a.Style != StyleLife {
+		return errors.New("类型只能是 tool（工具型）或 life（拟人型）")
+	}
 	return nil
 }
+
+// 两种类型：工具型（默认）和拟人型。
+const (
+	StyleTool = "tool"
+	StyleLife = "life"
+)
+
+// Life 是拟人型。
+func (a Agent) Life() bool { return a.Style == StyleLife }
 
 func (s *Store) save() error {
 	if s.st.Default == "" {

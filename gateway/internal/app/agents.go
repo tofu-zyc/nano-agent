@@ -481,6 +481,7 @@ func (a *App) toolNames() []string {
 	}
 	add("Skill")
 	add("Schedule")
+	add(knowledgeLabel)
 	for _, spec := range a.searchTools() {
 		add(spec.Name)
 	}

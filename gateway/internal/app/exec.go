@@ -56,6 +56,15 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		go a.messageTool(s.sid, raw, reply)
 		return
 	}
+	if m.Name == knowledgeLabel {
+		out, err := a.knowledgeCall(s.sid, r.from, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
 	if m.Name == "Skill" {
 		a.skillTool(r, s.sid, m, reply)
 		return
@@ -137,7 +146,7 @@ func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, strin
 		Name string `json:"name"`
 	}
 	json.Unmarshal(m.Args, &args)
-	text, files, _, ok := a.skills.Load(args.Name)
+	text, files, _, ok := skills.LoadAny(args.Name, a.ownSkills(a.agentOf(sid).ID), a.skills)
 	if !ok {
 		reply(false, text)
 		return
