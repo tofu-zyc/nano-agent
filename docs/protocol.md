@@ -153,7 +153,7 @@ K→G {"t":"update_result","ok":true,"version":"0.1.1"}
 ### v0.3 网关工具和定时运行（协议 v9 的可选字段）
 
 - input 可带 run_timeout_ms、approval_timeout_ms（毫秒）；缺省/0 仍用内核配置。定时任务默认都为 1800000。
-- v0.3.3 起网关每一轮都带上自己的设置（网页拓扑图的内核节点里改）：`max_steps`（最多请求模型几次）、`run_timeout_ms`、`approval_timeout_ms`，大于 0 是上限，小于 0 表示不限；`max_output`（工具结果最多保留的字节数，1024–64 MB），内核用在本机执行器和交给网关的 `exec` 上。kernel.conf 里的同名项只在连着旧网关、input 里没有这些字段时兜底。
+- v0.4.0 起网关每一轮都带上自己的设置（网页拓扑图的 Agent 节点里改）：`max_steps`（最多请求模型几次）、`run_timeout_ms`、`approval_timeout_ms`，大于 0 是上限，小于 0 表示不限；`max_output`（工具结果最多保留的字节数，1024–64 MB），内核用在本机执行器和交给网关的 `exec` 上。kernel.conf 里的同名项只在连着旧网关、input 里没有这些字段时兜底。
 - WebSearch/WebFetch 是公开只读策略：含 none/readonly 在内均可执行，内核通过 exec 交给网关，不附工作目录，不接收搜索密钥。
 - Schedule 只允许管理员（input.elevate=true）。list/run_now 走只读策略，create/update/delete 走写策略：ask 审批、auto 直接、readonly 拒绝。网关再次验证身份和任务权限上限。
 - GatewayAdmin 的 history_delete 在 readonly 下也要求审批，其他管理动作沿用既有规则。
