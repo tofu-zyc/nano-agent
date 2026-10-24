@@ -85,6 +85,7 @@ func (a *App) roomHumanSay(room rooms.Room, name, text string) {
 		}
 		s := a.sessOf(sid)
 		s.groupFresh = true
+		s.groupPending++
 		s.groupLast = a.now()
 		s.groupEp = endpoint{ch: "room", chat: room.ID}
 		// 暂停了：消息照样进成员的会话（它们还能听到），只是不叫人回
@@ -146,7 +147,7 @@ func (a *App) roomTrigger(s *sess, member string, room rooms.Room) {
 // roomAgentSay 是 agent 在房间里说了一句：记进房间记录、转给其他成员、看看要不要暂停。调用方持有锁。
 func (a *App) roomAgentSay(room rooms.Room, member, text string) {
 	text = strings.TrimSpace(text)
-	if text == "" || (strings.Contains(text, "[不回复]") && len([]rune(text)) <= 10) {
+	if isSilence(text) {
 		return
 	}
 	ag, ok := a.agentByID(member)
@@ -171,8 +172,15 @@ func (a *App) roomAgentSay(room rooms.Room, member, text string) {
 		}
 		s := a.sessOf(sid)
 		s.groupFresh = true
+		s.groupPending++
 		s.groupLast = a.now()
 		s.groupEp = endpoint{ch: "room", chat: room.ID}
+		// 在群里 @ 了或者叫到别的成员：叫醒它（连续发言、来回轮数的暂停规则兜底）
+		if !room.Paused && !room.MutedAgent(m) {
+			if other, ok := a.agentByID(m); ok && (strings.Contains(text, "@"+other.Name) || groupMentionsName(text, other.Name)) {
+				a.roomTrigger(s, m, room)
+			}
+		}
 	}
 	a.signalRoomWaiters(room.ID, member, text)
 	a.roomGuard(room, member)

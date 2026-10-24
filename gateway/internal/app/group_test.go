@@ -109,6 +109,7 @@ func TestGroupProactive(t *testing.T) {
 	life, _ := store.Get("default")
 	life.Style = agents.StyleLife
 	store.Update(life)
+	e.a.rnd = func() float64 { return 0 } // 门槛一定抽中（门槛本身另有测试）
 	e.a.now = func() time.Time { return base }
 	e.a.mu.Unlock()
 

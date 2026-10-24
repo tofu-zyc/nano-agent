@@ -62,15 +62,26 @@ func (f *fakeCh) wait(t *testing.T, substr string) string {
 // recLLM 包一层 Mock，记下最后一次请求
 type recLLM struct {
 	llm.Mock
-	mu   sync.Mutex
-	last llm.Request
+	mu    sync.Mutex
+	last  llm.Request
+	fixed string // 不为空时模型就回这句（测试“只回 [不回复]”之类）
 }
 
 func (r *recLLM) Chat(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (*llm.Result, error) {
 	r.mu.Lock()
 	r.last = req
+	fixed := r.fixed
 	r.mu.Unlock()
+	if fixed != "" {
+		return &llm.Result{Reason: llm.ReasonFinal, Content: fixed, Usage: llm.Usage{PromptTokens: 100, CompletionTokens: 10}}, nil
+	}
 	return r.Mock.Chat(ctx, req, onDelta)
+}
+
+func (r *recLLM) say(text string) {
+	r.mu.Lock()
+	r.fixed = text
+	r.mu.Unlock()
 }
 
 func (r *recLLM) lastReq() llm.Request {

@@ -257,7 +257,15 @@ invalid: 2026-10-30 已经换工作了，见「张三的新工作」   # 过时�
   - 内心会话的工具：WebSearch/WebFetch（配了搜索才有）、Knowledge、Message；系统提示 = 人格 + 拟人守则 + life 技能（`skills/life/SKILL.md`，和 `defaultLifeSkill` 一样，有测试对比）。
   - `Message` 的 `to: chat:<会话>`（`messageChat`，`rooms.go`）：只能发自己的私聊；记进那个会话（assistant）并发到最近说过话的窗口（`epRec.Last`，`attach` 里每条消息更新，一轮结束时存盘）；内心活动里发的要守规矩（`life_reach`、对方没回不再找、每天次数、睡觉时间）。内心活动里能用 Message（`exec.go` 放行 `@<id>/life`）；`life_reach=off` 时也不能私聊别的 agent。
   - 测试：`app/life_test.go`（技能和仓库一致、醒来的时机和看到的情况、近况只放一次、/wake 不算次数、不醒的几种情况、主动找人的规矩、设置恢复默认和类型）；群聊旧测试改成拟人型测插话，并加了“工具型不插话”。
-- [ ] **D 统一聊天循环**：门槛 + 退避、工具型群里不插话、私聊拆条和 `[不回复]`、`FollowUp`、房间里 agent @ agent、房间发言计额度。
+- [x] **D 统一聊天循环**：
+  - 门槛 `groupGate`（`group.go`，麦麦的逻辑回归特征和权重：@别人、问号、只有图片、最近 5 分钟自己说话占比、最近 5 分钟消息数、离上次说话多久、新消息条数）× `talkValue`（low 0.35 / normal 0.7 / high 1）；`groupTick` 里用 `a.random()` 抽，没抽中就 `groupFresh=false` 等下一批新消息（不调模型、不算判断次数）。测试里 `a.rnd` 换成固定值。
+  - 退避：`sess.groupSilent`（自己凑上来又回 `[不回复]` 的连续次数，`finish` 里记）≥2 时判断间隔是 15s×2^(n−2)（最多 5 分钟，不短于原来的 1 分钟）；`sess.groupPending`（上一轮之后的新消息数，listenGroup / 房间转发时加，开一轮时清零）≥6 就不退避。
+  - 工具型群里不插话（C 里做了）。
+  - 拟人型私聊：不开流式窗口（`startRun`），`finish` 里纯聊天（这一轮没调工具 `run.usedTools`、没有代码块、状态 OK）的回复用 `dmParts` 按空行分最多 3 条、`sendParts` 隔一会儿发；只回 `[不回复]` 就不发。干活（调了工具）的回复照旧一整条。`isSilence` 统一了 `[不回复]` 的判断。
+  - `FollowUp` 工具（`life.go`，拟人型的私聊和群里）：`{minutes 1–1440, note, cancel}` 存在 `lifeState.FollowUps`；`lifeTick` 里 `followUpTick` 到点就在那个会话追加一条 `[系统] 你之前约好这时候再看看：…` 并开一轮（trigger，身份用那个窗口的 `who`，群里算主动插话）；睡着时到点的挪到醒来；私聊里对方先说话就取消（`lifeAnswered`）。
+  - 网关里的群：`roomAgentSay` 里 agent 说的话 @ 了或叫到别的成员就 `roomTrigger` 叫醒（暂停规则兜底）；房间里说出口的也记进 `groupSpeaks`（每小时额度）；不说话（`[不回复]`）不再算“刚说过话”。两个 agent 的私聊房间不自动来回接话（只在被叫到、或 Message 指名时回），免得一直聊下去。
+  - envNote 不再在触发开的一轮里更新（以前只有群里有触发，现在私聊的 FollowUp 也是触发，不然环境说明会记成“说过了”却没放进去）。
+  - 测试：`app/loop_test.go`（门槛概率的方向、没抽中不调模型、退避、私聊分条和不接、工具型一整条、FollowUp 到点/取消/睡着挪到醒来/工具型不能约、房间里 @ 叫醒和计额度）。
 - [ ] **E 网页**：agent 面板、记忆节点、只读会话、拓扑状态；`check-web-ui.py`。
 - [ ] **F 收尾**：README、HANDOFF、ARCHITECTURE、e2e、`make test`、CI 全绿；等用户同意合并发布 v0.6.0。
 

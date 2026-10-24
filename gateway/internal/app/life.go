@@ -197,6 +197,7 @@ func (a *App) lifeTick() {
 			continue
 		}
 		ls := a.lifeOf(ag.ID)
+		a.followUpTick(ag, ls, now)
 		if ls.Next == 0 {
 			// 刚变成拟人型（或者第一次启动）：过一会儿先醒一次
 			ls.Next = now.Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))).Unix()
@@ -571,5 +572,93 @@ func (a *App) agentLoop() {
 			a.dreamTick()
 			a.lifeTick()
 		}
+	}
+}
+
+// ---- FollowUp：约好过一会儿再看看这个聊天（拟人型的私聊和群里）----
+
+const followUpSchema = `{"type":"object","properties":{
+"minutes":{"type":"integer","description":"过多少分钟再看，1 到 1440"},
+"note":{"type":"string","description":"到时候要想起来的事，比如“问问他面试怎么样了”"},
+"cancel":{"type":"boolean","description":"取消这个聊天里约好的"}
+}}`
+
+func followUpTool() proto.ToolSpec {
+	return proto.ToolSpec{Name: "FollowUp", Description: "约好过一会儿再看看这个聊天：到时候你会在这里醒来（带着你写的 note），可以接着说点什么，也可以不说。" +
+		"比如问了对方一个问题还没回、他说等会儿找你、你答应了晚点提醒他。私聊里对方先说话了就自动取消；一个聊天只留一个，新的替换旧的。",
+		InputSchema: json.RawMessage(followUpSchema)}
+}
+
+// followUpCall 执行 FollowUp。调用方持有锁。
+func (a *App) followUpCall(sid string, raw []byte) (string, error) {
+	ag := a.agentOf(sid)
+	if !ag.Life() || isInnerSID(sid) || a.agentRoot == "" {
+		return "", errors.New("只有拟人型 agent 在聊天里能约“过会儿再看”")
+	}
+	var x struct {
+		Minutes int    `json:"minutes"`
+		Note    string `json:"note"`
+		Cancel  bool   `json:"cancel"`
+	}
+	if err := json.Unmarshal(raw, &x); err != nil {
+		return "", errors.New("参数格式不对")
+	}
+	ls := a.lifeOf(ag.ID)
+	if x.Cancel {
+		delete(ls.FollowUps, sid)
+		a.saveLife()
+		return "取消了。", nil
+	}
+	if x.Minutes < 1 || x.Minutes > 24*60 {
+		return "", errors.New("minutes 要在 1 到 1440 之间")
+	}
+	at := a.now().Add(time.Duration(x.Minutes) * time.Minute)
+	ls.FollowUps[sid] = followUp{At: at.Unix(), Note: cutRunes(strings.TrimSpace(x.Note), 200)}
+	a.saveLife()
+	return "好，" + at.In(a.loc).Format("01-02 15:04") + " 再来看看。", nil
+}
+
+// followUpTick 处理到点的“过会儿再看”：在那个聊天里放一条说明，叫醒它说一句（或者不说）。
+// 睡着的时候到点的，挪到醒来的时候。调用方持有锁。
+func (a *App) followUpTick(ag agents.Agent, ls *lifeState, now time.Time) {
+	for sid, f := range ls.FollowUps {
+		if now.Unix() < f.At {
+			continue
+		}
+		if w := a.awakeOf(ag); !w.contains(now) {
+			ls.FollowUps[sid] = followUp{At: w.nextStart(now).Unix(), Note: f.Note}
+			a.saveLife()
+			continue
+		}
+		s := a.sessOf(sid)
+		if s.run != nil || len(s.queue) > 0 || s.compacting {
+			continue // 正在聊：过一会儿再看
+		}
+		delete(ls.FollowUps, sid)
+		a.saveLife()
+		ep, ok := a.lastEndpoint(sid)
+		if !ok {
+			continue
+		}
+		note := "[系统] 你之前约好这时候再看看"
+		if f.Note != "" {
+			note += "：" + f.Note
+		}
+		note += "（现在 " + now.Format("15:04") + "）。想说就说；没什么要说的就只回 [不回复]。"
+		if err := a.store.Append(sid, session.Msg{Role: "user", Content: note}); err != nil {
+			a.log.Warn("保存约好的提醒失败", "sid", sid, "err", err)
+			continue
+		}
+		group := a.isGroupSession(sid)
+		who := ""
+		if r := a.eps[ep.key()]; r != nil {
+			who = r.Who
+		}
+		if group {
+			s.groupProactive = true
+		}
+		s.queue = append(s.queue, queued{ep: ep, who: who, trigger: true, m: channel.Message{ChatID: ep.chat, Group: group}})
+		a.log.Info("约好的时间到了", "agent", ag.ID, "sid", sid)
+		a.startRun(s)
 	}
 }

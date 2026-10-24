@@ -81,6 +81,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		if a.memoryOn(a.agentOf(sid)) {
 			all = append(all, toolOf(knowledgeTool()))
 		}
+		if ag.Life() {
+			all = append(all, toolOf(followUpTool()))
+		}
 		tools = a.groupTools(sid, all)
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
@@ -94,8 +97,11 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		}
 		if a.memoryOn(a.agentOf(sid)) {
 			tools = append(tools, toolOf(knowledgeTool()))
-			sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		}
+		if ag.Life() {
+			tools = append(tools, toolOf(followUpTool()))
+		}
+		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}

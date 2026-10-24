@@ -191,6 +191,8 @@ type sess struct {
 	groupSpeaks    []time.Time
 	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
 	groupThoughts  []time.Time // 最近一小时判断了几次
+	groupSilent    int         // 自己凑上来、又决定不说话的连续次数（退避用）
+	groupPending   int         // 上一轮之后进来的新消息条数
 }
 
 // queued 是排队等处理的一条消息。trigger 是群聊里“该你说话了”的触发：
@@ -238,6 +240,7 @@ type run struct {
 	proactive  bool      // 群聊里自己凑上来的（上一次是 groupTick 触发的）
 	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
 	withImages bool      // 这一轮的模型能接收图片
+	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
 	rt    route
@@ -759,7 +762,7 @@ func (a *App) startRun(s *sess) {
 	// 群里说话的人按访客算；管理员在群里也只能用群聊白名单里的工具
 	admin := a.isAdmin(head.who) && !group
 	note := ""
-	if !group && !head.inner {
+	if !group && !head.inner && !head.trigger {
 		note = a.envNote(w, rt, admin)
 	}
 	// 长期记忆：记忆说明（变了才放）和这一轮想起来的几条，也放在消息前面（memory.go）
@@ -808,7 +811,9 @@ func (a *App) startRun(s *sess) {
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
-	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil && !group {
+	s.groupPending = 0
+	// 拟人型的私聊不流式显示：像人一样打完字再发（纯聊天的回复还会拆成几条）
+	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil && !group && !a.agentOf(s.sid).Life() {
 		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
 	}
 	// 同一个会话的其他窗口里能同步显示的（命令行）：先显示这条消息，再显示回复过程
@@ -1139,6 +1144,16 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	group := a.isGroupSession(s.sid)
 	roomOf, inRoom := a.roomOfSession(s.sid)
+	if group && r.proactive {
+		// 自己凑上来又不想说：记着，连着几次就越等越久
+		if isSilence(body) {
+			s.groupSilent++
+		} else {
+			s.groupSilent = 0
+		}
+	}
+	// 拟人型的私聊：纯聊天的回复像人一样分几条发；只回 [不回复] 就不接
+	lifeDM := !group && !inRoom && a.agentOf(s.sid).Life()
 	for _, o := range r.outs {
 		text := note
 		if body != "" && (o.view == nil || !r.streamed) {
@@ -1154,12 +1169,29 @@ func (a *App) finish(s *sess, status, detail string) {
 			a.sendGroup(s, o.ep, text)
 			continue
 		}
+		if lifeDM && o.view == nil && o.ep.ch != "web" {
+			if isSilence(body) {
+				if note != "" {
+					a.deliver(o.ep, note, "")
+				}
+				continue
+			}
+			if !r.usedTools && !strings.Contains(body, "```") && status == proto.StatusOK {
+				parts := dmParts(body, 3)
+				if note != "" {
+					parts = append(parts, note)
+				}
+				a.sendParts(o.ep, parts)
+				continue
+			}
+		}
 		a.deliver(o.ep, text, "")
 	}
-	// agent 在房间里的回复：记进群记录，转给其他成员；顺手记用量
+	// agent 在房间里的回复：记进群记录，转给其他成员；说出口的也算进每小时的额度；顺手记用量
 	if inRoom {
-		if roomLogSID(roomOf.ID) != s.sid && strings.TrimSpace(body) != "" {
+		if roomLogSID(roomOf.ID) != s.sid && !isSilence(body) {
 			s.groupSpokeAt = a.now()
+			s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
 			a.roomAgentSay(roomOf, roomSender(s.sid), body)
 		}
 		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
@@ -1306,6 +1338,7 @@ func (a *App) generateModel(s *sess) {
 		switch res.Reason {
 		case llm.ReasonToolUse:
 			turn.Reason = proto.ReasonToolUse
+			r.usedTools = true
 			for _, c := range res.Calls {
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)

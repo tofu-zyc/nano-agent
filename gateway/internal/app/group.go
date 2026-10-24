@@ -9,6 +9,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -134,6 +135,7 @@ func (a *App) listenGroup(s *sess, ep endpoint, m channel.Message, who string) {
 		a.log.Warn("保存群消息失败", "sid", s.sid, "err", err)
 	}
 	s.groupFresh = true
+	s.groupPending++
 	s.groupLast = a.now()
 	s.groupEp = ep
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: strings.TrimSpace(m.Text),
@@ -192,7 +194,12 @@ func (a *App) groupMayThink(s *sess, rule groupRule, now time.Time) bool {
 	if rule.Decisions <= 0 {
 		return false
 	}
-	if !s.groupThoughtAt.IsZero() && now.Sub(s.groupThoughtAt) < rule.ThinkGap {
+	gap := rule.ThinkGap
+	// 连着几次都决定不说话：越等越久（15 秒起翻倍，最多 5 分钟）；新消息攒够 6 条就不等了
+	if s.groupSilent >= 2 && s.groupPending < 6 {
+		gap = max(gap, min(15*time.Second<<min(s.groupSilent-2, 10), 5*time.Minute))
+	}
+	if !s.groupThoughtAt.IsZero() && now.Sub(s.groupThoughtAt) < gap {
 		return false
 	}
 	s.groupThoughts = cleanupGroupSpeaks(s.groupThoughts, now)
@@ -233,6 +240,11 @@ func (a *App) groupTick() {
 		if !a.groupMayThink(s, rule, now) {
 			continue
 		}
+		// 不调模型的门槛：按这几条新消息估计“该不该接话”，乘上积极度抽一次；没抽中就等下一批新消息
+		if a.random() >= a.groupGate(s, now)*talkValue(rule.Eagerness) {
+			s.groupFresh = false
+			continue
+		}
 		s.groupThoughtAt = now
 		s.groupThoughts = append(s.groupThoughts, now)
 		s.groupFresh = false
@@ -247,7 +259,7 @@ func (a *App) groupTick() {
 func (a *App) groupTools(sid string, all []llm.Tool) []llm.Tool {
 	allow := a.agentOf(sid).GroupTools
 	if len(allow) == 0 {
-		allow = []string{"WebSearch", "WebFetch", "Skill", knowledgeLabel}
+		allow = []string{"WebSearch", "WebFetch", "Skill", knowledgeLabel, "FollowUp"}
 	}
 	out := make([]llm.Tool, 0, len(allow))
 	for _, t := range all {
@@ -261,15 +273,20 @@ func (a *App) groupTools(sid string, all []llm.Tool) []llm.Tool {
 	return out
 }
 
+// isSilence 是模型决定不说话：只回了 [不回复]（或者什么都没回）。
+func isSilence(text string) bool {
+	text = strings.TrimSpace(text)
+	return text == "" || strings.Contains(text, "[不回复]") && len([]rune(text)) <= 10
+}
+
 // sendGroup 用人的方式发群消息：按空行拆成最多 N 条，每条不超过长度上限，中间停一会儿。
 // 模型只回 [不回复] 就什么都不发。调用方持有锁。
 func (a *App) sendGroup(s *sess, ep endpoint, text string) {
-	text = strings.TrimSpace(text)
-	if text == "" || (strings.Contains(text, "[不回复]") && len([]rune(text)) <= 10) {
+	if isSilence(text) {
 		return
 	}
 	rule := a.groupRuleOf(s.sid)
-	parts := groupParts(text, rule.Parts, rule.MaxLen)
+	parts := groupParts(strings.TrimSpace(text), rule.Parts, rule.MaxLen)
 	if len(parts) == 0 {
 		return
 	}
@@ -278,34 +295,51 @@ func (a *App) sendGroup(s *sess, ep endpoint, text string) {
 	if len(s.groupSpeaks) > 50 {
 		s.groupSpeaks = append([]time.Time(nil), s.groupSpeaks[len(s.groupSpeaks)-50:]...)
 	}
+	a.sendParts(ep, parts)
+}
+
+// sendParts 像人一样一条条发：每条之间停一会儿（按字数，0.3 到 3 秒）。
+func (a *App) sendParts(ep endpoint, parts []string) {
 	go func() {
 		for i, p := range parts {
 			if i > 0 {
-				// 像人一样停一下，最多 3 秒
 				d := time.Duration(len([]rune(p))) * 20 * time.Millisecond
-				if d > 3*time.Second {
-					d = 3 * time.Second
-				}
-				if d < 300*time.Millisecond {
-					d = 300 * time.Millisecond
-				}
+				d = min(max(d, 300*time.Millisecond), 3*time.Second)
 				select {
 				case <-time.After(d):
 				case <-a.ctx.Done():
 					return
 				}
 			}
+			a.mu.Lock()
 			ch := a.chans[ep.ch]
+			a.mu.Unlock()
 			if ch == nil {
 				return
 			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
 			if err := ch.Send(ctx, ep.chat, p, ""); err != nil {
-				a.log.Warn("群消息发送失败", "channel", ep.ch, "err", err)
+				a.log.Warn("消息发送失败", "channel", ep.ch, "err", err)
 			}
 			cancel()
 		}
 	}()
+}
+
+// dmParts 是拟人型在私聊里的分条：按空行拆，最多 n 条（多的并进最后一条），不截断。
+func dmParts(text string, n int) []string {
+	var out []string
+	for _, block := range strings.Split(strings.TrimSpace(text), "\n\n") {
+		if block = strings.TrimSpace(block); block == "" {
+			continue
+		}
+		if len(out) == n {
+			out[n-1] += "\n\n" + block
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
 }
 
 // groupParts 把回复拆成几条：先按空行拆，一条太长就在句号处截断，最多 maxParts 条、每条最多 limit 字。
@@ -354,3 +388,77 @@ func cleanupGroupSpeaks(speaks []time.Time, now time.Time) []time.Time {
 }
 
 func makeslice(in []time.Time) []time.Time { return make([]time.Time, 0, len(in)) }
+
+// talkValue 是积极度对应的发言频率（乘在门槛的概率上）。
+func talkValue(eagerness string) float64 {
+	switch eagerness {
+	case "high":
+		return 1
+	case "normal":
+		return 0.7
+	case "low":
+		return 0.35
+	}
+	return 0
+}
+
+// groupGate 估计群里这几条新消息“该不该接话”的概率，不调模型。特征和权重来自麦麦
+// （MaiBot src/maisaka/turn_trigger/reply_likelihood.py，用它的规划器记录拟合的逻辑回归）：
+// @了别人、有问号、只有图片、最近 5 分钟自己说话占比、最近 5 分钟消息数、离自己上次说话多久、新消息条数。
+// 被 @、叫到名字不走这里（一定回）。调用方持有锁。
+func (a *App) groupGate(s *sess, now time.Time) float64 {
+	h := a.store.History(s.sid)
+	var pending []string
+	for i := len(h) - 1; i >= 0 && len(pending) < 20; i-- {
+		if h[i].Role == "assistant" {
+			break
+		}
+		if h[i].Role == "user" && !isNoteMsg(h[i].Content) {
+			pending = append(pending, h[i].Content)
+		}
+	}
+	self, all := 0, 0
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].TS > 0 && now.Unix()-h[i].TS > 300 {
+			break
+		}
+		switch {
+		case h[i].Role == "user" && !isNoteMsg(h[i].Content):
+			all++
+		case h[i].Role == "assistant" && strings.TrimSpace(h[i].Content) != "" && !isSilence(h[i].Content):
+			self++
+			all++
+		}
+	}
+	since := 3600.0
+	if !s.groupSpokeAt.IsZero() {
+		since = now.Sub(s.groupSpokeAt).Seconds()
+	}
+	text := strings.Join(pending, "\n")
+	onlyPics := len(pending) > 0
+	for _, p := range pending {
+		if !strings.HasSuffix(strings.TrimSpace(p), "张图片）") {
+			onlyPics = false
+		}
+	}
+	ratio := 0.0
+	if all > 0 {
+		ratio = float64(self) / float64(all)
+	}
+	logit := -1.2005 + 2.6525*ratio - 0.0367*float64(all) + 0.0571*math.Log1p(max(0, since)) + 0.1012*float64(min(20, len(pending)))
+	if strings.Contains(text, "@") {
+		logit -= 1.1157
+	}
+	if strings.ContainsAny(text, "?？") {
+		logit += 0.4807
+	}
+	if onlyPics {
+		logit -= 1.0281
+	}
+	return 1 / (1 + math.Exp(-logit))
+}
+
+// isNoteMsg 是网关自己放进历史的说明（记忆、近况、想起来的、[系统]），不是谁说的话。
+func isNoteMsg(content string) bool {
+	return strings.HasPrefix(content, memNoteOpen) || strings.HasPrefix(content, recallOpen) || strings.HasPrefix(content, lifeRecentOp) || strings.HasPrefix(content, "[系统] ")
+}
