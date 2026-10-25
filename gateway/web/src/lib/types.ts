@@ -74,7 +74,7 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员
-export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
+export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string; main: string };
 
 export type SessionInfo = {
   agent: string; // 这个会话属于哪个 agent

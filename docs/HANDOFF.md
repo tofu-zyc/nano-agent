@@ -9,6 +9,11 @@
 
 见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。已完成：放行模式、飞书拟人型回复和状态、`/state`、QQ、微信、调工具前说的话当场发、看图（Read 读到图片交给模型）和 SendFile 发图片 / 文件（都有测试）。**2026-10-25 验证补完**：`scripts/test-isolated.sh` 全过（e2e 74 项，含 SendFile 那一步）、网页界面检查 0 failures（要单独跑，隔离脚本里会被跳过）、Windows 执行器 14 项（补了 `t_fetch`）、`e2e-win.py` 17 项；顺手修了 Windows 上文件不存在却报“No error”的问题（`plat_win.c` 没设 errno）。d307b8c 的 CI 也是 success。**已合并 main、发 v0.7.0**；剩下音频视频格式转换。**QQ 和微信都没在真的平台上试过**，发版后第一次扫码时留意一下；飞书发图片要老应用在开放平台补开 `im:resource` 再发一版。
 
+## v0.7.0 发布后的修复
+
+- **新 agent 的窗口「接到主会话」接到了默认 agent 上**：用户新建了一个 agent、把 Telegram / 飞书 / QQ / 微信都绑给它，结果每个会话只挂着一个平台。两半原因：① 窗口接哪个会话，看说话的人**是不是管理员**（不是管理员就各自一个会话，会话 ID 就是窗口 ID）；② 网页里的「设为管理员」和「接到主会话」把目标**写死成全局 `main`**（`WelcomeAdmin`、渠道面板），于是新 agent 的窗口被搬到默认 agent 上，下一条消息又被搬回来 —— 看起来就是“怎么接都接不到一起”。
+- 修法：按窗口所在会话的 agent 算主会话 —— 默认 agent 是 `main`，别的 agent 是 `@<id>/main`（`app/endpoints.go` 的 `mainOf`）。`/api/sessions` 里每个窗口多一个 `main` 字段，渠道面板用它，不再写死。测试 `TestWelcomeAdminOnOtherAgent` 锁住“新 agent 的访客窗口设为管理员后进 `@bob/main`”。
+- 仍然成立的行为：绑定机器人 ≠ 你在那个平台上就是管理员。管理员名单（`access.admins`）是按平台身份记的（`tg:<id>`、`feishu:<openid>`、`qq.<机器人>:<openid>`）；不是管理员的窗口各自一个会话，要在会话/渠道面板里点「设为管理员」才会并进主会话。
 ## v0.6 开发进度（dev/v0.6，已合并 main，v0.6.0 发布）
 
 设计和进度清单见 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)（每完成一个阶段在那里打勾、写坑）。

@@ -272,3 +272,37 @@ func TestAgentNameUnique(t *testing.T) {
 		t.Fatal("改名撞上同名的 agent 不该成功")
 	}
 }
+
+// 新建的 agent：把访客窗口设为管理员时，应该接到这个 agent 的主会话（@bob/main），
+// 而不是默认 agent 的 main —— 否则新 agent 上怎么接都接不到一起。
+func TestWelcomeAdminOnOtherAgent(t *testing.T) {
+	e := setup(t)
+	store, bots := withAgents(t, e)
+	if err := store.Create(testAgent("bob")); err != nil {
+		t.Fatal(err)
+	}
+	if err := bots.Bind("tg", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	tg := &fakeCh{name: "tg", sent: make(chan string, 10)}
+	e.a.AddChannel(tg)
+	// 不是管理员：窗口自己一个会话
+	e.a.OnMessage(tg, channel.Message{ChatID: "c1", SenderID: "u1", SenderName: "张三", Text: "你好", MsgID: "m1"})
+	e.a.mu.Lock()
+	guest := e.a.eps["tg:c1"].Session
+	e.a.mu.Unlock()
+	if guest != "@bob/tg:c1" {
+		t.Fatalf("访客的窗口应该单独一个会话，实际 %q", guest)
+	}
+	// 网页里设为管理员：窗口应该并到 bob 的主会话
+	e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, "tg:u1")
+	if err := e.a.WelcomeAdmin("tg:c1"); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	got := e.a.eps["tg:c1"].Session
+	e.a.mu.Unlock()
+	if got != "@bob/main" {
+		t.Fatalf("设为管理员后应该接到 bob 的主会话 @bob/main，实际 %q", got)
+	}
+}

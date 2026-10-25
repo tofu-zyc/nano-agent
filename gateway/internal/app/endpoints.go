@@ -62,6 +62,13 @@ type EndpointInfo struct {
 	Who     string `json:"who,omitempty"` // 在这个窗口说话的人
 	Admin   bool   `json:"admin"`         // 说话的人是管理员
 	Session string `json:"session"`
+	Main    string `json:"main"` // 这个会话所属 agent 的主会话（“接到主会话”要接的是它）
+}
+
+// mainOf 是会话 sid 所属 agent 的主会话。别的 agent 的主会话是 @<id>/main，
+// 不能一律用默认 agent 的 main —— 否则把新 agent 的窗口“接到主会话”会接到默认 agent 上去。
+func mainOf(sid string) string {
+	return agents.SessionFor(agents.SessionAgent(sid), mainSID)
 }
 
 // chanName 把渠道名（身份和窗口 ID 的前缀）换成拓扑图里的渠道名
@@ -237,16 +244,17 @@ func (a *App) publishSession(sid string) {
 // 管理员的窗口默认都接在主会话上），其他会话在网页里新建或者说过话才算。
 func (a *App) endpointsOf(sid string) []EndpointInfo {
 	out := []EndpointInfo{}
+	main := mainOf(sid)
 	for key, r := range a.eps {
 		if r.Session == sid {
 			ep := parseEndpoint(key)
 			out = append(out, EndpointInfo{Show: a.showOf(ep), Key: key, Channel: chanName(ep.ch), Name: r.Name, Who: r.Who,
-				Admin: ep.ch == "cli" || a.isAdmin(r.Who), Session: sid})
+				Admin: ep.ch == "cli" || a.isAdmin(r.Who), Session: sid, Main: main})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	if sid == mainSID || a.store.Settings(sid).Web {
-		out = append(out, EndpointInfo{Show: "详细", Key: "web", Channel: "web", Who: "web:admin", Admin: true, Session: sid})
+		out = append(out, EndpointInfo{Show: "详细", Key: "web", Channel: "web", Who: "web:admin", Admin: true, Session: sid, Main: main})
 	}
 	return out
 }
@@ -424,13 +432,15 @@ func (a *App) WelcomeAdmin(key string) error {
 	if r == nil {
 		return errors.New("没有这个聊天窗口")
 	}
-	a.publishSession(mainSID) // 窗口的管理员标记变了
-	if r.Session == mainSID {
+	// 接到这个窗口所属 agent 的主会话：默认 agent 是 main，别的 agent 是 @<id>/main
+	want := mainOf(r.Session)
+	a.publishSession(want) // 窗口的管理员标记变了
+	if r.Session == want {
 		a.deliver(parseEndpoint(key), "你现在是管理员了。发 /session 可以查看和切换所有会话。", "")
 		return nil
 	}
-	a.bind(key, mainSID)
-	a.introduce(parseEndpoint(key), mainSID, "你现在是管理员了。这个窗口已经接到主会话，和终端、网页是同一段上下文；发 /session 可以查看和切换所有会话。")
+	a.bind(key, want)
+	a.introduce(parseEndpoint(key), want, "你现在是管理员了。这个窗口已经接到主会话，之后在这里说的话都在同一段上下文里；发 /session 可以查看和切换所有会话。")
 	return nil
 }
 

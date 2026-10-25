@@ -107,8 +107,8 @@
             {:else if !e.admin}
               <p class="p-note">访客只能聊天，不能用工具，也看不到别的会话。如果这是你自己，设为管理员后这个窗口会接到主会话，和终端、网页共用上下文。</p>
               <button class="btn sm primary" onclick={() => makeAdmin(e)}><Icon name="shield" size={13} />设为管理员并接到主会话</button>
-            {:else if e.session !== 'main'}
-              <button class="btn sm" onclick={() => moveEndpoint(e, 'main')}><Icon name="hub" size={13} />接到主会话</button>
+            {:else if e.session !== e.main}
+              <button class="btn sm" onclick={() => moveEndpoint(e, e.main)}><Icon name="hub" size={13} />接到主会话</button>
             {/if}
           </div>
         {/each}
