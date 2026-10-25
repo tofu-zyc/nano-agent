@@ -55,6 +55,28 @@ func mcpHelper() {
 		_ = json.Unmarshal(req.Params.Arguments, &in)
 		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "echo:" + in.Text}}}, nil
 	})
+	srv.AddTool(&sdkmcp.Tool{
+		Name:        "pics",
+		Description: "返回两张小图",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	}, func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{
+			&sdkmcp.ImageContent{Data: png, MIMEType: "image/png"},
+			&sdkmcp.ImageContent{Data: png, MIMEType: "image/png"},
+		}}, nil
+	})
+	// wait 一直等到被取消（最多 10 秒）：测「调用到一半用户停下」
+	srv.AddTool(&sdkmcp.Tool{
+		Name:        "wait",
+		Description: "等一会儿",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+		}
+		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "等完了"}}}, nil
+	})
 	if err := srv.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
 		os.Exit(1)
 	}
@@ -83,6 +105,8 @@ func TestMCPEndToEnd(t *testing.T) {
 	mgr := mcp.NewManager(st, nil)
 	defer mgr.Close()
 	e.a.SetMCP(st, mgr)
+	// 后台连上以后工具定义里才有它（算工具定义只读缓存，不在总锁里去连）
+	waitFor(t, func() bool { return len(mgr.CachedTools("default")) > 0 })
 
 	// 管理员发一条消息：模型请求里的工具定义要带上 helper__echo
 	e.say("你好")

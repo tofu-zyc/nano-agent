@@ -77,6 +77,50 @@ try:
             bad = m; break
     if bad is not None: ok('命令不存在时回 pipe_closed（exit=%s）' % bad.get('exit'))
     else: fail('命令不存在时没有回 pipe_closed')
+    def wait_for(pred, n=200):
+        for _ in range(n):
+            m = recv()
+            if pred(m): return m
+        return None
+    # 写 stdin：findstr 原样输出每一行；关闭时写线程要先把攒下的写完再关 stdin
+    send(t='pipe_open', pipe='p3', argv=['C:\\Windows\\System32\\findstr.exe', '/R', '^'])
+    time.sleep(0.5)
+    send(t='pipe_write', pipe='p3', data='hello\u4e16\u754c')
+    send(t='pipe_write', pipe='p3', data='second')
+    send(t='pipe_close', pipe='p3')
+    lines, closed3 = [], None
+    for _ in range(200):
+        m = recv()
+        if m.get('pipe') != 'p3': continue
+        if m.get('t') == 'pipe_data': lines.append(m.get('data'))
+        if m.get('t') == 'pipe_closed': closed3 = m; break
+    if lines == ['hello\u4e16\u754c', 'second']: ok('pipe_write 写进去的两行都原样回来了')
+    else: fail('写进去的没有原样回来：%r' % lines)
+    if closed3 is not None and closed3.get('exit') == 0: ok('pipe_close：写完再关 stdin，进程正常退出')
+    else: fail('pipe_close 之后的退出不对：%r' % closed3)
+    # 对方不读 stdin 时写一大块：主循环不能卡在 WriteFile 上（以前是阻塞写，整个内核跟着停）
+    send(t='pipe_open', pipe='p4', argv=['C:\\Windows\\System32\\PING.EXE', '-n', '30', '127.0.0.3'])
+    time.sleep(0.5)
+    send(t='pipe_write', pipe='p4', data='x' * (2 << 20))
+    t0 = time.time()
+    send(t='pipe_write', pipe='gone', data='{}')
+    stale = wait_for(lambda m: m.get('t') == 'pipe_closed' and m.get('pipe') == 'gone')
+    if stale is not None and time.time() - t0 < 5: ok('对方不读时大块写入没有卡住内核（%.1fs 内回了下一条）' % (time.time() - t0))
+    elif stale is not None: fail('大块写入以后内核卡了 %.1fs' % (time.time() - t0))
+    else: fail('写不存在的管道没有回 pipe_closed')
+    # 网关突然断开：内核把进程收掉，自己还能重连
+    s.shutdown(socket.SHUT_RDWR); s.close()
+    s, _ = srv.accept(); s.settimeout(10)
+    buf[0] = b''
+    again = recv()
+    if again.get('t') == 'hello': ok('网关断开后内核没崩，重新连上来了')
+    else: fail('断开后重连的第一条不是 hello：%r' % again)
+    time.sleep(1)
+    left = subprocess.run([POWERSHELL, '-NoProfile', '-Command',
+                           "@(Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" | Where-Object { $_.CommandLine -like '*127.0.0.3*' }).Count"],
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+    if left == '0': ok('网关断开时 Windows 上的 MCP 进程被收掉了')
+    else: fail('网关断开以后进程还在：%r' % left)
     s.close()
 except Exception as e:
     fail('异常：%s' % e)

@@ -19,9 +19,10 @@ typedef struct na_pipe {
     /* POSIX */
     int     fd_in, fd_out;
     int     pid;
-    /* Windows */
-    void   *hproc, *hjob, *h_in, *h_out;
+    /* Windows：stdin 由写线程独占（主循环不能阻塞在 WriteFile 上），wev 叫醒它 */
+    void   *hproc, *hjob, *h_in, *h_out, *wev;
     bool    killed;
+    bool    in_eof;       /* 写完缓冲就关 stdin（pipe_close / 进程退出 / 网关断开） */
     /* 两边共用 */
     char   *buf;          /* stdout 还没凑成完整一行的尾巴 */
     size_t  len, cap;
@@ -45,9 +46,9 @@ typedef struct {
 /* 等着发给网关的东西：一行 stdout，或者一次退出。 */
 typedef struct {
     char *id;
-    char *data;
-    int   exit;
-    char *detail;
+    char *data;   /* pipe_data 的一行；退出的那条是 NULL（靠它区分，不靠 exit） */
+    int   exit;   /* pipe_closed 的退出码，-1 表示没有这条管道、写不进去 */
+    char *detail; /* 退出的原因 */
 } na_pipe_msg;
 
 typedef struct {
@@ -68,8 +69,12 @@ void pipes_close(na_pipes *ps, const char *id);
 size_t pipes_pollfds(na_pipes *ps, na_pollfd *pfds, na_piperef *refs, size_t max);
 void pipes_poll(na_pipes *ps, const na_pollfd *pfds, const na_piperef *refs, size_t n, int64_t now);
 bool pipes_take(na_pipes *ps, na_pipe_msg *out);
+/* 网关断开了：杀掉所有进程、丢掉没发的消息。条目先不释放（主循环这一轮的 poll 引用还指着它们），
+   下一次 pipes_poll 收尾时释放。 */
+void pipes_reset(na_pipes *ps);
+/* 内核退出：杀掉所有进程并释放全部条目。之后不能再调 pipes_poll。 */
 void pipes_shutdown(na_pipes *ps);
-/* 这条管道是不是还活着（网关重启后内核那边的条目要清掉） */
+/* 表里还有几条管道（包括已经退出、等着释放的） */
 size_t pipes_count(const na_pipes *ps);
 
 /* 内部（pipe.c 和 pipe_win.c 共用） */
@@ -79,5 +84,6 @@ void pipes_unlock(na_pipes *ps);
 void pipes_queue_line(na_pipes *ps, const char *id, const char *line, size_t n);
 void pipes_queue_closed(na_pipes *ps, const char *id, int code, const char *detail);
 void free_pipe(na_pipe_t *p);
+void pipes_clear_queue(na_pipes *ps);
 
 #endif

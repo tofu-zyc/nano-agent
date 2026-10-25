@@ -126,19 +126,17 @@ void runner_tick(runner_t *r, int64_t now)
 
 void runner_reap(runner_t *r, int64_t now)
 {
-    int st;
-    pid_t pid;
-    while ((pid = waitpid(-1, &st, WNOHANG)) > 0) {
-        for (job_t *j = r->jobs; j; j = j->next) {
-            if (j->pid == pid && !j->exited) {
-                j->exited = true;
-                j->status = st;
-                j->exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-                j->term_signal = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
-                j->exit_at = now;
-                break;
-            }
-        }
+    /* 只等自己起的进程：内核还有别的子进程（MCP 管道，pipe.c），用 waitpid(-1) 会把它们的
+       退出状态抢走，那边就只能当成退出码 0 */
+    for (job_t *j = r->jobs; j; j = j->next) {
+        if (j->exited || j->pid <= 0) continue;
+        int st;
+        if (waitpid(j->pid, &st, WNOHANG) != j->pid) continue;
+        j->exited = true;
+        j->status = st;
+        j->exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+        j->term_signal = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+        j->exit_at = now;
     }
 }
 

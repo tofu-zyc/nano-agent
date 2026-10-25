@@ -214,22 +214,18 @@ func (a *App) askMCPApproval(s *sess, execID, tool string, args json.RawMessage)
 	return ch, n
 }
 
-// mcpSignature 是 MCP 配置的指纹：加、删、启用、换机器都会让它变，
-// 工具快照据此重建（不然新加的服务在已有会话里看不见）。调用方持有锁。
-func (a *App) mcpSignature() string {
-	if a.mcpStore == nil {
-		return ""
+// mcpOffered 是这个会话的工具定义里该有的 MCP 工具：只给普通会话里的管理员，
+// 只读和不用工具的模式不给。contextParts 和 permSignature 共用这一处判断，
+// 保证「给了什么」和「什么时候重建工具快照」是一回事。调用方持有锁。
+func (a *App) mcpOffered(sid string, admin bool) []llm.Tool {
+	if !admin || a.mcp == nil || isDreamSID(sid) || isLifeSID(sid) || a.isGroupSession(sid) {
+		return nil
 	}
-	list := a.mcpStore.List()
-	names := make([]string, 0, len(list))
-	for _, s := range list {
-		if !s.Enabled {
-			continue
-		}
-		names = append(names, s.Name+"@"+s.Machine)
+	switch a.workspaceOf(sid).mode {
+	case proto.ModeReadonly, proto.ModeNone:
+		return nil
 	}
-	sort.Strings(names)
-	return strings.Join(names, ",")
+	return mcpTools(a.mcp, a.agentOf(sid).ID)
 }
 
 // mimeExt 是图片的扩展名（媒体库里按它命名）。
@@ -245,28 +241,36 @@ func mimeExt(mime string) string {
 	return ".png"
 }
 
-// cancelMCP 是内核说这次调用超时/不要了（exec_cancel）：撤掉挂着的审批，按拒绝处理。
+// cancelMCP 是内核说这次调用超时/不要了（exec_cancel）：撤掉挂着的审批，按没批准处理。
 // 不这么做的话，审批卡还挂着，管理员晚点批了工具照样执行，可模型早就被告知超时了。
 // 调用方持有锁。
-func (a *App) cancelMCP(id string) {
+func (a *App) cancelMCP(sid, id string) {
 	for n, ap := range a.approvals {
-		if ap.id != id || ap.resolve == nil {
-			continue
+		if ap.sid == sid && ap.id == id && ap.resolve != nil {
+			a.dropApproval(n, "已取消")
+			return
 		}
-		res := ap.resolve
-		delete(a.approvals, n)
-		a.resolveApproval(ap, "已取消")
-		a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
-		res(false)
-		return
 	}
 }
 
 // mcpCall 执行一次 MCP 工具调用。调用方持有锁；调用本身在协程里跑。
+//
+// 协程里只认开始时的那一轮（r）：调用回来时这一轮可能已经结束（用户停下、超时），
+// s.run 变成 nil 或者换成了下一轮，不能再往 s.run 上写东西。
 func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	mg := a.mcp
 	if mg == nil {
 		reply(false, "没有接 MCP 服务")
+		return
+	}
+	r := s.run
+	if r == nil {
+		reply(false, "这一轮已经结束了")
+		return
+	}
+	// 只读、不用工具的模式不给 MCP（工具列表里也不会出现）
+	if r.noTools || r.mode == proto.ModeReadonly || r.mode == proto.ModeNone {
+		reply(false, "当前模式不能用 MCP 工具")
 		return
 	}
 	server, tool, _ := mcp.SplitExposed(m.Name)
@@ -277,64 +281,54 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 			return
 		}
 	}
-	sid := s.sid
-	from := ""
-	if s.run != nil {
-		from = s.run.from
-	}
-	dial := func() {
+	sid, from, id := s.sid, r.from, m.ID
+	// start 真正发起调用。调用方持有锁：取消函数登记在这一轮上，内核超时或用户停下时
+	// 发来的 exec_cancel 能把它停下来（KernelMsg 的 TExecCancel）
+	start := func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
-		// 内核超时/用户停止时会发 exec_cancel：注册进去，它能把这个调用停下来
-		if s.run != nil {
-			if s.run.execs == nil {
-				s.run.execs = map[string]context.CancelFunc{}
-			}
-			s.run.execs[m.ID] = cancel
-			defer func() {
-				a.mu.Lock()
-				delete(s.run.execs, m.ID)
-				a.mu.Unlock()
-			}()
-		}
-		defer cancel()
-		res, err := mg.Call(ctx, server, tool, args)
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if err != nil {
-			a.log.Warn("MCP 工具调用失败", "sid", sid, "tool", m.Name, "err", err)
-			reply(false, err.Error())
-			return
-		}
-		text := mcp.ResultText(res)
-		// 工具返回的图片：存下来附在工具结果上，网页的工具卡片会显示
-		for _, c := range res.Content {
-			img, ok := c.(*sdkmcp.ImageContent)
-			if !ok || len(img.Data) == 0 || a.media == nil || s.run == nil {
-				continue
-			}
-			att, err := a.media.Save(img.Data, "mcp-"+m.ID+mimeExt(img.MIMEType), "mcp")
+		r.execs[id] = cancel
+		go func() {
+			defer cancel()
+			res, err := mg.Call(ctx, server, tool, args)
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			delete(r.execs, id)
 			if err != nil {
-				a.log.Warn("保存 MCP 返回的图片失败", "err", err)
-				continue
+				a.log.Warn("MCP 工具调用失败", "sid", sid, "tool", m.Name, "err", err)
+				reply(false, err.Error())
+				return
 			}
-			s.run.sent[m.ID] = append(s.run.sent[m.ID], att)
-			if s.run.withImages {
-				s.run.images[m.ID] = append(s.run.images[m.ID], att)
-			} else if !strings.Contains(text, "看不到") {
+			text := mcp.ResultText(res)
+			// 工具返回的图片：存下来附在工具结果上（网页的工具卡片显示）；模型能看图时也交给模型
+			live := s.run == r
+			hidden := false
+			for _, c := range res.Content {
+				img, ok := c.(*sdkmcp.ImageContent)
+				if !ok || len(img.Data) == 0 || a.media == nil || !live {
+					continue
+				}
+				att, err := a.media.Save(img.Data, "mcp-"+id+mimeExt(img.MIMEType), "mcp")
+				if err != nil {
+					a.log.Warn("保存 MCP 返回的图片失败", "err", err)
+					continue
+				}
+				r.sent[id] = append(r.sent[id], att)
+				if r.withImages {
+					r.images[id] = append(r.images[id], att)
+				} else {
+					hidden = true
+				}
+			}
+			if hidden {
 				text += "\n（图片附在工具结果上，但现在的模型不能看图）"
 			}
-		}
-		ok := !res.IsError
-		if !ok && text == "" {
-			text = "工具返回了错误"
-		}
-		a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "from", from, "bytes", len(text))
-		reply(ok, text)
-	}
-	// 只读模式不给 MCP（工具列表里也不会出现）
-	if a.workspaceOf(s.sid).mode == "readonly" {
-		reply(false, "当前是只读模式，不能用 MCP 工具")
-		return
+			ok := !res.IsError
+			if !ok && text == "" {
+				text = "工具返回了错误"
+			}
+			a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "from", from, "bytes", len(text))
+			reply(ok, text)
+		}()
 	}
 	// approval=always 每次都要批；per_turn 一轮里批过一次就放行；放行模式（full）不问
 	need := false
@@ -343,52 +337,50 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		case mcp.ApprovalAlways:
 			need = true
 		case mcp.ApprovalPerTurn:
-			need = s.run == nil || !s.run.mcpOK[server]
+			need = !r.mcpOK[server]
 		}
 	}
-	if need && s.run != nil && s.run.full {
+	if r.full {
 		need = false
 	}
-	if need {
-		wait, n := a.askMCPApproval(s, m.ID, m.Name, m.Args)
-		limit := a.cfg.Agent.ApprovalLimit()
-		a.log.Info("MCP 工具等审批", "sid", sid, "tool", m.Name, "n", n)
-		go func() {
-			var timeout <-chan time.Time
-			if limit > 0 {
-				t := time.NewTimer(limit)
-				defer t.Stop()
-				timeout = t.C
-			}
-			select {
-			case ok := <-wait:
-				if !ok {
-					a.mu.Lock()
-					reply(false, "管理员拒绝了这次调用")
-					a.mu.Unlock()
-					return
-				}
-				// 批准以后才记「这一轮批过了」：提前记的话，同一轮并发的第二次调用会绕过审批
-				a.mu.Lock()
-				if s.run != nil {
-					if s.run.mcpOK == nil {
-						s.run.mcpOK = map[string]bool{}
-					}
-					s.run.mcpOK[server] = true
-				}
-				a.mu.Unlock()
-			case <-timeout:
-				a.mu.Lock()
-				a.dropApproval(n, "等审批超时")
-				reply(false, "等审批超时，没有执行")
-				a.mu.Unlock()
-				return
-			case <-a.ctx.Done():
-				return
-			}
-			dial()
-		}()
+	if !need {
+		start()
 		return
 	}
-	go dial()
+	wait, n := a.askMCPApproval(s, id, m.Name, m.Args)
+	limit := a.cfg.Agent.ApprovalLimit()
+	a.log.Info("MCP 工具等审批", "sid", sid, "tool", m.Name, "n", n)
+	go func() {
+		var timeout <-chan time.Time
+		if limit > 0 {
+			t := time.NewTimer(limit)
+			defer t.Stop()
+			timeout = t.C
+		}
+		select {
+		case ok := <-wait:
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if !ok {
+				reply(false, "没有批准（管理员拒绝了，或者这一轮已经停了），没有执行")
+				return
+			}
+			if s.run != r {
+				reply(false, "这一轮已经结束了，没有执行")
+				return
+			}
+			// 批准以后才记「这一轮批过了」：提前记的话，同一轮并发的第二次调用会绕过审批
+			if r.mcpOK == nil {
+				r.mcpOK = map[string]bool{}
+			}
+			r.mcpOK[server] = true
+			start()
+		case <-timeout:
+			a.mu.Lock()
+			a.dropApproval(n, "等审批超时")
+			reply(false, "等审批超时，没有执行")
+			a.mu.Unlock()
+		case <-a.ctx.Done():
+		}
+	}()
 }

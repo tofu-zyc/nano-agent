@@ -212,9 +212,10 @@ func main() {
 		os.Exit(1)
 	}
 	mcpMgr := mcp.NewManager(mcpStore, log)
-	a.SetMCP(mcpStore, mcpMgr)
-	// 透传：MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）
+	// 透传：MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）。先接上再 SetMCP：
+	// SetMCP 会在后台开始连；挂在别的机器上的服务要等那台内核连上来（KernelUp 会叫醒它们）
 	mcpMgr.SetLink(app.MCPLink(a))
+	a.SetMCP(mcpStore, mcpMgr)
 	defer mcpMgr.Close()
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)

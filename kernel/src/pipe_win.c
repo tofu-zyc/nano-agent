@@ -199,18 +199,74 @@ static DWORD WINAPI wait_thread(LPVOID arg)
     DWORD code = 0;
     WaitForSingleObject(a->h, INFINITE);
     GetExitCodeProcess(a->h, &code);
-    pipes_queue_closed(a->ps, a->id, (int)code, "");
-    /* 进程句柄由这里负责关：先记到管道上，主循环据此知道可以释放了 */
+    /* 进程句柄由这里负责关：先在管道上清掉，主循环据此知道可以释放了。
+       顺便让写线程收尾（进程没了，stdin 没人读了） */
+    bool already = false;
     if (a->p) {
         pipes_lock(a->ps);
         a->p->hproc = NULL;
+        already = a->p->reported;   /* 网关断开时已经收掉了：不用再报 */
         a->p->reported = true;
+        a->p->in_eof = true;
+        if (a->p->wev) SetEvent((HANDLE)a->p->wev);
         pipes_unlock(a->ps);
     }
+    if (!already) pipes_queue_closed(a->ps, a->id, (int)code, "");
     na_pipes *ps = a->ps;
     io_done(a);
     if (ps->wake) plat_wake_signal(ps->wake);
     return 0;
+}
+
+#define WRITE_CAP (8u << 20)   /* 往 stdin 最多攒这么多，再多就是服务不读了 */
+
+/* 写线程：把主循环攒下的数据写进 stdin。WriteFile 会阻塞（子进程不读的时候），所以不能在主循环里写 */
+static DWORD WINAPI writer_thread(LPVOID arg)
+{
+    io_arg *a = arg;
+    na_pipe_t *p = a->p;   /* 这个线程占着 live 的一份，p 在它结束前不会被释放 */
+    for (;;) {
+        WaitForSingleObject((HANDLE)p->wev, INFINITE);
+        pipes_lock(a->ps);
+        char *buf = p->wbuf;
+        size_t len = p->wlen;
+        p->wbuf = NULL;
+        p->wlen = p->woff = 0;
+        bool eof = p->in_eof;
+        pipes_unlock(a->ps);
+        bool ok = true;
+        for (size_t off = 0; ok && off < len;) {
+            DWORD w = 0;
+            DWORD chunk = (DWORD)(len - off > (1u << 20) ? (1u << 20) : len - off);
+            if (!WriteFile(a->h, buf + off, chunk, &w, NULL) || !w) ok = false;
+            else off += w;
+        }
+        free(buf);
+        if (!ok) {
+            pipes_lock(a->ps);
+            p->input_dead = true;
+            pipes_unlock(a->ps);
+            break;
+        }
+        if (eof) break;   /* in_eof 和缓冲是在同一把锁里取的：之前攒的都已经写完了 */
+    }
+    na_pipes *ps = a->ps;
+    io_done(a);   /* 关掉 stdin：子进程读到 EOF */
+    if (ps->wake) plat_wake_signal(ps->wake);
+    return 0;
+}
+
+/* 结束一个进程：有 job 就连同它起的子进程一起杀；没有 job（加不进去）就只能杀它自己 */
+static void kill_tree(na_pipes *ps, na_pipe_t *p)
+{
+    if (p->hjob) {
+        TerminateJobObject((HANDLE)p->hjob, 1);
+    } else {
+        pipes_lock(ps);   /* 等待线程是在锁里清 hproc 之后才关句柄的：锁里用它是安全的 */
+        if (p->hproc) TerminateProcess((HANDLE)p->hproc, 1);
+        pipes_unlock(ps);
+    }
+    p->killed = true;
 }
 
 void pipes_lock(na_pipes *ps) { if (ps->lock) EnterCriticalSection((CRITICAL_SECTION *)ps->lock); }
@@ -283,8 +339,7 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         snprintf(err, errlen, "无法启动 %s：错误 %lu", argv[0], (unsigned long)e);
         return -1;
     }
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
+    /* 还挂起着的时候先放进 job，再让它跑：不然 npx 这类先起子进程的，子进程可能落在 job 外面，杀不掉 */
     HANDLE job = CreateJobObjectW(NULL, NULL);
     if (job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
@@ -293,12 +348,24 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
         if (!AssignProcessToJobObject(job, pi.hProcess)) { CloseHandle(job); job = NULL; }
     }
+    HANDLE wev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!wev) {
+        e = GetLastError();
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        if (job) CloseHandle(job);
+        CloseHandle(in_w); CloseHandle(out_r);
+        snprintf(err, errlen, "创建事件失败：错误 %lu", (unsigned long)e);
+        return -1;
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
     na_pipe_t *p = xcalloc(1, sizeof *p);
     p->id = xstrdup(id);
     p->hproc = pi.hProcess;
     p->hjob = job;
-    p->h_in = in_w;
-    p->live = 2;   /* 读线程 + 等待线程 */
+    p->wev = wev;
+    p->live = 3;   /* 读线程 + 等待线程 + 写线程 */
     p->next = ps->list;
     ps->list = p;
     io_arg *a1 = xcalloc(1, sizeof *a1);
@@ -307,24 +374,40 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
     io_arg *a2 = xcalloc(1, sizeof *a2);
     a2->ps = ps; a2->id = xstrdup(id); a2->p = p; a2->h = pi.hProcess;
     if (!CreateThread(NULL, 0, wait_thread, a2, 0, NULL)) { a2->h = NULL; io_done(a2); }
+    io_arg *a3 = xcalloc(1, sizeof *a3);
+    a3->ps = ps; a3->id = xstrdup(id); a3->p = p; a3->h = in_w;
+    if (!CreateThread(NULL, 0, writer_thread, a3, 0, NULL)) { p->input_dead = true; io_done(a3); }
     return 0;
 }
 
 int pipes_write(na_pipes *ps, const char *id, const char *data)
 {
     na_pipe_t *p = find_pipe(ps, id);
-    if (!p || !p->h_in) {
-        pipes_queue_closed(ps, id ? id : "", -1, "没有这条管道");
-        return -1;
-    }
     size_t n = strlen(data ? data : "");
-    char *line = xcalloc(n + 2, 1);
-    if (n) memcpy(line, data, n);
-    line[n] = '\n';
-    DWORD wrote = 0;
-    BOOL ok = WriteFile((HANDLE)p->h_in, line, (DWORD)(n + 1), &wrote, NULL);
-    free(line);
-    return ok ? 0 : -1;
+    const char *why = NULL;
+    pipes_lock(ps);
+    if (!p) why = "没有这条管道";
+    else if (p->input_dead || p->in_eof || p->reported) why = "进程不再读 stdin 了";
+    else if (p->wlen + n + 1 > WRITE_CAP) {
+        why = "写给 stdin 的数据太多，服务好像不读了";
+        p->in_eof = true;
+        SetEvent((HANDLE)p->wev);
+    } else {
+        p->wbuf = xrealloc(p->wbuf, p->wlen + n + 1);
+        if (n) memcpy(p->wbuf + p->wlen, data, n);
+        p->wbuf[p->wlen + n] = '\n';
+        p->wlen += n + 1;
+        SetEvent((HANDLE)p->wev);   /* 写线程去写；主循环不等 */
+    }
+    pipes_unlock(ps);
+    if (!why) return 0;
+    /* 网关还当它活着：回一条退出，别让它一直等；进程可能还活着，按关闭处理，到点不退就杀 */
+    pipes_queue_closed(ps, id ? id : "", -1, why);
+    if (p && !p->closing) {
+        p->closing = true;
+        p->close_at = now_ms();
+    }
+    return -1;
 }
 
 void pipes_close(na_pipes *ps, const char *id)
@@ -334,7 +417,10 @@ void pipes_close(na_pipes *ps, const char *id)
         pipes_queue_closed(ps, id ? id : "", -1, "没有这条管道");
         return;
     }
-    if (p->h_in) { CloseHandle((HANDLE)p->h_in); p->h_in = NULL; }
+    pipes_lock(ps);
+    p->in_eof = true;   /* 写线程把攒下的写完就关 stdin */
+    SetEvent((HANDLE)p->wev);
+    pipes_unlock(ps);
     p->closing = true;
     p->close_at = now_ms();
 }
@@ -349,18 +435,19 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, const na_piperef *refs, siz
 {
     (void)pfds; (void)refs; (void)n;
     for (na_pipe_t *p = ps->list; p; p = p->next) {
-        if (p->closing && p->hjob && !p->killed && now - p->close_at > ps->close_grace_ms) {
-            TerminateJobObject((HANDLE)p->hjob, 1);
-            p->killed = true;
-        }
+        if (p->closing && !p->killed && now - p->close_at > ps->close_grace_ms) kill_tree(ps, p);
     }
-    /* 报过退出、线程也用完了的，清掉 */
+    /* 报过退出、三个线程也都用完了的，清掉 */
     na_pipe_t **pp = &ps->list;
     while (*pp) {
         na_pipe_t *p = *pp;
-        if (p->reported && p->live <= 0 && !p->h_in && !p->hproc && !p->h_out) {
+        pipes_lock(ps);
+        bool done = p->reported && p->live <= 0 && !p->hproc;
+        pipes_unlock(ps);
+        if (done) {
             *pp = p->next;
             if (p->hjob) CloseHandle((HANDLE)p->hjob);
+            if (p->wev) CloseHandle((HANDLE)p->wev);
             free_pipe(p);
             continue;
         }
@@ -368,12 +455,22 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, const na_piperef *refs, siz
     }
 }
 
-void pipes_shutdown(na_pipes *ps)
+void pipes_reset(na_pipes *ps)
 {
     for (na_pipe_t *p = ps->list; p; p = p->next) {
-        if (p->h_in) { CloseHandle((HANDLE)p->h_in); p->h_in = NULL; }
-        if (p->hjob) { TerminateJobObject((HANDLE)p->hjob, 1); p->killed = true; }
-        /* 进程句柄归等待线程关，这里不碰（否则会关两次） */
-        p->reported = true;
+        pipes_lock(ps);
+        p->in_eof = true;
+        if (p->wev) SetEvent((HANDLE)p->wev);
+        p->reported = true;   /* 网关已经不在了：进程退出时不用再报 */
+        pipes_unlock(ps);
+        if (!p->killed) kill_tree(ps, p);
     }
+    pipes_clear_queue(ps);
+    /* 条目等三个线程都结束后由 pipes_poll 释放（线程还拿着它们） */
+}
+
+void pipes_shutdown(na_pipes *ps)
+{
+    /* 内核要退出了：杀掉就行，进程退出时线程跟着没了，不用等它们 */
+    pipes_reset(ps);
 }

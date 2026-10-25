@@ -34,6 +34,19 @@ void free_pipe(na_pipe_t *p)
     free(p);
 }
 
+/* 丢掉还没发出去的消息（网关断开了，发给下一个网关没有意义） */
+void pipes_clear_queue(na_pipes *ps)
+{
+    pipes_lock(ps);
+    for (size_t i = ps->qhead; i < ps->qn; i++) {
+        free(ps->q[i].id);
+        free(ps->q[i].data);
+        free(ps->q[i].detail);
+    }
+    ps->qn = ps->qhead = 0;
+    pipes_unlock(ps);
+}
+
 #if !NA_WINDOWS
 void pipes_lock(na_pipes *ps) { (void)ps; }
 void pipes_unlock(na_pipes *ps) { (void)ps; }
@@ -63,12 +76,14 @@ static na_pipe_msg *slot(na_pipes *ps)
 
 void pipes_queue_line(na_pipes *ps, const char *id, const char *line, size_t n)
 {
+    /* 不合法的 UTF-8（比如中文 Windows 上程序输出的 GBK）换成 U+FFFD：发出去的 JSON 必须合法 */
+    buf_t b = {0};
+    buf_put_utf8(&b, line, n);
+    buf_append(&b, "", 1);
     pipes_lock(ps);
     na_pipe_msg *m = slot(ps);
     m->id = xstrdup(id ? id : "");
-    char *s = xcalloc(n + 1, 1);
-    if (n) memcpy(s, line, n);
-    m->data = s;
+    m->data = b.p;
     pipes_unlock(ps);
 }
 
@@ -210,14 +225,20 @@ int pipes_write(na_pipes *ps, const char *id, const char *data)
 {
     na_pipe_t *p = find_pipe(ps, id);
     if (!p || p->fd_in < 0) {
-        /* 网关还当这条管道活着（内核重启过）：回一条退出，别让它一直等 */
-        pipes_queue_closed(ps, id ? id : "", -1, "没有这条管道");
+        /* 网关还当这条管道活着（内核重启过，或者进程的 stdin 已经坏了）：回一条退出，别让它一直等 */
+        pipes_queue_closed(ps, id ? id : "", -1, p ? "进程不再读 stdin 了" : "没有这条管道");
+        if (p && !p->closing) {   /* 进程可能还活着：按关闭处理，到点不退就杀 */
+            p->closing = true;
+            p->close_at = now_ms();
+        }
         return -1;
     }
     size_t n = strlen(data ? data : "");
     if (p->wlen - p->woff + n + 1 > WRITE_CAP) {
         pipes_queue_closed(ps, id, -1, "写给 stdin 的数据太多，服务好像不读了");
         close_in(p);
+        p->closing = true;   /* 网关那边已经当它结束了，不会再发 pipe_close：自己收掉 */
+        p->close_at = now_ms();
         return -1;
     }
     p->wbuf = xrealloc(p->wbuf, p->wlen + n + 1);
@@ -355,30 +376,40 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, const na_piperef *refs, siz
     }
 }
 
+/* 杀掉进程组、关掉两头，标成已经报告过（不再发 pipe_closed）。条目本身留着。 */
+static void kill_pipe(na_pipe_t *p)
+{
+    close_in(p);
+    close_out(p);
+    if (p->pid > 0 && !p->reaped) {
+        kill(-(pid_t)p->pid, SIGTERM);
+        kill(-(pid_t)p->pid, SIGKILL);
+        waitpid((pid_t)p->pid, NULL, 0);
+        p->reaped = true;
+        p->pid = -1;
+    }
+    p->reported = true;
+}
+
+void pipes_reset(na_pipes *ps)
+{
+    for (na_pipe_t *p = ps->list; p; p = p->next) kill_pipe(p);
+    pipes_clear_queue(ps);
+    /* 不在这里 free：同一轮主循环里 pipes_poll 拿着的引用还指着这些条目，
+       它们已经 reported、两头都关了，pipes_poll 收尾时会释放 */
+}
+
 void pipes_shutdown(na_pipes *ps)
 {
     na_pipe_t *p = ps->list;
     while (p) {
         na_pipe_t *next = p->next;
-        close_in(p);
-        close_out(p);
-        if (p->pid > 0 && !p->reaped) {
-            kill(-(pid_t)p->pid, SIGTERM);
-            kill(-(pid_t)p->pid, SIGKILL);
-            waitpid((pid_t)p->pid, NULL, 0);
-            p->reaped = true;
-            p->pid = -1;
-        }
+        kill_pipe(p);
         free_pipe(p);
         p = next;
     }
     ps->list = NULL;
-    for (size_t i = ps->qhead; i < ps->qn; i++) {
-        free(ps->q[i].id);
-        free(ps->q[i].data);
-        free(ps->q[i].detail);
-    }
-    ps->qn = ps->qhead = 0;
+    pipes_clear_queue(ps);
 }
 
 #endif /* !NA_WINDOWS */

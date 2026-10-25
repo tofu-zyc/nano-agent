@@ -63,7 +63,8 @@ type KernelInfo struct {
 	OS       string   `json:"os,omitempty"`
 	Arch     string   `json:"arch,omitempty"`
 	Version  string   `json:"version,omitempty"`
-	Landlock int      `json:"landlock"` // 0 表示没有沙箱
+	Proto    int      `json:"proto,omitempty"` // 内核说的协议版本（旧内核先放进来、随后自动更新）
+	Landlock int      `json:"landlock"`        // 0 表示没有沙箱
 	Tools    []string `json:"tools"`
 	Since    int64    `json:"since"`
 	Local    bool     `json:"local"`             // 和网关在同一台机器上
@@ -171,7 +172,7 @@ func (a *App) Skills() []skills.Skill {
 func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Lock()
 	n := &node{info: KernelInfo{Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
-		Since: time.Now().UnixMilli(), Local: local}}
+		Proto: hello.V, Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
@@ -204,7 +205,12 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
 	machine := a.machineOf(name)
+	mg := a.mcp
 	a.mu.Unlock()
+	// 挂在这台机器上的 MCP 服务马上去连（不等下一次维护）
+	if mg != nil {
+		mg.Wake(name, 30*time.Second)
+	}
 	// 机器上线后把离线时先按原样保存的工作目录换成那台机器给的规范形式
 	go a.normalizeWorkspaces(machine)
 	a.maybeUpdateKernel(name, hello)
@@ -227,6 +233,7 @@ func (a *App) KernelDown(name string) {
 		if p := a.mcp.Pipes(); p != nil {
 			p.DropNode(name) // 它上面起的 MCP 进程跟着没了
 		}
+		a.mcp.DropMachine(name) // 连接也作废：等它连回来再重新起（不然重连后第一次调用会失败）
 	}
 	a.hostGone(name)
 	a.publish(events.Event{T: "kernel", Name: name})

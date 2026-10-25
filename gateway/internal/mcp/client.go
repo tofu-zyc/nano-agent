@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -68,17 +70,22 @@ type Manager struct {
 	idle   time.Duration
 	now    func() time.Time
 	dial   func(Server) (sdkmcp.Transport, error)
-	pipes  *Pipes // 透传到别的机器上的管道（没接就是 nil）
+	pipes  *Pipes     // 透传到别的机器上的管道（没接就是 nil）
+	saveMu sync.Mutex // 写 mcp-tools.json
 }
 
-// conn 是一个服务的连接状态（自己一把锁，连接时不用占着 Manager 的锁）。
+// conn 是一个服务的连接状态。mu 只护着下面这几个字段，拿着它的时候**绝不能去连接、等网络或等进程**：
+// 算工具定义的地方是在网关总锁里读 tools 的，而连接（管道透传）要等内核回话、内核的消息又要过网关总锁，
+// 拿着 mu 去连就是锁顺序反了，会死锁。连接本身由 dialing 串行化（同一个服务同时只连一次）。
 type conn struct {
-	mu    sync.Mutex
-	cs    *sdkmcp.ClientSession
-	tools []*sdkmcp.Tool
-	used  time.Time
-	fails int
-	retry time.Time
+	dialing sync.Mutex
+	mu      sync.Mutex
+	cs      *sdkmcp.ClientSession
+	tools   []*sdkmcp.Tool // 最近一次列到的工具；断开时留着，连不上的时候工具定义照样用它
+	used    time.Time
+	fails   int
+	retry   time.Time
+	gen     int // 每断开一次（改了配置、调用出错）加一：连到一半的旧连接回来时作废
 }
 
 // NewManager 接上配置；idle 到了就 Sweep 关掉空闲连接。
@@ -95,6 +102,7 @@ func NewManager(store *Store, log *slog.Logger) *Manager {
 		now:    time.Now,
 	}
 	m.dial = m.defaultTransport
+	m.loadCache()
 	return m
 }
 
@@ -149,36 +157,69 @@ func (m *Manager) conn(name string) *conn {
 // session 拿到连上的服务（必要时现连）。连不上时记下退避时间。
 func (m *Manager) session(ctx context.Context, s Server) (*sdkmcp.ClientSession, []*sdkmcp.Tool, error) {
 	c := m.conn(s.Name)
+	if cs, tools, done, err := c.ready(m.now(), s.Name); done {
+		return cs, tools, err
+	}
+	c.dialing.Lock()
+	defer c.dialing.Unlock()
+	// 排队的时候别人可能已经连上了（或者刚失败、进了退避）
+	if cs, tools, done, err := c.ready(m.now(), s.Name); done {
+		return cs, tools, err
+	}
+	c.mu.Lock()
+	gen := c.gen
+	c.mu.Unlock()
+	cs, tools, err := m.connect(ctx, s)
+	c.mu.Lock()
+	if err != nil {
+		c.backoff(m.now())
+		c.mu.Unlock()
+		return nil, nil, err
+	}
+	if c.gen != gen {
+		// 连的时候配置改了（或者被断开了）：这条是按旧配置连上的，不要
+		c.mu.Unlock()
+		go cs.Close()
+		return nil, nil, fmt.Errorf("MCP 服务 %s 的配置刚改过，请再试一次", s.Name)
+	}
+	c.cs, c.tools, c.used, c.fails, c.retry = cs, tools, m.now(), 0, time.Time{}
+	c.mu.Unlock()
+	m.log.Info("MCP 服务已连接", "server", s.Name, "tools", len(tools))
+	m.saveCache() // 工具列表记到磁盘：重启以后连上之前先用它
+	return cs, tools, nil
+}
+
+// ready：已经连着就给出连接；还在退避期就给出错误；done 为 false 表示该去连了。
+func (c *conn) ready(now time.Time, name string) (cs *sdkmcp.ClientSession, tools []*sdkmcp.Tool, done bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := m.now()
 	if c.cs != nil {
 		c.used = now
-		return c.cs, c.tools, nil
+		return c.cs, c.tools, true, nil
 	}
 	if !c.retry.IsZero() && now.Before(c.retry) {
-		return nil, nil, fmt.Errorf("MCP 服务 %s 刚才连不上，%s 后再试", s.Name, c.retry.Sub(now).Round(time.Second))
+		return nil, nil, true, fmt.Errorf("MCP 服务 %s 刚才连不上，%s 后再试", name, c.retry.Sub(now).Round(time.Second))
 	}
+	return nil, nil, false, nil
+}
+
+// connect 真正去连（起进程 / 发 HTTP / 让内核起进程），不拿任何锁。
+func (m *Manager) connect(ctx context.Context, s Server) (*sdkmcp.ClientSession, []*sdkmcp.Tool, error) {
 	tr, err := m.dial(s)
 	if err != nil {
-		c.backoff(now)
 		return nil, nil, fmt.Errorf("MCP 服务 %s 起不来：%w", s.Name, err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cs, err := m.client.Connect(cctx, tr, nil)
 	if err != nil {
-		c.backoff(now)
 		return nil, nil, fmt.Errorf("连 MCP 服务 %s 失败：%w", s.Name, err)
 	}
 	tools, err := listAllTools(cctx, cs)
 	if err != nil {
 		_ = cs.Close()
-		c.backoff(now)
 		return nil, nil, fmt.Errorf("MCP 服务 %s 列工具失败：%w", s.Name, err)
 	}
-	c.cs, c.tools, c.used, c.fails, c.retry = cs, tools, now, 0, time.Time{}
-	m.log.Info("MCP 服务已连接", "server", s.Name, "tools", len(tools))
 	return cs, tools, nil
 }
 
@@ -286,7 +327,12 @@ func (m *Manager) Call(ctx context.Context, server, tool string, args any) (*sdk
 	}
 	res, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
-		m.drop(server)
+		// 只有连接本身坏了才断开重连：用户停下（取消）、服务回了一个 JSON-RPC 错误，连接都还是好的，
+		// 断开会把 computer use 这类服务的状态（开着的浏览器之类）一起丢掉
+		var werr *jsonrpc.Error
+		if !errors.Is(err, context.Canceled) && !errors.As(err, &werr) {
+			m.drop(server)
+		}
 		return nil, fmt.Errorf("调 %s 的 %s 失败：%w", server, tool, err)
 	}
 	return res, nil
@@ -294,14 +340,24 @@ func (m *Manager) Call(ctx context.Context, server, tool string, args any) (*sdk
 
 // drop 丢掉一个连接（下次重新连）。
 func (m *Manager) drop(name string) {
-	c := m.conn(name)
-	c.mu.Lock()
-	cs := c.cs
-	c.cs, c.tools = nil, nil
-	c.mu.Unlock()
-	if cs != nil {
+	if cs := m.detach(name, false); cs != nil {
 		_ = cs.Close()
 	}
+}
+
+// detach 把连接从表里摘下来交给调用方去关（关可能要等进程退出，不在锁里做）。
+// 工具列表留着：连不上的这段时间工具定义还用它，重连上会刷新。fresh 表示配置换了，退避也清掉。
+func (m *Manager) detach(name string, fresh bool) *sdkmcp.ClientSession {
+	c := m.conn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cs := c.cs
+	c.cs = nil
+	c.gen++
+	if fresh {
+		c.retry, c.fails = time.Time{}, 0
+	}
+	return cs
 }
 
 // Sweep 关掉空闲太久的连接（网关每分钟调一次）。
@@ -388,7 +444,45 @@ func (m *Manager) Status(name string) (online bool, tools int) {
 
 // Reload 在配置改了以后调用：断掉所有连接，下次用到再按新配置连。
 func (m *Manager) Reload() {
-	m.Close()
+	m.mu.Lock()
+	names := make([]string, 0, len(m.conns))
+	for name := range m.conns {
+		names = append(names, name)
+	}
+	m.mu.Unlock()
+	for _, name := range names {
+		// 配置换了：旧配置连不上留下的退避不算数，马上按新的连
+		if cs := m.detach(name, true); cs != nil {
+			_ = cs.Close()
+		}
+	}
+}
+
+// DropMachine 是某台机器的内核断开了：它上面跑的服务连接都作废（进程已经跟着没了）。
+// 网关总锁里调用：只摘下来，关在协程里做。
+func (m *Manager) DropMachine(machine string) {
+	for _, s := range m.store.List() {
+		if s.Machine != machine {
+			continue
+		}
+		if cs := m.detach(s.Name, true); cs != nil {
+			go cs.Close()
+		}
+	}
+}
+
+// Wake 是某台机器的内核刚连上：挂在它上面的服务马上去连（不等退避、不等下一次维护）。
+func (m *Manager) Wake(machine string, timeout time.Duration) {
+	for _, s := range m.store.List() {
+		if !s.Enabled || s.Machine != machine {
+			continue
+		}
+		c := m.conn(s.Name)
+		c.mu.Lock()
+		c.retry, c.fails = time.Time{}, 0
+		c.mu.Unlock()
+		go m.warmOne(s, timeout)
+	}
 }
 
 // Test 强制现连一次（忽略退避），网页上的“测试”用它 —— 用户点测试就是想看现在能不能连上。
@@ -436,12 +530,14 @@ func (m *Manager) Warm(timeout time.Duration) {
 		if !s.Enabled {
 			continue
 		}
-		go func(s Server) {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			if _, _, err := m.session(ctx, s); err != nil {
-				m.log.Warn("MCP 服务还没连上", "server", s.Name, "err", err)
-			}
-		}(s)
+		go m.warmOne(s, timeout)
+	}
+}
+
+func (m *Manager) warmOne(s Server, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if _, _, err := m.session(ctx, s); err != nil {
+		m.log.Warn("MCP 服务还没连上", "server", s.Name, "err", err)
 	}
 }

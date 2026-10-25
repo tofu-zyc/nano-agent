@@ -80,9 +80,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			for _, spec := range a.searchTools() {
 				tools = append(tools, toolOf(spec))
 			}
-		} else if admin && a.workspaceOf(sid).mode != "readonly" {
-			// MCP 服务带的工具（<服务>__<工具>）：访客、只读模式都没有
-			tools = append(tools, mcpTools(a.mcp, ag.ID)...)
+		} else {
+			// MCP 服务带的工具（<服务>__<工具>）：访客、只读和不用工具的模式都没有
+			tools = append(tools, a.mcpOffered(sid, admin)...)
 		}
 		if a.memoryOn(a.agentOf(sid)) {
 			tools = append(tools, toolOf(knowledgeTool()))
@@ -134,7 +134,18 @@ func (a *App) permOf(sid string) (route, bool, bool) {
 func (a *App) permSignature(sid string) string {
 	// 只看管理员/访客和内核：noTools 是“这一轮”算出来的，运行结束就变回去，放进签名会抖
 	rt, admin, _ := a.permOf(sid)
-	return fmt.Sprintf("%t|%s|%t|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, a.mcpSignature())
+	// MCP 按「这个会话实际会拿到的 MCP 工具」算：加了服务、后台连上了、换了模式都会变，
+	// 只看配置的话，服务暂时连不上时建的快照，之后连上了也不会重建
+	var names strings.Builder
+	for _, t := range a.mcpOffered(sid, admin) {
+		names.WriteString(t.Function.Name)
+		names.WriteByte(',')
+	}
+	mcpSig := ""
+	if names.Len() > 0 {
+		mcpSig = fmt.Sprintf("%x", sha256.Sum256([]byte(names.String())))[:16]
+	}
+	return fmt.Sprintf("%t|%s|%t|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig)
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

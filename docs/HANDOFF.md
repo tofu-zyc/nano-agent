@@ -376,7 +376,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 ## MCP（2026-10-25，阶段 11 前两块）
 
-配置在 `~/.nano-agent/data/mcp.json`（还没有网页界面，手写）：
+配置在 `~/.nano-agent/data/mcp.json`，网页里网关节点面板的「MCP 服务」能加、改、删、测试，也可以手写：
 
 ```json
 [
@@ -400,25 +400,39 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - `command`/`args`/`env`/`cwd` 是网关本机起的 stdio 进程；`url` 是远程 streamable HTTP。二选一。
 - `machine` 填一台在线内核的名字，这个服务就**跑到那台机器上**（协议 v10：`pipe_open` / `pipe_write` /
   `pipe_data` / `pipe_closed`，见 `kernel/src/pipe.c`）。不填（或写 `gateway`）就在网关本机跑。
-  **Windows 内核还不支持透传**（那份是明确报错的桩），Linux / macOS 可以。
+  Linux / macOS（`pipe.c`）和 Windows（`pipe_win.c`）都支持；内核协议低于 10 的机器直接报“内核太旧”。
 - `env` 里写明文密钥，存盘时会自动加密成 `enc:v1:`（读的时候解）。
 - `tools` 是白名单，`"!名字"` 表示禁用；`agents` 空表示所有 agent 都能用。
 - `approval`：`never`（直接执行，默认）、`per_turn`（一轮里第一次调用要批，批过就不再问）或
   `always`（每次都要批）。管理员在网页点批准，或者在聊天里发 `/approve 编号`。
 
-协议版本：网关只拒绝**比 `proto.MinVersion`（现在 8）还老**的内核。旧一版的内核先放进来，
+协议版本：网关只拒绝**比 `proto.MinVersion`（现在 9，自我更新从 v9 开始才有）还老**的内核。旧一版的内核先放进来，
 `maybeUpdateKernel` 才有机会把新版本推过去（以前要求版本完全相等，网关一升级老内核就永远连不上）。
 
 工具以 `<服务>__<工具>` 交给模型，说明里带“（MCP 服务 X）”。调用时内核不认识这个名字，
 会转回网关执行（`kernel/src/core.c` 的 `FORWARDED`），所以不需要给内核加动态工具表。
 只有管理员能用；访客的工具集里不会有这些。
 
-已经有的测试：`internal/mcp`（配置校验、密钥加密、列/调工具、黑名单、内存传输和真子进程两条路）、
-`app/TestMCPEndToEnd`（模型能看见工具 → 调用拿到结果）。
+工具返回的图片存进媒体库：网页的工具卡片显示；模型能看图时也附给模型（和 Read 读到图片一样）。
 
-还没做：图片类结果的专门展示（现在工具结果里是一行占位文字，图片本身也没存下来）。
+**锁的规矩（改之前一定先看）**：算工具定义（`contextParts`）是在网关总锁里做的，而连 MCP 服务——尤其
+`machine=` 的管道透传——要等内核回话，内核的消息又要过总锁。所以：
+- 总锁里只能读缓存（`Manager.CachedTools`），**绝不能去连**；连接由后台的 `Warm` / `Wake` 发起。
+- `conn.mu` 只护字段，拿着它不能连接、不能等网络；连接本身由 `conn.dialing` 串行化。
+- 管道收发（`app/pipe.go` 的 `PipeWrite` / `PipeClose`、`KernelMsg` 里的 `pipe_data`）不过总锁。
+- `mcpCall` 的协程只认开始时的那一轮 `run`：回来时 `s.run` 可能已经是 nil 或下一轮。
 
-两条端到端测试：`scripts/e2e-pipe.py`（假网关 + 真内核，测管道）、
+**工具快照**：签名里带「这个会话实际会拿到的 MCP 工具名」（`mcpOffered`），服务连上、加了工具、
+切换只读模式都会重建；连不上时用上次的工具列表（断开不清空），并记在 `data/mcp-tools.json`，
+网关重启后、服务连上之前先用它，前缀不抖。改配置会清掉退避马上重连；某台机器的内核连上来时
+（`KernelUp` → `Wake`）立刻去连挂在它上面的服务，断开时（`KernelDown`）把那台机器上的连接作废。
+
+测试：`internal/mcp`（配置、列/调工具、内存传输、真子进程、管道、`lock_test.go` 的锁和缓存）、
+`app/mcp_e2e_test.go`、`app/mcp_lock_test.go`（死锁、卡顿、中途停下、审批随这一轮撤掉、
+服务后来才连上、切换模式、旧内核）。
+
+两条端到端测试：`scripts/e2e-pipe.py`（假网关 + 真内核，测管道，含网关突然断开时进程被收掉；
+`NANO_TEST_KERNEL=` 可以换成 `-fsanitize=address` 编的内核查内存问题）、
 `scripts/e2e-mcp-remote.py`（真网关 + 真内核 + 最小的 MCP 服务，测 `machine=` 整条链路）。
 ## 关键设计（改之前先理解）
 

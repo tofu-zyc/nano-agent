@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
@@ -112,8 +113,9 @@ type App struct {
 	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
 	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
-	mcp               *mcp.Manager // MCP 服务（data/mcp.json）
-	mcpStore          *mcp.Store   // MCP 服务的配置（同一个文件的读写）
+	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
+	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
+	mcpStore          *mcp.Store                 // MCP 服务的配置（同一个文件的读写）
 	log               *slog.Logger
 	bus               *events.Bus
 	started           time.Time
@@ -240,6 +242,7 @@ type run struct {
 	calls      int             // 这一轮请求了几次模型
 	usage      llm.Usage       // 这一轮的累计用量
 	noTools    bool            // 访客没有工作目录：不给模型工具，只聊天
+	mode       string          // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
 	mcpOK      map[string]bool // 这一轮已经批准过的 MCP 服务（approval=per_turn）
 	readOnly   bool            // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate    bool            // 这个身份可以提权写工作目录外（管理员）
@@ -339,7 +342,12 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	return a
 }
 
-func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
+func (a *App) SetHub(h *kernel.Hub) {
+	a.mu.Lock()
+	a.hub = h
+	a.mu.Unlock()
+	a.hubRef.Store(h)
+}
 
 // SetMCP 接上 MCP 服务（data/mcp.json）；nil 表示没有。
 func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
@@ -948,6 +956,7 @@ func (a *App) startRun(s *sess) {
 	if mode == proto.ModeFull {
 		r.full, mode = true, proto.ModeAuto
 	}
+	r.mode = mode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
@@ -1113,15 +1122,14 @@ func (a *App) decide(c in, arg string, ok bool) {
 // ---- 内核事件（kernel.Handler） ----
 
 func (a *App) KernelMsg(node string, m *proto.Msg) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if m.T == proto.TLsResult || m.T == proto.TRunResult {
-		a.hostReply(node, m)
-		return
-	}
 	if m.T == proto.TPipeData || m.T == proto.TPipeClosed {
-		if a.mcp != nil {
-			if p := a.mcp.Pipes(); p != nil {
+		// MCP 管道的数据不过网关总锁：交给管道时可能要等 MCP 客户端读走（背压），
+		// 拿着总锁等就会把整个网关卡住
+		a.mu.Lock()
+		mg := a.mcp
+		a.mu.Unlock()
+		if mg != nil {
+			if p := mg.Pipes(); p != nil {
 				if m.T == proto.TPipeData {
 					p.Data(node, m.Pipe, m.Data)
 				} else {
@@ -1129,6 +1137,12 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 				}
 			}
 		}
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if m.T == proto.TLsResult || m.T == proto.TRunResult {
+		a.hostReply(node, m)
 		return
 	}
 	if m.T == proto.TTools {
@@ -1164,7 +1178,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if cancel := s.run.execs[m.ID]; cancel != nil {
 			cancel()
 		}
-		a.cancelMCP(m.ID)
+		a.cancelMCP(s.sid, m.ID)
 	case proto.TResult:
 		content := m.Content
 		if m.OK != nil && !*m.OK {

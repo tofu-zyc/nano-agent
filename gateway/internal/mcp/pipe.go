@@ -67,6 +67,7 @@ func (p *Pipes) Closed(node, id string, code int, msg string) {
 	p.mu.Unlock()
 	if c != nil {
 		c.finish(fmt.Errorf("MCP 进程退出（%d）：%s", code, msg))
+		p.remove(node, id) // 进程已经没了：表里也清掉（之后的 Close 不用再通知内核）
 	}
 }
 
@@ -140,10 +141,16 @@ func (c *pipeConn) Read(p []byte) (int, error) {
 		case line := <-c.in:
 			c.rest = append(line, '\n')
 		case <-c.done:
-			if c.err != nil {
-				return 0, c.err
+			// 进程退出前最后写的几行可能还在队列里：先读完再报结束
+			select {
+			case line := <-c.in:
+				c.rest = append(line, '\n')
+			default:
+				if c.err != nil {
+					return 0, c.err
+				}
+				return 0, io.EOF
 			}
-			return 0, io.EOF
 		}
 	}
 	n := copy(p, c.rest)
@@ -175,6 +182,8 @@ func (c *pipeConn) Write(p []byte) (int, error) {
 func (c *pipeConn) Close() error {
 	select {
 	case <-c.done:
+		// 进程已经退出了，或者那台机器断开了：内核那边没有这条管道了，不用再通知
+		c.pipes.remove(c.node, c.id)
 	default:
 		c.finish(nil)
 		c.pipes.remove(c.node, c.id)

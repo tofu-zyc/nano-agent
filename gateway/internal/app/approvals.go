@@ -115,6 +115,9 @@ func (a *App) dropApproval(n int, why string) {
 	delete(a.approvals, n)
 	a.resolveApproval(ap, why)
 	a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+	if ap.resolve != nil {
+		ap.resolve(false) // 网关这边在等结果的（MCP）：按没批准处理，别让它一直等
+	}
 }
 
 // decided 是审批结果的说明：谁批的（who 是身份或者名字）

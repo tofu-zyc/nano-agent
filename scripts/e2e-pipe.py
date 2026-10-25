@@ -3,7 +3,8 @@
 import json, os, socket, subprocess, tempfile, time, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-KERNEL = os.path.join(ROOT, 'kernel', 'nano-kernel')
+# NANO_TEST_KERNEL 可以换成别的内核（比如 -fsanitize=address 编出来的，查内存问题）
+KERNEL = os.environ.get('NANO_TEST_KERNEL') or os.path.join(ROOT, 'kernel', 'nano-kernel')
 tmp = tempfile.mkdtemp(prefix='nano-pipe-')
 sock = os.path.join(tmp, 'k.sock')
 conf = os.path.join(tmp, 'kernel.conf')
@@ -78,6 +79,39 @@ try:
             bad = m; break
     if bad is not None: ok('命令不存在时回 pipe_closed（exit=%s）' % bad.get('exit'))
     else: fail('命令不存在时没有回 pipe_closed')
+    # 网关以为还活着、内核这边已经没有的管道（内核重启过）：写过去要回 pipe_closed，不能让网关干等
+    send(t='pipe_write', pipe='gone', data='{}')
+    stale = None
+    for _ in range(80):
+        m = recv()
+        if m.get('t') == 'pipe_closed' and m.get('pipe') == 'gone':
+            stale = m; break
+    if stale is not None: ok('写不存在的管道回 pipe_closed（%s）' % stale.get('detail'))
+    else: fail('写不存在的管道没有回 pipe_closed')
+    # 网关突然断开：内核要把它让起的进程（连同进程组）都收掉，自己不能崩，还能重连
+    send(t='pipe_open', pipe='p3', argv=['sh', '-c', 'echo $$ > "$0"; while :; do echo tick; sleep 0.002; done',
+                                         os.path.join(tmp, 'p3.pid')])
+    time.sleep(0.5)
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        st = open('/proc/%d/stat' % pid).read().split(') ')[-1].split()[0] if os.path.exists('/proc/%d/stat' % pid) else ''
+        return st != 'Z'
+    try: p3 = int(open(os.path.join(tmp, 'p3.pid')).read())
+    except Exception: p3 = 0
+    if not p3: fail('p3 没起来')
+    s.shutdown(socket.SHUT_RDWR); s.close()
+    s, _ = srv.accept()
+    s.settimeout(5)
+    buf[0] = b''
+    again = recv()
+    if again.get('t') == 'hello': ok('网关断开后内核没崩，重新连上来了')
+    else: fail('断开后重连的第一条不是 hello：%r' % again)
+    if p3 and not alive(p3): ok('网关断开时 MCP 进程被收掉了')
+    elif p3: fail('网关断开以后 MCP 进程还活着（pid %d）' % p3)
+    if proc.poll() is not None: fail('内核退出了（%s）' % proc.returncode)
     s.close()
 except Exception as e:
     fail('异常：%s' % e)

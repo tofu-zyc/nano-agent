@@ -668,7 +668,7 @@ static void pump_pipes(kernel_t *k)
     na_pipe_msg m;
     while (pipes_take(&k->pipes, &m)) {
         cJSON *out;
-        if (m.exit >= 0) {
+        if (!m.data) {   /* 退出的那条没有 data（退出码可以是 -1：没有这条管道、起不来） */
             out = msg_new("pipe_closed", NULL);
             cJSON_AddStringToObject(out, "pipe", m.id);
             cJSON_AddNumberToObject(out, "exit", m.exit);
@@ -1011,8 +1011,9 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     /* 被拒绝、等确认这些状态比“断开”更有用，留着 */
     if (!strcmp(k->state, "connected") || !k->state[0]) set_state(k, "connecting", why, NULL);
     link_close(&k->link);
-    /* 网关那边已经不在了：把它让起的 MCP 进程都收掉，别留在机器上 */
-    pipes_shutdown(&k->pipes);
+    /* 网关那边已经不在了：把它让起的 MCP 进程都收掉，别留在机器上。
+       用 reset 不用 shutdown：这一轮主循环后面的 pipes_poll 还拿着这些条目的引用 */
+    pipes_reset(&k->pipes);
     na_event ev = { .type = NA_EV_RESET };
     na_core_feed(k->core, now, &ev);
     pump(k, now);   /* 只剩 KILL：终止所有正在执行的工具 */
