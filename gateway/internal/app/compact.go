@@ -283,6 +283,9 @@ func (a *App) maintenance() {
 			return
 		case <-tick.C:
 			a.Maintain()
+			if a.mcp != nil {
+				a.mcp.Sweep() // 空闲太久的 MCP 连接先断开
+			}
 		}
 	}
 }

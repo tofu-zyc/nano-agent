@@ -27,6 +27,7 @@ import (
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/paths"
@@ -204,6 +205,15 @@ func main() {
 		os.Exit(1)
 	}
 	a.SetMedia(mediaStore)
+	// MCP 服务（data/mcp.json）：用到才连，进程/连接在网关退出时关掉
+	mcpStore, err := mcp.Open(filepath.Join(cfg.Session.DataDir, "mcp.json"))
+	if err != nil {
+		log.Error("读取 MCP 服务失败", "err", err)
+		os.Exit(1)
+	}
+	mcpMgr := mcp.NewManager(mcpStore, log)
+	a.SetMCP(mcpMgr)
+	defer mcpMgr.Close()
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)

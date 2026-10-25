@@ -69,12 +69,13 @@ func Normalize(s Server) (Server, error) {
 		return s, errors.New("要填 command（本机 stdio）或者 url（远程 streamable HTTP）")
 	}
 	switch s.Approval {
-	case "", ApprovalAlways, ApprovalPerTurn, ApprovalNever:
+	case "", ApprovalNever:
+		s.Approval = ApprovalNever
+	case ApprovalAlways, ApprovalPerTurn:
+		// 阶段 11 后半段才接审批；先明确拒绝，免得以为开了审批其实没开
+		return s, errors.New("审批（always / per_turn）还没接上，先写 never")
 	default:
-		return s, fmt.Errorf("approval 只能是 %s、%s、%s", ApprovalAlways, ApprovalPerTurn, ApprovalNever)
-	}
-	if s.Approval == "" {
-		s.Approval = ApprovalPerTurn
+		return s, fmt.Errorf("approval 只能是 %s（%s、%s 还没接上）", ApprovalNever, ApprovalAlways, ApprovalPerTurn)
 	}
 	for _, t := range s.Tools {
 		if strings.TrimSpace(strings.TrimPrefix(t, "!")) == "" {

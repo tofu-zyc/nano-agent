@@ -302,3 +302,38 @@ func (m *Manager) Close() {
 		m.drop(name)
 	}
 }
+
+// Server 按名字找一个服务（网关分发 <服务>__<工具> 时用）。
+func (m *Manager) Server(name string) (Server, bool) {
+	return m.store.Get(name)
+}
+
+// ResultText 把工具结果摊平成一段文字。图片单独说明（模型的工具结果放不进图片，
+// 需要的话由网关另外塞进上下文）。
+func ResultText(res *sdkmcp.CallToolResult) string {
+	if res == nil {
+		return "（没有输出）"
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		switch v := c.(type) {
+		case *sdkmcp.TextContent:
+			b.WriteString(v.Text)
+		case *sdkmcp.ImageContent:
+			fmt.Fprintf(&b, "\n[图片 %s，%d 字节]", v.MIMEType, len(v.Data))
+		case *sdkmcp.AudioContent:
+			fmt.Fprintf(&b, "\n[音频 %s，%d 字节]", v.MIMEType, len(v.Data))
+		case *sdkmcp.ResourceLink:
+			fmt.Fprintf(&b, "\n[资源 %s]", v.URI)
+		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s
+	}
+	if res.StructuredContent != nil {
+		if out, err := json.Marshal(res.StructuredContent); err == nil {
+			return string(out)
+		}
+	}
+	return "（没有输出）"
+}

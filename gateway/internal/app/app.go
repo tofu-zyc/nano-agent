@@ -22,6 +22,7 @@ import (
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
@@ -111,6 +112,7 @@ type App struct {
 	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
 	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
+	mcp               *mcp.Manager // MCP 服务（data/mcp.json）
 	log               *slog.Logger
 	bus               *events.Bus
 	started           time.Time
@@ -335,6 +337,9 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 }
 
 func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
+
+// SetMCP 接上 MCP 服务（data/mcp.json）；nil 表示没有。
+func (a *App) SetMCP(m *mcp.Manager) { a.mu.Lock(); a.mcp = m; a.mu.Unlock() }
 
 // Bus 是事件总线，网页界面从这里订阅。
 func (a *App) Bus() *events.Bus { return a.bus }

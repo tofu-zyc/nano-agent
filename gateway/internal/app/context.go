@@ -80,6 +80,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			for _, spec := range a.searchTools() {
 				tools = append(tools, toolOf(spec))
 			}
+		} else {
+			// MCP 服务带的工具（<服务>__<工具>）：访客没有工具，也就没有这些
+			tools = append(tools, mcpTools(a.mcp, ag.ID)...)
 		}
 		if a.memoryOn(a.agentOf(sid)) {
 			tools = append(tools, toolOf(knowledgeTool()))

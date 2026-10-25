@@ -40,8 +40,8 @@ func TestStoreSaveAndNormalize(t *testing.T) {
 	if !ok {
 		t.Fatal("读回来了但没有 demo")
 	}
-	if s.Approval != ApprovalPerTurn {
-		t.Fatalf("approval 默认应该是 per_turn，实际 %q", s.Approval)
+	if s.Approval != ApprovalNever {
+		t.Fatalf("approval 默认应该是 never（审批还没接上），实际 %q", s.Approval)
 	}
 	if strings.Contains(s.Env["TOKEN"], "sk-plain") {
 		t.Fatalf("env 里的密钥应该加密存：%q", s.Env["TOKEN"])
@@ -63,11 +63,12 @@ func TestStoreRejectsBadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := []Server{
-		{Name: "", Command: "x"},                          // 没名字
-		{Name: "a b", Command: "x"},                       // 名字带空格
-		{Name: "ok", URL: "http://x", Command: "y"},       // 两个都给
-		{Name: "ok", Command: "x", Approval: "sometimes"}, // 审批方式不对
-		{Name: "ok", Command: "x", Machine: "windows-pc"}, // 现在只支持本机
+		{Name: "", Command: "x"},                             // 没名字
+		{Name: "a b", Command: "x"},                          // 名字带空格
+		{Name: "ok", URL: "http://x", Command: "y"},          // 两个都给
+		{Name: "ok", Command: "x", Approval: "sometimes"},    // 审批方式不对
+		{Name: "ok", Command: "x", Approval: ApprovalAlways}, // 审批还没接上，明确拒绝
+		{Name: "ok", Command: "x", Machine: "windows-pc"},    // 现在只支持本机
 	}
 	for _, s := range bad {
 		if err := st.Save([]Server{s}); err == nil {
