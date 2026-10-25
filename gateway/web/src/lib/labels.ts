@@ -1,8 +1,8 @@
 // 选项、工具、机器人种类的中文名字：面板里别把英文原样丢给用户。
 export const enumLabels: Record<string, Record<string, string>> = {
-  mode: { auto: '自动', ask: '每次问', readonly: '只读' },
-  'agent.mode': { auto: '自动', ask: '每次问', readonly: '只读' },
-  'workspace.mode': { auto: '自动', ask: '审批', readonly: '只读' },
+  mode: { full: '放行', auto: '自动', ask: '每次问', readonly: '只读' },
+  'agent.mode': { full: '放行', auto: '自动', ask: '每次问', readonly: '只读' },
+  'workspace.mode': { full: '放行', auto: '自动', ask: '审批', readonly: '只读' },
   group_eagerness: { off: '不主动说', low: '少插话', normal: '正常', high: '多插话' },
   life_level: { low: '安静（2–4 小时醒一次）', normal: '平常（1–2 小时）', high: '活跃（半小时到一小时）' },
   life_reach: { owner: '只找主人', all: '私聊过的人都可能找', off: '不主动找人' },

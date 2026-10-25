@@ -61,7 +61,7 @@
           <p class="p-note">还没有会话在这里工作。在会话节点里“挂载工作目录”选它。</p>
         {/each}
       </div>
-      <p class="p-note" style="margin-top: 10px">工具在工作目录里能读能写，外面只能读，写外面要提权审批。权限模式（自动、审批、只读）跟着会话，新会话的默认值在 Agent 节点里。</p>
+      <p class="p-note" style="margin-top: 10px">工具在工作目录里能读能写，外面只能读，写外面要提权审批。权限模式（放行、自动、审批、只读）跟着会话，新会话的默认值在 Agent 节点里。</p>
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={() => remove(ws)}><Icon name="trash" size={13} />从列表删掉（机器上的文件不动）</button>
       </div>

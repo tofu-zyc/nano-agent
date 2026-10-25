@@ -42,7 +42,8 @@
     { key: 'life', title: '拟人', note: '作息、多久醒一次、主动找谁' },
     { key: 'memory', title: '长期记忆', note: '记什么、什么时候整理' },
   ];
-  const ownDefault = (s: AgentSetting) => s.group !== 'work';
+  // 拟人型的权限模式默认放行，不跟随全局
+  const ownDefault = (s: AgentSetting) => s.group !== 'work' || (s.key === 'mode' && a?.style === 'life');
   const life = $derived(a?.style === 'life');
 
   async function setStyle(style: 'tool' | 'life') {
@@ -301,7 +302,7 @@
                     saveSetting(s.key, s.type === 'string' ? raw : Number(raw));
                   }} />
               {/if}
-              {#if s.value === null && s.type !== 'model'}<p class="p-note p-small">现在用{ownDefault(s) ? '默认的' : '全局的'}：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
+              {#if s.value === null && s.type !== 'model'}<p class="p-note p-small">现在用{ownDefault(s) ? '默认的' : '全局的'}：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode' && modeMeta[String(s.effective)]}{'，' + modeMeta[String(s.effective)].desc}{/if}</p>{/if}
               {#if s.help}<p class="p-note p-small">{s.help}</p>{/if}
             </div>
           {/each}

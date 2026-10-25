@@ -66,7 +66,7 @@ var Commands = []Command{
 	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
-	{Name: "mode", Args: "[auto | ask | readonly]", Desc: "查看、切换权限模式：自动、审批、只读", Admin: true},
+	{Name: "mode", Args: "[full | auto | ask | readonly]", Desc: "查看、切换权限模式：放行、自动、审批、只读", Admin: true},
 	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
 	{Name: "model", Args: "[编号 | default]", Desc: "查看、切换这个会话用的模型", Admin: true},
 	{Name: "persona", Args: "[编号 | 名字 | default]", Desc: "查看、切换这个会话的人格（自带小纳、大肥鱼）", Admin: true},
@@ -229,6 +229,7 @@ type run struct {
 	truncated  bool
 	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
 	stopTyping func()
+	full       bool // 放行模式：内核要审批的调用由网关自动批准
 
 	streamed   bool // 回复正文已经通过 RunView 显示过了
 	start      time.Time
@@ -859,6 +860,10 @@ func (a *App) startRun(s *sess) {
 	}
 	r.proactive = s.groupProactive
 	s.groupProactive = false
+	// 放行：内核按自动模式跑（沙箱和审批规则都不变），要审批的调用由网关当场批准（approvals.go）
+	if mode == proto.ModeFull {
+		r.full, mode = true, proto.ModeAuto
+	}
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
@@ -898,7 +903,11 @@ func (a *App) startRun(s *sess) {
 	}
 	a.log.Info("开始处理", "sid", s.sid, "node", node, "workspaces", len(rt.mounts), "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
-	runData := map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}
+	shown := in.Mode
+	if r.full && in.Mode == proto.ModeAuto {
+		shown = proto.ModeFull
+	}
+	runData := map[string]any{"from": r.from, "mode": shown, "channel": chanName(head.ep.ch), "node": node}
 	if len(images) > 0 {
 		runData["images"] = images
 	}
@@ -1071,8 +1080,15 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000)})
 	case proto.TApproveReq:
-		a.askApproval(s, m)
+		if s.run.full {
+			a.autoApprove(s, m)
+		} else {
+			a.askApproval(s, m)
+		}
 	case proto.TNotice:
+		if s.run.full && strings.HasPrefix(m.Text, "已批准") {
+			break // 自动批准的：网页上已经记过了，不往聊天里发
+		}
 		a.notify(s, m.Text)
 	case proto.TDone:
 		a.finish(s, m.Status, m.Detail)

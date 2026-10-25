@@ -20,7 +20,7 @@ nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自�
 - 每个 agent：`id`、`name`、`emoji`、`default`（是不是默认的）、`style`（`tool` 工具型 / `life` 拟人型）、`model`、`model_label`、`thinking`、`sessions`（几个会话）、`bots`（绑了哪些机器人）、`persona_file`、`memory`（长期记忆：开没开、多少条、多少人、上次整理）、`life`（拟人型的状态：睡着 / 醒着 / 在想事情、下次醒来、今天醒了几次、近况）、`settings`（它自己的设置：每项有 `group` 分组（work 干活 / group 群聊 / life 拟人 / memory 记忆）、`global` 全局值或默认值、`value` 它自己的值（`null` 表示跟随全局或默认）、`effective` 实际生效的值）。
 - 每个机器人：`id`、`kind`（telegram / feishu）、`name`、`agent`（绑在谁身上）、`channel`（渠道名，比如 `tg`、`tg.bob`）、`enabled`、`legacy`（内置的）。
 
-## 再改（每次审批）
+## 再改（每次审批；放行模式下自动批准）
 
 ```json
 {"action":"agent_save","name":"小鲍","emoji":"🦦"}
@@ -28,7 +28,7 @@ nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自�
 
 - `name` 是新的 agent 的名字，ID 会自动起（小写字母、数字、-）。
 - 改已有的：带上 `"agent":"bob"`，再加要改的字段（`name`、`emoji`、`model`、`thinking`）。
-- 改它覆盖的设置：`"settings":{"max_steps":50,"mode":"ask"}`；写 `null` 恢复跟随全局（可覆盖的键：`max_steps`、`run_timeout`、`approval_timeout`、`max_output_kb`、`mode`、`compact_at`、`compact_to`、`keep_turns`、`idle_compact`、`idle_compact_min`）。
+- 改它覆盖的设置：`"settings":{"max_steps":50,"mode":"ask"}`；写 `null` 恢复跟随全局（可覆盖的键：`max_steps`、`run_timeout`、`approval_timeout`、`max_output_kb`、`mode`、`compact_at`、`compact_to`、`keep_turns`、`idle_compact`、`idle_compact_min`）。`mode` 是新会话的权限模式：`full` 放行（什么都不审批）、`auto`、`ask`、`readonly`；拟人型没设时是 `full`，工具型跟随全局。
 - 改类型：`"style":"life"`（拟人型）或 `"tool"`（工具型）。拟人型自己的设置：`life_awake`（醒着的时间，如 `08:00-23:30`）、`life_level`（`low` / `normal` / `high`，多久自己醒一次）、`life_reach`（`owner` 只主动找主人 / `all` 私聊过的人都可能找 / `off` 不主动找人）、`life_budget`（内心活动每天最多用多少 token，0 不限）。
 - 长期记忆的设置：`memory`（`on` / `off`）、`dream_when`（什么时候整理记忆：`idle` 空闲时、`nightly` 每天定点、`sleep` 睡着时、`off`）、`dream_at`（定点几点，如 `03:00`）、`dream_idle`（空闲多久，如 `2h`）、`dream_max`（每天最多自动整理几次）、`dream_model`（整理用的模型 ID，空就用自己的）。
 - 删掉：`{"action":"agent_delete","id":"bob"}`。默认 agent 不能删；还绑着机器人的 agent 要先换绑。

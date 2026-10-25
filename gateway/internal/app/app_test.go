@@ -498,6 +498,40 @@ func TestApprovalButtons(t *testing.T) {
 	}
 }
 
+// 放行模式：内核照样按自动模式跑，要审批的调用由网关当场批准，聊天里不发审批消息；拟人型没设置时默认放行
+func TestFullModeAutoApproves(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	e.say("帮我截个屏")
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAuto {
+		t.Fatalf("发给内核的模式：%q", in.Mode)
+	}
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: e.sid, ID: "c1", Name: "Shell", Args: json.RawMessage(`{"command":"screenshot.ps1"}`), From: "fake:u1"})
+	if ap := e.k.expect(proto.TApprove); ap.ID != "c1" || ap.OK == nil || !*ap.OK {
+		t.Fatalf("approve: %+v", ap)
+	}
+	e.k.send(proto.Msg{T: proto.TNotice, SID: e.sid, Text: "已批准，开始执行 Shell"})
+	e.ch.none(t)
+	e.a.mu.Lock()
+	n := len(e.a.approvals)
+	e.a.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("不该留下审批单：%d", n)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[e.sid].run == nil })
+
+	// 自己设了审批模式的拟人型：照常审批
+	e.say("/mode ask")
+	e.ch.wait(t, "权限模式已切换为审批")
+	e.say("再截一次")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: e.sid, ID: "c2", Name: "Shell", Args: json.RawMessage(`{"command":"x"}`), From: "fake:u1"})
+	e.ch.wait(t, "需要审批 #")
+	e.k.none()
+}
+
 func TestKernelDownAbortsRuns(t *testing.T) {
 	e := setup(t)
 	e.say("任务")

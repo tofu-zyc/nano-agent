@@ -12,6 +12,9 @@ const (
 	ModeReadonly = "readonly" // 只能用只读工具（Read、Grep）
 	ModeAsk      = "ask"      // 只读工具直接执行，其余每次先审批
 	ModeAuto     = "auto"     // 全部直接执行，都在工作目录的沙箱里
+	// ModeFull 是放行：内核照样按 auto 跑（沙箱和审批规则不变），要审批的调用由网关当场自动批准。
+	// 只在网关里用，不发给内核。
+	ModeFull = "full"
 )
 
 // 消息类型。

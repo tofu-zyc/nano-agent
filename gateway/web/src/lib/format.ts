@@ -94,6 +94,7 @@ export const stateLabel: Record<string, string> = {
 };
 
 export const modeMeta: Record<string, { label: string; desc: string }> = {
+  full: { label: '放行', desc: '所有工具直接执行，不审批' },
   auto: { label: '自动', desc: '工作目录内的读写和命令直接执行' },
   ask: { label: '审批', desc: '写文件、执行命令前要批准' },
   readonly: { label: '只读', desc: '只能读文件和搜索' },
