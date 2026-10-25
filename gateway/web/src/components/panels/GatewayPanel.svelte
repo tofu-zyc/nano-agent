@@ -20,6 +20,7 @@
     env: string;
     agents: string;
     enabled: boolean;
+    approval: string;
   };
   const mcps = $derived(store.ov?.mcp ?? []);
   let mcpDraft = $state<MCPDraft | null>(null);
@@ -37,6 +38,7 @@
       env: (m?.env_keys ?? []).map((k) => k + '=').join('\n'),
       agents: (m?.agents ?? []).join(', '),
       enabled: m?.enabled ?? true,
+      approval: m?.approval ?? 'never',
     };
   }
 
@@ -81,7 +83,7 @@
       enabled: d.enabled,
       tools: prev?.tools ?? [],
       agents: d.agents.split(',').map((s) => s.trim()).filter(Boolean),
-      approval: prev?.approval ?? 'never',
+      approval: d.approval || 'never',
     };
     mcpBusy = true;
     mcpMsg = '';
@@ -224,6 +226,12 @@
         {/if}
         <label><span>环境变量</span><textarea bind:value={mcpDraft.env} rows="3" placeholder="KEY=VALUE，一行一个；值留空表示沿用已存的"></textarea></label>
         <label><span>给哪些 agent</span><input bind:value={mcpDraft.agents} placeholder="留空就是所有 agent" /></label>
+        <label><span>审批</span>
+          <select bind:value={mcpDraft.approval}>
+            <option value="never">不用审批，直接执行</option>
+            <option value="always">每次调用都要批准</option>
+          </select>
+        </label>
         <label class="inline"><input type="checkbox" bind:checked={mcpDraft.enabled} /><span>启用</span></label>
         <div class="p-actions tight">
           <button class="btn sm primary" disabled={mcpBusy} onclick={saveMCP}>{mcpBusy ? '保存中…' : '保存'}</button>

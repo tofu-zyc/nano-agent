@@ -93,3 +93,59 @@ func TestMCPEndToEnd(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
 }
+
+// approval=always：每次调用都先出审批单，批了才真的执行。
+func TestMCPApprovalAlways(t *testing.T) {
+	if testing.Short() {
+		t.Skip("要起子进程")
+	}
+	e := setup(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := mcp.Open(filepath.Join(t.TempDir(), "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save([]mcp.Server{{
+		Name: "helper", Command: exe, Args: []string{"-test.run=TestNoSuchTest"},
+		Env: map[string]string{mcpHelperEnv: "1"}, Enabled: true, Approval: mcp.ApprovalAlways,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := mcp.NewManager(st, nil)
+	defer mgr.Close()
+	e.a.SetMCP(st, mgr)
+	e.say("你好")
+	in := e.k.expect(proto.TInput)
+	e.a.mu.Lock()
+	s := e.a.sessOf(in.SID)
+	e.a.execTool("test", s, &proto.Msg{T: proto.TExec, SID: in.SID, ID: "c1", Name: "helper__echo",
+		Args: json.RawMessage(`{"text":"世界"}`)})
+	e.a.mu.Unlock()
+	// 先不该执行，而是挂一张审批单
+	e.k.none()
+	e.a.mu.Lock()
+	n := 0
+	for k := range e.a.approvals {
+		n = k
+	}
+	e.a.mu.Unlock()
+	if n == 0 {
+		t.Fatal("没有出审批单")
+	}
+	if err := e.a.Approve(n, true); err != nil {
+		t.Fatal(err)
+	}
+	res := e.k.expect(proto.TExecResult)
+	if res.OK == nil || !*res.OK || res.Content != "echo:世界" {
+		t.Fatalf("批准以后应该执行：%+v", res)
+	}
+	e.a.mu.Lock()
+	left := len(e.a.approvals)
+	e.a.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("审批单应该消掉，还剩 %d", left)
+	}
+}

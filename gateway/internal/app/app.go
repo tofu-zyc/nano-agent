@@ -1082,6 +1082,20 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
+	who := c.who
+	if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
+		who = c.name
+	}
+	// MCP 这类工具在网关这边执行：批不批交回调用方，不用告诉内核
+	if ap.resolve != nil {
+		res := ap.resolve
+		delete(a.approvals, n)
+		a.resolveApproval(ap, a.decided(ok, who))
+		a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+		a.answer(c, a.decided(ok, who))
+		res(ok)
+		return
+	}
 	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
 		who := c.who
 		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {

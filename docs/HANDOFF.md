@@ -371,7 +371,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 | 56b1e33 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
 | 2189325 | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
 | 8bf1bac | 跨平台阶段 4：macOS 平台层（`_NSGetExecutablePath`、无沙箱 `sandbox_stub`、`nexec_main` 去掉 Linux `sys/syscall.h` 依赖、`_DARWIN_C_SOURCE` 解决 `DT_DIR`）；`cross-macos` 交叉编译 aarch64/x86_64；`make release` 出 macOS 包；`install-kernel.sh` 的 launchd 用户 agent（启动、卸载）和 `nano-kernel-ctl` 的 macOS 支持。没有真机测试 |
-| 262d063、aacfe97 | MCP（路线图阶段 11 的前两块）：`internal/mcp` 客户端（本机 stdio / 远程 streamable HTTP、懒连接、退避重连、空闲断开、密钥加密）、`data/mcp.json`；内核把不认识的工具名转给网关，网关按 `<服务>__<工具>` 分发到 MCP 客户端；真子进程端到端测试 |
+| 262d063、aacfe97、61e2c51 | MCP（路线图阶段 11 的前两块）：`internal/mcp` 客户端（本机 stdio / 远程 streamable HTTP、懒连接、退避重连、空闲断开、密钥加密）、`data/mcp.json`；内核把不认识的工具名转给网关，网关按 `<服务>__<工具>` 分发到 MCP 客户端；真子进程端到端测试 |
 
 
 ## MCP（2026-10-25，阶段 11 前两块）
@@ -400,7 +400,8 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 - `command`/`args`/`env`/`cwd` 是网关本机起的 stdio 进程；`url` 是远程 streamable HTTP。二选一。
 - `env` 里写明文密钥，存盘时会自动加密成 `enc:v1:`（读的时候解）。
 - `tools` 是白名单，`"!名字"` 表示禁用；`agents` 空表示所有 agent 都能用。
-- `approval` 现在只认 `never`，写 `always` / `per_turn` 会被拒绝（还没接审批）。
+- `approval`：`never`（直接执行，默认）或 `always`（每次调用都出一张审批单，管理员在网页点批准、
+  或者在聊天里发 `/approve 编号`）。`per_turn`（一轮只批一次）还没接上，写了会被拒绝。
 
 工具以 `<服务>__<工具>` 交给模型，说明里带“（MCP 服务 X）”。调用时内核不认识这个名字，
 会转回网关执行（`kernel/src/core.c` 的 `FORWARDED`），所以不需要给内核加动态工具表。
@@ -409,8 +410,8 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 已经有的测试：`internal/mcp`（配置校验、密钥加密、列/调工具、黑名单、内存传输和真子进程两条路）、
 `app/TestMCPEndToEnd`（模型能看见工具 → 调用拿到结果）。
 
-还没做：网页里增删改和“测试”按钮、审批（always/per_turn）、经内核透传到别的电脑
-（协议 v10 的 pipe_open/pipe_write，阶段 11 后半段）、图片类结果的专门展示。
+还没做：经内核透传到别的电脑（协议 v10 的 `pipe_open`/`pipe_write`，阶段 11 后半段）、
+`per_turn` 审批、图片类结果的专门展示（现在是一行占位文字）。
 ## 关键设计（改之前先理解）
 
 1. **前缀缓存优先**：系统提示词和工具定义固定不变；历史只追加；时间、来源（`[2026-10-21 周三 15:08 · Telegram]`）、环境变化（`[系统] 在 X 上工作。工作目录：…`、替补说明）都追加在用户消息前面，**变了才追加**（Settings.EnvNote 记着上次说的）。历史太长时一次裁掉一大段（滞回），之后又只追加。任何会改动前面字节的改动都是缓存回归。

@@ -369,8 +369,18 @@ func (a *App) Approvals() []ApprovalInfo {
 // Approve 以网页管理员的身份批准或拒绝。
 func (a *App) Approve(n int, ok bool) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	ap := a.approvals[n]
+	// MCP 这类工具在网关这边执行：批不批交回调用方，不用告诉内核
+	if ap != nil && ap.resolve != nil {
+		res := ap.resolve
+		delete(a.approvals, n)
+		a.resolveApproval(ap, a.decided(ok, "web:admin"))
+		a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+		a.mu.Unlock()
+		res(ok)
+		return nil
+	}
+	defer a.mu.Unlock()
 	var s *sess
 	if ap != nil {
 		s = a.sessions[ap.sid]

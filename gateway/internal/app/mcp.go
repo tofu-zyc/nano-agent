@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/mcp"
@@ -146,6 +147,57 @@ func mcpToolNames(m *mcp.Manager, agent string) []string {
 	return out
 }
 
+// askMCPApproval 建一张审批单，返回等结果的 channel（批准往这里塞 true）。
+// 调用方持有锁；resolve 只往缓冲 channel 里塞，不会再要锁。
+func (a *App) askMCPApproval(s *sess, tool string, args json.RawMessage) (<-chan bool, int) {
+	a.nextAppr++
+	n := a.nextAppr
+	ch := make(chan bool, 1)
+	title, body := callCard(tool, args)
+	desc := title + "：" + body
+	from := ""
+	if s.run != nil {
+		from = s.run.from
+	}
+	ap := &approval{sid: s.sid, name: tool, detail: desc, from: from, at: a.now(),
+		card: channel.ApprovalCard{N: n, Title: title, Detail: body, From: from},
+		resolve: func(ok bool) {
+			select {
+			case ch <- ok:
+			default:
+			}
+		}}
+	a.approvals[n] = ap
+	a.publish(events.Event{T: "approval", SID: s.sid, N: n, Name: tool, Text: desc, Data: map[string]any{"from": from}})
+	text := fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝", n, desc, from, n, n)
+	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+	if s.run != nil {
+		for _, o := range s.run.outs {
+			approver, ok := a.chans[o.ep.ch].(channel.Approver)
+			if !ok {
+				a.deliver(o.ep, text, "")
+				continue
+			}
+			ep, card := o.ep, ap.card
+			go func() {
+				ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+				defer cancel()
+				ref, err := approver.SendApproval(ctx, ep.chat, card)
+				a.mu.Lock()
+				defer a.mu.Unlock()
+				if err != nil {
+					a.deliver(ep, text, "")
+					return
+				}
+				if cur := a.approvals[n]; cur != nil {
+					cur.refs = append(cur.refs, approvalRef{ep: ep, ref: ref})
+				}
+			}()
+		}
+	}
+	return ch, n
+}
+
 // mcpCall 执行一次 MCP 工具调用。调用方持有锁；调用本身在协程里跑。
 func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	mg := a.mcp
@@ -166,8 +218,7 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	if s.run != nil {
 		from = s.run.from
 	}
-	a.log.Info("调 MCP 工具", "sid", sid, "tool", m.Name, "from", from)
-	go func() {
+	dial := func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
 		defer cancel()
 		res, err := mg.Call(ctx, server, tool, args)
@@ -183,7 +234,41 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		if !ok && text == "" {
 			text = "工具返回了错误"
 		}
-		a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "bytes", len(text))
+		a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "from", from, "bytes", len(text))
 		reply(ok, text)
-	}()
+	}
+	// approval=always 的服务：每次调用都先问管理员（/approve、网页按钮都能批）
+	if srv, ok := mg.Server(server); ok && srv.Approval == mcp.ApprovalAlways {
+		wait, n := a.askMCPApproval(s, m.Name, m.Args)
+		limit := a.cfg.Agent.ApprovalLimit()
+		a.log.Info("MCP 工具等审批", "sid", sid, "tool", m.Name, "n", n)
+		go func() {
+			var timeout <-chan time.Time
+			if limit > 0 {
+				t := time.NewTimer(limit)
+				defer t.Stop()
+				timeout = t.C
+			}
+			select {
+			case ok := <-wait:
+				if !ok {
+					a.mu.Lock()
+					reply(false, "管理员拒绝了这次调用")
+					a.mu.Unlock()
+					return
+				}
+			case <-timeout:
+				a.mu.Lock()
+				a.dropApproval(n, "等审批超时")
+				reply(false, "等审批超时，没有执行")
+				a.mu.Unlock()
+				return
+			case <-a.ctx.Done():
+				return
+			}
+			dial()
+		}()
+		return
+	}
+	go dial()
 }
