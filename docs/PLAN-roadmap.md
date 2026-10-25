@@ -493,7 +493,10 @@ MCP 服务可以挂在任何一台接入的电脑上，用来实现“computer u
 > **进度（2026-10-25）**：前两块已完成并合到 `dev/v0.7.1` —— `internal/mcp` 客户端（本机 stdio / 远程 streamable HTTP）
 > 和 `data/mcp.json`；内核把不认识的工具名转给网关，网关按 `<服务>__<工具>` 分发。真子进程端到端测试通过。
 > 网页里能加、改、删、测试（网关节点面板的「MCP 服务」），审批支持 always（每次都要批）。
-> **还没做**：下面这节的协议 v10 透传（把 MCP 进程放到别的电脑上）、per_turn 审批。
+> 协议 v10 **两端都做了**：网关侧（消息类型、`internal/mcp/pipe.go` 的管道传输、`machine` 配置、路由）
+> 和内核侧（`kernel/src/pipe.c`：起子进程、按行读 stdout、关 stdin 后退不退先 SIGTERM 再 SIGKILL）。
+> 端到端测过：真网关 + 真内核 + 一个最小 MCP 服务，`machine=<内核名>` 能列出并调用工具。
+> **还没做**：Windows 内核的透传（现在是明确报错的桩）、`per_turn` 审批。
 > 详见 `docs/HANDOFF.md` 的「MCP（2026-10-25）」一节。
 
 ### 协议 v10（内核和网关）

@@ -398,6 +398,9 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 
 - `name` 只能用字母、数字、下划线、减号；它也是工具名的前缀。
 - `command`/`args`/`env`/`cwd` 是网关本机起的 stdio 进程；`url` 是远程 streamable HTTP。二选一。
+- `machine` 填一台在线内核的名字，这个服务就**跑到那台机器上**（协议 v10：`pipe_open` / `pipe_write` /
+  `pipe_data` / `pipe_closed`，见 `kernel/src/pipe.c`）。不填（或写 `gateway`）就在网关本机跑。
+  **Windows 内核还不支持透传**（那份是明确报错的桩），Linux / macOS 可以。
 - `env` 里写明文密钥，存盘时会自动加密成 `enc:v1:`（读的时候解）。
 - `tools` 是白名单，`"!名字"` 表示禁用；`agents` 空表示所有 agent 都能用。
 - `approval`：`never`（直接执行，默认）或 `always`（每次调用都出一张审批单，管理员在网页点批准、
