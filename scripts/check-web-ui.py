@@ -791,12 +791,46 @@ def check_living(page, url, nano):
         ok("内心会话不占拓扑图的会话列")
     else:
         fail("内心会话出现在会话列里")
+    check_workspace_unmount(page, url)
     # 收拾：改回工具型、删掉测试记忆
     api(page, "PATCH", "/api/agents/default", {"style": "tool"})
     for pth in ["people/张三.md", "国庆去成都.md"]:
         api(page, "DELETE", "/api/agents/default/memory/item?path=" + urllib.request.quote(pth))
     api(page, "PUT", "/api/agents/default/memory/self", {"text": ""})
 
+
+
+def check_workspace_unmount(page, url):
+    """对话头部的工作目录标签：点一下就取下（以前只弹选择框，提示却写着“点击取下”）"""
+    d = tempfile.mkdtemp(prefix="nano-ui-ws-")
+    code, ws = api(page, "POST", "/api/workspaces", {"host": "本机", "path": d})
+    if code != 200 or not isinstance(ws, dict) or "id" not in ws:
+        return fail(f"加工作目录失败：{code} {str(ws)[:200]}")
+    code, _ = api(page, "PATCH", "/api/sessions/main", {"workspaces": [ws["id"]]})
+    if code != 200:
+        return fail(f"挂载失败：{code}")
+    page.goto(url + "#/sessions/main")
+    page.wait_for_selector(".conv header", timeout=10000)
+    page.wait_for_timeout(700)
+    chip = page.locator(".conv header button.tag.mono")
+    if chip.count() != 1:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"对话头部的工作目录标签数量不对：{chip.count()}")
+    title = chip.first.get_attribute("title") or ""
+    if "点击取下" not in title:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"标签提示不是“点击取下”：{title}")
+    chip.first.click()
+    page.wait_for_timeout(900)
+    code, info = api(page, "GET", "/api/sessions/main")
+    left = (info.get("info") or {}).get("workspaces") if isinstance(info, dict) else None
+    if left:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"点了标签以后还挂着：{left}")
+    ok("对话头部的工作目录标签点一下就取下")
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(400)
 
 if __name__ == "__main__":
     main()
