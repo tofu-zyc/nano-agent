@@ -3,7 +3,7 @@
   // 设置分两层：这里能改的是它自己覆盖的项，没覆盖的跟随「Agent 默认值」。
   import { store } from '../../lib/state.svelte';
   import { api } from '../../lib/api';
-  import { modeMeta } from '../../lib/format';
+  import { botKindMeta, modeMeta } from '../../lib/format';
   import { botKindLabel, optionLabel, toolLabel } from '../../lib/labels';
   import type { AgentSetting } from '../../lib/types';
   import Icon from '../Icon.svelte';
@@ -237,7 +237,7 @@
       {#if a.bots.length}
         {#each a.bots as b (b.id)}
           <button class="p-srow" onclick={() => store.open({ type: 'bot', id: b.id })} title={'渠道 ID：' + b.channel}>
-            <Icon name={b.kind === 'feishu' ? 'feishu' : 'send'} size={14} />
+            <Icon name={botKindMeta[b.kind]?.icon ?? 'send'} size={14} />
             <span class="p-grow">{b.name}{#if b.name !== botKindLabel(b.kind)} <span class="muted p-small">{botKindLabel(b.kind)}</span>{/if}</span>
             <span class="muted p-small">{b.enabled ? '开着' : '停用'}</span>
             <Icon name="right" size={13} />

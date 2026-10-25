@@ -321,9 +321,10 @@ export type RoomInfo = {
 
 export type BotInfo = {
   id: string;
-  kind: 'telegram' | 'feishu';
+  kind: 'telegram' | 'feishu' | 'qq' | 'weixin';
   name: string;
   app_id: string;
+  owner?: string; // 扫码的人（已经设成管理员）
   agent: string;
   show: string;
   channel: string;

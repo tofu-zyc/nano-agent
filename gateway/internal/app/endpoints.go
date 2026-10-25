@@ -72,12 +72,18 @@ func chanName(prefix string) string {
 	return prefix
 }
 
-var sourceLabel = map[string]string{"cli": "命令行", "web": "网页", "tg": "Telegram", "feishu": "飞书"}
+var sourceLabel = map[string]string{"cli": "命令行", "web": "网页", "tg": "Telegram", "feishu": "飞书", "qq": "QQ", "wx": "微信"}
 
-// sourceOf 是消息来源的名字，写在用户消息的时间戳里，模型就知道用户是从哪里说的话
+// sourceOf 是消息来源的名字，写在用户消息的时间戳里，模型就知道用户是从哪里说的话。
+// 另外加的机器人（tg.bob、qq.x）按种类说。
 func sourceOf(prefix string) string {
 	if l, ok := sourceLabel[prefix]; ok {
 		return l
+	}
+	if kind, _, ok := strings.Cut(prefix, "."); ok {
+		if l, ok := sourceLabel[kind]; ok {
+			return l
+		}
 	}
 	return prefix
 }

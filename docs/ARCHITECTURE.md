@@ -82,6 +82,14 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
 - 缓存优先：记忆说明、近况像环境说明一样放在用户消息前面，变了才放；系统提示只在类型改变时变（拟人守则）。
 - 策略在技能里：怎么整理记忆是 `skills/dream/SKILL.md`，醒来干什么是 `skills/life/SKILL.md`，用户能改，agent 自己的 `agents/<id>/skills/` 优先。
 
+## 聊天平台和放行模式（v0.7）
+
+详细设计见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。
+
+- 渠道（`gateway/internal/channel`）都实现同一个 `Channel` 接口，能力按需实现：`Streamer`（流式卡片）、`Approver`（审批按钮）、`Typer`（正在输入，定时调）、`Busy`（处理时的状态，开始/结束各一次）、`Markdowner`（回复正文按 Markdown 发）。agent 的回复正文走 `deliverReply`，命令和系统说明走 `deliver`。
+- QQ（`qq.go`）：官方机器人，WebSocket 网关收事件，HTTP 发消息；被动回复自动带最近一条消息的 `msg_id`。微信（`weixin.go`）：官方 ClawBot 的 iLink 接口，长轮询；回复带 `context_token`，游标和凭证存在 `data/bots/<id>.state.json`。两者都只能另外加（`bots.json`），扫码绑定（`register.go`、`qq_register.go`、`weixin_register.go`，网页接口在 `web/botreg.go`）。
+- 放行模式（`full`）只在网关里：发给内核的是 `auto`，内核的沙箱和审批规则不变，`approve_req` 由网关当场批准（`approvals.go` 的 `autoApprove`）。拟人型没设置时默认放行。
+
 ## 安全
 
 - 网页只听本机、密码登录。
@@ -90,6 +98,6 @@ nano-agent 由两部分组成：**网关**是唯一有状态的中心，资源�
   - 配对得到的专用口令，绑定内核名字，网关只存 SHA-256。
 - SSH 凭据只在网关（`data/connections.json`，0600，密码加密），密码经 `SSH_ASKPASS` 传递，不进命令行参数和日志。
 - 模型 API key、SSH 密码、机器人 token、网页密码用 `~/.nano-agent/secret.key` 做 AES-256-GCM，存成 `enc:v1:...`；旧明文启动时自动加密重写。工具结果可以按 `[security] redact` 脱敏。
-- 读：管理员会话能读当前用户能读的文件（访客仍然只读工作目录和系统目录）；写：默认只有工作目录、临时目录和缓存目录。写工作目录外要给 `Write` / `Edit` / `Shell` 加 `elevated: true`，任何模式都要审批，批准后这一次调用 `rw` 放开到 `/`；访客和 readonly 模式不能提权。没有工作目录的管理员在 HOME 下工作。
+- 读：管理员会话能读当前用户能读的文件（访客仍然只读工作目录和系统目录）；写：默认只有工作目录、临时目录和缓存目录。写工作目录外要给 `Write` / `Edit` / `Shell` 加 `elevated: true`，任何模式都要审批（放行模式下由网关自动批准），批准后这一次调用 `rw` 放开到 `/`；访客和 readonly 模式不能提权。没有工作目录的管理员在 HOME 下工作。
 - 工作目录不能包含网关的运行时、配置和数据目录（用 `make install` 后它们在用户目录，源码目录和项目目录不受影响），网关、内核和执行器各自把关。
 - 内核连不上、被拒（名字冲突之类）时重连间隔逐渐拉长（最长 30 秒），网关接受之后才重置。

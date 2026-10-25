@@ -282,6 +282,7 @@ def run(page, url, nano):
             fail("Telegram 节点里没有绑定 agent 的地方")
 
     check_living(page, url, nano)
+    check_bots(page)
 
     # ---- 新建 agent 时直接挑一个自带人格：人格文件里就是它 ----
     open_node(page, "add:agent")
@@ -615,6 +616,81 @@ def run(page, url, nano):
         ok("接入机器面板（1280 宽）")
     else:
         fail("接入机器面板内容不对")
+
+
+def check_bots(page):
+    """v0.7：QQ、微信机器人。扫码的接口在浏览器里拦下来（不碰腾讯的真服务），停用的机器人也不会去连。"""
+    open_node(page, "add:bot")
+    page.locator(".insp select.p-select").first.select_option("qq")
+    page.wait_for_timeout(200)
+    text = page.locator(".insp").inner_text()
+    if "扫码创建机器人" in text and "生成二维码" in text and "手动填" in text and "Bot Token" not in text:
+        ok("添加机器人：选 QQ 是扫码创建，也能手动填")
+    else:
+        fail("选 QQ 以后面板不对：" + text[:400])
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><rect width="4" height="4" fill="#fff"/></svg>'
+    seen = []
+    def reg(route):
+        seen.append((route.request.method, route.request.post_data or ""))
+        route.fulfill(json={"url": "https://q.qq.com/qqbot/openclaw/connect.html?task_id=t", "qr_svg": svg} if route.request.method == "POST" else {"ok": True})
+    page.route("**/api/bots/register", reg)
+    page.locator(".insp button:has-text('生成二维码')").click()
+    page.wait_for_selector(".insp .qrbox .qr svg")
+    text = page.locator(".insp").inner_text()
+    page.screenshot(path=os.path.join(SHOTS, "bot-qq-qr.png"))
+    body = json.loads(seen[0][1]) if seen else {}
+    if "QQ扫一扫" in text.replace(" ", ""):
+        if body.get("kind") == "qq" and body.get("agent") == "default":
+            ok("QQ 扫码：显示二维码，请求带着种类和绑给谁")
+        else:
+            fail(f"扫码请求不对：{body}")
+    else:
+        fail("QQ 二维码没显示：" + text[:300])
+    page.locator(".insp button:has-text('取消')").click()
+    page.wait_for_timeout(200)
+    page.locator(".insp button:has-text('手动填')").click()
+    page.wait_for_timeout(150)
+    text = page.locator(".insp").inner_text()
+    if "App ID" in text and "QQ 开放平台" in text and "改成扫码" in text:
+        ok("QQ 手动填 AppID / AppSecret")
+    else:
+        fail("QQ 手动填不对：" + text[:300])
+    page.locator(".insp select.p-select").first.select_option("weixin")
+    page.wait_for_timeout(200)
+    text = page.locator(".insp").inner_text()
+    if "扫码连接微信" in text and "不能拉群" in text and "App ID" not in text and "添加" not in [b.inner_text() for b in page.locator(".insp .p-actions button").all()]:
+        ok("添加机器人：选微信只能扫码连接，说明了只能自己聊、不能拉群")
+    else:
+        fail("选微信以后面板不对：" + text[:400])
+    page.unroute("**/api/bots/register")
+
+    # 停用的微信机器人：面板里能重新扫码，没有“保存凭据”
+    st, wx = api(page, "POST", "/api/bots", {"kind": "weixin", "name": "我的微信", "agent": "default", "token": "x", "enabled": False})
+    st2, qq = api(page, "POST", "/api/bots", {"kind": "qq", "name": "我的 QQ", "agent": "default", "app_id": "1", "app_secret": "y", "enabled": False})
+    if st != 200 or st2 != 200:
+        fail(f"加机器人失败：{st} {wx} {st2} {qq}")
+        return
+    page.evaluate("window.__nano.refresh()")
+    page.wait_for_timeout(500)
+    open_node(page, "add:bot")
+    page.locator(".insp .p-srow:has-text('我的微信')").click()
+    page.wait_for_timeout(300)
+    text = page.locator(".insp").inner_text()
+    page.screenshot(path=os.path.join(SHOTS, "bot-weixin.png"))
+    if "微信" in text and "重新扫码" in text and "保存凭据" not in text and wx.get("channel") == "wx.weixin":
+        ok("微信机器人面板：种类是微信，能重新扫码")
+    else:
+        fail("微信机器人面板不对：" + json.dumps(wx, ensure_ascii=False) + " " + text[:400])
+    open_node(page, "add:bot")
+    page.locator(".insp .p-srow:has-text('我的 QQ')").click()
+    page.wait_for_timeout(300)
+    text = page.locator(".insp").inner_text()
+    if "QQ" in text and "App ID" in text and "保存凭据" in text and qq.get("channel") == "qq.qq":
+        ok("QQ 机器人面板：种类是 QQ，能改 AppID / AppSecret")
+    else:
+        fail("QQ 机器人面板不对：" + json.dumps(qq, ensure_ascii=False) + " " + text[:400])
+    for b in (wx, qq):
+        api(page, "DELETE", "/api/bots/" + b["id"])
 
 
 def check_living(page, url, nano):

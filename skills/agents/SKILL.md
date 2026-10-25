@@ -7,7 +7,7 @@ description: 查看和管理多个 agent 和它们绑定的机器人：谁是谁
 
 nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自己的名字、头像、人格（`agents/<id>/persona.md`）、模型和会话。会话 ID 默认 agent 是 `main`、`tg:123`，别的 agent 前面加前缀，比如 `@bob/main`。
 
-**机器人**（Telegram、飞书）绑在 agent 上：一个机器人只绑一个 agent，它上面收到的消息都归那个 agent。同一个 agent 可以绑好几个机器人。内置的两个机器人 ID 是 `tg` 和 `feishu`，它们的凭据在网关配置里（网页的 Telegram / 飞书节点）；另外加的机器人凭据存在 `data/bots.json`（加密）。
+**机器人**（Telegram、飞书、QQ、微信）绑在 agent 上：一个机器人只绑一个 agent，它上面收到的消息都归那个 agent。同一个 agent 可以绑好几个机器人。内置的两个机器人 ID 是 `tg` 和 `feishu`，它们的凭据在网关配置里（网页的 Telegram / 飞书节点）；另外加的机器人凭据存在 `data/bots.json`（加密）。QQ 和微信机器人要在网页上扫码加（「＋ 添加机器人」→ 选 QQ 或微信 → 生成二维码），扫码的人自动成为管理员；聊天里加不了，用户要加时告诉他去网页上扫。微信只能和扫码的人私聊、不能进群；QQ 私聊群聊都行，但隔太久的主动消息可能被 QQ 拦下。
 
 ## 先查
 
@@ -18,7 +18,7 @@ nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自�
 返回 `agents` 和 `bots` 两份：
 
 - 每个 agent：`id`、`name`、`emoji`、`default`（是不是默认的）、`style`（`tool` 工具型 / `life` 拟人型）、`model`、`model_label`、`thinking`、`sessions`（几个会话）、`bots`（绑了哪些机器人）、`persona_file`、`memory`（长期记忆：开没开、多少条、多少人、上次整理）、`life`（拟人型的状态：睡着 / 醒着 / 在想事情、下次醒来、今天醒了几次、近况）、`doing`（现在在干嘛，和聊天里 `/state` 是同一套说法：`state` 是 dreaming 整理记忆 / chatting 聊天 / working 干活 / thinking 内心活动 / sleeping 睡着 / slacking 摸鱼 / idle 发呆或闲着，`text` 是给人看的一句话）、`settings`（它自己的设置：每项有 `group` 分组（work 干活 / group 群聊 / life 拟人 / memory 记忆）、`global` 全局值或默认值、`value` 它自己的值（`null` 表示跟随全局或默认）、`effective` 实际生效的值）。
-- 每个机器人：`id`、`kind`（telegram / feishu）、`name`、`agent`（绑在谁身上）、`channel`（渠道名，比如 `tg`、`tg.bob`）、`enabled`、`legacy`（内置的）。
+- 每个机器人：`id`、`kind`（telegram / feishu / qq / weixin）、`name`、`agent`（绑在谁身上）、`channel`（渠道名，比如 `tg`、`tg.bob`、`qq.x`、`wx.x`）、`enabled`、`legacy`（内置的）、`owner`（扫码的人，已经是管理员）。
 
 ## 再改（每次审批；放行模式下自动批准）
 
@@ -40,7 +40,7 @@ nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自�
 
 ## 群聊
 
-机器人在群里（Telegram、飞书）不是每句都回：被 @、回复它、叫到名字才回。**拟人型**在群里安静够了、额度够的时候可以自己插一句，不想说就只回 `[不回复]`；**工具型**只回被叫到的。能改的：
+机器人在群里（Telegram、飞书、QQ）不是每句都回：被 @、回复它、叫到名字才回。**拟人型**在群里安静够了、额度够的时候可以自己插一句，不想说就只回 `[不回复]`；**工具型**只回被叫到的。能改的：
 
 - `group_eagerness`（只对拟人型有用）：`off` 只回被叫到的；`low`（默认）每小时最多主动说 2 次；`normal` 6 次；`high` 15 次。
 - `group_quiet`：群里安静多久才可能插话，默认 `20s`；`group_min_gap`：两次发言最短间隔，默认 `10s`。

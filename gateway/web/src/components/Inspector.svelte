@@ -2,7 +2,7 @@
   // 右侧的节点面板：点了哪个节点就显示哪个节点的全部状态、操作和设置。
   // 面板从上到下是：状态 → 操作 → 设置（按小节，高级的折叠） → 危险操作。左边缘可以拖动调宽度。
   import { store } from '../lib/state.svelte';
-  import { channelMeta, homeShort, machineMeta, since, stateLabel } from '../lib/format';
+  import { botKindMeta, channelMeta, homeShort, machineMeta, since, stateLabel } from '../lib/format';
   import FieldGroup from './FieldGroup.svelte';
   import ModelPanel from './ModelPanel.svelte';
   import GatewayPanel from './panels/GatewayPanel.svelte';
@@ -55,7 +55,8 @@
         return { icon: 'plus', color: 'var(--c-agent)', title: '添加 agent', sub: '每个 agent 是图上的一个节点，可以绑自己的机器人' };
       case 'bot': {
         const b = store.bots.find((x) => x.id === target.id);
-        return { icon: b?.kind === 'feishu' ? 'feishu' : 'send', color: b?.kind === 'feishu' ? 'var(--c-feishu)' : 'var(--c-telegram)',
+        const km = botKindMeta[b?.kind ?? ''] ?? botKindMeta.telegram;
+        return { icon: km.icon, color: km.color,
           title: b?.name ?? target.id, sub: b ? b.channel + ' · 绑给 ' + (store.agent(b.agent)?.name ?? b.agent) : '这个机器人不在了' };
       }
       case 'room': {

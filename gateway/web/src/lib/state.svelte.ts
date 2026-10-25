@@ -98,6 +98,7 @@ class Store {
   personaTick = $state(0);
   memoryTick = $state(0); // 记忆、整理记忆、内心活动有变化（记忆面板据此重读）
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
+  botReg = $state<{ kind: string; text: string; data?: any; n: number } | null>(null); // QQ / 微信扫码的进展（每条都是新的）
   restarting = $state(false);
   updating = $state(false);
   checkingUpdate = $state(false);
@@ -625,6 +626,9 @@ class Store {
         break;
       case 'feishu_reg':
         this.feishuReg = { kind: e.kind ?? '', text: e.text ?? '' };
+        break;
+      case 'bot_reg':
+        this.botReg = { kind: e.kind ?? '', text: e.text ?? '', data: e.data, n: (this.botReg?.n ?? 0) + 1 };
         break;
     }
     if (e.t !== 'delta') {

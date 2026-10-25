@@ -15,12 +15,15 @@ import (
 //
 // 内置的两个机器人 ID 是 tg 和 feishu，凭据还是 gateway.toml 里的 [telegram]、[feishu]（Legacy），
 // 所以设置只有一个家：Telegram / 飞书节点。另外加的机器人凭据存在 bots.json 里（加密）。
-// 渠道名：内置的是 tg、feishu，另外加的是 tg.<id>、feishu.<id>。
+// 渠道名：内置的是 tg、feishu，另外加的是 tg.<id>、feishu.<id>、qq.<id>、wx.<id>。
+// QQ 和微信（v0.7 起）只能另外加，扫码绑定。
 
 // BotKind 是机器人的种类。
 const (
 	KindTelegram = "telegram"
 	KindFeishu   = "feishu"
+	KindQQ       = "qq"     // QQ 开放平台的官方机器人：AppID + AppSecret
+	KindWeixin   = "weixin" // 微信 ClawBot：Token 是 bot_token，APIBase 是扫码时给的接口地址
 )
 
 // Bot 是一个机器人实例。
@@ -40,6 +43,8 @@ type Bot struct {
 	APIBase   string `json:"api_base,omitempty"`
 	Domain    string `json:"domain,omitempty"`
 	GroupAll  bool   `json:"group_all,omitempty"`
+	BotID     string `json:"bot_id,omitempty"` // 微信的 ilink_bot_id
+	Owner     string `json:"owner,omitempty"`  // 扫码的人在这个机器人那里的 ID
 
 	Created int64 `json:"created,omitempty"`
 }
@@ -204,8 +209,13 @@ func ChannelName(x Bot) string {
 		}
 		return "tg"
 	}
-	if x.Kind == KindFeishu {
+	switch x.Kind {
+	case KindFeishu:
 		return "feishu." + x.ID
+	case KindQQ:
+		return "qq." + x.ID
+	case KindWeixin:
+		return "wx." + x.ID
 	}
 	return "tg." + x.ID
 }
@@ -217,6 +227,12 @@ func KindOfChannel(name string) string {
 	}
 	if name == "tg" || strings.HasPrefix(name, "tg.") {
 		return KindTelegram
+	}
+	if strings.HasPrefix(name, "qq.") {
+		return KindQQ
+	}
+	if strings.HasPrefix(name, "wx.") {
+		return KindWeixin
 	}
 	return ""
 }
@@ -233,14 +249,20 @@ func normalizeBot(x *Bot) error {
 	if x.Name == "" {
 		x.Name = x.ID
 	}
-	if x.Kind != KindTelegram && x.Kind != KindFeishu {
-		return errors.New("种类只能是 telegram 或 feishu")
+	if !slices.Contains([]string{KindTelegram, KindFeishu, KindQQ, KindWeixin}, x.Kind) {
+		return errors.New("种类只能是 telegram、feishu、qq 或 weixin")
 	}
 	if x.Kind == KindTelegram && strings.TrimSpace(x.Token) == "" {
 		return errors.New("Telegram 机器人要填 Bot Token")
 	}
 	if x.Kind == KindFeishu && (strings.TrimSpace(x.AppID) == "" || strings.TrimSpace(x.AppSecret) == "") {
 		return errors.New("飞书机器人要填 App ID 和 App Secret")
+	}
+	if x.Kind == KindQQ && (strings.TrimSpace(x.AppID) == "" || strings.TrimSpace(x.AppSecret) == "") {
+		return errors.New("QQ 机器人要填 AppID 和 AppSecret（或者扫码创建）")
+	}
+	if x.Kind == KindWeixin && strings.TrimSpace(x.Token) == "" {
+		return errors.New("微信机器人要扫码连接")
 	}
 	return normalizeBotBinding(x)
 }

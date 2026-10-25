@@ -4,7 +4,7 @@
   import { onMount } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, sidPath } from '../lib/api';
-  import { ago, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate, whenText } from '../lib/format';
+  import { ago, botKindMeta, channelMeta, homeShort, machineMeta, modeMeta, num, osLabel, pct, sessionChannels, shortPath, stateLabel, truncate, whenText } from '../lib/format';
   import { portal } from '../lib/portal';
   import Icon from '../components/Icon.svelte';
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
@@ -94,8 +94,9 @@
     chans.forEach((c, i) => {
       const y = leftY(i);
       const bot = botOf(c.name);
-      const meta = channelMeta[c.name] ?? { label: bot?.name ?? c.name, icon: bot?.kind === 'feishu' ? 'feishu' : 'send',
-        color: bot?.kind === 'feishu' ? 'var(--c-feishu)' : 'var(--c-telegram)' };
+      // 另外加的机器人显示它自己的名字，颜色和图标按种类
+      const km = botKindMeta[bot?.kind ?? ''];
+      const meta = bot && !bot.legacy && km ? { ...km, label: bot.name } : (channelMeta[c.name] ?? { ...(km ?? botKindMeta.telegram), label: bot?.name ?? c.name });
       const target: Target = bot && !bot.legacy ? { type: 'bot', id: bot.id } : { type: 'channel', name: c.name };
       nodes.push({ id: 'c:' + c.name, kind: 'channel', col: 'in', x: X.chan, y: y - 32, w: 200, h: 64, color: meta.color,
         target, data: { ...c, meta } });

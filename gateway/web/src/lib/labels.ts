@@ -41,4 +41,4 @@ export const toolLabels: Record<string, string> = {
 
 export const toolLabel = (n: string) => toolLabels[n] ?? n;
 
-export const botKindLabel = (k: string) => (k === 'feishu' ? '飞书' : k === 'telegram' ? 'Telegram' : k);
+export const botKindLabel = (k: string) => ({ feishu: '飞书', telegram: 'Telegram', qq: 'QQ', weixin: '微信' })[k] ?? k;

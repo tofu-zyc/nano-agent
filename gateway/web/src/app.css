@@ -26,6 +26,8 @@
   --c-web: #f472b6;
   --c-telegram: #38bdf8;
   --c-feishu: #2dd4bf;
+  --c-qq: #60a5fa;
+  --c-weixin: #4ade80;
   --c-search: #fb923c;
   --c-memory: #e879f9;
   --c-cron: #fda4af;
@@ -61,6 +63,10 @@
     --c-web: #db2777;
     --c-telegram: #0ea5e9;
     --c-feishu: #0d9488;
+  --c-qq: #2563eb;
+  --c-weixin: #16a34a;
+    --c-qq: #2563eb;
+    --c-weixin: #16a34a;
     --c-search: #ea580c;
     --c-memory: #c026d3;
     --c-cron: #e11d48;
