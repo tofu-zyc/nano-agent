@@ -16,6 +16,7 @@ type mcpSaveBody struct {
 
 type mcpSaveItem struct {
 	Name     string            `json:"name"`
+	Orig     string            `json:"orig"` // 改名时填原名：密钥和工具列表要跟着搬过去
 	Kind     string            `json:"kind"` // stdio / http，只是给界面看的
 	Command  string            `json:"command"`
 	Args     []string          `json:"args"`
@@ -39,7 +40,11 @@ func (s *Server) mcpSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	list := make([]mcp.Server, 0, len(body.Items))
+	renames := map[string]string{}
 	for _, it := range body.Items {
+		if it.Orig != "" && it.Orig != it.Name {
+			renames[it.Name] = it.Orig
+		}
 		srv := mcp.Server{
 			Name: it.Name, Command: it.Command, Args: it.Args, Cwd: it.Cwd, Machine: it.Machine, Env: it.Env,
 			Enabled: it.Enabled, Tools: it.Tools, Agents: it.Agents, Approval: it.Approval,
@@ -49,7 +54,7 @@ func (s *Server) mcpSave(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, srv)
 	}
-	if err := s.app.SaveMCP(list); err != nil {
+	if err := s.app.SaveMCPRenamed(list, renames); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

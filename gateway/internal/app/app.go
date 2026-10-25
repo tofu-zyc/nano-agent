@@ -251,6 +251,7 @@ type run struct {
 
 	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
 	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）
+	images       map[string][]media.Attachment // 工具返回的图片（MCP）：要交给模型看的那份
 	fetching     int                           // 正在取的图片：取完之前不请求模型
 	modelWaiting bool                          // 内核要求请求模型的时候图片还没取完
 
@@ -345,6 +346,9 @@ func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
 	a.mu.Lock()
 	a.mcpStore, a.mcp = store, m
 	a.mu.Unlock()
+	if m != nil {
+		m.Warm(20 * time.Second) // 启动时后台连一遍，工具定义那边只读缓存
+	}
 }
 
 // Bus 是事件总线，网页界面从这里订阅。
@@ -883,7 +887,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
-		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{},
+		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
@@ -1160,6 +1164,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if cancel := s.run.execs[m.ID]; cancel != nil {
 			cancel()
 		}
+		a.cancelMCP(m.ID)
 	case proto.TResult:
 		content := m.Content
 		if m.OK != nil && !*m.OK {
@@ -1167,7 +1172,9 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
 		if !a.seeImage(s, m) {
-			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Sent: s.run.sent[m.ID]}); err != nil {
+			// MCP 工具返回的图片：模型支持看图时一起发过去
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content,
+				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID]}); err != nil {
 				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 			}
 		}

@@ -5,9 +5,10 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-/* ---- 两边共用：队列 ---- */
+/* ---- 两边共用 ---- */
 
 na_pipe_t *find_pipe(na_pipes *ps, const char *id)
 {
@@ -17,13 +18,28 @@ na_pipe_t *find_pipe(na_pipes *ps, const char *id)
     return NULL;
 }
 
+size_t pipes_count(const na_pipes *ps)
+{
+    size_t n = 0;
+    for (const na_pipe_t *p = ps->list; p; p = p->next) n++;
+    return n;
+}
+
+void free_pipe(na_pipe_t *p)
+{
+    if (!p) return;
+    free(p->id);
+    free(p->buf);
+    free(p->wbuf);
+    free(p);
+}
+
 #if !NA_WINDOWS
 void pipes_lock(na_pipes *ps) { (void)ps; }
 void pipes_unlock(na_pipes *ps) { (void)ps; }
 void pipes_set_wake(na_pipes *ps, na_wake *w) { (void)ps; (void)w; }
 #endif
 
-/* 往队列里放一条（发掉的格子复用） */
 static na_pipe_msg *slot(na_pipes *ps)
 {
     if (ps->qhead > 0 && ps->qn == ps->qcap) {
@@ -49,7 +65,7 @@ void pipes_queue_line(na_pipes *ps, const char *id, const char *line, size_t n)
 {
     pipes_lock(ps);
     na_pipe_msg *m = slot(ps);
-    m->id = xstrdup(id);
+    m->id = xstrdup(id ? id : "");
     char *s = xcalloc(n + 1, 1);
     if (n) memcpy(s, line, n);
     m->data = s;
@@ -60,7 +76,7 @@ void pipes_queue_closed(na_pipes *ps, const char *id, int code, const char *deta
 {
     pipes_lock(ps);
     na_pipe_msg *m = slot(ps);
-    m->id = xstrdup(id);
+    m->id = xstrdup(id ? id : "");
     m->exit = code;
     m->detail = xstrdup(detail ? detail : "");
     pipes_unlock(ps);
@@ -90,11 +106,37 @@ bool pipes_take(na_pipes *ps, na_pipe_msg *out)
 #include <unistd.h>
 
 #define READ_CHUNK 65536
+#define WRITE_CAP  (8u << 20)   /* 往 stdin 最多攒这么多，再多就是服务不读了 */
 
 void pipes_init(na_pipes *ps)
 {
     memset(ps, 0, sizeof *ps);
     ps->close_grace_ms = 3000;
+}
+
+/* 关掉 stdin（对端会读到 EOF） */
+static void close_in(na_pipe_t *p)
+{
+    if (p->fd_in >= 0) {
+        close(p->fd_in);
+        p->fd_in = -1;
+    }
+    p->input_dead = true;
+    p->wlen = p->woff = 0;
+}
+
+static void close_out(na_pipe_t *p)
+{
+    if (p->fd_out >= 0) {
+        close(p->fd_out);
+        p->fd_out = -1;
+    }
+}
+
+static int pipe_nonblock(int fd)
+{
+    int fl = fcntl(fd, F_GETFL);
+    return fl < 0 ? -1 : fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
 int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *const env[], const char *cwd,
@@ -109,6 +151,9 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         snprintf(err, errlen, "建管道失败：%s", strerror(errno));
         return -1;
     }
+    /* 一定要 close-on-exec：不然 Shell 命令和别的 MCP 进程都会继承我们的管道 */
+    fcntl(in[0], F_SETFD, FD_CLOEXEC); fcntl(in[1], F_SETFD, FD_CLOEXEC);
+    fcntl(out[0], F_SETFD, FD_CLOEXEC); fcntl(out[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
         snprintf(err, errlen, "fork 失败：%s", strerror(errno));
@@ -116,6 +161,8 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         return -1;
     }
     if (pid == 0) {
+        /* 独立进程组：结束的时候能把 npx 拉起来的 node 一起杀掉 */
+        setpgid(0, 0);
         dup2(in[0], 0);
         dup2(out[1], 1);
         int devnull = open("/dev/null", O_WRONLY);
@@ -128,10 +175,11 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         execvp(argv[0], argv);
         _exit(127);
     }
+    setpgid(pid, pid);   /* 和子进程抢一下，谁先都行 */
     close(in[0]);
     close(out[1]);
-    fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
-    fcntl(out[0], F_SETFL, fcntl(out[0], F_GETFL) | O_NONBLOCK);
+    pipe_nonblock(in[1]);
+    pipe_nonblock(out[0]);
     na_pipe_t *p = xcalloc(1, sizeof *p);
     p->id = xstrdup(id);
     p->fd_in = in[1];
@@ -142,47 +190,74 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
     return 0;
 }
 
+/* 把攒着的写进 stdin，写不动就留着，下一次可写时再来 */
+static void flush_in(na_pipe_t *p)
+{
+    while (!p->input_dead && p->woff < p->wlen) {
+        ssize_t w = write(p->fd_in, p->wbuf + p->woff, p->wlen - p->woff);
+        if (w > 0) {
+            p->woff += (size_t)w;
+            continue;
+        }
+        if (w < 0 && (errno == EAGAIN || errno == EINTR)) return;
+        close_in(p);   /* 对面不读了 */
+        return;
+    }
+    if (p->woff >= p->wlen) p->wlen = p->woff = 0;
+}
+
 int pipes_write(na_pipes *ps, const char *id, const char *data)
 {
     na_pipe_t *p = find_pipe(ps, id);
-    if (!p || p->fd_in < 0) return -1;
-    size_t n = strlen(data ? data : "");
-    char *line = xcalloc(n + 2, 1);
-    if (n) memcpy(line, data, n);
-    line[n] = '\n';
-    size_t off = 0, total = n + 1;
-    int rc = 0;
-    while (off < total) {
-        ssize_t w = write(p->fd_in, line + off, total - off);
-        if (w > 0) { off += (size_t)w; continue; }
-        if (w < 0 && (errno == EAGAIN || errno == EINTR)) continue;
-        rc = -1;
-        break;
+    if (!p || p->fd_in < 0) {
+        /* 网关还当这条管道活着（内核重启过）：回一条退出，别让它一直等 */
+        pipes_queue_closed(ps, id ? id : "", -1, "没有这条管道");
+        return -1;
     }
-    free(line);
-    return rc;
+    size_t n = strlen(data ? data : "");
+    if (p->wlen - p->woff + n + 1 > WRITE_CAP) {
+        pipes_queue_closed(ps, id, -1, "写给 stdin 的数据太多，服务好像不读了");
+        close_in(p);
+        return -1;
+    }
+    p->wbuf = xrealloc(p->wbuf, p->wlen + n + 1);
+    if (n) memcpy(p->wbuf + p->wlen, data, n);
+    p->wbuf[p->wlen + n] = '\n';
+    p->wlen += n + 1;
+    flush_in(p);   /* 能写就当场写掉，写不动的留在缓冲里等 poll */
+    return 0;
 }
 
 void pipes_close(na_pipes *ps, const char *id)
 {
     na_pipe_t *p = find_pipe(ps, id);
-    if (!p) return;
-    if (p->fd_in >= 0) {
-        close(p->fd_in);
-        p->fd_in = -1;
+    if (!p) {
+        pipes_queue_closed(ps, id ? id : "", -1, "没有这条管道");
+        return;
     }
+    flush_in(p);
+    close_in(p);
     p->closing = true;
     p->close_at = now_ms();
 }
 
-size_t pipes_pollfds(na_pipes *ps, na_pollfd *pfds, na_pipe_t **refs, size_t max)
+size_t pipes_pollfds(na_pipes *ps, na_pollfd *pfds, na_piperef *refs, size_t max)
 {
     size_t n = 0;
     for (na_pipe_t *p = ps->list; p && n < max; p = p->next) {
-        if (p->fd_out < 0) continue;
-        pfds[n] = (na_pollfd){ .id = p->fd_out, .events = NA_POLLIN };
-        refs[n] = p;
-        n++;
+        if (p->fd_in >= 0 && p->wlen > p->woff) {
+            pfds[n] = (na_pollfd){ .id = p->fd_in, .events = NA_POLLOUT };
+            refs[n].p = p;
+            refs[n].which = 0;
+            n++;
+            if (n >= max) break;
+        }
+        if (p->fd_out >= 0) {
+            pfds[n] = (na_pollfd){ .id = p->fd_out, .events = NA_POLLIN };
+            refs[n].p = p;
+            refs[n].which = 1;
+            n++;
+        }
     }
     return n;
 }
@@ -215,21 +290,23 @@ static void drain_pipe(na_pipes *ps, na_pipe_t *p)
             }
             continue;
         }
-        if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
-            if (p->fd_out >= 0) {
-                close(p->fd_out);
-                p->fd_out = -1;
-            }
-        }
+        if (n == 0 || (errno != EAGAIN && errno != EINTR)) close_out(p);
         return;
     }
 }
 
-void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n, int64_t now)
+void pipes_poll(na_pipes *ps, const na_pollfd *pfds, const na_piperef *refs, size_t n, int64_t now)
 {
     for (size_t i = 0; i < n; i++) {
-        if (!pfds[i].revents) continue;
-        if (refs[i] && refs[i]->fd_out >= 0) drain_pipe(ps, refs[i]);
+        na_pipe_t *p = refs[i].p;
+        if (!p) continue;
+        short re = pfds[i].revents;
+        if (refs[i].which == 0) {
+            if (re & (NA_POLLERR | NA_POLLHUP | NA_POLLNVAL)) close_in(p);
+            else if (re & NA_POLLOUT) flush_in(p);
+        } else if (p->fd_out >= 0 && re) {
+            drain_pipe(ps, p);
+        }
     }
     for (na_pipe_t *p = ps->list; p; p = p->next) {
         if (p->reported) continue;
@@ -254,31 +331,54 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n,
             if (p->fd_out >= 0) drain_pipe(ps, p);
             pipes_queue_closed(ps, p->id, p->code, "");
             p->reported = true;
-            if (p->fd_in >= 0) { close(p->fd_in); p->fd_in = -1; }
-            if (p->fd_out >= 0) { close(p->fd_out); p->fd_out = -1; }
+            close_in(p);
+            close_out(p);
             continue;
         }
         if (p->closing && p->pid > 0) {
             int64_t waited = now - p->close_at;
-            if (waited > ps->close_grace_ms) kill((pid_t)p->pid, SIGKILL);
-            else if (waited > ps->close_grace_ms / 2) kill((pid_t)p->pid, SIGTERM);
+            /* 杀整个进程组：npx 起来了 node，只杀 npx 会留下 node */
+            if (waited > ps->close_grace_ms) kill(-(pid_t)p->pid, SIGKILL);
+            else if (waited > ps->close_grace_ms / 2) kill(-(pid_t)p->pid, SIGTERM);
         }
+    }
+    /* 已经报过退出的条目清掉 */
+    na_pipe_t **pp = &ps->list;
+    while (*pp) {
+        na_pipe_t *p = *pp;
+        if (p->reported && p->fd_in < 0 && p->fd_out < 0) {
+            *pp = p->next;
+            free_pipe(p);
+            continue;
+        }
+        pp = &p->next;
     }
 }
 
 void pipes_shutdown(na_pipes *ps)
 {
-    for (na_pipe_t *p = ps->list; p; p = p->next) {
-        if (p->fd_in >= 0) { close(p->fd_in); p->fd_in = -1; }
-        if (p->fd_out >= 0) { close(p->fd_out); p->fd_out = -1; }
+    na_pipe_t *p = ps->list;
+    while (p) {
+        na_pipe_t *next = p->next;
+        close_in(p);
+        close_out(p);
         if (p->pid > 0 && !p->reaped) {
-            kill((pid_t)p->pid, SIGTERM);
-            kill((pid_t)p->pid, SIGKILL);
+            kill(-(pid_t)p->pid, SIGTERM);
+            kill(-(pid_t)p->pid, SIGKILL);
             waitpid((pid_t)p->pid, NULL, 0);
             p->reaped = true;
             p->pid = -1;
         }
+        free_pipe(p);
+        p = next;
     }
+    ps->list = NULL;
+    for (size_t i = ps->qhead; i < ps->qn; i++) {
+        free(ps->q[i].id);
+        free(ps->q[i].data);
+        free(ps->q[i].detail);
+    }
+    ps->qn = ps->qhead = 0;
 }
 
 #endif /* !NA_WINDOWS */

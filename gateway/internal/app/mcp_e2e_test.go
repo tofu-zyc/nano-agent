@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/proto"
@@ -276,5 +278,74 @@ func TestMCPImageResult(t *testing.T) {
 	e.a.mu.Unlock()
 	if sent != 1 {
 		t.Fatalf("图片应该挂在工具结果上，实际 %d 张", sent)
+	}
+}
+
+// 死锁回归：算工具定义时（拿着网关的总锁）绝不能去连 MCP。
+// 用一台不存在的机器上的服务，以前会卡死在这里。
+func TestMCPNoLockDuringContextParts(t *testing.T) {
+	e := setup(t)
+	st, err := mcp.Open(filepath.Join(t.TempDir(), "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save([]mcp.Server{{Name: "off", Machine: "no-such-machine", Command: "x", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := mcp.NewManager(st, nil)
+	defer mgr.Close()
+	e.a.SetMCP(st, mgr)
+	done := make(chan []llm.Tool, 1)
+	go func() {
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		_, tools, _, _ := e.a.contextParts(mainSID)
+		done <- tools
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("算工具定义时卡住了（又去连 MCP 了）")
+	}
+}
+
+// 保存 MCP 配置以后，已有会话的工具快照要重建，不然新加的服务看不见。
+func TestMCPSaveRefreshesTools(t *testing.T) {
+	if testing.Short() {
+		t.Skip("要起子进程")
+	}
+	e := setup(t)
+	st, err := mcp.Open(filepath.Join(t.TempDir(), "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := mcp.NewManager(st, nil)
+	defer mgr.Close()
+	e.a.SetMCP(st, mgr)
+	// 先跑一轮，让快照落下（这时还没有 MCP）
+	e.say("你好")
+	in := e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.a.mu.Lock()
+	_, before, _, _ := e.a.contextParts(in.SID)
+	e.a.mu.Unlock()
+	if hasTool(before, "helper__echo") {
+		t.Fatal("还没有 MCP 服务，不该有它的工具")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.SaveMCP([]mcp.Server{{Name: "helper", Command: exe,
+		Args: []string{"-test.run=TestNoSuchTest"}, Env: map[string]string{mcpHelperEnv: "1"}, Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(mgr.CachedTools("default")) >= 1 })
+	e.a.mu.Lock()
+	_, after, _, _ := e.a.contextParts(in.SID)
+	e.a.mu.Unlock()
+	if !hasTool(after, "helper__echo") {
+		t.Fatalf("保存 MCP 以后快照没重建：%v", toolNames(after))
 	}
 }

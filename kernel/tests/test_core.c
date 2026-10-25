@@ -166,7 +166,7 @@ static void test_rejections_are_results(void)
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 3);
     /* 内核不认识的工具名交给网关执行（MCP 工具 <服务>__<工具> 就是这样），
        其余不合法或没权限的还是当场回错误结果 */
-    EXPECT(c, "EXEC(x,nope,120000) "
+    EXPECT(c, "EXEC(x,nope,1800000) "
               "RESULT(y,err,参数不是合法的 JSON 对象：not json) "
               "RESULT(z,err,当前身份没有使用工具的权限)");
     tool_done(c, 20, "s1", "x", true, "ok");

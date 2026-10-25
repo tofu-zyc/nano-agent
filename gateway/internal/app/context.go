@@ -80,8 +80,8 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			for _, spec := range a.searchTools() {
 				tools = append(tools, toolOf(spec))
 			}
-		} else {
-			// MCP 服务带的工具（<服务>__<工具>）：访客没有工具，也就没有这些
+		} else if admin && a.workspaceOf(sid).mode != "readonly" {
+			// MCP 服务带的工具（<服务>__<工具>）：访客、只读模式都没有
 			tools = append(tools, mcpTools(a.mcp, ag.ID)...)
 		}
 		if a.memoryOn(a.agentOf(sid)) {
@@ -134,7 +134,7 @@ func (a *App) permOf(sid string) (route, bool, bool) {
 func (a *App) permSignature(sid string) string {
 	// 只看管理员/访客和内核：noTools 是“这一轮”算出来的，运行结束就变回去，放进签名会抖
 	rt, admin, _ := a.permOf(sid)
-	return fmt.Sprintf("%t|%s|%t", admin, rt.kernel, a.nodes[rt.kernel] != nil)
+	return fmt.Sprintf("%t|%s|%t|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, a.mcpSignature())
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

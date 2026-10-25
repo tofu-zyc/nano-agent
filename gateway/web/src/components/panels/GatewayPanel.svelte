@@ -22,6 +22,7 @@
     enabled: boolean;
     approval: string;
     machine: string;
+    orig: string; // 编辑时的原名（改名时要靠它找回旧的密钥）
   };
   const mcps = $derived(store.ov?.mcp ?? []);
   // MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）
@@ -35,7 +36,7 @@
       name: m?.name ?? '',
       kind: m?.kind ?? 'stdio',
       command: m?.command ?? '',
-      args: (m?.args ?? []).join(' '),
+      args: (m?.args ?? []).join('\n'),
       url: m?.url ?? '',
       cwd: m?.cwd ?? '',
       env: (m?.env_keys ?? []).map((k) => k + '=').join('\n'),
@@ -43,6 +44,7 @@
       enabled: m?.enabled ?? true,
       approval: m?.approval ?? 'never',
       machine: m?.machine ?? '',
+      orig: m?.name ?? '',
     };
   }
 
@@ -75,12 +77,15 @@
       mcpMsg = '名字不能为空';
       return;
     }
-    const prev = mcps.find((x) => x.name === name);
+    const orig = d.orig || name;
+    const prev = mcps.find((x) => x.name === orig);
     const item = {
       name,
+      orig,
       kind: d.kind,
       command: d.kind === 'stdio' ? d.command.trim() : '',
-      args: d.kind === 'stdio' ? d.args.trim().split(/\s+/).filter(Boolean) : [],
+      // 一行一个参数（路径里有空格也不会被拆开）
+      args: d.kind === 'stdio' ? d.args.split('\n').map((s) => s.trim()).filter(Boolean) : [],
       url: d.kind === 'http' ? d.url.trim() : '',
       cwd: d.cwd.trim(),
       machine: d.machine,
@@ -93,7 +98,7 @@
     mcpBusy = true;
     mcpMsg = '';
     try {
-      await api.post('/api/mcp', { items: [...mcps.filter((x) => x.name !== name).map(itemOf), item] });
+      await api.post('/api/mcp', { items: [...mcps.filter((x) => x.name !== orig).map(itemOf), item] });
       mcpDraft = null;
       await store.refresh();
     } catch (err) {
@@ -231,8 +236,8 @@
             </select>
           </label>
           <label><span>命令</span><input bind:value={mcpDraft.command} placeholder="npx" /></label>
-          <label><span>参数</span><input bind:value={mcpDraft.args} placeholder="-y @modelcontextprotocol/server-filesystem /home/me" /></label>
-          <label><span>工作目录</span><input bind:value={mcpDraft.cwd} placeholder="留空就是数据目录" /></label>
+          <label><span>参数</span><textarea bind:value={mcpDraft.args} rows="3" placeholder="一行一个，比如：\n-y\n@modelcontextprotocol/server-filesystem\n/home/me"></textarea></label>
+          <label><span>工作目录</span><input bind:value={mcpDraft.cwd} placeholder="留空就用网关进程的当前目录" /></label>
         {:else}
           <label><span>地址</span><input bind:value={mcpDraft.url} placeholder="https://example.com/mcp" /></label>
         {/if}

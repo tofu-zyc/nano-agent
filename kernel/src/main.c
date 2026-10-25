@@ -1011,6 +1011,8 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     /* 被拒绝、等确认这些状态比“断开”更有用，留着 */
     if (!strcmp(k->state, "connected") || !k->state[0]) set_state(k, "connecting", why, NULL);
     link_close(&k->link);
+    /* 网关那边已经不在了：把它让起的 MCP 进程都收掉，别留在机器上 */
+    pipes_shutdown(&k->pipes);
     na_event ev = { .type = NA_EV_RESET };
     na_core_feed(k->core, now, &ev);
     pump(k, now);   /* 只剩 KILL：终止所有正在执行的工具 */
@@ -1061,7 +1063,7 @@ static void loop(kernel_t *k)
 {
     static na_pollfd pfds[MAX_POLL];
     static pollref_t refs[MAX_POLL];
-    static na_pipe_t *prefs[MAX_POLL];
+    static na_piperef prefs[MAX_POLL];
 
     while (!g_stop) {
         int64_t now = now_ms();

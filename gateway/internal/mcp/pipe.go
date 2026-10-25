@@ -184,3 +184,19 @@ func (c *pipeConn) Close() error {
 	}
 	return nil
 }
+
+// DropNode 是某台机器的内核断开了：它上面起的 MCP 进程都没了，等它重连再重新起。
+func (p *Pipes) DropNode(node string) {
+	p.mu.Lock()
+	var hits []*pipeConn
+	for k, c := range p.conns {
+		if c.node == node {
+			hits = append(hits, c)
+			delete(p.conns, k)
+		}
+	}
+	p.mu.Unlock()
+	for _, c := range hits {
+		c.finish(fmt.Errorf("%s 的内核断开了，MCP 进程跟着没了", node))
+	}
+}

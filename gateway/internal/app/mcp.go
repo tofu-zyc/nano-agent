@@ -70,7 +70,10 @@ func (a *App) MCPInfo() []MCPInfo {
 }
 
 // SaveMCP 整份保存 MCP 服务列表。env 里值留空的沿用原来存着的（网页看不到明文密钥）。
-func (a *App) SaveMCP(list []mcp.Server) error {
+func (a *App) SaveMCP(list []mcp.Server) error { return a.SaveMCPRenamed(list, nil) }
+
+// SaveMCPRenamed 同上，renames 是新名字 → 旧名字：改名的时候密钥和工具列表要跟着搬。
+func (a *App) SaveMCPRenamed(list []mcp.Server, renames map[string]string) error {
 	a.mu.Lock()
 	store, mgr := a.mcpStore, a.mcp
 	a.mu.Unlock()
@@ -83,8 +86,28 @@ func (a *App) SaveMCP(list []mcp.Server) error {
 	}
 	for i := range list {
 		prev, ok := old[list[i].Name]
+		renamed := false
+		if !ok {
+			if from, has := renames[list[i].Name]; has {
+				prev, ok = old[from]
+				renamed = ok
+			}
+		}
 		if !ok {
 			continue
+		}
+		if renamed {
+			if list[i].Env == nil {
+				list[i].Env = map[string]string{}
+			}
+			for k, v := range prev.Env {
+				if _, has := list[i].Env[k]; !has {
+					list[i].Env[k] = v
+				}
+			}
+			if len(list[i].Tools) == 0 {
+				list[i].Tools = prev.Tools
+			}
 		}
 		for k, v := range list[i].Env {
 			if strings.TrimSpace(v) == "" {
@@ -99,6 +122,7 @@ func (a *App) SaveMCP(list []mcp.Server) error {
 	}
 	if mgr != nil {
 		mgr.Reload()
+		mgr.Warm(20 * time.Second) // 先连一遍，会话那边只读缓存
 	}
 	a.publish(events.Event{T: "mcp"})
 	return nil
@@ -117,14 +141,13 @@ func (a *App) TestMCP(name string) ([]mcp.ToolInfo, error) {
 	return mgr.Test(ctx, name)
 }
 
-// mcpTools 是某个 agent 现在能用的 MCP 工具定义。调用方持有锁。
+// mcpTools 是某个 agent 现在能用的 MCP 工具定义。调用方持有锁 —— 这里只能读缓存，
+// 绝不能去连服务（连接会等锁、而锁在这里，直接死锁）。
 func mcpTools(m *mcp.Manager, agent string) []llm.Tool {
 	if m == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	infos := m.ToolsFor(ctx, agent)
+	infos := m.CachedTools(agent)
 	out := make([]llm.Tool, 0, len(infos))
 	for _, t := range infos {
 		desc := t.Description
@@ -140,19 +163,9 @@ func mcpTools(m *mcp.Manager, agent string) []llm.Tool {
 	return out
 }
 
-// mcpToolNames 是这些工具的名字（给 agent 的工具白名单用）。
-func mcpToolNames(m *mcp.Manager, agent string) []string {
-	tools := mcpTools(m, agent)
-	out := make([]string, 0, len(tools))
-	for _, t := range tools {
-		out = append(out, t.Function.Name)
-	}
-	return out
-}
-
 // askMCPApproval 建一张审批单，返回等结果的 channel（批准往这里塞 true）。
 // 调用方持有锁；resolve 只往缓冲 channel 里塞，不会再要锁。
-func (a *App) askMCPApproval(s *sess, tool string, args json.RawMessage) (<-chan bool, int) {
+func (a *App) askMCPApproval(s *sess, execID, tool string, args json.RawMessage) (<-chan bool, int) {
 	a.nextAppr++
 	n := a.nextAppr
 	ch := make(chan bool, 1)
@@ -162,7 +175,7 @@ func (a *App) askMCPApproval(s *sess, tool string, args json.RawMessage) (<-chan
 	if s.run != nil {
 		from = s.run.from
 	}
-	ap := &approval{sid: s.sid, name: tool, detail: desc, from: from, at: a.now(),
+	ap := &approval{sid: s.sid, id: execID, name: tool, detail: desc, from: from, at: a.now(),
 		card: channel.ApprovalCard{N: n, Title: title, Detail: body, From: from},
 		resolve: func(ok bool) {
 			select {
@@ -201,6 +214,24 @@ func (a *App) askMCPApproval(s *sess, tool string, args json.RawMessage) (<-chan
 	return ch, n
 }
 
+// mcpSignature 是 MCP 配置的指纹：加、删、启用、换机器都会让它变，
+// 工具快照据此重建（不然新加的服务在已有会话里看不见）。调用方持有锁。
+func (a *App) mcpSignature() string {
+	if a.mcpStore == nil {
+		return ""
+	}
+	list := a.mcpStore.List()
+	names := make([]string, 0, len(list))
+	for _, s := range list {
+		if !s.Enabled {
+			continue
+		}
+		names = append(names, s.Name+"@"+s.Machine)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
 // mimeExt 是图片的扩展名（媒体库里按它命名）。
 func mimeExt(mime string) string {
 	switch mime {
@@ -212,6 +243,23 @@ func mimeExt(mime string) string {
 		return ".gif"
 	}
 	return ".png"
+}
+
+// cancelMCP 是内核说这次调用超时/不要了（exec_cancel）：撤掉挂着的审批，按拒绝处理。
+// 不这么做的话，审批卡还挂着，管理员晚点批了工具照样执行，可模型早就被告知超时了。
+// 调用方持有锁。
+func (a *App) cancelMCP(id string) {
+	for n, ap := range a.approvals {
+		if ap.id != id || ap.resolve == nil {
+			continue
+		}
+		res := ap.resolve
+		delete(a.approvals, n)
+		a.resolveApproval(ap, "已取消")
+		a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+		res(false)
+		return
+	}
 }
 
 // mcpCall 执行一次 MCP 工具调用。调用方持有锁；调用本身在协程里跑。
@@ -236,6 +284,18 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	}
 	dial := func() {
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
+		// 内核超时/用户停止时会发 exec_cancel：注册进去，它能把这个调用停下来
+		if s.run != nil {
+			if s.run.execs == nil {
+				s.run.execs = map[string]context.CancelFunc{}
+			}
+			s.run.execs[m.ID] = cancel
+			defer func() {
+				a.mu.Lock()
+				delete(s.run.execs, m.ID)
+				a.mu.Unlock()
+			}()
+		}
 		defer cancel()
 		res, err := mg.Call(ctx, server, tool, args)
 		a.mu.Lock()
@@ -258,6 +318,11 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 				continue
 			}
 			s.run.sent[m.ID] = append(s.run.sent[m.ID], att)
+			if s.run.withImages {
+				s.run.images[m.ID] = append(s.run.images[m.ID], att)
+			} else if !strings.Contains(text, "看不到") {
+				text += "\n（图片附在工具结果上，但现在的模型不能看图）"
+			}
 		}
 		ok := !res.IsError
 		if !ok && text == "" {
@@ -266,7 +331,12 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "from", from, "bytes", len(text))
 		reply(ok, text)
 	}
-	// approval=always 每次都要批；per_turn 一轮里只要批过一次就放行
+	// 只读模式不给 MCP（工具列表里也不会出现）
+	if a.workspaceOf(s.sid).mode == "readonly" {
+		reply(false, "当前是只读模式，不能用 MCP 工具")
+		return
+	}
+	// approval=always 每次都要批；per_turn 一轮里批过一次就放行；放行模式（full）不问
 	need := false
 	if srv, ok := mg.Server(server); ok {
 		switch srv.Approval {
@@ -276,14 +346,11 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 			need = s.run == nil || !s.run.mcpOK[server]
 		}
 	}
+	if need && s.run != nil && s.run.full {
+		need = false
+	}
 	if need {
-		if s.run != nil {
-			if s.run.mcpOK == nil {
-				s.run.mcpOK = map[string]bool{}
-			}
-			s.run.mcpOK[server] = true
-		}
-		wait, n := a.askMCPApproval(s, m.Name, m.Args)
+		wait, n := a.askMCPApproval(s, m.ID, m.Name, m.Args)
 		limit := a.cfg.Agent.ApprovalLimit()
 		a.log.Info("MCP 工具等审批", "sid", sid, "tool", m.Name, "n", n)
 		go func() {
@@ -301,6 +368,15 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 					a.mu.Unlock()
 					return
 				}
+				// 批准以后才记「这一轮批过了」：提前记的话，同一轮并发的第二次调用会绕过审批
+				a.mu.Lock()
+				if s.run != nil {
+					if s.run.mcpOK == nil {
+						s.run.mcpOK = map[string]bool{}
+					}
+					s.run.mcpOK[server] = true
+				}
+				a.mu.Unlock()
 			case <-timeout:
 				a.mu.Lock()
 				a.dropApproval(n, "等审批超时")

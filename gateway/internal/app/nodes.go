@@ -223,6 +223,11 @@ func (a *App) KernelDown(name string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.nodes, name)
+	if a.mcp != nil {
+		if p := a.mcp.Pipes(); p != nil {
+			p.DropNode(name) // 它上面起的 MCP 进程跟着没了
+		}
+	}
 	a.hostGone(name)
 	a.publish(events.Event{T: "kernel", Name: name})
 	a.publish(events.Event{T: "machines", Data: a.machineList()})

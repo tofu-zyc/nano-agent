@@ -319,7 +319,8 @@ func (m *Manager) Sweep() {
 		idle := c.cs != nil && now.Sub(c.used) > m.idle
 		var cs *sdkmcp.ClientSession
 		if idle {
-			cs, c.cs, c.tools = c.cs, nil, nil
+			// 只断连接，工具列表留着：下次算工具定义时还能用（连上以后会刷新）
+			cs, c.cs = c.cs, nil
 		}
 		c.mu.Unlock()
 		if cs != nil {
@@ -406,4 +407,41 @@ func (m *Manager) Test(ctx context.Context, name string) ([]ToolInfo, error) {
 		return nil, err
 	}
 	return toolInfos(s, tools), nil
+}
+
+// CachedTools 是这个 agent 现在能用的 MCP 工具，**只读缓存、不连接**。
+// 工具定义要在网关的总锁里算，绝不能在这里发起网络/进程连接（会死锁、也会卡住整个网关）；
+// 连接由 Warm 在后台按需建立。
+func (m *Manager) CachedTools(agent string) []ToolInfo {
+	servers := m.store.List()
+	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
+	var out []ToolInfo
+	for _, s := range servers {
+		if !s.Enabled || !s.ForAgent(agent) {
+			continue
+		}
+		c := m.conn(s.Name)
+		c.mu.Lock()
+		tools := c.tools
+		c.mu.Unlock()
+		out = append(out, toolInfos(s, tools)...)
+	}
+	return out
+}
+
+// Warm 把还没连上的服务后台连一遍（启动时、改了配置以后、每轮维护时调用）。
+// 连不上就按退避下一轮再试；这里不返回错误，日志里能看到原因。
+func (m *Manager) Warm(timeout time.Duration) {
+	for _, s := range m.store.List() {
+		if !s.Enabled {
+			continue
+		}
+		go func(s Server) {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if _, _, err := m.session(ctx, s); err != nil {
+				m.log.Warn("MCP 服务还没连上", "server", s.Name, "err", err)
+			}
+		}(s)
+	}
 }
