@@ -21,8 +21,11 @@
     agents: string;
     enabled: boolean;
     approval: string;
+    machine: string;
   };
   const mcps = $derived(store.ov?.mcp ?? []);
+  // MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）
+  const kernelNodes = $derived((store.ov?.kernels ?? []).map((k) => k.node));
   let mcpDraft = $state<MCPDraft | null>(null);
   let mcpBusy = $state(false);
   let mcpMsg = $state('');
@@ -39,6 +42,7 @@
       agents: (m?.agents ?? []).join(', '),
       enabled: m?.enabled ?? true,
       approval: m?.approval ?? 'never',
+      machine: m?.machine ?? '',
     };
   }
 
@@ -58,7 +62,7 @@
   function itemOf(m: MCPInfo) {
     return {
       name: m.name, kind: m.kind, command: m.command ?? '', args: m.args ?? [], url: m.url ?? '',
-      cwd: m.cwd ?? '', env: Object.fromEntries((m.env_keys ?? []).map((k) => [k, ''])),
+      cwd: m.cwd ?? '', machine: m.machine ?? '', env: Object.fromEntries((m.env_keys ?? []).map((k) => [k, ''])),
       enabled: m.enabled, tools: m.tools ?? [], agents: m.agents ?? [], approval: m.approval,
     };
   }
@@ -79,6 +83,7 @@
       args: d.kind === 'stdio' ? d.args.trim().split(/\s+/).filter(Boolean) : [],
       url: d.kind === 'http' ? d.url.trim() : '',
       cwd: d.cwd.trim(),
+      machine: d.machine,
       env: envOf(d.env),
       enabled: d.enabled,
       tools: prev?.tools ?? [],
@@ -199,6 +204,7 @@
           <span class="tag">{m.kind === 'http' ? 'HTTP' : 'stdio'}</span>
           {#if !m.enabled}<span class="tag">已关闭</span>{/if}
           {#if m.tool_count}<span class="tag ok">{m.tool_count} 个工具</span>{/if}
+          {#if m.machine}<span class="tag">在 {m.machine} 上</span>{/if}
           {#if m.agents?.length}<span class="tag">仅 {m.agents.join('、')}</span>{/if}
         </span>
         <button class="btn sm" disabled={mcpBusy} onclick={() => testMCP(m.name)}>测试</button>
@@ -218,6 +224,12 @@
           </select>
         </label>
         {#if mcpDraft.kind === 'stdio'}
+          <label><span>在哪台机器</span>
+            <select bind:value={mcpDraft.machine}>
+              <option value="">网关本机</option>
+              {#each kernelNodes as k (k)}<option value={k}>{k}</option>{/each}
+            </select>
+          </label>
           <label><span>命令</span><input bind:value={mcpDraft.command} placeholder="npx" /></label>
           <label><span>参数</span><input bind:value={mcpDraft.args} placeholder="-y @modelcontextprotocol/server-filesystem /home/me" /></label>
           <label><span>工作目录</span><input bind:value={mcpDraft.cwd} placeholder="留空就是数据目录" /></label>

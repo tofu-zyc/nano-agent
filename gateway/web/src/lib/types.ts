@@ -147,6 +147,7 @@ export type MCPInfo = {
   args?: string[];
   url?: string;
   cwd?: string;
+  machine?: string;
   env_keys?: string[];
   enabled: boolean;
   tools?: string[];

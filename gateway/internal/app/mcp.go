@@ -27,6 +27,7 @@ type MCPInfo struct {
 	Args      []string `json:"args,omitempty"`
 	URL       string   `json:"url,omitempty"`
 	Cwd       string   `json:"cwd,omitempty"`
+	Machine   string   `json:"machine,omitempty"`
 	EnvKeys   []string `json:"env_keys,omitempty"`
 	Enabled   bool     `json:"enabled"`
 	Tools     []string `json:"tools,omitempty"`
@@ -46,7 +47,7 @@ func (a *App) MCPInfo() []MCPInfo {
 		return out
 	}
 	for _, s := range store.List() {
-		info := MCPInfo{Name: s.Name, Command: s.Command, Args: s.Args, URL: s.URL, Cwd: s.Cwd,
+		info := MCPInfo{Name: s.Name, Command: s.Command, Args: s.Args, URL: s.URL, Cwd: s.Cwd, Machine: s.Machine,
 			Enabled: s.Enabled, Tools: s.Tools, Agents: s.Agents, Approval: s.Approval}
 		if s.URL != "" {
 			info.Kind = "http"

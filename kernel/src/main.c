@@ -9,6 +9,7 @@
 #include "ctl.h"
 #include "core.h"
 #include "link.h"
+#include "pipe.h"
 #include "plat.h"
 #include "runner.h"
 #include "tools.h"
@@ -26,7 +27,7 @@
 
 #include "version.h"
 
-#define PROTO_VERSION      9
+#define PROTO_VERSION      10
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -54,6 +55,7 @@ typedef struct {
     char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
     na_core        *core;
     runner_t        runner;
+    na_pipes        pipes;            /* 协议 v10：MCP 服务的 stdio 透传 */
     struct gwjob   *gwjobs;      /* 交给网关执行、还没有结果的工具调用 */
     link_t          link;
     int64_t         last_ping;
@@ -658,6 +660,69 @@ static void pump(kernel_t *k, int64_t now)
     }
 }
 
+/* ---- 协议 v10：MCP 服务的 stdio 透传 ---- */
+
+/* 网关要把输出送出去：一行一行、以及退出 */
+static void pump_pipes(kernel_t *k)
+{
+    na_pipe_msg m;
+    while (pipes_take(&k->pipes, &m)) {
+        cJSON *out;
+        if (m.exit >= 0) {
+            out = msg_new("pipe_closed", NULL);
+            cJSON_AddStringToObject(out, "pipe", m.id);
+            cJSON_AddNumberToObject(out, "exit", m.exit);
+            if (m.detail && *m.detail) cJSON_AddStringToObject(out, "detail", m.detail);
+        } else {
+            out = msg_new("pipe_data", NULL);
+            cJSON_AddStringToObject(out, "pipe", m.id);
+            cJSON_AddStringToObject(out, "data", m.data ? m.data : "");
+        }
+        link_send(&k->link, out);
+        free(m.id);
+        free(m.data);
+        free(m.detail);
+    }
+}
+
+static void handle_pipe_open(kernel_t *k, const cJSON *m)
+{
+    const char *id = sget(m, "pipe");
+    const cJSON *av = cJSON_GetObjectItemCaseSensitive(m, "argv");
+    if (!id || !cJSON_IsArray(av)) return;
+    int n = cJSON_GetArraySize(av);
+    char **argv = xcalloc((size_t)n + 1, sizeof *argv);
+    for (int i = 0; i < n; i++) {
+        const cJSON *v = cJSON_GetArrayItem(av, i);
+        argv[i] = (char *)(cJSON_IsString(v) ? v->valuestring : "");
+    }
+    /* env：k, v 交替，NULL 结尾 */
+    const cJSON *ev = cJSON_GetObjectItemCaseSensitive(m, "env");
+    size_t pairs = cJSON_IsObject(ev) ? (size_t)cJSON_GetArraySize(ev) : 0;
+    const char **env = xcalloc(pairs * 2 + 2, sizeof *env);
+    size_t pi = 0;
+    if (cJSON_IsObject(ev)) {
+        const cJSON *it = NULL;
+        cJSON_ArrayForEach(it, ev) {
+            if (!cJSON_IsString(it) || !it->string) continue;
+            env[pi++] = it->string;
+            env[pi++] = it->valuestring;
+        }
+    }
+    char err[256] = "";
+    if (pipes_open(&k->pipes, id, argv, env, sget(m, "cwd"), err, sizeof err) < 0) {
+        log_warn("起 MCP 进程失败：%s", err);
+        cJSON *out = msg_new("pipe_closed", NULL);
+        cJSON_AddStringToObject(out, "pipe", id);
+        cJSON_AddNumberToObject(out, "exit", -1);
+        cJSON_AddStringToObject(out, "detail", err);
+        link_send(&k->link, out);
+    } else {
+        log_info("起了 MCP 进程 %s：%s", id, argv[0]);
+    }
+    free(argv);
+    free(env);
+}
 /* ---- 网关消息 → 事件 ---- */
 
 static na_turn_reason parse_reason(const char *s)
@@ -809,6 +874,19 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     }
     if (!strcmp(t, "skill_put")) {
         handle_skill_put(k, m);
+        return;
+    }
+    if (!strcmp(t, "pipe_open")) {
+        handle_pipe_open(k, m);
+        return;
+    }
+    if (!strcmp(t, "pipe_write")) {
+        if (pipes_write(&k->pipes, sget(m, "pipe"), sget(m, "data")) != 0)
+            log_warn("往 MCP 进程写失败");
+        return;
+    }
+    if (!strcmp(t, "pipe_close")) {
+        pipes_close(&k->pipes, sget(m, "pipe"));
         return;
     }
 
@@ -983,6 +1061,7 @@ static void loop(kernel_t *k)
 {
     static na_pollfd pfds[MAX_POLL];
     static pollref_t refs[MAX_POLL];
+    static na_pipe_t *prefs[MAX_POLL];
 
     while (!g_stop) {
         int64_t now = now_ms();
@@ -1011,6 +1090,8 @@ static void loop(kernel_t *k)
         }
         size_t base = np;
         np += runner_pollfds(&k->runner, pfds + base, refs + base, MAX_POLL - base);
+        size_t pbase = np;
+        np += pipes_pollfds(&k->pipes, pfds + pbase, prefs + pbase, MAX_POLL - pbase);
 
         int64_t wake = next_wakeup(k, now);
         int timeout = wake > now ? (int)(wake - now) : 0;
@@ -1048,7 +1129,9 @@ static void loop(kernel_t *k)
                 disconnect(k, now, "写入失败");
         }
 
-        if (np > base) runner_on_poll(&k->runner, pfds + base, refs + base, np - base);
+        if (pbase > base) runner_on_poll(&k->runner, pfds + base, refs + base, pbase - base);
+        pipes_poll(&k->pipes, pfds + pbase, prefs + pbase, np - pbase, now);
+        pump_pipes(k);
         collect_finished(k, now);
 
         na_event tick = { .type = NA_EV_TICK };
@@ -1211,6 +1294,7 @@ int main(int argc, char **argv)
         .approval_timeout_ms = k.conf.approval_timeout * 1000,
     };
     k.core = na_core_new(&cc);
+    pipes_init(&k.pipes);
     /* 执行器的输出是一行 JSON，内容转义后可能比原文长不少，留足余量 */
     k.runner.out_cap = k.conf.max_output * 6 + 4096;
     k.runner.wake = &g_wake;
@@ -1225,6 +1309,7 @@ int main(int argc, char **argv)
     }
     plat_signals_remove();
     runner_shutdown(&k.runner, 2500);
+    pipes_shutdown(&k.pipes);
     if (k.restart && k.link.fd != NA_SOCK_NONE) link_flush(&k.link);   /* 把 update_result 发出去 */
     link_close(&k.link);
     buf_free(&k.link.in);

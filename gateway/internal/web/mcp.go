@@ -21,6 +21,7 @@ type mcpSaveItem struct {
 	Args     []string          `json:"args"`
 	URL      string            `json:"url"`
 	Cwd      string            `json:"cwd"`
+	Machine  string            `json:"machine"`
 	Env      map[string]string `json:"env"`
 	Enabled  bool              `json:"enabled"`
 	Tools    []string          `json:"tools"`
@@ -40,7 +41,7 @@ func (s *Server) mcpSave(w http.ResponseWriter, r *http.Request) {
 	list := make([]mcp.Server, 0, len(body.Items))
 	for _, it := range body.Items {
 		srv := mcp.Server{
-			Name: it.Name, Command: it.Command, Args: it.Args, Cwd: it.Cwd, Env: it.Env,
+			Name: it.Name, Command: it.Command, Args: it.Args, Cwd: it.Cwd, Machine: it.Machine, Env: it.Env,
 			Enabled: it.Enabled, Tools: it.Tools, Agents: it.Agents, Approval: it.Approval,
 		}
 		if it.Kind == "http" || it.URL != "" {
