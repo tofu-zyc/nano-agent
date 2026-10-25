@@ -3,6 +3,7 @@
 
 用法：python3 tests/test_exec.py ./nano-exec
 """
+import base64
 import json
 import os
 import shutil
@@ -97,6 +98,20 @@ def t_read_misc():
     c = ok(run("Read", {"path": "."}), "是目录", "sub/", "lines.txt")
     assert c.index("bin.dat") < c.index("lines.txt")
     bad(run("Read", {"path": "nope.txt"}), "No such file")
+
+
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+@case("Read 读到图片说是图片；Fetch 取回 base64，读的规则和 Read 一样（v0.7）")
+def t_fetch():
+    ok(run("Read", {"path": "pic.png"}), "pic.png 是图片（PNG，%d 字节）" % len(PNG))
+    c = ok(run("Fetch", {"path": "pic.png"}))
+    assert base64.b64decode(c) == PNG, c
+    assert base64.b64decode(ok(run("Fetch", {"path": "lines.txt"}))).startswith(b"line 1\n")
+    bad(run("Fetch", {"path": "lines.txt", "max_bytes": 10}), "太大了")
+    bad(run("Fetch", {"path": "."}), "是目录")
+    bad(run("Fetch", {"path": "../other/secret.txt"}), "不在工作目录内")
 
 
 @case("Read：工作目录外的路径一律拒绝（..、绝对路径、~、符号链接）")
@@ -341,6 +356,8 @@ def setup():
     open(os.path.join(WORK, "empty.txt"), "w").close()
     with open(os.path.join(WORK, "bin.dat"), "wb") as f:
         f.write(b"\x00\x01binary")
+    with open(os.path.join(WORK, "pic.png"), "wb") as f:
+        f.write(PNG)
     with open(os.path.join(WORK, "sub", "hello.md"), "w") as f:
         f.write("Hello world\n")
     with open(os.path.join(WORK, "ro.txt"), "w") as f:
@@ -373,7 +390,7 @@ def main():
     try:
         setup()
         print(f"probe：{PROBE}")
-        for t in (t_read, t_read_misc, t_read_escape, t_read_ro, t_read_all, t_write, t_write_escape, t_edit, t_grep,
+        for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
                   t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()

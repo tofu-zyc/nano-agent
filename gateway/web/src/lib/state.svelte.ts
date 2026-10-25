@@ -98,6 +98,7 @@ class Store {
   personaTick = $state(0);
   memoryTick = $state(0); // 记忆、整理记忆、内心活动有变化（记忆面板据此重读）
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
+  botReg = $state<{ kind: string; text: string; data?: any; n: number } | null>(null); // QQ / 微信扫码的进展（每条都是新的）
   restarting = $state(false);
   updating = $state(false);
   checkingUpdate = $state(false);
@@ -206,6 +207,20 @@ class Store {
   }
 
   private reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  private agentsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** agent 的状态（在干嘛）跟着会话变：过一会儿只重读 agent 列表 */
+  reloadAgentsSoon() {
+    clearTimeout(this.agentsTimer);
+    this.agentsTimer = setTimeout(async () => {
+      try {
+        const r = await api.get<{ items: AgentInfo[] }>('/api/agents');
+        if (this.ov) this.ov.agents = r.items;
+      } catch {
+        /* 下次整体刷新时再读 */
+      }
+    }, 800);
+  }
 
   // 这个页面加载时网关的版本。网关更新以后（这个标签页一直开着），页面代码还是旧的，
   // 新版本加的设置项、节点在旧页面上看不到：发现版本变了就自己刷新一次。
@@ -534,6 +549,7 @@ class Store {
         break;
       }
       case 'run': {
+        this.reloadAgentsSoon();
         const s = this.session(sid);
         if (e.kind === 'start') {
           if (s) s.running = true;
@@ -583,6 +599,12 @@ class Store {
         }
         break;
       }
+      case 'tool_media': {
+        // 工具读到的图片、SendFile 发出去的文件：显示在那个工具卡片下面
+        const it = this.live[sid]?.find((x) => x.kind === 'tool' && x.id === e.id);
+        if (it && it.kind === 'tool') it.media = [...(it.media ?? []), ...(e.data?.images ?? []), ...(e.data?.sent ?? [])];
+        break;
+      }
       case 'say':
         this.pushLive(sid, { kind: 'say', text: e.text ?? '', at: e.at });
         break;
@@ -610,6 +632,9 @@ class Store {
         break;
       case 'feishu_reg':
         this.feishuReg = { kind: e.kind ?? '', text: e.text ?? '' };
+        break;
+      case 'bot_reg':
+        this.botReg = { kind: e.kind ?? '', text: e.text ?? '', data: e.data, n: (this.botReg?.n ?? 0) + 1 };
         break;
     }
     if (e.t !== 'delta') {

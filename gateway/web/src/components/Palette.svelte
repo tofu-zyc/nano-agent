@@ -131,9 +131,12 @@
     ];
     for (const c of store.ov?.channels ?? []) {
       const m = channelMeta[c.name];
+      const bot = store.botOfChannel(c.name);
+      const own = bot && !bot.legacy; // 另外加的机器人：用它自己的名字，点开是机器人节点
       out.push({
-        id: 'c:' + c.name, icon: m?.icon ?? 'link', color: m?.color, title: m?.label ?? c.name, sub: c.status.identity ?? c.status.state, kind: '渠道',
-        text: `${m?.label} ${c.name} 渠道 机器人 bot`, run: () => { store.openOnMap({ type: 'channel', name: c.name }); close(); },
+        id: 'c:' + c.name, icon: m?.icon ?? 'link', color: m?.color, title: own ? bot.name : (m?.label ?? c.name), sub: c.status.identity ?? c.status.state, kind: '渠道',
+        text: `${m?.label} ${own ? bot.name : ''} ${c.name} 渠道 机器人 bot`,
+        run: () => { store.openOnMap(own ? { type: 'bot', id: bot.id } : { type: 'channel', name: c.name }); close(); },
       });
     }
     for (const s of store.ov?.sessions ?? []) {

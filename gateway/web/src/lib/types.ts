@@ -201,7 +201,8 @@ export type ToolCall = { id: string; type: string; function: { name: string; arg
 export type Msg = {
   role: 'user' | 'assistant' | 'tool' | 'system';
   content?: string;
-  images?: Attachment[]; // 用户消息附带的图片
+  images?: Attachment[]; // 用户消息附带的图片；工具（Read）读到、交给模型看的图片
+  sent?: Attachment[]; // SendFile 发到聊天里的文件
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   reasoning?: string;
@@ -227,7 +228,7 @@ export type LiveItem =
   | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; images?: Attachment[]; at: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'content'; text: string }
-  | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string }
+  | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string; media?: Attachment[] }
   | { kind: 'say'; text: string; at: number };
 
 // 一个 agent 可以覆盖的全局设置：全局值（global）、自己的值（value，null 表示跟随全局）、实际生效的值
@@ -269,6 +270,7 @@ export type AgentInfo = {
   style: 'tool' | 'life'; // 工具型 / 拟人型
   memory: MemoryBrief;
   life?: LifeBrief; // 拟人型的内心活动
+  doing?: AgentDoing; // 现在在干嘛
 };
 
 // agent 长期记忆的概况
@@ -320,9 +322,10 @@ export type RoomInfo = {
 
 export type BotInfo = {
   id: string;
-  kind: 'telegram' | 'feishu';
+  kind: 'telegram' | 'feishu' | 'qq' | 'weixin';
   name: string;
   app_id: string;
+  owner?: string; // 扫码的人（已经设成管理员）
   agent: string;
   show: string;
   channel: string;
@@ -380,3 +383,11 @@ export type ScheduleTask = {
  next: string; running: boolean; last?: ScheduleResult; results: ScheduleResult[];
 };
 export type ScheduleView = { tasks: ScheduleTask[]; timezone: string; error?: string };
+
+// 一个 agent 现在在干嘛（和聊天里的 /state 同一套说法）
+export interface AgentDoing {
+  state: 'dreaming' | 'chatting' | 'working' | 'thinking' | 'sleeping' | 'slacking' | 'idle';
+  icon: string;
+  text: string; // 带着在跟谁聊、几点醒
+  brief: string; // 短说法
+}

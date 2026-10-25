@@ -2,7 +2,7 @@
 import type { Attachment, Msg, Usage } from './types';
 import { parseUser, type NoteKind } from './format';
 
-export type ToolView = { id: string; name: string; detail: string; args: string; ok?: boolean; result?: string };
+export type ToolView = { id: string; name: string; detail: string; args: string; ok?: boolean; result?: string; media?: Attachment[] };
 
 export type Block =
   | { type: 'env'; text: string }
@@ -23,6 +23,8 @@ export function toolDetail(name: string, args: string): string {
       return String(a.command ?? '');
     case 'Read':
       return String(a.path ?? '') + (a.offset ? `（从第 ${a.offset} 行）` : '');
+    case 'SendFile':
+      return (Array.isArray(a.files) ? a.files : []).join('、');
     case 'Write':
       return `${a.path ?? ''}（${new TextEncoder().encode(String(a.content ?? '')).length} 字节）`;
     case 'Edit':
@@ -71,6 +73,8 @@ export function buildBlocks(history: Msg[], inner = false): Block[] {
         t.ok = !c.startsWith('[执行失败] ');
         if (!t.ok) c = c.slice('[执行失败] '.length);
         t.result = c;
+        const media = [...(m.images ?? []), ...(m.sent ?? [])];
+        if (media.length) t.media = media;
       }
     }
   }

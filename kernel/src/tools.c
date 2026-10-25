@@ -69,6 +69,7 @@ static const builtin BUILTINS[] = {
     { { "Knowledge", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL }, /* 长期记忆 */
     { { "Diary", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },     /* 整理记忆时读聊天记录 */
     { { "FollowUp", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },  /* 约好过会儿再看 */
+    { { "SendFile", NA_TOOL_PUBLIC_READ, 320 * 1000 }, NULL, NULL }, /* 把图片、表情包、文件发到当前聊天 */
     { { "Write", NA_TOOL_WRITE, 30 * 1000 },
       "创建或覆盖文件，写入完整内容；上级目录不存在会自动创建。默认只能写工作目录；写工作目录外要把 elevated 设为 true，会请用户批准。"
       "只改文件的一部分时用 Edit，不要用 Write 重写整个文件。",

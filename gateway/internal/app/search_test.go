@@ -83,7 +83,7 @@ func TestGuestWebSearchToolAndFrozenPrefix(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
 	e.k.expect(proto.TTurn)
 	req := e.llm.lastReq()
-	if len(req.Tools) != 2 {
+	if len(req.Tools) != 3 { // 搜索两个，加上 SendFile（访客只能发网址上的）
 		t.Fatalf("guest tools: %+v", req.Tools)
 	}
 	e.k.send(proto.Msg{T: proto.TExec, SID: in.SID, ID: "web1", Name: "WebSearch", Args: json.RawMessage(`{"query":"news"}`)})
@@ -100,7 +100,7 @@ func TestGuestWebSearchToolAndFrozenPrefix(t *testing.T) {
 	e.a.cfg.Search.APIKey = ""
 	_, tools, _, _ := e.a.contextParts(in.SID)
 	e.a.mu.Unlock()
-	if len(tools) != 2 {
+	if len(tools) != 3 {
 		t.Fatal("prefix changed mid-session")
 	}
 }

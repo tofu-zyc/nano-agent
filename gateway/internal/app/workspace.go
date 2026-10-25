@@ -18,12 +18,14 @@ import (
 // 改动在下一条消息开始的那一轮生效。
 
 var modeNames = map[string]string{
+	proto.ModeFull:     "放行",
 	proto.ModeAuto:     "自动",
 	proto.ModeAsk:      "审批",
 	proto.ModeReadonly: "只读",
 }
 
 var modeDesc = map[string]string{
+	proto.ModeFull:     "所有工具直接执行，不用等批准；写工作目录外照样要加 elevated: true，会自动批准",
 	proto.ModeAuto:     "工作目录内的读写和命令直接执行，目录外的一律不允许",
 	proto.ModeAsk:      "读文件和搜索直接执行，写文件和执行命令要管理员批准",
 	proto.ModeReadonly: "只能读文件和搜索",
@@ -208,7 +210,7 @@ func (a *App) envNote(w workspace, rt route, admin bool) string {
 func (a *App) cmdMode(c in, arg string) {
 	if arg == "" {
 		w := a.workspaceOf(c.s.sid)
-		a.answer(c, fmt.Sprintf("权限模式：%s（%s）\n可选：auto 自动、ask 审批、readonly 只读，用 /mode <模式> 切换",
+		a.answer(c, fmt.Sprintf("权限模式：%s（%s）\n可选：full 放行、auto 自动、ask 审批、readonly 只读，用 /mode <模式> 切换",
 			modeNames[w.mode], modeDesc[w.mode]))
 		return
 	}
@@ -217,7 +219,7 @@ func (a *App) cmdMode(c in, arg string) {
 		return
 	}
 	if _, ok := modeNames[arg]; !ok {
-		a.answer(c, "模式只能是 auto、ask 或 readonly")
+		a.answer(c, "模式只能是 full、auto、ask 或 readonly")
 		return
 	}
 	st := a.store.Settings(c.s.sid)

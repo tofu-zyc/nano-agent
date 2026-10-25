@@ -76,13 +76,32 @@ export const machineMeta: Record<string, { label: string; icon: string }> = {
   ssh: { label: 'SSH 服务器', icon: 'server' },
 };
 
-export const channelMeta: Record<string, { label: string; color: string; icon: string }> = {
+type ChanMeta = { label: string; color: string; icon: string };
+
+const baseChannels: Record<string, ChanMeta> = {
   cli: { label: '命令行', color: 'var(--c-cli)', icon: 'terminal' },
   web: { label: '网页', color: 'var(--c-web)', icon: 'globe' },
   telegram: { label: 'Telegram', color: 'var(--c-telegram)', icon: 'send' },
   feishu: { label: '飞书', color: 'var(--c-feishu)', icon: 'feishu' },
   life: { label: '内心', color: 'var(--accent-2)', icon: 'sparkles' }, // 拟人型的内心活动（只能看）
 };
+
+/** 机器人种类的样子（另外加的机器人渠道名是 tg.<id>、feishu.<id>、qq.<id>、wx.<id>） */
+export const botKindMeta: Record<string, ChanMeta> = {
+  telegram: baseChannels.telegram,
+  feishu: baseChannels.feishu,
+  qq: { label: 'QQ', color: 'var(--c-qq)', icon: 'qq' },
+  weixin: { label: '微信', color: 'var(--c-weixin)', icon: 'weixin' },
+};
+const prefixKind: Record<string, string> = { tg: 'telegram', feishu: 'feishu', qq: 'qq', wx: 'weixin' };
+
+/** 渠道的名字、颜色、图标：内置的按名字找，另外加的机器人按渠道名前缀的种类找 */
+export const channelMeta: Record<string, ChanMeta> = new Proxy(baseChannels, {
+  get(t, k) {
+    if (typeof k !== 'string') return undefined;
+    return t[k] ?? botKindMeta[prefixKind[k.split('.')[0]] ?? ''];
+  },
+});
 
 export const stateLabel: Record<string, string> = {
   online: '在线',
@@ -94,6 +113,7 @@ export const stateLabel: Record<string, string> = {
 };
 
 export const modeMeta: Record<string, { label: string; desc: string }> = {
+  full: { label: '放行', desc: '所有工具直接执行，不审批' },
   auto: { label: '自动', desc: '工作目录内的读写和命令直接执行' },
   ask: { label: '审批', desc: '写文件、执行命令前要批准' },
   readonly: { label: '只读', desc: '只能读文件和搜索' },
@@ -105,6 +125,7 @@ export const toolIcon: Record<string, string> = {
   Edit: 'edit',
   Grep: 'search',
   Shell: 'terminal',
+  SendFile: 'send',
 };
 
 export type NoteKind = 'memory' | 'recall' | 'life';

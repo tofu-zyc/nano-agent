@@ -243,7 +243,7 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	}
 	if p.Mode != nil {
 		if _, ok := modeNames[*p.Mode]; !ok {
-			errs = append(errs, errors.New("模式只能是 auto、ask 或 readonly"))
+			errs = append(errs, errors.New("模式只能是 full、auto、ask 或 readonly"))
 		}
 		st.Mode = *p.Mode
 	}

@@ -219,7 +219,7 @@ type Workspace struct {
 	// 旧版本的默认机器和默认工作目录：第一次启动时迁移到工作目录列表（data/workspaces.json），之后不再使用
 	Node string   `toml:"node" json:"node"`
 	Dirs []string `toml:"dirs" json:"dirs"`
-	Mode string   `toml:"mode" json:"mode"` // auto | ask（默认）| readonly
+	Mode string   `toml:"mode" json:"mode"` // full | auto | ask（默认）| readonly
 }
 
 // Skills：技能放在网关上，每个技能一个目录（SKILL.md 和附带文件）
@@ -460,9 +460,9 @@ func (c *Config) validate() error {
 		}
 	}
 	switch c.Workspace.Mode {
-	case "auto", "ask", "readonly":
+	case "full", "auto", "ask", "readonly":
 	default:
-		errs = append(errs, fmt.Errorf("workspace.mode 只能是 auto、ask 或 readonly，现在是 %q", c.Workspace.Mode))
+		errs = append(errs, fmt.Errorf("workspace.mode 只能是 full、auto、ask 或 readonly，现在是 %q", c.Workspace.Mode))
 	}
 	if c.Access.Guest != "none" && c.Access.Guest != "readonly" {
 		errs = append(errs, fmt.Errorf("access.guest 只能是 none 或 readonly，现在是 %q", c.Access.Guest))

@@ -4,7 +4,9 @@
   import { store } from '../../lib/state.svelte';
   import { api } from '../../lib/api';
   import { stateLabel } from '../../lib/format';
+  import { botKindLabel } from '../../lib/labels';
   import Icon from '../Icon.svelte';
+  import BotQR from '../BotQR.svelte';
 
   let { id }: { id: string } = $props();
 
@@ -57,7 +59,8 @@
       </div>
       {#if channel?.status.error}<div class="p-err">{channel.status.error}</div>{/if}
       <div class="p-row"><span class="p-k">渠道 ID</span><code class="p-grow">{b.channel}</code></div>
-      <div class="p-row"><span class="p-k">种类</span><span class="p-grow">{b.kind === 'feishu' ? '飞书' : 'Telegram'}{#if b.legacy}<span class="tag">内置</span>{/if}</span></div>
+      <div class="p-row"><span class="p-k">种类</span><span class="p-grow">{botKindLabel(b.kind)}{#if b.legacy}<span class="tag">内置</span>{/if}</span></div>
+      {#if b.owner}<div class="p-row"><span class="p-k">主人</span><code class="p-grow" title="扫码的人，已经设成管理员">{b.owner}</code></div>{/if}
     </div>
 
     <h5 class="p-h">绑定</h5>
@@ -97,7 +100,10 @@
     {:else}
       <h5 class="p-h">凭据 <span class="muted p-small">加密保存，网页不回显</span></h5>
       <div class="p-card">
-        {#if b.kind === 'telegram'}
+        {#if b.kind === 'weixin'}
+          <p class="p-note p-small">微信的登录凭据是扫码拿到的。微信里退出了 ClawBot、或者这里显示“登录失效了”，就重新扫一次（还是绑在这个机器人上，聊天记录不丢）。</p>
+          <BotQR kind="weixin" botId={b.id} />
+        {:else if b.kind === 'telegram'}
           <label class="p-label">Bot Token {b.has_token ? '（已经设置，留空不改）' : ''}
             <input class="p-input" type="password" bind:value={token} placeholder="找 @BotFather 要" />
           </label>
@@ -112,9 +118,11 @@
         <label class="p-label">代理
           <input class="p-input" value={b.proxy} placeholder="留空用默认代理" onchange={(e) => patch({ proxy: (e.target as HTMLInputElement).value })} />
         </label>
-        <div class="p-actions tight">
-          <button class="btn sm primary" onclick={setCreds}>保存凭据</button>
-        </div>
+        {#if b.kind !== 'weixin'}
+          <div class="p-actions tight">
+            <button class="btn sm primary" onclick={setCreds}>保存凭据</button>
+          </div>
+        {/if}
       </div>
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={remove}><Icon name="trash" size={13} />删掉这个机器人</button>

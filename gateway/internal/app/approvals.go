@@ -67,6 +67,16 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 	}
 }
 
+// autoApprove：放行模式下内核要审批的调用，网关当场批准，不发审批消息，只在网页上记一笔。调用方持有锁。
+func (a *App) autoApprove(s *sess, m *proto.Msg) {
+	title, _ := callCard(m.Name, m.Args)
+	if !a.hub.Send(s.run.node, proto.Msg{T: proto.TApprove, SID: s.sid, ID: m.ID, OK: proto.Bool(true), From: "auto"}) {
+		return
+	}
+	a.log.Info("放行模式：自动批准", "sid", s.sid, "tool", m.Name)
+	a.publish(events.Event{T: "say", SID: s.sid, Text: "✅ 放行模式，自动批准：" + title})
+}
+
 // resolveApproval 记下处理结果，把发出去的审批消息都改成结果（去掉按钮）。调用方持有锁。
 func (a *App) resolveApproval(ap *approval, result string) {
 	if ap.result != "" {

@@ -10,14 +10,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 const (
 	MaxImageBytes = 10 << 20 // 单张图片最多 10 MB
+	MaxFileBytes  = 20 << 20 // agent 发到聊天里的文件（图片、音频、视频……）最多 20 MB
 	MaxPerMessage = 4        // 一条消息最多几张图片
 )
 
@@ -83,6 +86,59 @@ func (s *Store) Save(data []byte, name, source string) (Attachment, error) {
 		}
 	}
 	return Attachment{ID: id, Name: name, MIME: mime, Size: int64(len(data)), Source: source}, nil
+}
+
+// SaveFile 存一个任意类型的文件（agent 发到聊天里的：音频、视频、文档……），按内容去重。
+// 类型先按内容嗅探，认不出来再按文件名的扩展名。
+func (s *Store) SaveFile(data []byte, name, source string) (Attachment, error) {
+	if len(data) == 0 {
+		return Attachment{}, errors.New("文件是空的")
+	}
+	if len(data) > MaxFileBytes {
+		return Attachment{}, fmt.Errorf("文件太大（%d 字节，最多 %d MB）", len(data), MaxFileBytes>>20)
+	}
+	if mt := http.DetectContentType(data); IsImage(mt) && len(data) <= MaxImageBytes {
+		return s.Save(data, name, source)
+	}
+	sum := sha256.Sum256(data)
+	id := hex.EncodeToString(sum[:])
+	path := filepath.Join(s.dir, id)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, data, 0o600); err != nil {
+			return Attachment{}, err
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			os.Remove(tmp)
+			return Attachment{}, err
+		}
+	}
+	return Attachment{ID: id, Name: name, MIME: MIMEOf(data, name), Size: int64(len(data)), Source: source}, nil
+}
+
+// MIMEOf 是文件的类型：先按内容嗅探，认不出来（application/octet-stream、text/plain）再按扩展名。
+func MIMEOf(data []byte, name string) string {
+	mt := http.DetectContentType(data)
+	if mt != "application/octet-stream" && !strings.HasPrefix(mt, "text/plain") {
+		return strings.TrimSuffix(strings.Split(mt, ";")[0], " ")
+	}
+	if byExt := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); byExt != "" {
+		return strings.Split(byExt, ";")[0]
+	}
+	return strings.Split(mt, ";")[0]
+}
+
+// Kind 是附件的大类：image、audio、video、file。
+func Kind(mt string) string {
+	switch {
+	case IsImage(mt):
+		return "image"
+	case strings.HasPrefix(mt, "audio/"):
+		return "audio"
+	case strings.HasPrefix(mt, "video/"):
+		return "video"
+	}
+	return "file"
 }
 
 // Read 读一个附件。ID 不对或者文件没了会报错。

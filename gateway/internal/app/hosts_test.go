@@ -21,7 +21,8 @@ type fakeHost struct {
 	reqs   []map[string]any
 	put    map[string][]host.File
 	result host.Result
-	block  bool // Exec 一直等到 ctx 结束
+	block  bool          // Exec 一直等到 ctx 结束
+	gate   chan struct{} // 不为空时 Exec 等它关上再返回
 }
 
 func (f *fakeHost) Exec(ctx context.Context, req []byte) host.Result {
@@ -29,8 +30,15 @@ func (f *fakeHost) Exec(ctx context.Context, req []byte) host.Result {
 	json.Unmarshal(req, &m)
 	f.mu.Lock()
 	f.reqs = append(f.reqs, m)
-	block, res := f.block, f.result
+	block, res, gate := f.block, f.result, f.gate
 	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return host.Result{Content: "已停止"}
+		}
+	}
 	if block {
 		<-ctx.Done()
 		return host.Result{Content: "已停止"}

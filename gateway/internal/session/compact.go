@@ -13,6 +13,9 @@ func (s *Store) EffectiveHistory(sid string) []Msg {
 	for i := range h {
 		if text, ok := st.Omitted[st.Base+i]; ok {
 			h[i].Content = text
+			if h[i].Role == "tool" {
+				h[i].Images = nil // 旧轮次里工具读到的图片也省略（不然每次请求都要重新发）
+			}
 		}
 	}
 	return h
@@ -42,10 +45,14 @@ func (s *Store) Elide(sid string, keep int) error {
 		for _, tc := range m.ToolCalls {
 			names[tc.ID] = tc.Function.Name + " " + tc.Function.Arguments
 		}
-		if m.Role == "tool" && len(m.Content) > 2048 {
+		if m.Role == "tool" && (len(m.Content) > 2048 || len(m.Images) > 0) {
 			idx := st.Base + i
 			if _, ok := omitted[idx]; !ok {
-				omitted[idx] = fmt.Sprintf("[已省略：%s 的输出，%dKB。需要时重新读取]", names[m.ToolCallID], len(m.Content)/1024)
+				if len(m.Images) > 0 {
+					omitted[idx] = fmt.Sprintf("[已省略：%s 读到的图片。需要时重新读取]", names[m.ToolCallID])
+				} else {
+					omitted[idx] = fmt.Sprintf("[已省略：%s 的输出，%dKB。需要时重新读取]", names[m.ToolCallID], len(m.Content)/1024)
+				}
 				changed = true
 			}
 		}

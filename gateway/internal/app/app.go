@@ -47,6 +47,7 @@ var Commands = []Command{
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
+	{Name: "state", Desc: "看 agent 现在在干嘛：睡着、在聊天、在冲浪、在摸鱼、在发呆……"},
 	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
@@ -66,7 +67,7 @@ var Commands = []Command{
 	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
-	{Name: "mode", Args: "[auto | ask | readonly]", Desc: "查看、切换权限模式：自动、审批、只读", Admin: true},
+	{Name: "mode", Args: "[full | auto | ask | readonly]", Desc: "查看、切换权限模式：放行、自动、审批、只读", Admin: true},
 	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
 	{Name: "model", Args: "[编号 | default]", Desc: "查看、切换这个会话用的模型", Admin: true},
 	{Name: "persona", Args: "[编号 | 名字 | default]", Desc: "查看、切换这个会话的人格（自带小纳、大肥鱼）", Admin: true},
@@ -229,6 +230,7 @@ type run struct {
 	truncated  bool
 	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
 	stopTyping func()
+	full       bool // 放行模式：内核要审批的调用由网关自动批准
 
 	streamed   bool // 回复正文已经通过 RunView 显示过了
 	start      time.Time
@@ -241,6 +243,12 @@ type run struct {
 	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
 	withImages bool      // 这一轮的模型能接收图片
 	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
+	tool       string    // 最近一次调的工具（/state 说它在干嘛）
+
+	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
+	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）
+	fetching     int                           // 正在取的图片：取完之前不请求模型
+	modelWaiting bool                          // 内核要求请求模型的时候图片还没取完
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
 	rt    route
@@ -287,6 +295,10 @@ type outItem struct {
 	chatID  string
 	text    string
 	replyTo string
+	md      bool              // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
+	delay   time.Duration     // 发之前停一会儿（像人一样一条条发）
+	att     *media.Attachment // 不是文字而是文件（SendFile）：渠道有 MediaSender 就发文件，没有就发一行说明
+	data    []byte
 }
 
 func New(ctx context.Context, cfg *config.Config, client llm.Client, store *session.Store, p *persona.Loader, log *slog.Logger) *App {
@@ -342,8 +354,22 @@ func (a *App) AddChannel(ch channel.Channel) {
 	a.outboxes[name] = q
 	go func() {
 		for it := range q {
+			if it.delay > 0 {
+				select {
+				case <-time.After(it.delay):
+				case <-a.ctx.Done():
+					return
+				}
+			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
-			if err := it.ch.Send(ctx, it.chatID, it.text, it.replyTo); err != nil {
+			if it.att != nil {
+				if err := sendMedia(ctx, it.ch, it.chatID, *it.att, it.data); err != nil {
+					a.log.Warn("发送文件失败", "channel", name, "chat", it.chatID, "file", it.att.Name, "err", err)
+				}
+				cancel()
+				continue
+			}
+			if err := sendText(ctx, it.ch, it.chatID, it.text, it.replyTo, it.md); err != nil {
 				a.log.Warn("发送消息失败", "channel", name, "chat", it.chatID, "err", err)
 			}
 			cancel()
@@ -428,6 +454,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "agent":
 		a.cmdAgent(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
+		return
+	case "state":
+		a.cmdState(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
 		return
 	case "whoami":
 		sid := a.boundSession(ep, m)
@@ -630,16 +659,45 @@ func (a *App) allowed(key string) bool {
 
 // deliver 把一条消息发到一个窗口。调用方持有锁。
 func (a *App) deliver(ep endpoint, text, replyTo string) {
+	a.enqueue(ep, outItem{text: text, replyTo: replyTo})
+}
+
+// deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
+func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
+
+func (a *App) enqueue(ep endpoint, it outItem) {
 	ch := a.chans[ep.ch]
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return
 	}
+	it.ch, it.chatID = ch, ep.chat
 	select {
-	case a.outboxes[ep.ch] <- outItem{ch: ch, chatID: ep.chat, text: text, replyTo: replyTo}:
+	case a.outboxes[ep.ch] <- it:
 	default:
 		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
 	}
+}
+
+// sendMedia 发一个文件：渠道有 MediaSender 就按它的方式发（发不出去时退回一行说明），没有就发一行说明。
+func sendMedia(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error {
+	if ms, ok := ch.(channel.MediaSender); ok {
+		err := ms.SendMedia(ctx, chat, att, data)
+		if err == nil {
+			return nil
+		}
+		ch.Send(ctx, chat, fmt.Sprintf("［%s：%s，没发出去：%s］", kindLabel(att.MIME), att.Name, err), "")
+		return err
+	}
+	return ch.Send(ctx, chat, fmt.Sprintf("［%s：%s］", kindLabel(att.MIME), att.Name), "")
+}
+
+// sendText 发一条消息；md 时渠道能渲染 Markdown 就按 Markdown 发。
+func sendText(ctx context.Context, ch channel.Channel, chat, text, replyTo string, md bool) error {
+	if m, ok := ch.(channel.Markdowner); ok && md {
+		return m.SendMarkdown(ctx, chat, text, replyTo)
+	}
+	return ch.Send(ctx, chat, text, replyTo)
 }
 
 // tell 回复一个窗口；sid 不为空时网页上也显示在这个会话里。调用方持有锁。
@@ -809,6 +867,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
@@ -843,6 +902,12 @@ func (a *App) startRun(s *sess) {
 		r.inner, r.outs = true, nil // 不对任何窗口说话；结果由 innerDone 处理
 	} else if r.scheduled == nil {
 		r.stopTyping = a.startTyping(head.ep)
+		// 没有流式卡片的私聊（拟人型）：在这条消息上显示“正在处理”，处理完撤掉
+		last := batch[len(batch)-1].m.MsgID // 连着发了几条：贴在最后一条上
+		if b, ok := a.chans[head.ep.ch].(channel.Busy); ok && !group && r.outs[0].view == nil && last != "" {
+			stop, done := r.stopTyping, b.Busy(head.ep.chat, last)
+			r.stopTyping = func() { stop(); done() }
+		}
 	} else {
 		r.outs = nil
 		for _, key := range r.scheduled.Deliver {
@@ -859,6 +924,10 @@ func (a *App) startRun(s *sess) {
 	}
 	r.proactive = s.groupProactive
 	s.groupProactive = false
+	// 放行：内核按自动模式跑（沙箱和审批规则都不变），要审批的调用由网关当场批准（approvals.go）
+	if mode == proto.ModeFull {
+		r.full, mode = true, proto.ModeAuto
+	}
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
@@ -898,7 +967,11 @@ func (a *App) startRun(s *sess) {
 	}
 	a.log.Info("开始处理", "sid", s.sid, "node", node, "workspaces", len(rt.mounts), "from", r.from, "chat", head.ep.key(), "messages", n, "mode", in.Mode)
 	a.totals.Runs++
-	runData := map[string]any{"from": r.from, "mode": in.Mode, "channel": chanName(head.ep.ch), "node": node}
+	shown := in.Mode
+	if r.full && in.Mode == proto.ModeAuto {
+		shown = proto.ModeFull
+	}
+	runData := map[string]any{"from": r.from, "mode": shown, "channel": chanName(head.ep.ch), "node": node}
 	if len(images) > 0 {
 		runData["images"] = images
 	}
@@ -1034,6 +1107,10 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	switch m.T {
 	case proto.TModel:
+		if s.run.fetching > 0 {
+			s.run.modelWaiting = true // 等图片取完（seeImage）
+			break
+		}
 		a.callModel(s)
 	case proto.TExec:
 		a.execTool(node, s, m)
@@ -1046,8 +1123,11 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if m.OK != nil && !*m.OK {
 			content = "[执行失败] " + content
 		}
-		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content}); err != nil {
-			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
+		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
+		if !a.seeImage(s, m) {
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Sent: s.run.sent[m.ID]}); err != nil {
+				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
+			}
 		}
 		for _, o := range s.run.outs {
 			if o.view == nil {
@@ -1071,8 +1151,15 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000)})
 	case proto.TApproveReq:
-		a.askApproval(s, m)
+		if s.run.full {
+			a.autoApprove(s, m)
+		} else {
+			a.askApproval(s, m)
+		}
 	case proto.TNotice:
+		if s.run.full && strings.HasPrefix(m.Text, "已批准") {
+			break // 自动批准的：网页上已经记过了，不往聊天里发
+		}
 		a.notify(s, m.Text)
 	case proto.TDone:
 		a.finish(s, m.Status, m.Detail)
@@ -1184,6 +1271,10 @@ func (a *App) finish(s *sess, status, detail string) {
 				a.sendParts(o.ep, parts)
 				continue
 			}
+		}
+		if body != "" && (o.view == nil || !r.streamed) {
+			a.deliverReply(o.ep, text)
+			continue
 		}
 		a.deliver(o.ep, text, "")
 	}
@@ -1339,7 +1430,10 @@ func (a *App) generateModel(s *sess) {
 		case llm.ReasonToolUse:
 			turn.Reason = proto.ReasonToolUse
 			r.usedTools = true
+			a.sayMidway(s, r, res.Content)
 			for _, c := range res.Calls {
+				r.tool = c.Function.Name
+				r.callArgs[c.ID] = proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)}
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)
 				for _, v := range views {
@@ -1357,6 +1451,31 @@ func (a *App) generateModel(s *sess) {
 		}
 		a.hub.Send(r.node, turn)
 	}()
+}
+
+// sayMidway 发调工具之前说的话（“等等，我看一眼”）。流式显示的窗口已经看到了；别的窗口（拟人型的私聊、
+// QQ、微信）只在这一轮结束时收到最后一段回复，前面说的要在说的时候就发出去，不然就丢了。
+// 定时任务、内心活动不发（结果另有去处）。调用方持有锁。
+func (a *App) sayMidway(s *sess, r *run, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || isSilence(text) || r.scheduled != nil || r.inner {
+		return
+	}
+	group := a.isGroupSession(s.sid)
+	life := a.agentOf(s.sid).Life()
+	for _, o := range r.outs {
+		if o.view != nil || o.ep.ch == "web" || o.ep.ch == "room" {
+			continue // 网页从事件里看到；网关里的群只记最后的发言
+		}
+		switch {
+		case group:
+			a.sendGroup(s, o.ep, text)
+		case life && !strings.Contains(text, "```"):
+			a.sendParts(o.ep, dmParts(text, 3))
+		default:
+			a.deliverReply(o.ep, text)
+		}
+	}
 }
 
 // argsJSON 把模型给的参数字符串转成协议里的 args：合法的 JSON 对象原样放进去，

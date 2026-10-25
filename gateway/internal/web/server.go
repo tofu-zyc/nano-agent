@@ -53,6 +53,7 @@ type Server struct {
 	sessionsPath string
 	loopback     bool               // 只监听本机：要检查 Host 头
 	regCancel    context.CancelFunc // 进行中的飞书扫码注册
+	botReg       *botRegRun         // 进行中的 QQ / 微信扫码（botreg.go）
 	devices      *host.Manager
 	media        *media.Store // 网页上传的图片
 }
@@ -285,6 +286,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/rooms/{id}", s.auth(s.patchRoom))
 	mux.HandleFunc("DELETE /api/rooms/{id}", s.auth(s.deleteRoom))
 	mux.HandleFunc("GET /api/bots", s.auth(s.listBots))
+	mux.HandleFunc("POST /api/bots/register", s.auth(s.botRegister))
+	mux.HandleFunc("POST /api/bots/register/verify", s.auth(s.botRegisterVerify))
+	mux.HandleFunc("DELETE /api/bots/register", s.auth(s.botRegisterCancel))
 	mux.HandleFunc("POST /api/bots", s.auth(s.createBot))
 	mux.HandleFunc("PATCH /api/bots/{id}", s.auth(s.patchBot))
 	mux.HandleFunc("DELETE /api/bots/{id}", s.auth(s.deleteBot))

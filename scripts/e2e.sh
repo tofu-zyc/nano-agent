@@ -179,6 +179,11 @@ dreamlog() { find "$TMP" -path '*/agents/default/dreams/*.md' 2>/dev/null | head
 for _ in $(seq 80); do [ -n "$(dreamlog)" ] && break; sleep 0.1; done
 if [ -n "$(dreamlog)" ] && grep -q "（mock）" "$(dreamlog)"; then echo "  ok   整理记忆跑完写了梦境日志"; pass=$((pass + 1)); else echo "  FAIL 整理记忆跑完写了梦境日志"; grep -E "整理记忆|dream" "$TMP/gateway.log" | tail -5; fail=$((fail + 1)); fi
 
+# 图片和文件（v0.7）：SendFile 由内核转给网关，网关让本机的执行器取文件（Fetch）；命令行发不了文件，发一行说明
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR' > "$TMP/work/e2e-pic.png"
+send '!call SendFile {"files":["e2e-pic.png"]}';      expect "SendFile 取文件发到聊天里" "［图片：e2e-pic.png］"
+expect "SendFile 的结果" "已发送图片：e2e-pic.png"
+
 # 第二个内核 phone 连上来；pc 掉线后由 phone 顶上（只聊天），pc 回来后照常用工具
 "$ROOT/kernel/nano-kernel" -c "$TMP/kernel2.conf" 2>"$TMP/kernel2.log" &
 for _ in $(seq 50); do grep -q 'node=phone' "$TMP/gateway.log" 2>/dev/null && break; sleep 0.1; done

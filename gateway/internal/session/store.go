@@ -26,7 +26,8 @@ import (
 type Msg struct {
 	Role       string             `json:"role"`
 	Content    string             `json:"content,omitempty"`
-	Images     []media.Attachment `json:"images,omitempty"` // 用户消息附带的图片，文件在 data/uploads
+	Images     []media.Attachment `json:"images,omitempty"` // 用户消息附带的图片、工具（Read）读到的图片，文件在 data/uploads
+	Sent       []media.Attachment `json:"sent,omitempty"`   // SendFile 发到聊天里的文件：只给人看，不再发给模型
 	ToolCalls  []llm.ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID string             `json:"tool_call_id,omitempty"`
 	Reasoning  string             `json:"reasoning,omitempty"`

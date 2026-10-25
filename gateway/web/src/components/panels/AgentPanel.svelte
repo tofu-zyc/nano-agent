@@ -3,7 +3,7 @@
   // 设置分两层：这里能改的是它自己覆盖的项，没覆盖的跟随「Agent 默认值」。
   import { store } from '../../lib/state.svelte';
   import { api } from '../../lib/api';
-  import { modeMeta } from '../../lib/format';
+  import { botKindMeta, modeMeta } from '../../lib/format';
   import { botKindLabel, optionLabel, toolLabel } from '../../lib/labels';
   import type { AgentSetting } from '../../lib/types';
   import Icon from '../Icon.svelte';
@@ -42,7 +42,8 @@
     { key: 'life', title: '拟人', note: '作息、多久醒一次、主动找谁' },
     { key: 'memory', title: '长期记忆', note: '记什么、什么时候整理' },
   ];
-  const ownDefault = (s: AgentSetting) => s.group !== 'work';
+  // 拟人型的权限模式默认放行，不跟随全局
+  const ownDefault = (s: AgentSetting) => s.group !== 'work' || (s.key === 'mode' && a?.style === 'life');
   const life = $derived(a?.style === 'life');
 
   async function setStyle(style: 'tool' | 'life') {
@@ -145,7 +146,9 @@
     <div class="p-grid">
       <div class="p-stat"><b>{a.sessions}</b><span>会话</span></div>
       <div class="p-stat"><b class:acc={a.bots.length > 0}>{a.bots.length}</b><span>绑的机器人</span></div>
-      {#if a.life}
+      {#if a.doing}
+        <div class="p-stat"><b>{a.doing.icon} {a.doing.brief}</b><span>现在</span></div>
+      {:else if a.life}
         <div class="p-stat"><b>{lifeState[a.life.state]?.icon} {lifeState[a.life.state]?.text}</b><span>现在</span></div>
       {:else}
         <div class="p-stat"><b>{a.running ? '在跑' : '空闲'}</b><span>现在</span></div>
@@ -166,7 +169,7 @@
       <div class="p-card lifecard">
         <div class="p-row">
           <span class="p-grow">
-            {#if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else if L.state === 'thinking'}💭 正在想事情{:else}🌱 醒着{#if L.next}，大约 {when(L.next)} 再自己醒一次{/if}{/if}
+            {#if a.doing}{a.doing.icon} {a.doing.text}{:else if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else}🌱 醒着{/if}
           </span>
         </div>
         <div class="p-note p-small">今天自己醒了 {L.wakes}/{L.max_wakes} 次 · 主动找了 {L.reaches} 次人 · 用了 {L.tokens.toLocaleString()} token{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}</div>
@@ -234,7 +237,7 @@
       {#if a.bots.length}
         {#each a.bots as b (b.id)}
           <button class="p-srow" onclick={() => store.open({ type: 'bot', id: b.id })} title={'渠道 ID：' + b.channel}>
-            <Icon name={b.kind === 'feishu' ? 'feishu' : 'send'} size={14} />
+            <Icon name={botKindMeta[b.kind]?.icon ?? 'send'} size={14} />
             <span class="p-grow">{b.name}{#if b.name !== botKindLabel(b.kind)} <span class="muted p-small">{botKindLabel(b.kind)}</span>{/if}</span>
             <span class="muted p-small">{b.enabled ? '开着' : '停用'}</span>
             <Icon name="right" size={13} />
@@ -301,7 +304,7 @@
                     saveSetting(s.key, s.type === 'string' ? raw : Number(raw));
                   }} />
               {/if}
-              {#if s.value === null && s.type !== 'model'}<p class="p-note p-small">现在用{ownDefault(s) ? '默认的' : '全局的'}：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode'}{' · ' + (modeMeta[String(s.effective)]?.label ?? '')}{/if}</p>{/if}
+              {#if s.value === null && s.type !== 'model'}<p class="p-note p-small">现在用{ownDefault(s) ? '默认的' : '全局的'}：{s.type === 'enum' ? optionLabel(s.key, String(s.effective)) : s.effective}{#if s.key === 'mode' && modeMeta[String(s.effective)]}{'，' + modeMeta[String(s.effective)].desc}{/if}</p>{/if}
               {#if s.help}<p class="p-note p-small">{s.help}</p>{/if}
             </div>
           {/each}

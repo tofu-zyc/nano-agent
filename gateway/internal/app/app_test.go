@@ -238,9 +238,9 @@ func TestFinalAnswer(t *testing.T) {
 	}
 	req := e.llm.lastReq()
 	// 没有工作目录：HOME 模式，工具仍然给；管理员还有 Gateway / GatewayAdmin
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 5 ||
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "你是测试机器人" || len(req.Tools) != 6 ||
 		req.Tools[0].Function.Name != "Gateway" || req.Tools[1].Function.Name != "GatewayAdmin" || req.Tools[2].Function.Name != "Message" ||
-		req.Tools[3].Function.Name != "Schedule" || req.Tools[4].Function.Name != "echo" {
+		req.Tools[3].Function.Name != "Schedule" || req.Tools[4].Function.Name != "SendFile" || req.Tools[5].Function.Name != "echo" {
 		t.Fatalf("request: %+v", req)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
@@ -316,7 +316,7 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 5 {
+	if n := len(e.llm.lastReq().Tools); n != 6 {
 		t.Fatalf("有工作目录时应该提供工具：%d", n)
 	}
 }
@@ -496,6 +496,40 @@ func TestApprovalButtons(t *testing.T) {
 	if _, r := b.state(); !strings.Contains(r["ref3"], "这一轮已经结束") {
 		t.Fatalf("结果：%v", r)
 	}
+}
+
+// 放行模式：内核照样按自动模式跑，要审批的调用由网关当场批准，聊天里不发审批消息；拟人型没设置时默认放行
+func TestFullModeAutoApproves(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	e.say("帮我截个屏")
+	if in := e.k.expect(proto.TInput); in.Mode != proto.ModeAuto {
+		t.Fatalf("发给内核的模式：%q", in.Mode)
+	}
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: e.sid, ID: "c1", Name: "Shell", Args: json.RawMessage(`{"command":"screenshot.ps1"}`), From: "fake:u1"})
+	if ap := e.k.expect(proto.TApprove); ap.ID != "c1" || ap.OK == nil || !*ap.OK {
+		t.Fatalf("approve: %+v", ap)
+	}
+	e.k.send(proto.Msg{T: proto.TNotice, SID: e.sid, Text: "已批准，开始执行 Shell"})
+	e.ch.none(t)
+	e.a.mu.Lock()
+	n := len(e.a.approvals)
+	e.a.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("不该留下审批单：%d", n)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[e.sid].run == nil })
+
+	// 自己设了审批模式的拟人型：照常审批
+	e.say("/mode ask")
+	e.ch.wait(t, "权限模式已切换为审批")
+	e.say("再截一次")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TApproveReq, SID: e.sid, ID: "c2", Name: "Shell", Args: json.RawMessage(`{"command":"x"}`), From: "fake:u1"})
+	e.ch.wait(t, "需要审批 #")
+	e.k.none()
 }
 
 func TestKernelDownAbortsRuns(t *testing.T) {

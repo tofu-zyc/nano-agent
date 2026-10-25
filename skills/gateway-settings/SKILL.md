@@ -5,7 +5,7 @@ description: 在聊天里查看和修改 nano-agent 网关的设置项：聊天�
 
 # 网关设置
 
-管理员会话有 `Gateway`（查询）和 `GatewayAdmin`（修改，每次审批）。设置项和网页拓扑图上各节点面板里的设置是同一份（每一项只在一个节点里），改完立即生效，存在 `data/config.json`，不用改 `gateway.toml`。
+管理员会话有 `Gateway`（查询）和 `GatewayAdmin`（修改，每次审批；放行模式下自动批准）。设置项和网页拓扑图上各节点面板里的设置是同一份（每一项只在一个节点里），改完立即生效，存在 `data/config.json`，不用改 `gateway.toml`。
 
 ## 先查
 

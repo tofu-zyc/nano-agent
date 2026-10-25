@@ -12,8 +12,10 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/app"
 )
 
@@ -92,8 +94,8 @@ func (s *Server) createBot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := strings.ToLower(strings.TrimSpace(body.Kind))
-	if kind != "telegram" && kind != "feishu" {
-		writeErr(w, http.StatusBadRequest, "种类只能是 telegram 或 feishu")
+	if !slices.Contains([]string{agents.KindTelegram, agents.KindFeishu, agents.KindQQ, agents.KindWeixin}, kind) {
+		writeErr(w, http.StatusBadRequest, "种类只能是 telegram、feishu、qq 或 weixin")
 		return
 	}
 	view, err := s.app.CreateBot(kind, body.BotPatch)

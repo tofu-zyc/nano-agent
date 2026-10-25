@@ -57,6 +57,10 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		go a.messageTool(s.sid, raw, reply)
 		return
 	}
+	if m.Name == "SendFile" {
+		a.sendFileCall(s, m, reply)
+		return
+	}
 	if m.Name == "FollowUp" {
 		out, err := a.followUpCall(s.sid, m.Args)
 		if err != nil {

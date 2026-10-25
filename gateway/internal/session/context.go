@@ -118,7 +118,20 @@ func BuildMessages(system, summary string, h []Msg, sendReasoning bool, images I
 		msgs = append(msgs, llm.Message{Role: "system", Content: system})
 	}
 	first := true
+	// 工具读到的图片：OpenAI 兼容接口的工具结果不能带图，跟在这一批工具结果后面作为一条用户消息
+	var toolImgs []media.Attachment
+	flushImgs := func() {
+		if len(toolImgs) > 0 && images != nil {
+			msgs = append(msgs, llm.Message{Role: "user", Parts: imageParts("[系统] 上面的工具读到的图片：", toolImgs, images)})
+		}
+		toolImgs = nil
+	}
 	for i, m := range h {
+		if m.Role != "tool" {
+			flushImgs()
+		} else {
+			toolImgs = append(toolImgs, m.Images...)
+		}
 		content := m.Content
 		if first && summary != "" && m.Role == "user" {
 			content = summary + "\n" + content
@@ -143,6 +156,7 @@ func BuildMessages(system, summary string, h []Msg, sendReasoning bool, images I
 		}
 		msgs = append(msgs, lm)
 	}
+	flushImgs()
 	return msgs
 }
 

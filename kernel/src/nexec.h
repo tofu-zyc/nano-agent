@@ -43,6 +43,8 @@ bool tool_write(const xctx *x, const cJSON *args, buf_t *out);
 bool tool_edit(const xctx *x, const cJSON *args, buf_t *out);
 bool tool_grep(const xctx *x, const cJSON *args, buf_t *out);
 bool tool_shell(const xctx *x, const cJSON *args, buf_t *out);
+/* Fetch 不给模型用：网关取文件的原始内容（看图、把文件发到聊天里），结果是 base64 */
+bool tool_fetch(const xctx *x, const cJSON *args, buf_t *out);
 
 /* 执行器旁边的 rg（发布包里自带），没有就用 PATH 里的；找不到返回 NULL */
 char *rg_path(const xctx *x);

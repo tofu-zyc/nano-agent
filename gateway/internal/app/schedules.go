@@ -120,6 +120,8 @@ func modeRank(mode string) int {
 		return 1
 	case proto.ModeAuto:
 		return 2
+	case proto.ModeFull:
+		return 3
 	}
 	return -1
 }

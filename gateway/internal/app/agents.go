@@ -23,6 +23,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
+	"nano-agent/gateway/internal/proto"
 )
 
 // SetAgents 接上 agent 列表、机器人列表和 agents 目录。
@@ -138,10 +139,19 @@ func parseLimitDuration(s string) time.Duration {
 
 // agentModeDefault 是会话的默认权限模式：agent 覆盖了就用它的，否则用全局的。调用方持有锁。
 func (a *App) agentModeDefault(sid string) string {
-	if ag := a.agentOf(sid); ag.Mode != nil && *ag.Mode != "" {
+	return modeFor(a.agentOf(sid), a.cfg.Workspace.Mode)
+}
+
+// modeFor 是 agent 的默认权限模式：自己设了的用自己的；拟人型没设时放行（像人一样做事，不停下来等审批），
+// 工具型跟随全局。
+func modeFor(ag agents.Agent, global string) string {
+	if ag.Mode != nil && *ag.Mode != "" {
 		return *ag.Mode
 	}
-	return a.cfg.Workspace.Mode
+	if ag.Life() {
+		return proto.ModeFull
+	}
+	return global
 }
 
 // contextConfigFor 是会话的上下文整理参数：agent 覆盖了的用自己的，没覆盖的用全局。
@@ -263,6 +273,7 @@ type AgentInfo struct {
 	Style          string         `json:"style"` // tool | life
 	Memory         MemoryBrief    `json:"memory"`
 	Life           *LifeBrief     `json:"life,omitempty"` // 拟人型的内心活动状态
+	Doing          Doing          `json:"doing"`          // 现在在干嘛（doing.go）
 }
 
 // MemoryBrief 是 agent 长期记忆的概况：多少条、多少人、上次整理。
@@ -295,6 +306,10 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 	if !ag.Life() {
 		eagerDef, eagerHelp = "off", "工具型 agent 在群里只回被叫到的，不主动插话；改成拟人型才用这一项"
 	}
+	modeDef, modeHelp := c.Workspace.Mode, "新会话用的权限模式，会话里还能单独改。full 放行：所有工具直接执行、不审批"
+	if ag.Life() {
+		modeDef, modeHelp = proto.ModeFull, "新会话用的权限模式，会话里还能单独改。拟人型默认 full 放行：所有工具直接执行、不审批"
+	}
 	models := []string{""}
 	if a.models != nil {
 		for _, m := range a.models.Models() {
@@ -321,11 +336,11 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 			Global:    c.Agent.OutputBytes() >> 10,
 			Value:     ptrAny(ag.MaxOutputKB),
 			Effective: pickPositive(ag.MaxOutputKB, c.Agent.OutputBytes()>>10)},
-		{Key: "mode", Group: "work", Label: "默认权限模式", Type: "enum", Options: []string{"auto", "ask", "readonly"},
-			Help:      "新会话用的权限模式，会话里还能单独改",
-			Global:    c.Workspace.Mode,
+		{Key: "mode", Group: "work", Label: "默认权限模式", Type: "enum", Options: []string{"full", "auto", "ask", "readonly"},
+			Help:      modeHelp,
+			Global:    modeDef,
 			Value:     ptrAny(ag.Mode),
-			Effective: pickString(ag.Mode, c.Workspace.Mode)},
+			Effective: pickString(ag.Mode, modeDef)},
 		{Key: "compact_at", Group: "work", Label: "自动整理阈值", Type: "float",
 			Help:      "上下文到模型窗口的这个比例时自动整理",
 			Global:    at,
@@ -513,6 +528,7 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 		info.Style = agents.StyleLife
 		info.Life = a.lifeBrief(ag)
 	}
+	info.Doing = a.agentDoing(ag, "")
 	if a.agentRoot != "" {
 		info.Memory.On = a.memoryOn(ag)
 		info.Memory.Total, info.Memory.People, _ = a.memStore(ag.ID).Counts()
@@ -567,6 +583,7 @@ func (a *App) toolNames() []string {
 	add("Schedule")
 	add(knowledgeLabel)
 	add("FollowUp")
+	add("SendFile")
 	for _, spec := range a.searchTools() {
 		add(spec.Name)
 	}
@@ -661,7 +678,7 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 			return fmt.Errorf("%s 要填文字", key)
 		}
 		s = strings.TrimSpace(s)
-		enums := map[string][]string{"mode": {"auto", "ask", "readonly"}, "group_eagerness": {"off", "low", "normal", "high"},
+		enums := map[string][]string{"mode": {"full", "auto", "ask", "readonly"}, "group_eagerness": {"off", "low", "normal", "high"},
 			"life_level": {"low", "normal", "high"}, "life_reach": {"owner", "all", "off"}, "memory": {"on", "off"},
 			"dream_when": {"idle", "nightly", "sleep", "off"}}
 		switch {

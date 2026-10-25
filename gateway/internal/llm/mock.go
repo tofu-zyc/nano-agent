@@ -22,6 +22,8 @@ type Mock struct {
 
 var mockStamp = regexp.MustCompile(`(?m)^\[\d{4}-\d{2}-\d{2} [^\]]*\] `)
 
+var mockSpeaker = regexp.MustCompile(`^(\[[^\]]*\]\s*)*$`)
+
 func (m *Mock) Chat(ctx context.Context, req Request, onDelta func(Delta)) (*Result, error) {
 	res := m.reply(req)
 	if onDelta != nil {
@@ -75,7 +77,12 @@ func (m *Mock) reply(req Request) *Result {
 		if strings.TrimSpace(args) == "" {
 			args = "{}"
 		}
-		return &Result{Reason: ReasonToolUse, Calls: []ToolCall{{
+		// “!call” 前面的话是调工具之前说的（群里的 [谁说的] 不算）
+		said := strings.TrimSpace(text[:i])
+		if mockSpeaker.MatchString(said) {
+			said = ""
+		}
+		return &Result{Reason: ReasonToolUse, Content: said, Calls: []ToolCall{{
 			ID:       fmt.Sprintf("mock-%d", m.n.Add(1)),
 			Type:     "function",
 			Function: FunctionCall{Name: name, Arguments: strings.TrimSpace(args)},

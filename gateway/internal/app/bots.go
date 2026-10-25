@@ -77,6 +77,12 @@ func (a *App) botChannel(cfg *config.Config, b agents.Bot) (conf any, build func
 		}, c.Enabled
 	}
 	name := agents.ChannelName(b)
+	switch b.Kind {
+	case agents.KindQQ:
+		return a.qqChannel(cfg, b, name)
+	case agents.KindWeixin:
+		return a.weixinChannel(cfg, b, name)
+	}
 	if b.Kind == agents.KindFeishu {
 		appSecret, err := secret.Decrypt(b.AppSecret)
 		if err != nil {
@@ -116,6 +122,49 @@ func (a *App) botChannel(cfg *config.Config, b agents.Bot) (conf any, build func
 	}, b.Enabled
 }
 
+// qqChannel 是 QQ 机器人的渠道。调用方持有锁。
+func (a *App) qqChannel(cfg *config.Config, b agents.Bot, name string) (any, func() (channel.Channel, error), bool) {
+	appSecret, err := secret.Decrypt(b.AppSecret)
+	if err != nil {
+		a.log.Error("机器人的 AppSecret 解不开", "bot", b.ID, "err", err)
+		return nil, nil, false
+	}
+	c := channel.QQConfig{AppID: b.AppID, AppSecret: appSecret, Proxy: cfg.ProxyFor(b.Proxy), APIBase: b.APIBase}
+	if strings.TrimSpace(c.AppID) == "" || c.AppSecret == "" {
+		return nil, nil, false
+	}
+	return c, func() (channel.Channel, error) {
+		ch, err := channel.NewQQ(c, a.MediaStore(), a.log)
+		if err != nil {
+			return nil, err
+		}
+		ch.SetName(name)
+		return ch, nil
+	}, b.Enabled
+}
+
+// weixinChannel 是微信机器人的渠道：收消息的游标和 context_token 存在 data/bots/<id>.state.json。调用方持有锁。
+func (a *App) weixinChannel(cfg *config.Config, b agents.Bot, name string) (any, func() (channel.Channel, error), bool) {
+	token, err := secret.Decrypt(b.Token)
+	if err != nil {
+		a.log.Error("机器人的 Token 解不开", "bot", b.ID, "err", err)
+		return nil, nil, false
+	}
+	c := channel.WeixinConfig{Token: token, BaseURL: b.APIBase, Proxy: cfg.ProxyFor(b.Proxy),
+		StateFile: filepath.Join(a.store.Dir(), "bots", b.ID+".state.json")}
+	if c.Token == "" {
+		return nil, nil, false
+	}
+	return c, func() (channel.Channel, error) {
+		ch, err := channel.NewWeixin(c, a.MediaStore(), a.log)
+		if err != nil {
+			return nil, err
+		}
+		ch.SetName(name)
+		return ch, nil
+	}, b.Enabled
+}
+
 // botKinds 是机器人渠道名可能的前缀，用来认出“已经不存在的机器人渠道”。
 func isBotChannel(name string) bool {
 	return agents.KindOfChannel(name) != ""
@@ -140,12 +189,52 @@ type BotView struct {
 	APIBase   string `json:"api_base"`
 	Domain    string `json:"domain"`
 	GroupAll  bool   `json:"group_all"`
+	Owner     string `json:"owner,omitempty"` // 扫码的人的身份（渠道:ID），已经设成了管理员
 }
 
 func botView(b agents.Bot) BotView {
-	return BotView{ID: b.ID, Kind: b.Kind, Name: b.Name, Agent: b.Agent, Show: b.Show, Channel: agents.ChannelName(b),
+	v := BotView{ID: b.ID, Kind: b.Kind, Name: b.Name, Agent: b.Agent, Show: b.Show, Channel: agents.ChannelName(b),
 		Enabled: b.Enabled, Legacy: b.Legacy, AppID: b.AppID, HasToken: b.Token != "" || b.Legacy, HasSecret: b.AppSecret != "" || b.Legacy,
 		Proxy: b.Proxy, APIBase: b.APIBase, Domain: b.Domain, GroupAll: b.GroupAll}
+	if b.Owner != "" {
+		v.Owner = v.Channel + ":" + b.Owner
+	}
+	return v
+}
+
+// WeixinTokens 是已经连过的微信机器人的 bot_token（扫码时告诉微信，它能认出“这个微信连过了”）。
+// except 是要重新扫码的那个机器人，不算它。
+func (a *App) WeixinTokens(except string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := []string{}
+	if a.botStore == nil {
+		return out
+	}
+	for _, b := range a.botStore.List() {
+		if b.Kind != agents.KindWeixin || b.ID == except || b.Token == "" {
+			continue
+		}
+		if t, err := secret.Decrypt(b.Token); err == nil && t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// BotByWeixinID 是已经连过的同一个微信 ClawBot（按 ilink_bot_id 找），没有返回空。
+func (a *App) BotByWeixinID(botID string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.botStore == nil || botID == "" {
+		return ""
+	}
+	for _, b := range a.botStore.List() {
+		if b.Kind == agents.KindWeixin && b.BotID == botID {
+			return b.ID
+		}
+	}
+	return ""
 }
 
 // Bots 是所有机器人。
@@ -175,6 +264,8 @@ type BotPatch struct {
 	APIBase   *string `json:"api_base"`
 	Domain    *string `json:"domain"`
 	GroupAll  *bool   `json:"group_all"`
+	BotID     *string `json:"bot_id"` // 微信：扫码时拿到
+	Owner     *string `json:"owner"`  // 扫码的人
 }
 
 // applyBotPatch 把网页的修改套到机器人上。凭据留空表示不改。
@@ -206,6 +297,12 @@ func applyBotPatch(b *agents.Bot, p BotPatch) error {
 	if p.AppID != nil {
 		b.AppID = strings.TrimSpace(*p.AppID)
 	}
+	if p.BotID != nil {
+		b.BotID = strings.TrimSpace(*p.BotID)
+	}
+	if p.Owner != nil {
+		b.Owner = strings.TrimSpace(*p.Owner)
+	}
 	if p.Token != nil && strings.TrimSpace(*p.Token) != "" {
 		enc, err := secret.Encrypt(strings.TrimSpace(*p.Token))
 		if err != nil {
@@ -223,7 +320,7 @@ func applyBotPatch(b *agents.Bot, p BotPatch) error {
 	return nil
 }
 
-// CreateBot 加一个机器人。kind 是 telegram 或 feishu，ID 按名字起。
+// CreateBot 加一个机器人。kind 是 telegram、feishu、qq 或 weixin，ID 按名字起。
 func (a *App) CreateBot(kind string, p BotPatch) (BotView, error) {
 	a.mu.Lock()
 	if a.botStore == nil {
@@ -238,7 +335,7 @@ func (a *App) CreateBot(kind string, p BotPatch) (BotView, error) {
 	if b.Agent == "" {
 		b.Agent = agents.DefaultID
 	}
-	b.ID = botIDSuggestion(a.botStore, b.Name)
+	b.ID = botIDSuggestion(a.botStore, b.Name, kind)
 	err := a.botStore.Create(b)
 	a.mu.Unlock()
 	if err != nil {
@@ -251,7 +348,7 @@ func (a *App) CreateBot(kind string, p BotPatch) (BotView, error) {
 }
 
 // botIDSuggestion 按名字起一个没被占用的机器人 ID。
-func botIDSuggestion(s *agents.Bots, name string) string {
+func botIDSuggestion(s *agents.Bots, name, fallback string) string {
 	var out strings.Builder
 	for _, r := range strings.ToLower(name) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
@@ -261,6 +358,9 @@ func botIDSuggestion(s *agents.Bots, name string) string {
 		}
 	}
 	base := strings.Trim(out.String(), "-")
+	if base == "" {
+		base = fallback // 名字全是中文：用种类当 ID（weixin、qq……）
+	}
 	if base == "" {
 		base = "bot"
 	}
@@ -324,12 +424,16 @@ func (a *App) DeleteBot(id string) error {
 		a.mu.Unlock()
 		return errors.New("机器人列表还没准备好")
 	}
+	b, _ := a.botStore.Get(id)
 	err := a.botStore.Delete(id)
 	a.mu.Unlock()
 	if err != nil {
 		return err
 	}
 	a.reconcileBots()
+	if b.Kind == agents.KindWeixin {
+		os.Remove(filepath.Join(a.store.Dir(), "bots", b.ID+".state.json")) // 收消息的游标和 context_token
+	}
 	a.publish(events.Event{T: "agents"})
 	return nil
 }

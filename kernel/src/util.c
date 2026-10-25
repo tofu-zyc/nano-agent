@@ -228,6 +228,22 @@ static int unb64(int ch)
     return -1;
 }
 
+void b64_encode(buf_t *b, const unsigned char *p, size_t n)
+{
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char q[4];
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)p[i] << 16;
+        if (i + 1 < n) v |= (unsigned)p[i + 1] << 8;
+        if (i + 2 < n) v |= p[i + 2];
+        q[0] = tbl[v >> 18 & 63];
+        q[1] = tbl[v >> 12 & 63];
+        q[2] = i + 1 < n ? tbl[v >> 6 & 63] : '=';
+        q[3] = i + 2 < n ? tbl[v & 63] : '=';
+        buf_append(b, q, 4);
+    }
+}
+
 unsigned char *b64_decode(const char *s, size_t *n)
 {
     size_t len = strlen(s);

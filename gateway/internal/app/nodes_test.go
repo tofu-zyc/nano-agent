@@ -114,7 +114,7 @@ func TestGatewayExecWhenLocalKernelOffline(t *testing.T) {
 	}
 	phone.send(proto.Msg{T: proto.TModel, SID: mainSID})
 	phone.expect(proto.TTurn)
-	if n := len(e.llm.lastReq().Tools); n != 5 {
+	if n := len(e.llm.lastReq().Tools); n != 6 {
 		t.Fatalf("替补也能用工具：%d", n)
 	}
 	phone.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
@@ -395,9 +395,9 @@ func TestGatewaySkills(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
 	got := e.llm.lastReq().Tools
-	if len(got) != 6 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" ||
-		got[2].Function.Name != "Message" || got[3].Function.Name != "Schedule" || got[4].Function.Name != "Skill" ||
-		got[5].Function.Name != "echo" || !strings.Contains(got[4].Function.Description, "- demo：示例技能") {
+	if len(got) != 7 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" ||
+		got[2].Function.Name != "Message" || got[3].Function.Name != "Schedule" || got[4].Function.Name != "SendFile" || got[5].Function.Name != "Skill" ||
+		got[6].Function.Name != "echo" || !strings.Contains(got[5].Function.Description, "- demo：示例技能") {
 		t.Fatalf("模型没收到技能工具：%+v", got)
 	}
 	if s := e.a.Skills(); len(s) != 1 || s[0].Name != "demo" {
@@ -410,7 +410,7 @@ func TestGatewaySkills(t *testing.T) {
 	e.say("技能删掉了")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if len(e.llm.lastReq().Tools) != 6 {
+	if len(e.llm.lastReq().Tools) != 7 {
 		t.Fatal("两次整理之间工具快照改变")
 	}
 	e.say("/reset")
@@ -418,7 +418,7 @@ func TestGatewaySkills(t *testing.T) {
 	e.say("刷新后再看技能")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if got := e.llm.lastReq().Tools; len(got) != 5 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" || got[2].Function.Name != "Message" || got[3].Function.Name != "Schedule" || got[4].Function.Name != "echo" {
+	if got := e.llm.lastReq().Tools; len(got) != 6 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" || got[2].Function.Name != "Message" || got[3].Function.Name != "Schedule" || got[4].Function.Name != "SendFile" || got[5].Function.Name != "echo" {
 		t.Fatalf("模型仍然带着已经删除的技能：%+v", got)
 	}
 }

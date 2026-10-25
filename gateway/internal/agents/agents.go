@@ -216,8 +216,8 @@ func normalize(a *Agent) error {
 			*v = strings.TrimSpace(*v)
 		}
 	}
-	if a.Mode != nil && *a.Mode != "" && !slices.Contains([]string{"auto", "ask", "readonly"}, *a.Mode) {
-		return errors.New("权限模式只能是 auto、ask、readonly，或者空（跟随全局）")
+	if a.Mode != nil && *a.Mode != "" && !slices.Contains([]string{"full", "auto", "ask", "readonly"}, *a.Mode) {
+		return errors.New("权限模式只能是 full、auto、ask、readonly，或者空（跟随默认）")
 	}
 	a.Style = strings.TrimSpace(a.Style)
 	if a.Style == StyleTool {

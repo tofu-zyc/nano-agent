@@ -5,6 +5,7 @@
 测试目录放在 Windows 的临时目录下（WSL 里用 wslpath -w 转换），USERPROFILE 也指向临时目录，
 不碰用户自己的文件。需要 Windows 的 powershell.exe。
 """
+import base64
 import json
 import os
 import shutil
@@ -119,6 +120,8 @@ def setup():
         f.write("Hello world\n中文 hello\n")
     with open(os.path.join(WORK_LINUX, "crlf.txt"), "w", encoding="utf-8", newline="") as f:
         f.write("a\r\nb\r\n")
+    with open(os.path.join(WORK_LINUX, "pic.png"), "wb") as f:
+        f.write(PNG)
 
 
 def run(tool, args=None, dirs=(WORK_WIN,), write=True, ro=(), rw=(), home=False,
@@ -195,6 +198,8 @@ def t_read():
     c = ok(run("Read", {"path": "中文.txt"}), "     1\t第一行", "     2\t第二行")
     ok(run("Read", {"path": os.path.join(WORK_WIN, "中文.txt")}), "第一行")
     ok(run("Read", {"path": "sub"}), "hello.md", "是目录")
+    # 不存在的文件要说出原因（以前 Windows 上 errno 没设，报的是“No error”）
+    bad(run("Read", {"path": "nope.txt"}), "No such file")
 
 
 @case("Write：新建用 LF，覆盖保留 CRLF")
@@ -214,6 +219,25 @@ def t_edit_crlf():
         data = f.read()
     assert data == b"X\r\nY\r\n", data
     assert "X" in c
+
+
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+@case("Read 读到图片说是图片；Fetch 取回 base64，读的规则和 Read 一样")
+def t_fetch():
+    ok(run("Read", {"path": "pic.png"}), "pic.png 是图片（PNG，%d 字节）" % len(PNG))
+    c = ok(run("Fetch", {"path": "pic.png"}))
+    assert base64.b64decode(c) == PNG, c[:120]
+    # 中文路径、中文内容也按原样取回（Linux 上是同一份 nexec_fs.c 的 t_fetch）
+    got = base64.b64decode(ok(run("Fetch", {"path": "中文.txt"})))
+    assert got == "第一行\n第二行\n".encode(), got[:120]
+    bad(run("Fetch", {"path": "中文.txt", "max_bytes": 10}), "太大了")
+    bad(run("Fetch", {"path": "sub"}), "是目录")
+    bad(run("Fetch", {"path": "../other/secret.txt"}), "不在工作目录内")
+    bad(run("Fetch", {"path": "nope.txt"}), "No such file")
+    # 工作目录外的绝对路径同样拒绝（read 的规则和 Read 一致）
+    bad(run("Fetch", {"path": os.path.join(OTHER_WIN, "secret.txt")}), "不在工作目录内")
 
 
 @case("Read / Write：工作目录外一律拒绝（..、绝对路径、~）")
@@ -325,7 +349,7 @@ def main():
     try:
         setup()
         print(f"windows temp：{ROOT_WIN}")
-        for t in (t_probe, t_read, t_write, t_edit_crlf, t_escape, t_read_all, t_shell, t_env,
+        for t in (t_probe, t_read, t_write, t_edit_crlf, t_fetch, t_escape, t_read_all, t_shell, t_env,
                   t_timeout, t_cancel, t_grep, t_ls, t_bad_request):
             t()
         print(f"exec-win: {len(FAILS)} failures")
