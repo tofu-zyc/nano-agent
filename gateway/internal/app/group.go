@@ -7,7 +7,6 @@ package app
 // 群里的回复短、口语，不发思考、工具过程和用量；工具只有 agent 的群聊白名单（默认只有搜索）。
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -298,32 +297,17 @@ func (a *App) sendGroup(s *sess, ep endpoint, text string) {
 	a.sendParts(ep, parts)
 }
 
-// sendParts 像人一样一条条发：每条之间停一会儿（按字数，0.3 到 3 秒）。
+// sendParts 像人一样一条条发：每条之间停一会儿（按字数，0.3 到 3 秒）。和别的消息走同一个发送队列，
+// 先说的一定先到。调用方持有锁。
 func (a *App) sendParts(ep endpoint, parts []string) {
-	go func() {
-		for i, p := range parts {
-			if i > 0 {
-				d := time.Duration(len([]rune(p))) * 20 * time.Millisecond
-				d = min(max(d, 300*time.Millisecond), 3*time.Second)
-				select {
-				case <-time.After(d):
-				case <-a.ctx.Done():
-					return
-				}
-			}
-			a.mu.Lock()
-			ch := a.chans[ep.ch]
-			a.mu.Unlock()
-			if ch == nil {
-				return
-			}
-			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
-			if err := sendText(ctx, ch, ep.chat, p, "", true); err != nil {
-				a.log.Warn("消息发送失败", "channel", ep.ch, "err", err)
-			}
-			cancel()
+	for i, p := range parts {
+		var d time.Duration
+		if i > 0 {
+			d = time.Duration(len([]rune(p))) * 20 * time.Millisecond
+			d = min(max(d, 300*time.Millisecond), 3*time.Second)
 		}
-	}()
+		a.enqueue(ep, outItem{text: p, md: true, delay: d})
+	}
 }
 
 // dmParts 是拟人型在私聊里的分条：按空行拆，最多 n 条（多的并进最后一条），不截断。

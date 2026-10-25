@@ -290,7 +290,8 @@ type outItem struct {
 	chatID  string
 	text    string
 	replyTo string
-	md      bool // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
+	md      bool          // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
+	delay   time.Duration // 发之前停一会儿（像人一样一条条发）
 }
 
 func New(ctx context.Context, cfg *config.Config, client llm.Client, store *session.Store, p *persona.Loader, log *slog.Logger) *App {
@@ -346,6 +347,13 @@ func (a *App) AddChannel(ch channel.Channel) {
 	a.outboxes[name] = q
 	go func() {
 		for it := range q {
+			if it.delay > 0 {
+				select {
+				case <-time.After(it.delay):
+				case <-a.ctx.Done():
+					return
+				}
+			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
 			if err := sendText(ctx, it.ch, it.chatID, it.text, it.replyTo, it.md); err != nil {
 				a.log.Warn("发送消息失败", "channel", name, "chat", it.chatID, "err", err)
@@ -1387,6 +1395,7 @@ func (a *App) generateModel(s *sess) {
 		case llm.ReasonToolUse:
 			turn.Reason = proto.ReasonToolUse
 			r.usedTools = true
+			a.sayMidway(s, r, res.Content)
 			for _, c := range res.Calls {
 				r.tool = c.Function.Name
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
@@ -1406,6 +1415,31 @@ func (a *App) generateModel(s *sess) {
 		}
 		a.hub.Send(r.node, turn)
 	}()
+}
+
+// sayMidway 发调工具之前说的话（“等等，我看一眼”）。流式显示的窗口已经看到了；别的窗口（拟人型的私聊、
+// QQ、微信）只在这一轮结束时收到最后一段回复，前面说的要在说的时候就发出去，不然就丢了。
+// 定时任务、内心活动不发（结果另有去处）。调用方持有锁。
+func (a *App) sayMidway(s *sess, r *run, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || isSilence(text) || r.scheduled != nil || r.inner {
+		return
+	}
+	group := a.isGroupSession(s.sid)
+	life := a.agentOf(s.sid).Life()
+	for _, o := range r.outs {
+		if o.view != nil || o.ep.ch == "web" || o.ep.ch == "room" {
+			continue // 网页从事件里看到；网关里的群只记最后的发言
+		}
+		switch {
+		case group:
+			a.sendGroup(s, o.ep, text)
+		case life && !strings.Contains(text, "```"):
+			a.sendParts(o.ep, dmParts(text, 3))
+		default:
+			a.deliverReply(o.ep, text)
+		}
+	}
 }
 
 // argsJSON 把模型给的参数字符串转成协议里的 args：合法的 JSON 对象原样放进去，
