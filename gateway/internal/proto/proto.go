@@ -6,6 +6,10 @@ import "encoding/json"
 // Version 是当前协议版本，内核在 hello 里带上。
 const Version = 10
 
+// MinVersion 是网关还愿意连的最老协议：更老的连上来会先被接受，然后靠自动更新换成新的；
+// 比这还老的不认（少太多字段，连上也是错的）。
+const MinVersion = 8
+
 // 权限模式，随 input 传给内核。
 const (
 	ModeNone     = "none"     // 不能用工具

@@ -219,12 +219,15 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 	if err == nil && hello.T != proto.THello {
 		err = fmt.Errorf("第一条消息应为 hello，收到 %q", hello.T)
 	}
-	if err == nil && hello.V != proto.Version {
+	if err == nil && (hello.V < proto.MinVersion || hello.V > proto.Version) {
 		fix := "网关太旧了，先升级网关"
-		if hello.V < proto.Version {
+		if hello.V < proto.MinVersion {
 			fix = "内核太旧了，重新运行安装脚本（或者在源码目录 make）升级"
 		}
 		err = fmt.Errorf("协议版本不兼容：内核 %d，网关 %d。%s", hello.V, proto.Version, fix)
+	} else if err == nil && hello.V < proto.Version {
+		// 旧内核先让它连上，随后 maybeUpdateKernel 会把新版本推过去；直接拒绝的话永远推不到
+		h.log.Warn("内核的协议版本比较旧，先连上再自动更新", "node", hello.Node, "kernel_proto", hello.V, "gateway_proto", proto.Version)
 	}
 	if err == nil && !validNode(hello.Node) {
 		err = fmt.Errorf("内核的名字 %q 不能用：不能为空、不能有空白和冒号，最长 64 个字（在 kernel.conf 里设 node）", hello.Node)
