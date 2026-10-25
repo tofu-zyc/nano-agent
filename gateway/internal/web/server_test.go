@@ -291,7 +291,7 @@ func TestMakeAdmin(t *testing.T) {
 		t.Fatalf("admins: %v", admins)
 	}
 	_, out := c.do("GET", "/api/sessions/main", nil, false)
-	if !strings.Contains(mustJSON(out["info"]), `{"admin":true,"channel":"fs","key":"fs:c9","name":"我","session":"main","show":"过程","who":"fs:u9"}`) {
+	if !strings.Contains(mustJSON(out["info"]), `{"admin":true,"channel":"fs","key":"fs:c9","main":"main","name":"我","session":"main","show":"过程","who":"fs:u9"}`) {
 		t.Fatalf("窗口应该接到主会话：%v", out["info"])
 	}
 	// 再点一次不会重复添加

@@ -74,7 +74,7 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员
-export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string };
+export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string; main: string };
 
 export type SessionInfo = {
   agent: string; // 这个会话属于哪个 agent
@@ -140,6 +140,23 @@ export type RuntimeStatus = {
   update?: UpdateInfo;
 };
 
+export type MCPInfo = {
+  name: string;
+  kind: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  url?: string;
+  cwd?: string;
+  machine?: string;
+  env_keys?: string[];
+  enabled: boolean;
+  tools?: string[];
+  agents?: string[];
+  approval: string;
+  online: boolean;
+  tool_count: number;
+};
+
 export type Overview = {
   gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string; env_proxy?: string };
   runtime?: RuntimeStatus;
@@ -170,6 +187,7 @@ export type Overview = {
   agents?: AgentInfo[]; // 所有 agent（v0.5 起）
   bots?: BotInfo[]; // 所有机器人
   rooms?: RoomInfo[]; // 网关内部的群聊
+  mcp?: MCPInfo[]; // MCP 服务（阶段 11）
 };
 
 /** 网络搜索的状态；key 是 settings（设置里填的）、endpoint:<接口名>（借用模型接口的）或空（没有可用的 key） */

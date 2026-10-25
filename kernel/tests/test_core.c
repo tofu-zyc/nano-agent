@@ -164,10 +164,13 @@ static void test_rejections_are_results(void)
         { "z", "Read", "{}", true, NA_SB_DEFAULT, NULL },
     };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 3);
-    EXPECT(c, "RESULT(x,err,未知工具：nope) "
+    /* 内核不认识的工具名交给网关执行（MCP 工具 <服务>__<工具> 就是这样），
+       其余不合法或没权限的还是当场回错误结果 */
+    EXPECT(c, "EXEC(x,nope,1800000) "
               "RESULT(y,err,参数不是合法的 JSON 对象：not json) "
-              "RESULT(z,err,当前身份没有使用工具的权限) "
-              "MODEL(s1)");
+              "RESULT(z,err,当前身份没有使用工具的权限)");
+    tool_done(c, 20, "s1", "x", true, "ok");
+    EXPECT(c, "RESULT(x,ok,ok) MODEL(s1)");
     na_core_free(c);
 }
 

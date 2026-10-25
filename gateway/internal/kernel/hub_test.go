@@ -201,3 +201,47 @@ func TestHubNodes(t *testing.T) {
 		t.Fatalf("events: %v", ev)
 	}
 }
+
+// dialV 用指定的协议版本握手。
+func dialV(t *testing.T, addr, node string, v int) (net.Conn, *proto.Msg) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(proto.Msg{T: proto.THello, V: v, Token: "tok", Node: node})
+	c.Write(append(b, '\n'))
+	sc := bufio.NewScanner(c)
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if !sc.Scan() {
+		t.Fatalf("%s：没有回复", node)
+	}
+	var m proto.Msg
+	json.Unmarshal(sc.Bytes(), &m)
+	return c, &m
+}
+
+// 旧协议的内核要先让连上（不然自动更新永远推不到它），太老的才拒绝。
+func TestOldKernelCanConnect(t *testing.T) {
+	ln, err := Listen("tcp:127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub("tok", &recHandler{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.Serve(ctx, ln)
+	addr := ln.Addr().String()
+
+	c, m := dialV(t, addr, "old", proto.Version-1)
+	if m.T != proto.TWelcome {
+		t.Fatalf("旧一版的内核应该先放进来（好推新版本）：%+v", m)
+	}
+	c.Close()
+
+	c2, m2 := dialV(t, addr, "ancient", proto.MinVersion-1)
+	if m2.T != proto.TError {
+		t.Fatalf("太老的内核应该拒绝：%+v", m2)
+	}
+	c2.Close()
+}

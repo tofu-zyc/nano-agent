@@ -196,3 +196,33 @@ func TestScheduleOverlappingOccurrenceSkipped(t *testing.T) {
 		t.Fatal(current)
 	}
 }
+
+// 模型建任务时不写 deliver：默认只放任务页，不往聊天窗口推（以前默认发到创建任务的那个窗口）
+func TestScheduleWithoutDeliverStaysOnTaskPage(t *testing.T) {
+	e := setup(t)
+	e.say("/cron")
+	e.ch.wait(t, "定时任务")
+	v, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "create", Name: "值守", When: "every 30m", Prompt: "看看有没有新消息"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := v.(schedule.Task)
+	if len(task.Deliver) != 0 {
+		t.Fatalf("没写 deliver 就不该有投递窗口：%v", task.Deliver)
+	}
+	if _, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "run_now", ID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	m := e.k.expect(proto.TInput)
+	if m.SID != "cron:"+task.ID {
+		t.Fatalf("input: %+v", m)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: m.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: m.SID, Status: proto.StatusOK})
+	waitFor(t, func() bool { return !e.a.Schedules().Tasks[0].Running })
+	if got := e.a.Schedules().Tasks[0].Results; len(got) != 1 || !got[0].OK {
+		t.Fatalf("结果该记进任务页：%+v", got)
+	}
+	e.ch.none(t) // 不往聊天窗口投递
+}

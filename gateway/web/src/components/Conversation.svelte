@@ -271,6 +271,16 @@
       store.fail(err);
     }
   }
+  // 点头部的工作目录标签就是取下它（以前只打开选择框，和“点击取下”的提示不符）
+  async function unmountWorkspace(id: string) {
+    const mt = info?.workspaces.find((m) => m.id === id);
+    try {
+      store.upsertSession(await api.patch<SessionInfo>(sidPath(sid), { workspaces: (info?.workspaces ?? []).filter((m) => m.id !== id).map((m) => m.id) }));
+      store.toast({ kind: 'ok', text: mt ? `已取下 ${mt.host}:${shortPath(homeShort(mt.path), 30)}` : '已取下' }, 2400);
+    } catch (err) {
+      store.fail(err);
+    }
+  }
 
   let undoing = $state(false);
   async function undo() {
@@ -323,8 +333,9 @@
           {#if info.workspaces.length}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
             {#each info.workspaces as mt (mt.id)}
-              <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击挂载 / 取下" onclick={() => (picking = true)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
+              <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击取下" onclick={() => unmountWorkspace(mt.id)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
             {/each}
+            <button class="tag" onclick={() => (picking = true)} title="再挂一个工作目录"><Icon name="plus" size={11} />挂载</button>
           {:else if innerKind}
             <span class="tag">{innerKind === 'life' ? '内心活动 · 只能看' : '整理记忆 · 只能看'}</span>
           {:else}

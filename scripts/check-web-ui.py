@@ -791,12 +791,106 @@ def check_living(page, url, nano):
         ok("内心会话不占拓扑图的会话列")
     else:
         fail("内心会话出现在会话列里")
+    check_workspace_unmount(page, url)
+    check_new_session_agent(page, url)
+    check_mcp_panel(page, url)
     # 收拾：改回工具型、删掉测试记忆
     api(page, "PATCH", "/api/agents/default", {"style": "tool"})
     for pth in ["people/张三.md", "国庆去成都.md"]:
         api(page, "DELETE", "/api/agents/default/memory/item?path=" + urllib.request.quote(pth))
     api(page, "PUT", "/api/agents/default/memory/self", {"text": ""})
 
+
+
+def check_workspace_unmount(page, url):
+    """对话头部的工作目录标签：点一下就取下（以前只弹选择框，提示却写着“点击取下”）"""
+    d = tempfile.mkdtemp(prefix="nano-ui-ws-")
+    code, ws = api(page, "POST", "/api/workspaces", {"host": "本机", "path": d})
+    if code != 200 or not isinstance(ws, dict) or "id" not in ws:
+        return fail(f"加工作目录失败：{code} {str(ws)[:200]}")
+    code, _ = api(page, "PATCH", "/api/sessions/main", {"workspaces": [ws["id"]]})
+    if code != 200:
+        return fail(f"挂载失败：{code}")
+    page.goto(url + "#/sessions/main")
+    page.wait_for_selector(".conv header", timeout=10000)
+    page.wait_for_timeout(700)
+    chip = page.locator(".conv header button.tag.mono")
+    if chip.count() != 1:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"对话头部的工作目录标签数量不对：{chip.count()}")
+    title = chip.first.get_attribute("title") or ""
+    if "点击取下" not in title:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"标签提示不是“点击取下”：{title}")
+    chip.first.click()
+    page.wait_for_timeout(900)
+    code, info = api(page, "GET", "/api/sessions/main")
+    left = (info.get("info") or {}).get("workspaces") if isinstance(info, dict) else None
+    if left:
+        api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
+        return fail(f"点了标签以后还挂着：{left}")
+    ok("对话头部的工作目录标签点一下就取下")
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(400)
+
+
+def check_new_session_agent(page, url):
+    """新建会话时可以选 agent（后端一直支持，以前界面没给入口，只能建在默认 agent 下）"""
+    st, out = api(page, "POST", "/api/agents", {"name": "选会话测试"})
+    if st != 200 or not isinstance(out, dict) or not out.get("id"):
+        return fail(f"建测试 agent 失败：{st} {str(out)[:120]}")
+    ag = out["id"]
+    page.goto(url + "#/sessions")
+    page.wait_for_timeout(700)
+    page.click('button[title="新建会话"]')
+    if page.locator(".newmenu").count() == 0:
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail("新建会话没有出现选 agent 的菜单")
+    item = page.locator('.newmenu button:has-text("选会话测试")')
+    if item.count() != 1:
+        n = page.locator(".newmenu button").count()
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail(f"菜单里没有列出那个 agent（共 {n} 项）")
+    item.click()
+    page.wait_for_timeout(900)
+    sid = urllib.request.unquote(page.url.split("#/sessions/")[-1])
+    if sid.startswith("@" + ag + "/"):
+        ok("新建会话时可以选 agent")
+    else:
+        fail(f"新建的会话不在选中的 agent 下：{sid}")
+    api(page, "DELETE", "/api/agents/" + ag)
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(400)
+
+
+def check_mcp_panel(page, url):
+    """MCP 服务：网页上能加、能看到、“测试”会连一次并回显结果"""
+    st, _ = api(page, "POST", "/api/mcp", {"items": [{"name": "uicheck", "kind": "stdio",
+                                     "command": "/nonexistent-mcp", "args": [], "enabled": True}]})
+    if st != 200:
+        return fail(f"加 MCP 服务失败：HTTP {st}")
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(600)
+    page.click("g.node.gateway")
+    page.wait_for_timeout(700)
+    txt = page.inner_text("body")
+    if "MCP 服务" not in txt or "uicheck" not in txt:
+        api(page, "POST", "/api/mcp", {"items": []})
+        return fail("网关面板里看不到刚加的 MCP 服务")
+    page.click('button:has-text("测试")')
+    page.wait_for_timeout(2500)
+    txt = page.inner_text("body")
+    if "uicheck：" not in txt:
+        api(page, "POST", "/api/mcp", {"items": []})
+        return fail("点测试没有回显结果")
+    ok("MCP 服务能在网页里添加、看到，测试会连一次")
+    api(page, "POST", "/api/mcp", {"items": []})
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(300)
 
 if __name__ == "__main__":
     main()

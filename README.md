@@ -80,7 +80,7 @@ Windows 上开机自启用任务计划程序（只对当前用户，不需要管
 
 ## 快速开始（从源码）
 
-需要 gcc 或 clang、make、Go 1.22 以上。沙箱需要 Linux 5.13 以上（WSL2 也可以，支持 Windows 盘符下的工作目录）。
+需要 gcc 或 clang、make、Go 1.25 以上（MCP 用的官方 SDK 要求 1.25）。沙箱需要 Linux 5.13 以上（WSL2 也可以，支持 Windows 盘符下的工作目录）。
 
 ```sh
 cp gateway.example.toml gateway.toml   # 把 token 改成一串随机字符；模型启动后在网页里添加

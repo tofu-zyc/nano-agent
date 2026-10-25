@@ -128,6 +128,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"search":     s.app.SearchInfo(),
 		"schedules":  s.app.ScheduleSummary(),
 		"memory":     s.app.MemoryInfo(),
+		"mcp":        s.app.MCPInfo(),
 	})
 }
 

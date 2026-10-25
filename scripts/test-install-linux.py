@@ -50,7 +50,7 @@ class FakeGateway(threading.Thread):
                 return
             hello = json.loads(line)
             if hello.get("token") == PAIRED:
-                f.write((json.dumps({"t": "welcome", "v": 9}) + "\n").encode())
+                f.write((json.dumps({"t": "welcome", "v": 10}) + "\n").encode())
                 f.flush()
                 self.accepted.set()
                 time.sleep(30)

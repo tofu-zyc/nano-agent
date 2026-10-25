@@ -21,6 +21,9 @@ type approval struct {
 	card                        channel.ApprovalCard
 	refs                        []approvalRef // 发出去的带按钮的审批消息
 	result                      string        // 处理结果，空表示还在等
+	// resolve 不为空表示这不是内核要执行的工具（比如 MCP 在网关这边跑），
+	// 批不批由这里交回去，不用发 TApprove 给内核
+	resolve func(ok bool)
 }
 
 type approvalRef struct {
@@ -112,6 +115,9 @@ func (a *App) dropApproval(n int, why string) {
 	delete(a.approvals, n)
 	a.resolveApproval(ap, why)
 	a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+	if ap.resolve != nil {
+		ap.resolve(false) // 网关这边在等结果的（MCP）：按没批准处理，别让它一直等
+	}
 }
 
 // decided 是审批结果的说明：谁批的（who 是身份或者名字）

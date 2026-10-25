@@ -27,6 +27,7 @@ import (
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/paths"
@@ -204,6 +205,18 @@ func main() {
 		os.Exit(1)
 	}
 	a.SetMedia(mediaStore)
+	// MCP 服务（data/mcp.json）：用到才连，进程/连接在网关退出时关掉
+	mcpStore, err := mcp.Open(filepath.Join(cfg.Session.DataDir, "mcp.json"))
+	if err != nil {
+		log.Error("读取 MCP 服务失败", "err", err)
+		os.Exit(1)
+	}
+	mcpMgr := mcp.NewManager(mcpStore, log)
+	// 透传：MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）。先接上再 SetMCP：
+	// SetMCP 会在后台开始连；挂在别的机器上的服务要等那台内核连上来（KernelUp 会叫醒它们）
+	mcpMgr.SetLink(app.MCPLink(a))
+	a.SetMCP(mcpStore, mcpMgr)
+	defer mcpMgr.Close()
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)

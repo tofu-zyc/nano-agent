@@ -4,7 +4,11 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 9
+const Version = 10
+
+// MinVersion 是网关还愿意连的最老协议：比 Version 旧、但不比它旧的内核先放进来，
+// 随后靠自动更新换成新的。自我更新是 v9 才有的，再老的放进来也推不了新版本，直接拒绝。
+const MinVersion = 9
 
 // 权限模式，随 input 传给内核。
 const (
@@ -47,9 +51,16 @@ const (
 	TRun        = "run"         // 请内核在它的机器上执行一次工具（工作目录在那台机器上，这一轮由别的内核跑）
 	TRunCancel  = "run_cancel"  // 停下 run
 	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.nano-agent/skills/<技能名>/
-	TPairing    = "pairing"     // 收到了配对请求，等管理员确认（Code 是确认码）
-	TPaired     = "paired"      // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
-	TUpdate     = "update"      // 新版本的程序（Files：path 是文件名，data 是 base64），内核换掉自己后重启
+	// 协议 v10：MCP 服务的 stdio 透传（把 MCP 进程放到别的电脑上跑）
+	TPipeOpen   = "pipe_open"   // 网关 → 内核：起一个子进程
+	TPipeWrite  = "pipe_write"  // 网关 → 内核：往它的 stdin 写一行
+	TPipeClose  = "pipe_close"  // 网关 → 内核：关掉（先关 stdin，不退就杀）
+	TPipeData   = "pipe_data"   // 内核 → 网关：stdout 的一行
+	TPipeClosed = "pipe_closed" // 内核 → 网关：进程退出了
+
+	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
+	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
+	TUpdate  = "update"  // 新版本的程序（Files：path 是文件名，data 是 base64），内核换掉自己后重启
 )
 
 // error 的 reason：内核据此决定怎么办
@@ -129,6 +140,14 @@ type Msg struct {
 	Status  string          `json:"status,omitempty"`
 	Detail  string          `json:"detail,omitempty"`
 	Text    string          `json:"text,omitempty"`
+
+	// pipe（协议 v10）：MCP 服务的 stdio 透传
+	Pipe string            `json:"pipe,omitempty"` // 这条管道的编号
+	Argv []string          `json:"argv,omitempty"` // pipe_open：要跑的命令和参数
+	Env  map[string]string `json:"env,omitempty"`  // pipe_open：环境变量
+	Cwd  string            `json:"cwd,omitempty"`  // pipe_open：工作目录
+	Data string            `json:"data,omitempty"` // pipe_write / pipe_data：一行内容
+	Exit int               `json:"exit,omitempty"` // pipe_closed：退出码
 
 	// ls / ls_result
 	Path      string     `json:"path,omitempty"`

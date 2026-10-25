@@ -9,6 +9,11 @@
 
 见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。已完成：放行模式、飞书拟人型回复和状态、`/state`、QQ、微信、调工具前说的话当场发、看图（Read 读到图片交给模型）和 SendFile 发图片 / 文件（都有测试）。**2026-10-25 验证补完**：`scripts/test-isolated.sh` 全过（e2e 74 项，含 SendFile 那一步）、网页界面检查 0 failures（要单独跑，隔离脚本里会被跳过）、Windows 执行器 14 项（补了 `t_fetch`）、`e2e-win.py` 17 项；顺手修了 Windows 上文件不存在却报“No error”的问题（`plat_win.c` 没设 errno）。d307b8c 的 CI 也是 success。**已合并 main、发 v0.7.0**；剩下音频视频格式转换。**QQ 和微信都没在真的平台上试过**，发版后第一次扫码时留意一下；飞书发图片要老应用在开放平台补开 `im:resource` 再发一版。
 
+## v0.7.0 发布后的修复
+
+- **新 agent 的窗口「接到主会话」接到了默认 agent 上**：用户新建了一个 agent、把 Telegram / 飞书 / QQ / 微信都绑给它，结果每个会话只挂着一个平台。两半原因：① 窗口接哪个会话，看说话的人**是不是管理员**（不是管理员就各自一个会话，会话 ID 就是窗口 ID）；② 网页里的「设为管理员」和「接到主会话」把目标**写死成全局 `main`**（`WelcomeAdmin`、渠道面板），于是新 agent 的窗口被搬到默认 agent 上，下一条消息又被搬回来 —— 看起来就是“怎么接都接不到一起”。
+- 修法：按窗口所在会话的 agent 算主会话 —— 默认 agent 是 `main`，别的 agent 是 `@<id>/main`（`app/endpoints.go` 的 `mainOf`）。`/api/sessions` 里每个窗口多一个 `main` 字段，渠道面板用它，不再写死。测试 `TestWelcomeAdminOnOtherAgent` 锁住“新 agent 的访客窗口设为管理员后进 `@bob/main`”。
+- 仍然成立的行为：绑定机器人 ≠ 你在那个平台上就是管理员。管理员名单（`access.admins`）是按平台身份记的（`tg:<id>`、`feishu:<openid>`、`qq.<机器人>:<openid>`）；不是管理员的窗口各自一个会话，要在会话/渠道面板里点「设为管理员」才会并进主会话。
 ## v0.6 开发进度（dev/v0.6，已合并 main，v0.6.0 发布）
 
 设计和进度清单见 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)（每完成一个阶段在那里打勾、写坑）。
@@ -366,7 +371,69 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 | 56b1e33 | 跨平台阶段 2：Windows 内核 `nano-kernel.exe`（Winsock TCP、WSAPoll、读线程 + 回环 socket 唤醒、Job Object、runner_win）；协议 v8（hello 的 os/arch、workspace 的 os）；修 127.0.0.1 TCP 被当成本机（只认 unix socket 和 AllowToken）；路径归属（ListDir 规范形式、离线机器上线后换规范路径、网关不解析远程路径）；Windows 目录选择器、机器/拓扑显示系统；`scripts/e2e-win.py` 实测 WSL 网关 + Windows 内核的远程 run、本地执行、PowerShell、CRLF、Grep、技能下发 |
 | 2189325 | 跨平台阶段 3：`make release` 本地交叉编译（Linux 静态 x86_64/arm64、Windows、Linux 网关包）和 `SHA256SUMS`；`fetch-rg.sh --all`；`install-kernel.sh` 离线包模式（不编译）；`install-kernel.ps1`（离线安装、配置、配对、任务计划程序、升级、卸载）；`install-gateway.sh` 支持离线包；离线安装测试 |
 | 8bf1bac | 跨平台阶段 4：macOS 平台层（`_NSGetExecutablePath`、无沙箱 `sandbox_stub`、`nexec_main` 去掉 Linux `sys/syscall.h` 依赖、`_DARWIN_C_SOURCE` 解决 `DT_DIR`）；`cross-macos` 交叉编译 aarch64/x86_64；`make release` 出 macOS 包；`install-kernel.sh` 的 launchd 用户 agent（启动、卸载）和 `nano-kernel-ctl` 的 macOS 支持。没有真机测试 |
+| 262d063、aacfe97、61e2c51 | MCP（路线图阶段 11 的前两块）：`internal/mcp` 客户端（本机 stdio / 远程 streamable HTTP、懒连接、退避重连、空闲断开、密钥加密）、`data/mcp.json`；内核把不认识的工具名转给网关，网关按 `<服务>__<工具>` 分发到 MCP 客户端；真子进程端到端测试 |
 
+
+## MCP（2026-10-25，阶段 11 前两块）
+
+配置在 `~/.nano-agent/data/mcp.json`，网页里网关节点面板的「MCP 服务」能加、改、删、测试，也可以手写：
+
+```json
+[
+  {
+    "name": "fs",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me"],
+    "enabled": true,
+    "agents": [],
+    "approval": "never"
+  },
+  {
+    "name": "remote",
+    "url": "https://example.com/mcp",
+    "enabled": true
+  }
+]
+```
+
+- `name` 只能用字母、数字、下划线、减号；它也是工具名的前缀。
+- `command`/`args`/`env`/`cwd` 是网关本机起的 stdio 进程；`url` 是远程 streamable HTTP。二选一。
+- `machine` 填一台在线内核的名字，这个服务就**跑到那台机器上**（协议 v10：`pipe_open` / `pipe_write` /
+  `pipe_data` / `pipe_closed`，见 `kernel/src/pipe.c`）。不填（或写 `gateway`）就在网关本机跑。
+  Linux / macOS（`pipe.c`）和 Windows（`pipe_win.c`）都支持；内核协议低于 10 的机器直接报“内核太旧”。
+- `env` 里写明文密钥，存盘时会自动加密成 `enc:v1:`（读的时候解）。
+- `tools` 是白名单，`"!名字"` 表示禁用；`agents` 空表示所有 agent 都能用。
+- `approval`：`never`（直接执行，默认）、`per_turn`（一轮里第一次调用要批，批过就不再问）或
+  `always`（每次都要批）。管理员在网页点批准，或者在聊天里发 `/approve 编号`。
+
+协议版本：网关只拒绝**比 `proto.MinVersion`（现在 9，自我更新从 v9 开始才有）还老**的内核。旧一版的内核先放进来，
+`maybeUpdateKernel` 才有机会把新版本推过去（以前要求版本完全相等，网关一升级老内核就永远连不上）。
+
+工具以 `<服务>__<工具>` 交给模型，说明里带“（MCP 服务 X）”。调用时内核不认识这个名字，
+会转回网关执行（`kernel/src/core.c` 的 `FORWARDED`），所以不需要给内核加动态工具表。
+只有管理员能用；访客的工具集里不会有这些。
+
+工具返回的图片存进媒体库：网页的工具卡片显示；模型能看图时也附给模型（和 Read 读到图片一样）。
+
+**锁的规矩（改之前一定先看）**：算工具定义（`contextParts`）是在网关总锁里做的，而连 MCP 服务——尤其
+`machine=` 的管道透传——要等内核回话，内核的消息又要过总锁。所以：
+- 总锁里只能读缓存（`Manager.CachedTools`），**绝不能去连**；连接由后台的 `Warm` / `Wake` 发起。
+- `conn.mu` 只护字段，拿着它不能连接、不能等网络；连接本身由 `conn.dialing` 串行化。
+- 管道收发（`app/pipe.go` 的 `PipeWrite` / `PipeClose`、`KernelMsg` 里的 `pipe_data`）不过总锁。
+- `mcpCall` 的协程只认开始时的那一轮 `run`：回来时 `s.run` 可能已经是 nil 或下一轮。
+
+**工具快照**：签名里带「这个会话实际会拿到的 MCP 工具名」（`mcpOffered`），服务连上、加了工具、
+切换只读模式都会重建；连不上时用上次的工具列表（断开不清空），并记在 `data/mcp-tools.json`，
+网关重启后、服务连上之前先用它，前缀不抖。改配置会清掉退避马上重连；某台机器的内核连上来时
+（`KernelUp` → `Wake`）立刻去连挂在它上面的服务，断开时（`KernelDown`）把那台机器上的连接作废。
+
+测试：`internal/mcp`（配置、列/调工具、内存传输、真子进程、管道、`lock_test.go` 的锁和缓存）、
+`app/mcp_e2e_test.go`、`app/mcp_lock_test.go`（死锁、卡顿、中途停下、审批随这一轮撤掉、
+服务后来才连上、切换模式、旧内核）。
+
+两条端到端测试：`scripts/e2e-pipe.py`（假网关 + 真内核，测管道，含网关突然断开时进程被收掉；
+`NANO_TEST_KERNEL=` 可以换成 `-fsanitize=address` 编的内核查内存问题）、
+`scripts/e2e-mcp-remote.py`（真网关 + 真内核 + 最小的 MCP 服务，测 `machine=` 整条链路）。
 ## 关键设计（改之前先理解）
 
 1. **前缀缓存优先**：系统提示词和工具定义固定不变；历史只追加；时间、来源（`[2026-10-21 周三 15:08 · Telegram]`）、环境变化（`[系统] 在 X 上工作。工作目录：…`、替补说明）都追加在用户消息前面，**变了才追加**（Settings.EnvNote 记着上次说的）。历史太长时一次裁掉一大段（滞回），之后又只追加。任何会改动前面字节的改动都是缓存回归。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/host"
+	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/skills"
 )
@@ -107,6 +108,17 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 			go a.gatewayAdminCall(s.sid, r.from, raw, reply)
 		}
 		return
+	}
+	// MCP 工具：内核不认识 <服务>__<工具> 这种名字，会转回网关执行
+	if server, _, ok := mcp.SplitExposed(m.Name); ok && a.mcp != nil {
+		if _, exists := a.mcp.Server(server); exists {
+			if !a.isAdmin(r.from) {
+				reply(false, "只有管理员能用 MCP 工具")
+				return
+			}
+			a.mcpCall(s, m, reply)
+			return
+		}
 	}
 	mt := r.rt.find(m.Workspace)
 	if mt == nil {

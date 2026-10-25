@@ -150,6 +150,10 @@ static const na_tool_policy *find_tool(na_core *c, const char *name)
     return NULL;
 }
 
+/* 内核不认识的工具名交给网关执行：MCP 工具（<服务>__<工具>）是网关动态带来的，内核没有静态表。
+ * 网关认不出来会回一条错误结果，模型能看到。 */
+static const na_tool_policy FORWARDED = { "?", NA_TOOL_PUBLIC_READ, 30 * 60 * 1000 };
+
 typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
 
 /* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
@@ -346,6 +350,8 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->name = dupstr(in->name ? in->name : "");
         k->args = dupstr(in->args ? in->args : "{}");
         k->tool = find_tool(c, k->name);
+        /* 内核不认识的工具名（MCP 的 <服务>__<工具>）交给网关执行 */
+        if (!k->tool) k->tool = &FORWARDED;
         const char *why = NULL;
         bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
         k->elevated = in->elevated;
@@ -363,9 +369,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         if (history_delete && r->elevate)
             d = DECIDE_ASK; /* 删除历史在所有模式（包括只读）都要审批 */
 
-        if (!k->tool) {
-            result_err(c, r, k, "未知工具：%s", k->name);
-        } else if (!in->args_ok) {
+        if (!in->args_ok) {
             char *p = preview(k->args, ARGS_PREVIEW);
             result_err(c, r, k, "参数不是合法的 JSON 对象：%s", p);
             free(p);

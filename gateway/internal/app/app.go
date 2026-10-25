@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
@@ -22,6 +23,7 @@ import (
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
 	"nano-agent/gateway/internal/persona"
@@ -111,6 +113,9 @@ type App struct {
 	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
 	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
+	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
+	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
+	mcpStore          *mcp.Store                 // MCP 服务的配置（同一个文件的读写）
 	log               *slog.Logger
 	bus               *events.Bus
 	started           time.Time
@@ -234,19 +239,22 @@ type run struct {
 
 	streamed   bool // 回复正文已经通过 RunView 显示过了
 	start      time.Time
-	calls      int       // 这一轮请求了几次模型
-	usage      llm.Usage // 这一轮的累计用量
-	noTools    bool      // 访客没有工作目录：不给模型工具，只聊天
-	readOnly   bool      // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
-	elevate    bool      // 这个身份可以提权写工作目录外（管理员）
-	proactive  bool      // 群聊里自己凑上来的（上一次是 groupTick 触发的）
-	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
-	withImages bool      // 这一轮的模型能接收图片
-	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
-	tool       string    // 最近一次调的工具（/state 说它在干嘛）
+	calls      int             // 这一轮请求了几次模型
+	usage      llm.Usage       // 这一轮的累计用量
+	noTools    bool            // 访客没有工作目录：不给模型工具，只聊天
+	mode       string          // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
+	mcpOK      map[string]bool // 这一轮已经批准过的 MCP 服务（approval=per_turn）
+	readOnly   bool            // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
+	elevate    bool            // 这个身份可以提权写工作目录外（管理员）
+	proactive  bool            // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	inner      bool            // agent 自己的一轮（整理记忆、内心活动）
+	withImages bool            // 这一轮的模型能接收图片
+	usedTools  bool            // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
+	tool       string          // 最近一次调的工具（/state 说它在干嘛）
 
 	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
 	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）
+	images       map[string][]media.Attachment // 工具返回的图片（MCP）：要交给模型看的那份
 	fetching     int                           // 正在取的图片：取完之前不请求模型
 	modelWaiting bool                          // 内核要求请求模型的时候图片还没取完
 
@@ -334,7 +342,22 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	return a
 }
 
-func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
+func (a *App) SetHub(h *kernel.Hub) {
+	a.mu.Lock()
+	a.hub = h
+	a.mu.Unlock()
+	a.hubRef.Store(h)
+}
+
+// SetMCP 接上 MCP 服务（data/mcp.json）；nil 表示没有。
+func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
+	a.mu.Lock()
+	a.mcpStore, a.mcp = store, m
+	a.mu.Unlock()
+	if m != nil {
+		m.Warm(20 * time.Second) // 启动时后台连一遍，工具定义那边只读缓存
+	}
+}
 
 // Bus 是事件总线，网页界面从这里订阅。
 func (a *App) Bus() *events.Bus { return a.bus }
@@ -642,6 +665,11 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 }
 
 func (a *App) sessOf(sid string) *sess {
+	if sid == "" {
+		// 空 ID 不是会话。窗口还没接过线时（比如在那里发 /state）以前会在这里建一个 ID 为空的
+		// 会话，网页上就多出一个没标题的幽灵会话：给一个不记账的临时会话。
+		return &sess{}
+	}
 	s := a.sessions[sid]
 	if s == nil {
 		s = &sess{sid: sid}
@@ -867,7 +895,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
-		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{},
+		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
@@ -928,6 +956,7 @@ func (a *App) startRun(s *sess) {
 	if mode == proto.ModeFull {
 		r.full, mode = true, proto.ModeAuto
 	}
+	r.mode = mode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
@@ -1067,6 +1096,20 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.answer(c, "只有管理员能审批")
 		return
 	}
+	who := c.who
+	if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
+		who = c.name
+	}
+	// MCP 这类工具在网关这边执行：批不批交回调用方，不用告诉内核
+	if ap.resolve != nil {
+		res := ap.resolve
+		delete(a.approvals, n)
+		a.resolveApproval(ap, a.decided(ok, who))
+		a.publish(events.Event{T: "approval_done", SID: ap.sid, N: n})
+		a.answer(c, a.decided(ok, who))
+		res(ok)
+		return
+	}
 	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
 		who := c.who
 		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
@@ -1079,6 +1122,23 @@ func (a *App) decide(c in, arg string, ok bool) {
 // ---- 内核事件（kernel.Handler） ----
 
 func (a *App) KernelMsg(node string, m *proto.Msg) {
+	if m.T == proto.TPipeData || m.T == proto.TPipeClosed {
+		// MCP 管道的数据不过网关总锁：交给管道时可能要等 MCP 客户端读走（背压），
+		// 拿着总锁等就会把整个网关卡住
+		a.mu.Lock()
+		mg := a.mcp
+		a.mu.Unlock()
+		if mg != nil {
+			if p := mg.Pipes(); p != nil {
+				if m.T == proto.TPipeData {
+					p.Data(node, m.Pipe, m.Data)
+				} else {
+					p.Closed(node, m.Pipe, m.Exit, m.Detail)
+				}
+			}
+		}
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if m.T == proto.TLsResult || m.T == proto.TRunResult {
@@ -1118,6 +1178,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if cancel := s.run.execs[m.ID]; cancel != nil {
 			cancel()
 		}
+		a.cancelMCP(s.sid, m.ID)
 	case proto.TResult:
 		content := m.Content
 		if m.OK != nil && !*m.OK {
@@ -1125,7 +1186,9 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
 		if !a.seeImage(s, m) {
-			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Sent: s.run.sent[m.ID]}); err != nil {
+			// MCP 工具返回的图片：模型支持看图时一起发过去
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content,
+				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID]}); err != nil {
 				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 			}
 		}
@@ -1315,8 +1378,10 @@ func (a *App) generateModel(s *sess) {
 	r := s.run
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
-	if st.Prefix == nil || st.Prefix.System != system || st.Prefix.Ver != prefixVer {
-		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools, Ver: prefixVer}
+	// 群聊和房间不套用快照（见 contextParts），也就不写；其余会话权限一变就重写一次
+	perm := a.permSignature(s.sid)
+	if !a.isGroupSession(s.sid) && (st.Prefix == nil || st.Prefix.System != system || st.Prefix.Ver != prefixVer || st.Prefix.Perm != perm) {
+		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools, Ver: prefixVer, Perm: perm}
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存提示快照失败", "err", err)
 		}
