@@ -25,7 +25,7 @@ func TestMCPToolDispatch(t *testing.T) {
 	}
 	mgr := mcp.NewManager(st, nil)
 	defer mgr.Close()
-	e.a.SetMCP(mgr)
+	e.a.SetMCP(st, mgr)
 	e.a.mu.Lock()
 	s := e.a.sessOf(e.sid)
 	e.a.execTool("test", s, &proto.Msg{T: proto.TExec, SID: e.sid, ID: "c1", Name: "demo__echo", Args: json.RawMessage(`{"text":"hi"}`)})

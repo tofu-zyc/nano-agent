@@ -337,3 +337,34 @@ func ResultText(res *sdkmcp.CallToolResult) string {
 	}
 	return "（没有输出）"
 }
+
+// Status 是这个服务现在的连接状态（不主动连，没有连上就是 false）。
+func (m *Manager) Status(name string) (online bool, tools int) {
+	c := m.conn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cs != nil, len(c.tools)
+}
+
+// Reload 在配置改了以后调用：断掉所有连接，下次用到再按新配置连。
+func (m *Manager) Reload() {
+	m.Close()
+}
+
+// Test 强制现连一次（忽略退避），网页上的“测试”用它 —— 用户点测试就是想看现在能不能连上。
+func (m *Manager) Test(ctx context.Context, name string) ([]ToolInfo, error) {
+	s, ok := m.store.Get(name)
+	if !ok {
+		return nil, fmt.Errorf("没有 MCP 服务 %q", name)
+	}
+	c := m.conn(name)
+	c.mu.Lock()
+	c.retry = time.Time{}
+	c.fails = 0
+	c.mu.Unlock()
+	_, tools, err := m.session(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	return toolInfos(s, tools), nil
+}

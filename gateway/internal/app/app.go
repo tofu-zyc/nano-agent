@@ -113,6 +113,7 @@ type App struct {
 	roomRuns          map[string]*roomRun
 	hub               *kernel.Hub
 	mcp               *mcp.Manager // MCP 服务（data/mcp.json）
+	mcpStore          *mcp.Store   // MCP 服务的配置（同一个文件的读写）
 	log               *slog.Logger
 	bus               *events.Bus
 	started           time.Time
@@ -339,7 +340,11 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 func (a *App) SetHub(h *kernel.Hub) { a.mu.Lock(); a.hub = h; a.mu.Unlock() }
 
 // SetMCP 接上 MCP 服务（data/mcp.json）；nil 表示没有。
-func (a *App) SetMCP(m *mcp.Manager) { a.mu.Lock(); a.mcp = m; a.mu.Unlock() }
+func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
+	a.mu.Lock()
+	a.mcpStore, a.mcp = store, m
+	a.mu.Unlock()
+}
 
 // Bus 是事件总线，网页界面从这里订阅。
 func (a *App) Bus() *events.Bus { return a.bus }

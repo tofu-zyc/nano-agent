@@ -793,6 +793,7 @@ def check_living(page, url, nano):
         fail("内心会话出现在会话列里")
     check_workspace_unmount(page, url)
     check_new_session_agent(page, url)
+    check_mcp_panel(page, url)
     # 收拾：改回工具型、删掉测试记忆
     api(page, "PATCH", "/api/agents/default", {"style": "tool"})
     for pth in ["people/张三.md", "国庆去成都.md"]:
@@ -862,6 +863,34 @@ def check_new_session_agent(page, url):
     page.goto(url + "#/")
     page.wait_for_selector("g.node.gateway")
     page.wait_for_timeout(400)
+
+
+def check_mcp_panel(page, url):
+    """MCP 服务：网页上能加、能看到、“测试”会连一次并回显结果"""
+    st, _ = api(page, "POST", "/api/mcp", {"items": [{"name": "uicheck", "kind": "stdio",
+                                     "command": "/nonexistent-mcp", "args": [], "enabled": True}]})
+    if st != 200:
+        return fail(f"加 MCP 服务失败：HTTP {st}")
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(600)
+    page.click("g.node.gateway")
+    page.wait_for_timeout(700)
+    txt = page.inner_text("body")
+    if "MCP 服务" not in txt or "uicheck" not in txt:
+        api(page, "POST", "/api/mcp", {"items": []})
+        return fail("网关面板里看不到刚加的 MCP 服务")
+    page.click('button:has-text("测试")')
+    page.wait_for_timeout(2500)
+    txt = page.inner_text("body")
+    if "uicheck：" not in txt:
+        api(page, "POST", "/api/mcp", {"items": []})
+        return fail("点测试没有回显结果")
+    ok("MCP 服务能在网页里添加、看到，测试会连一次")
+    api(page, "POST", "/api/mcp", {"items": []})
+    page.reload()
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(300)
 
 if __name__ == "__main__":
     main()

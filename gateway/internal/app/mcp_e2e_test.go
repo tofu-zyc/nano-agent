@@ -67,7 +67,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	}
 	mgr := mcp.NewManager(st, nil)
 	defer mgr.Close()
-	e.a.SetMCP(mgr)
+	e.a.SetMCP(st, mgr)
 
 	// 管理员发一条消息：模型请求里的工具定义要带上 helper__echo
 	e.say("你好")

@@ -212,7 +212,7 @@ func main() {
 		os.Exit(1)
 	}
 	mcpMgr := mcp.NewManager(mcpStore, log)
-	a.SetMCP(mcpMgr)
+	a.SetMCP(mcpStore, mcpMgr)
 	defer mcpMgr.Close()
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
