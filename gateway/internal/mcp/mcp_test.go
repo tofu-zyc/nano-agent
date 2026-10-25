@@ -68,7 +68,8 @@ func TestStoreRejectsBadConfig(t *testing.T) {
 		{Name: "ok", URL: "http://x", Command: "y"},           // 两个都给
 		{Name: "ok", Command: "x", Approval: "sometimes"},     // 审批方式不对
 		{Name: "ok", Command: "x", Approval: ApprovalPerTurn}, // per_turn 还没接上，明确拒绝
-		{Name: "ok", Command: "x", Machine: "windows-pc"},     // 现在只支持本机
+		{Name: "ok", Machine: "windows-pc"},                   // 挂别的机器要给 command
+		{Name: "ok", URL: "http://x", Machine: "windows-pc"},  // 挂别的机器不能是 url
 	}
 	for _, s := range bad {
 		if err := st.Save([]Server{s}); err == nil {

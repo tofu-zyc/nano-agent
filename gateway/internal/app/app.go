@@ -1114,6 +1114,18 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.hostReply(node, m)
 		return
 	}
+	if m.T == proto.TPipeData || m.T == proto.TPipeClosed {
+		if a.mcp != nil {
+			if p := a.mcp.Pipes(); p != nil {
+				if m.T == proto.TPipeData {
+					p.Data(node, m.Pipe, m.Data)
+				} else {
+					p.Closed(node, m.Pipe, m.Exit, m.Detail)
+				}
+			}
+		}
+		return
+	}
 	if m.T == proto.TTools {
 		a.toolsChanged(node, m)
 		return

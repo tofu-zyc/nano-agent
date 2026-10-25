@@ -59,8 +59,11 @@ func Normalize(s Server) (Server, error) {
 	s.URL = strings.TrimSpace(s.URL)
 	s.Command = strings.TrimSpace(s.Command)
 	s.Machine = strings.TrimSpace(s.Machine)
-	if s.Machine != "" && s.Machine != "gateway" {
-		return s, fmt.Errorf("现在只能挂在网关本机（machine 留空或写 gateway），%q 要等内核透传", s.Machine)
+	if s.Machine != "" && s.Machine != "gateway" && s.Command == "" {
+		return s, errors.New("挂在别的电脑上要填 command（在那台机器上跑什么）")
+	}
+	if s.Machine != "" && s.Machine != "gateway" && s.URL != "" {
+		return s, errors.New("挂在别的电脑上的是本机进程，不能同时给 url")
 	}
 	if s.URL != "" && s.Command != "" {
 		return s, errors.New("URL 和 command 只能给一个")

@@ -68,6 +68,7 @@ type Manager struct {
 	idle   time.Duration
 	now    func() time.Time
 	dial   func(Server) (sdkmcp.Transport, error)
+	pipes  *Pipes // 透传到别的机器上的管道（没接就是 nil）
 }
 
 // conn 是一个服务的连接状态（自己一把锁，连接时不用占着 Manager 的锁）。
@@ -85,15 +86,53 @@ func NewManager(store *Store, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{
+	m := &Manager{
 		store:  store,
 		log:    log,
 		client: sdkmcp.NewClient(&sdkmcp.Implementation{Name: "nano-agent", Version: "v1"}, nil),
 		conns:  map[string]*conn{},
 		idle:   10 * time.Minute,
 		now:    time.Now,
-		dial:   DefaultTransport,
 	}
+	m.dial = m.defaultTransport
+	return m
+}
+
+// SetLink 接上「把 stdio 送到某台机器」的通道；nil 表示不支持透传。
+func (m *Manager) SetLink(l Link) {
+	m.mu.Lock()
+	if l == nil {
+		m.pipes = nil
+	} else {
+		m.pipes = NewPipes(l)
+	}
+	m.mu.Unlock()
+}
+
+// Pipes 是管道表（网关收到 pipe_data / pipe_closed 时交给它）。
+func (m *Manager) Pipes() *Pipes {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pipes
+}
+
+// defaultTransport：指定了机器就走内核透传，否则本机 stdio / 远程 HTTP。
+func (m *Manager) defaultTransport(s Server) (sdkmcp.Transport, error) {
+	if s.Machine != "" && s.Machine != "gateway" {
+		m.mu.Lock()
+		pipes := m.pipes
+		m.mu.Unlock()
+		if pipes == nil {
+			return nil, fmt.Errorf("MCP 透传还没接上，%s 上的服务现在用不了", s.Machine)
+		}
+		env, err := s.EnvFor()
+		if err != nil {
+			return nil, err
+		}
+		return &PipeTransport{Pipes: pipes, Node: s.Machine,
+			Argv: append([]string{s.Command}, s.Args...), Env: env, Cwd: s.Cwd}, nil
+	}
+	return DefaultTransport(s)
 }
 
 func (m *Manager) conn(name string) *conn {

@@ -213,6 +213,8 @@ func main() {
 	}
 	mcpMgr := mcp.NewManager(mcpStore, log)
 	a.SetMCP(mcpStore, mcpMgr)
+	// 透传：MCP 进程可以挂到任何一台在线内核的机器上跑（协议 v10）
+	mcpMgr.SetLink(app.MCPLink(a))
 	defer mcpMgr.Close()
 	hub := kernel.NewHub(cfg.Kernel.Token, a, log)
 	a.SetHub(hub)
