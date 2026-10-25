@@ -288,6 +288,7 @@ type outItem struct {
 	chatID  string
 	text    string
 	replyTo string
+	md      bool // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
 }
 
 func New(ctx context.Context, cfg *config.Config, client llm.Client, store *session.Store, p *persona.Loader, log *slog.Logger) *App {
@@ -344,7 +345,7 @@ func (a *App) AddChannel(ch channel.Channel) {
 	go func() {
 		for it := range q {
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
-			if err := it.ch.Send(ctx, it.chatID, it.text, it.replyTo); err != nil {
+			if err := sendText(ctx, it.ch, it.chatID, it.text, it.replyTo, it.md); err != nil {
 				a.log.Warn("发送消息失败", "channel", name, "chat", it.chatID, "err", err)
 			}
 			cancel()
@@ -630,17 +631,31 @@ func (a *App) allowed(key string) bool {
 }
 
 // deliver 把一条消息发到一个窗口。调用方持有锁。
-func (a *App) deliver(ep endpoint, text, replyTo string) {
+func (a *App) deliver(ep endpoint, text, replyTo string) { a.enqueue(ep, outItem{text: text, replyTo: replyTo}) }
+
+// deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
+func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
+
+func (a *App) enqueue(ep endpoint, it outItem) {
 	ch := a.chans[ep.ch]
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return
 	}
+	it.ch, it.chatID = ch, ep.chat
 	select {
-	case a.outboxes[ep.ch] <- outItem{ch: ch, chatID: ep.chat, text: text, replyTo: replyTo}:
+	case a.outboxes[ep.ch] <- it:
 	default:
 		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
 	}
+}
+
+// sendText 发一条消息；md 时渠道能渲染 Markdown 就按 Markdown 发。
+func sendText(ctx context.Context, ch channel.Channel, chat, text, replyTo string, md bool) error {
+	if m, ok := ch.(channel.Markdowner); ok && md {
+		return m.SendMarkdown(ctx, chat, text, replyTo)
+	}
+	return ch.Send(ctx, chat, text, replyTo)
 }
 
 // tell 回复一个窗口；sid 不为空时网页上也显示在这个会话里。调用方持有锁。
@@ -844,6 +859,12 @@ func (a *App) startRun(s *sess) {
 		r.inner, r.outs = true, nil // 不对任何窗口说话；结果由 innerDone 处理
 	} else if r.scheduled == nil {
 		r.stopTyping = a.startTyping(head.ep)
+		// 没有流式卡片的私聊（拟人型）：在这条消息上显示“正在处理”，处理完撤掉
+		last := batch[len(batch)-1].m.MsgID // 连着发了几条：贴在最后一条上
+		if b, ok := a.chans[head.ep.ch].(channel.Busy); ok && !group && r.outs[0].view == nil && last != "" {
+			stop, done := r.stopTyping, b.Busy(head.ep.chat, last)
+			r.stopTyping = func() { stop(); done() }
+		}
 	} else {
 		r.outs = nil
 		for _, key := range r.scheduled.Deliver {
@@ -1200,6 +1221,10 @@ func (a *App) finish(s *sess, status, detail string) {
 				a.sendParts(o.ep, parts)
 				continue
 			}
+		}
+		if body != "" && (o.view == nil || !r.streamed) {
+			a.deliverReply(o.ep, text)
+			continue
 		}
 		a.deliver(o.ep, text, "")
 	}

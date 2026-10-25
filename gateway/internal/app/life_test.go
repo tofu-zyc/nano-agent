@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,5 +311,63 @@ func TestLifeCreateAndLabels(t *testing.T) {
 	}
 	if !strings.Contains(note, "网络搜索没开") || strings.Contains(note, "（agent:小纳）：") {
 		t.Fatalf("醒来说明：%q", note)
+	}
+}
+
+// mdCh 能按 Markdown 发、能显示“正在处理”的渠道（像飞书）
+type mdCh struct {
+	fakeCh
+	mu   sync.Mutex
+	md   []string
+	busy []string // "on:<消息>" / "off:<消息>"
+}
+
+func (c *mdCh) SendMarkdown(_ context.Context, _, text, _ string) error {
+	c.mu.Lock()
+	c.md = append(c.md, text)
+	c.mu.Unlock()
+	c.sent <- text
+	return nil
+}
+
+func (c *mdCh) Busy(_, msgID string) func() {
+	c.mu.Lock()
+	c.busy = append(c.busy, "on:"+msgID)
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		c.busy = append(c.busy, "off:"+msgID)
+		c.mu.Unlock()
+	}
+}
+
+func (c *mdCh) state() ([]string, []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.md), slices.Clone(c.busy)
+}
+
+// 拟人型私聊：回复正文按 Markdown 发；处理时在用户那条消息上显示“正在处理”，回完撤掉
+func TestLifeDMMarkdownAndBusy(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	ch := &mdCh{fakeCh: fakeCh{name: "md", sent: make(chan string, 100)}}
+	e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, "md:u1")
+	e.a.AddChannel(ch)
+	e.a.OnMessage(ch, channel.Message{ChatID: "c1", SenderID: "u1", SenderName: "张三", Text: "你好", MsgID: "om_1", Mentioned: true})
+	in := e.k.expect(proto.TInput)
+	waitFor(t, func() bool { _, b := ch.state(); return len(b) == 1 })
+	if _, b := ch.state(); b[0] != "on:om_1" {
+		t.Fatalf("busy: %v", b)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	ch.wait(t, "收到：")
+	waitFor(t, func() bool { _, b := ch.state(); return len(b) == 2 })
+	md, b := ch.state()
+	if b[1] != "off:om_1" || len(md) == 0 || !strings.Contains(md[0], "收到：") {
+		t.Fatalf("md=%v busy=%v", md, b)
 	}
 }

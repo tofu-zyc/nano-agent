@@ -318,7 +318,7 @@ func (a *App) sendParts(ep endpoint, parts []string) {
 				return
 			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
-			if err := ch.Send(ctx, ep.chat, p, ""); err != nil {
+			if err := sendText(ctx, ch, ep.chat, p, "", true); err != nil {
 				a.log.Warn("消息发送失败", "channel", ep.ch, "err", err)
 			}
 			cancel()

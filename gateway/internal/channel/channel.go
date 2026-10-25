@@ -63,6 +63,18 @@ type Typer interface {
 	Typing(ctx context.Context, chatID string) error
 }
 
+// Markdowner 是可选能力：agent 的回复正文按 Markdown 渲染发出去（飞书：富文本消息里的 md）。
+// 没有这个能力的渠道用 Send 发原文。系统说明、命令的回答仍然用 Send。
+type Markdowner interface {
+	SendMarkdown(ctx context.Context, chatID, text, replyTo string) error
+}
+
+// Busy 是可选能力：处理一条消息的时候在那条消息上显示“正在处理”（飞书没有“正在输入”，
+// 贴一个“敲键盘”表情），返回的函数撤掉它。不能阻塞：真正的请求在后台发。
+type Busy interface {
+	Busy(chatID, msgID string) (done func())
+}
+
 // Streamer 是可选能力：边生成边显示。每一轮处理打开一个 RunView，直到这一轮结束；
 // 回复正文已经通过 RunView 显示过，就不会再用 Send 发一遍。
 type Streamer interface {
