@@ -1295,6 +1295,7 @@ int main(int argc, char **argv)
     };
     k.core = na_core_new(&cc);
     pipes_init(&k.pipes);
+    pipes_set_wake(&k.pipes, &g_wake);
     /* 执行器的输出是一行 JSON，内容转义后可能比原文长不少，留足余量 */
     k.runner.out_cap = k.conf.max_output * 6 + 4096;
     k.runner.wake = &g_wake;

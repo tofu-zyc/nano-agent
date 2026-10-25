@@ -21,21 +21,24 @@ ifeq ($(NA_PLATFORM),windows)
 PLAT := src/plat_win.c
 SB   := src/sandbox_win.c
 RUNNER := src/runner_win.c
+PIPE   := src/pipe_win.c
 else ifeq ($(NA_PLATFORM),macos)
 CPPFLAGS += -D_DARWIN_C_SOURCE
 PLAT := src/plat_posix.c
 SB   := src/sandbox_stub.c
 RUNNER := src/runner.c
+PIPE   :=
 else
 PLAT := src/plat_posix.c
 SB   := src/sandbox.c
 RUNNER := src/runner.c
+PIPE   :=
 endif
 
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c src/util.c $(PLAT)
+SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
-KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/util.c src/plat_win.c
+KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
 MAC_SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
 MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o

@@ -19,6 +19,7 @@ test: all
 	./scripts/e2e.sh
 	python3 scripts/e2e-control.py
 	python3 scripts/e2e-pipe.py
+	python3 scripts/e2e-pipe-win.py
 	python3 scripts/e2e-mcp-remote.py
 	@if python3 -c "import playwright" 2>/dev/null; then python3 scripts/check-web-ui.py; \
 	else echo "（没有 playwright，跳过网页界面检查：pip install playwright && python3 -m playwright install chromium-headless-shell）"; fi

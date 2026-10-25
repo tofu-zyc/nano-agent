@@ -86,7 +86,7 @@ class FakeGateway(threading.Thread):
             if hello.get("token") == PAIRED:
                 self.hellos.append(hello)
                 self.hello_times.append(time.time())
-                f.write((json.dumps({"t": "welcome", "v": 9}) + "\n").encode())
+                f.write((json.dumps({"t": "welcome", "v": 10}) + "\n").encode())
                 f.flush()
                 if self.update_msg:
                     msg, self.update_msg = self.update_msg, None

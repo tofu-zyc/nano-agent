@@ -1,4 +1,4 @@
-/* pipe.c —— 管道透传的实现（POSIX 用 poll，Windows 暂时不支持） */
+/* pipe.c —— 管道透传：共用部分 + POSIX 实现（Windows 见 pipe_win.c） */
 #include "pipe.h"
 
 #include "util.h"
@@ -7,30 +7,23 @@
 #include <stdio.h>
 #include <string.h>
 
-#if !NA_WINDOWS
+/* ---- 两边共用：队列 ---- */
 
-#include <fcntl.h>
-#include <signal.h>
-#include <stdlib.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#define READ_CHUNK 65536
-
-void pipes_init(na_pipes *ps)
+na_pipe_t *find_pipe(na_pipes *ps, const char *id)
 {
-    memset(ps, 0, sizeof *ps);
-    ps->close_grace_ms = 3000;
-}
-
-static na_pipe_t *find(na_pipes *ps, const char *id)
-{
+    if (!id) return NULL;
     for (na_pipe_t *p = ps->list; p; p = p->next)
         if (!strcmp(p->id, id)) return p;
     return NULL;
 }
 
-/* 往队列里放一条（qhead 前面已经发掉的格子复用） */
+#if !NA_WINDOWS
+void pipes_lock(na_pipes *ps) { (void)ps; }
+void pipes_unlock(na_pipes *ps) { (void)ps; }
+void pipes_set_wake(na_pipes *ps, na_wake *w) { (void)ps; (void)w; }
+#endif
+
+/* 往队列里放一条（发掉的格子复用） */
 static na_pipe_msg *slot(na_pipes *ps)
 {
     if (ps->qhead > 0 && ps->qn == ps->qcap) {
@@ -52,21 +45,56 @@ static na_pipe_msg *slot(na_pipes *ps)
     return m;
 }
 
-static void queue_line(na_pipes *ps, na_pipe_t *p, const char *line, size_t n)
+void pipes_queue_line(na_pipes *ps, const char *id, const char *line, size_t n)
 {
+    pipes_lock(ps);
     na_pipe_msg *m = slot(ps);
-    m->id = xstrdup(p->id);
-    char *s = xcalloc(1, n + 1);
-    memcpy(s, line, n);
+    m->id = xstrdup(id);
+    char *s = xcalloc(n + 1, 1);
+    if (n) memcpy(s, line, n);
     m->data = s;
+    pipes_unlock(ps);
 }
 
-static void queue_closed(na_pipes *ps, na_pipe_t *p, int code, const char *detail)
+void pipes_queue_closed(na_pipes *ps, const char *id, int code, const char *detail)
 {
+    pipes_lock(ps);
     na_pipe_msg *m = slot(ps);
-    m->id = xstrdup(p->id);
+    m->id = xstrdup(id);
     m->exit = code;
     m->detail = xstrdup(detail ? detail : "");
+    pipes_unlock(ps);
+}
+
+bool pipes_take(na_pipes *ps, na_pipe_msg *out)
+{
+    pipes_lock(ps);
+    if (ps->qhead >= ps->qn) {
+        ps->qhead = ps->qn = 0;
+        pipes_unlock(ps);
+        return false;
+    }
+    *out = ps->q[ps->qhead];
+    ps->q[ps->qhead].id = ps->q[ps->qhead].data = ps->q[ps->qhead].detail = NULL;
+    ps->qhead++;
+    pipes_unlock(ps);
+    return true;
+}
+
+#if !NA_WINDOWS
+
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#define READ_CHUNK 65536
+
+void pipes_init(na_pipes *ps)
+{
+    memset(ps, 0, sizeof *ps);
+    ps->close_grace_ms = 3000;
 }
 
 int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *const env[], const char *cwd,
@@ -88,7 +116,6 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
         return -1;
     }
     if (pid == 0) {
-        /* 子进程：接好三个标准流，设置环境变量，切目录，然后 exec */
         dup2(in[0], 0);
         dup2(out[1], 1);
         int devnull = open("/dev/null", O_WRONLY);
@@ -117,11 +144,11 @@ int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *con
 
 int pipes_write(na_pipes *ps, const char *id, const char *data)
 {
-    na_pipe_t *p = find(ps, id);
+    na_pipe_t *p = find_pipe(ps, id);
     if (!p || p->fd_in < 0) return -1;
     size_t n = strlen(data ? data : "");
-    char *line = xcalloc(1, n + 2);
-    memcpy(line, data ? data : "", n);
+    char *line = xcalloc(n + 2, 1);
+    if (n) memcpy(line, data, n);
     line[n] = '\n';
     size_t off = 0, total = n + 1;
     int rc = 0;
@@ -138,7 +165,7 @@ int pipes_write(na_pipes *ps, const char *id, const char *data)
 
 void pipes_close(na_pipes *ps, const char *id)
 {
-    na_pipe_t *p = find(ps, id);
+    na_pipe_t *p = find_pipe(ps, id);
     if (!p) return;
     if (p->fd_in >= 0) {
         close(p->fd_in);
@@ -160,7 +187,6 @@ size_t pipes_pollfds(na_pipes *ps, na_pollfd *pfds, na_pipe_t **refs, size_t max
     return n;
 }
 
-/* 从一条管道里读干净，切出完整的行 */
 static void drain_pipe(na_pipes *ps, na_pipe_t *p)
 {
     char tmp[READ_CHUNK];
@@ -180,7 +206,7 @@ static void drain_pipe(na_pipes *ps, na_pipe_t *p)
                 if (p->buf[i] != '\n') continue;
                 size_t len = i - start;
                 if (len > 0 && p->buf[start + len - 1] == '\r') len--;
-                queue_line(ps, p, p->buf + start, len);
+                pipes_queue_line(ps, p->id, p->buf + start, len);
                 start = i + 1;
             }
             if (start) {
@@ -205,14 +231,12 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n,
         if (!pfds[i].revents) continue;
         if (refs[i] && refs[i]->fd_out >= 0) drain_pipe(ps, refs[i]);
     }
-    /* 收尸 + 关了 stdin 迟迟不退的，先 SIGTERM 再 SIGKILL */
     for (na_pipe_t *p = ps->list; p; p = p->next) {
         if (p->reported) continue;
         if (p->pid > 0) {
             int status = 0;
             pid_t got = waitpid((pid_t)p->pid, &status, WNOHANG);
             if (got < 0 && errno == ECHILD) {
-                /* 已经被别处收走了（执行器用的是 waitpid(-1)）：当作已退出 */
                 p->reaped = true;
                 p->pid = -1;
                 p->code = 0;
@@ -228,7 +252,7 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n,
         }
         if (p->reaped) {
             if (p->fd_out >= 0) drain_pipe(ps, p);
-            queue_closed(ps, p, p->code, "");
+            pipes_queue_closed(ps, p->id, p->code, "");
             p->reported = true;
             if (p->fd_in >= 0) { close(p->fd_in); p->fd_in = -1; }
             if (p->fd_out >= 0) { close(p->fd_out); p->fd_out = -1; }
@@ -236,25 +260,10 @@ void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n,
         }
         if (p->closing && p->pid > 0) {
             int64_t waited = now - p->close_at;
-            if (waited > ps->close_grace_ms) {
-                kill((pid_t)p->pid, SIGKILL);
-            } else if (waited > ps->close_grace_ms / 2) {
-                kill((pid_t)p->pid, SIGTERM);
-            }
+            if (waited > ps->close_grace_ms) kill((pid_t)p->pid, SIGKILL);
+            else if (waited > ps->close_grace_ms / 2) kill((pid_t)p->pid, SIGTERM);
         }
     }
-}
-
-bool pipes_take(na_pipes *ps, na_pipe_msg *out)
-{
-    if (ps->qhead >= ps->qn) {
-        ps->qhead = ps->qn = 0;
-        return false;
-    }
-    *out = ps->q[ps->qhead];
-    ps->q[ps->qhead].id = ps->q[ps->qhead].data = ps->q[ps->qhead].detail = NULL;
-    ps->qhead++;
-    return true;
 }
 
 void pipes_shutdown(na_pipes *ps)
@@ -272,18 +281,4 @@ void pipes_shutdown(na_pipes *ps)
     }
 }
 
-#else /* NA_WINDOWS */
-
-void pipes_init(na_pipes *ps) { memset(ps, 0, sizeof *ps); }
-
-int pipes_open(na_pipes *ps, const char *id, char *const argv[], const char *const env[], const char *cwd,
-               char *err, size_t errlen)
-  { (void)ps; (void)id; (void)argv; (void)env; (void)cwd; snprintf(err, errlen, "这台机器（Windows）的内核还不支持 MCP 透传"); return -1; }
-int pipes_write(na_pipes *ps, const char *id, const char *data) { (void)ps; (void)id; (void)data; return -1; }
-void pipes_close(na_pipes *ps, const char *id) { (void)ps; (void)id; }
-size_t pipes_pollfds(na_pipes *ps, na_pollfd *pfds, na_pipe_t **refs, size_t max) { (void)ps; (void)pfds; (void)refs; (void)max; return 0; }
-void pipes_poll(na_pipes *ps, const na_pollfd *pfds, na_pipe_t **refs, size_t n, int64_t now) { (void)ps; (void)pfds; (void)refs; (void)n; (void)now; }
-bool pipes_take(na_pipes *ps, na_pipe_msg *out) { (void)ps; (void)out; return false; }
-void pipes_shutdown(na_pipes *ps) { (void)ps; }
-
-#endif
+#endif /* !NA_WINDOWS */
