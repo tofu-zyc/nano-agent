@@ -1,6 +1,6 @@
 # v0.7：QQ、微信、放行模式、飞书拟人型回复、/state
 
-分支 `dev/v0.7`。这份文档同时是交接文档：用户要求、调研结论、做了什么、怎么测、还差什么。
+分支 `dev/v0.7`，2026-10-25 合并回 main，发布 v0.7.0。这份文档同时是交接文档：用户要求、调研结论、做了什么、怎么测、还差什么。
 
 ## 用户的要求（2026-10-24）
 
@@ -75,7 +75,7 @@
 - 渠道：飞书（上传图片 / 文件，opus 发语音，其余发文件；扫码新建的应用多申请 `im:resource`，**老应用要在开放平台补开 `im:resource` 并发布**）、Telegram（photo / animation / voice / audio / video / document）、QQ（先上传 `/files` 再发 msg_type 7，只支持图片、mp4、silk 语音）、微信（AES-128-ECB 加密传 CDN，图片 / 视频 / 文件消息）。
 - 拟人守则加了一句：想发表情包就用 SendFile，别用文字描述。`prefixVer` 升到 2（旧会话工具快照作废一次）。
 - 测试：`TestReadImageShownToModel`、`TestSendFileSendsToChat`、`TestTelegramSendMedia`、`TestQQSendMedia`、`TestWeixinSendMedia`、`kernel/tests/test_exec.py` 的 `t_fetch`、`kernel/tests/test_exec_win.py` 的 `t_fetch`、`scripts/e2e.sh` 的 SendFile 一步（2026-10-25 跑过了，见文末「验证过」）。
-- **还没做**：音频、视频格式转换（QQ 语音要 silk、飞书语音要 opus）；合并 main、发 v0.7.0（等用户确认）。
+- **还没做**：音频、视频格式转换（QQ 语音要 silk、飞书语音要 opus）。
 
 ## 没做、要注意的
 
