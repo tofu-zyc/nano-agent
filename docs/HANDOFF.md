@@ -24,6 +24,55 @@
   `@<agent>/`），聊天窗口显示成「飞书 · 名字」；新任务默认不推送。`scripts/check-web-ui.py` 补了点选、只运行一次、重新打开认得出、
   1280 和 390 宽不重叠的检查。
 
+### dev/v0.7.2 其余改动和交接（2026-10-25，额度到上限时写的，接手先读这一节）
+
+**已经做完（都在 `dev/v0.7.2` 上，没合并 main、没发版）**：
+
+1. 3d0ac02（CI 三平台全绿）：定时任务 `[不回复]` 不推送、同样的失败只推一次、编辑任务弹窗（见上一节）。
+2. 下一个提交（MCP 和 AI 配置）：
+   - **MCP 节点**：拓扑图「能力和内核」一列加了「MCP 服务」节点（在技能和模型之间，上面三个节点各上移一格，画布最小高度 900→1000）。
+     面板 `web/src/components/panels/MCPPanel.svelte`（从网关面板整块挪过来，网关面板里已删掉），补了：在哪台机器、那台机器在不在线、
+     展开看工具、只开放工具（白名单）字段、不在线的机器在下拉里也保留。挂在别的电脑上的服务从 MCP 节点连线到那台机器；
+     机器面板里列「这台机器上跑的 MCP 服务」。⌘K 能搜到。颜色 `--c-mcp`，图标 `plug`。
+   - **AI 能配 MCP**：`Gateway {"what":"mcp"}`（配置、在线、上次列到的工具和说明、能挂服务的在线电脑）；`GatewayAdmin` 的
+     `mcp_save`（没写的字段保持原样；改名用 `id` 写旧名，密钥跟着走；env 值写空表示沿用）、`mcp_delete`、`mcp_test`。
+     代码在 `app/mcp_admin.go`。审批卡上 env 的值打星；`knownSecrets` 加了 MCP 的 env 值（工具结果、日志里出现就脱敏）。
+     技能 `skills/mcp/SKILL.md`。README 加了「MCP 服务」一节。工具定义变了，`prefixVer` 2→3（升级后会话的工具快照重建一次）。
+   - **顺手修的老 bug**：`gatewayArgs` 里 `BaseURL`、`APIKey`、`IdentityFile`、`ContextWindow`、`MaxTokens`、`MaxHistory`、`AutoConnect`、
+     `ThinkingLevels` 没写 json 标签，参数表里是 `base_url` 这种带下划线的名字，Go 对不上——**AI 在聊天里配模型接口时地址和 key
+     一直是丢的**。全部字段写明了标签，`TestGatewayAdminSchemaFields` 保证参数表里每个参数都能收到。
+   - MCP 连上、断开时 `Manager.OnChange` → 发 `mcp` 事件 → 网页重新读概况（节点上的在线数跟着变）。`MCPInfo` 多了 `tool_names`。
+   - 测试：`app/mcp_admin_test.go`（参数表对齐、模型接口地址和 key 存上、AI 加查测改改名删 MCP 且不回显密钥）；
+     `check-web-ui.py` 改成点 MCP 节点。已跑：`go test -race ./internal/app ./internal/mcp`、`npm run check`、`check-web-ui.py` 0 failures。
+     **还没跑**：完整的 `scripts/test-isolated.sh`、`e2e-pipe-win.py`、CI。
+
+**用户的原则**（2026-10-25 明确说的）：**网页上用户能配置的，AI 在聊天里也要能辅助配置**（工具 + 技能）。反过来 AI 能配的，网页也该能配。
+
+**接下来要做**：
+
+1. **核对“网页能配的 AI 也能配”**。网页所有写接口见 `web/server.go` 里 POST/PATCH/PUT/DELETE 的路由，逐个对照 AI 工具
+   （`Gateway` / `GatewayAdmin` / `Schedule` / `Message` / `Knowledge` / 聊天命令）。已经有的：模型、SSH、工作目录、配对、设置项、
+   agent（`agent_save` / `agent_delete` / `bot_bind`）、定时任务、MCP、历史删除。**很可能缺的，要逐个确认**：群（房间）的建、改、删
+   （`/api/rooms`）；人格文件（`/api/personas`、`/api/agents/{id}/persona`——看 `agent_save` 能不能改人格）；窗口设为管理员、
+   接到哪个会话（`/api/endpoints/{key}`、`/api/endpoints/{key}/admin`）；会话的新建、改名、改模式/模型、删除、重置
+   （`/api/sessions`，部分有聊天命令）；机器人的改名、删除（`/api/bots`；扫码创建 AI 做不了，可以告诉用户去网页）；
+   电脑接入地址（`PUT /api/devices/listener`）；长期记忆条目的改删（`/api/agents/{id}/memory/*`，agent 自己有 `Knowledge`）；
+   叫醒、做梦（有 `/wake`、`/sleep` 命令）。缺的加进 `GatewayAdmin`（参数加进 `gatewayAdminSchema` 时 json 标签一定写，测试会查），
+   再在对应技能里写怎么用。
+2. **发 v0.7.2**：跑完整测试（`scripts/test-isolated.sh`、`python3 scripts/check-web-ui.py`、`python3 scripts/e2e-pipe-win.py`），
+   推上去等 CI，`--no-ff` 合并到 main，更新本文件开头的“最后更新”，打 `v0.7.2` 标签（发布流程会先跑 CI 再打包），
+   再用 `gh release edit v0.7.2 --notes-file` 换成中文说明（格式照 v0.7.1 的 Release）。说明里要写：定时任务 `[不回复]` 不推送、
+   编辑任务点选时间和只运行一次、MCP 节点挪到拓扑图、AI 能在聊天里配 MCP、修了 AI 配模型接口丢地址和 key、
+   `prefixVer` 3 导致每个会话缓存少命中一次。
+3. **用户那台网关**（`linux-pc`，0.7.1）：任务「B站私信值守」每 3 分钟往飞书推一条「[不回复]」，升到 0.7.2 才停；
+   着急的话让用户在网页的定时任务里把飞书那个投递窗口取消勾选。
+   连那台机器：非交互 shell 里 `ssh` 被 `.bashrc` 的包装函数劫持（`_linux_pc_ssh` 找不到），用 `command ssh linux-pc …`。
+   **只读查看**，用户没说不要改他的环境。
+4. 没做、等用户定的：
+   - 麦麦那种数值：建议先做“熟悉度”（按聊天次数、最近一次算）和“精力”（按时间和预算算），心情只做显示；用户还没回复要不要做。
+   - SendFile 发音频：用户说已经支持了，先不管。
+   - MCP 连远程地址（HTTP）这条路**没有测试**；也没接过真正的 computer use 服务。
+
 ## v0.7.0 发布后的修复
 
 - **新 agent 的窗口「接到主会话」接到了默认 agent 上**：用户新建了一个 agent、把 Telegram / 飞书 / QQ / 微信都绑给它，结果每个会话只挂着一个平台。两半原因：① 窗口接哪个会话，看说话的人**是不是管理员**（不是管理员就各自一个会话，会话 ID 就是窗口 ID）；② 网页里的「设为管理员」和「接到主会话」把目标**写死成全局 `main`**（`WelcomeAdmin`、渠道面板），于是新 agent 的窗口被搬到默认 agent 上，下一条消息又被搬回来 —— 看起来就是“怎么接都接不到一起”。

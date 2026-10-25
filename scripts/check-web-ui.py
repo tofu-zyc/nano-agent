@@ -912,21 +912,24 @@ def check_mcp_panel(page, url):
     if st != 200:
         return fail(f"加 MCP 服务失败：HTTP {st}")
     page.reload()
-    page.wait_for_selector("g.node.gateway")
+    page.wait_for_selector("g.node.mcp")
     page.wait_for_timeout(600)
-    page.click("g.node.gateway")
+    # MCP 是「能力和内核」那一列里的一个节点（以前藏在网关面板里，找不到）
+    if "1 个服务" not in (page.locator("g.node.mcp").text_content() or ""):
+        fail("拓扑图上的 MCP 节点没显示服务数")
+    page.click("g.node.mcp")
     page.wait_for_timeout(700)
-    txt = page.inner_text("body")
+    txt = page.inner_text(".insp")
     if "MCP 服务" not in txt or "uicheck" not in txt:
         api(page, "POST", "/api/mcp", {"items": []})
-        return fail("网关面板里看不到刚加的 MCP 服务")
-    page.click('button:has-text("测试")')
+        return fail("MCP 节点的面板里看不到刚加的服务")
+    page.click('.insp button.btn:has-text("测试")')
     page.wait_for_timeout(2500)
     txt = page.inner_text("body")
     if "uicheck：" not in txt:
         api(page, "POST", "/api/mcp", {"items": []})
         return fail("点测试没有回显结果")
-    ok("MCP 服务能在网页里添加、看到，测试会连一次")
+    ok("MCP 服务能在网页里添加、看到，测试会连一次（拓扑图上的 MCP 节点）")
     api(page, "POST", "/api/mcp", {"items": []})
     page.reload()
     page.wait_for_selector("g.node.gateway")

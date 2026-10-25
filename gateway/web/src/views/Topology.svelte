@@ -10,9 +10,9 @@
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
-  import type { AgentInfo, Ev, KernelInfo, MachineInfo, MemoryInfo, MountInfo, RoomInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
+  import type { AgentInfo, Ev, KernelInfo, MachineInfo, MCPInfo, MemoryInfo, MountInfo, RoomInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
 
-  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'room' | 'dm' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
+  type Kind = 'channel' | 'schedule' | 'session' | 'agent' | 'room' | 'dm' | 'agentdefaults' | 'botadd' | 'gateway' | 'model' | 'search' | 'memory' | 'skills' | 'mcp' | 'kernel' | 'machine' | 'workspace' | 'more' | 'add';
   type Col = 'in' | 'sess' | 'room' | 'agent' | 'gw' | 'caps' | 'mach' | 'ws';
   type N = { id: string; kind: Kind; col: Col; x: number; y: number; w: number; h: number; color: string; target?: Target; data?: any };
   type E = { id: string; from: string; to: string; color: string; dashed?: boolean; flow?: boolean };
@@ -87,7 +87,7 @@
     const kernels: KernelInfo[] = (ov.kernels ?? []).slice().sort((a, b) =>
       Number(!!b.managed) - Number(!!a.managed) || Number(b.local) - Number(a.local) || a.node.localeCompare(b.node));
     const nM = store.machines.length + 1; // 机器，最下面是“接入机器”
-    const H = Math.max(900, nS * 64 + 160, nL * 96 + 160, 2 * (70 + Math.max(1, nM, kernels.length) * 96));
+    const H = Math.max(1000, nS * 64 + 160, nL * 96 + 160, 2 * (70 + Math.max(1, nM, kernels.length) * 96));
     const cy = H / 2;
     const leftY = (i: number) => cy + (i - (nL - 1) / 2) * 96;
 
@@ -186,15 +186,19 @@
       target: { type: 'rooms' }, data: { icon: 'chat', title: '创建群', sub: '几个 agent 一起聊' } });
     nodes.push({ id: 'gw', kind: 'gateway', col: 'gw', x: X.gw - 62, y: cy - 62, w: 124, h: 124, color: 'var(--c-gateway)', target: { type: 'gateway' } });
 
-    // 能力：网关用的服务，从上到下是记忆、搜索、技能、模型（模型离中间最近，光点最多）
-    nodes.push({ id: 'memory', kind: 'memory', col: 'caps', x: X.right, y: cy - 380, w: 250, h: 72, color: 'var(--c-memory)', target: { type: 'memory' }, data: ov.memory });
+    // 能力：网关用的服务，从上到下是记忆、搜索、技能、MCP、模型（模型离中间最近，光点最多）
+    nodes.push({ id: 'memory', kind: 'memory', col: 'caps', x: X.right, y: cy - 464, w: 250, h: 72, color: 'var(--c-memory)', target: { type: 'memory' }, data: ov.memory });
     edges.push({ id: 'gw>memory', from: 'gw', to: 'memory', color: 'var(--c-memory)' });
     const si = ov.search;
     const searchOn = !!si?.enabled && !!si?.key;
-    nodes.push({ id: 'search', kind: 'search', col: 'caps', x: X.right, y: cy - 296, w: 250, h: 72, color: searchOn ? 'var(--c-search)' : 'var(--muted)', target: { type: 'search' }, data: si });
+    nodes.push({ id: 'search', kind: 'search', col: 'caps', x: X.right, y: cy - 380, w: 250, h: 72, color: searchOn ? 'var(--c-search)' : 'var(--muted)', target: { type: 'search' }, data: si });
     edges.push({ id: 'gw>search', from: 'gw', to: 'search', color: searchOn ? 'var(--c-search)' : 'var(--muted)', dashed: !searchOn });
-    nodes.push({ id: 'skills', kind: 'skills', col: 'caps', x: X.right, y: cy - 212, w: 250, h: 72, color: 'var(--c-skill)', target: { type: 'skills' }, data: ov.skills });
+    nodes.push({ id: 'skills', kind: 'skills', col: 'caps', x: X.right, y: cy - 296, w: 250, h: 72, color: 'var(--c-skill)', target: { type: 'skills' }, data: ov.skills });
     edges.push({ id: 'gw>skills', from: 'gw', to: 'skills', color: 'var(--c-skill)' });
+    // MCP 服务：外部工具。挂在别的电脑上跑的，下面再从这里连一条线到那台机器
+    const mcps = (ov.mcp ?? []).filter((m) => m.enabled);
+    nodes.push({ id: 'mcp', kind: 'mcp', col: 'caps', x: X.right, y: cy - 212, w: 250, h: 72, color: mcps.length ? 'var(--c-mcp)' : 'var(--muted)', target: { type: 'mcp' }, data: ov.mcp ?? [] });
+    edges.push({ id: 'gw>mcp', from: 'gw', to: 'mcp', color: mcps.length ? 'var(--c-mcp)' : 'var(--muted)', dashed: !mcps.length });
     nodes.push({ id: 'model', kind: 'model', col: 'caps', x: X.right, y: cy - 124, w: 250, h: 80, color: 'var(--c-model)', target: { type: 'model' } });
     edges.push({ id: 'gw>model', from: 'gw', to: 'model', color: 'var(--c-model)' });
 
@@ -224,6 +228,9 @@
         target: { type: 'machine', name: m.name }, data: m });
       const ks = kernels.filter((k) => (k.local ? '本机' : k.node) === m.name);
       for (const k of ks) edges.push({ id: `k:${k.node}>${id}`, from: 'k:' + k.node, to: id, color: 'var(--c-kernel)' });
+      // 这台机器上跑着 MCP 服务（machine 写的是那台内核的名字）
+      const here = mcps.filter((x) => x.machine && (x.machine === m.name || ks.some((k) => k.node === x.machine)));
+      if (here.length) edges.push({ id: `mcp>${id}`, from: 'mcp', to: id, color: 'var(--c-mcp)', dashed: !m.online });
       if (m.kind === 'ssh' || (m.kind === 'local' && !ks.length)) {
         // 网关自己执行：SSH 服务器，或者本机没有内核时
         edges.push({ id: `gw>${id}`, from: 'gw', to: id, color: m.online ? 'var(--accent-2)' : 'var(--err)', dashed: !m.online });
@@ -747,6 +754,7 @@
       case 'memory':
       case 'search':
       case 'skills':
+      case 'mcp':
       case 'add':
       case 'agentdefaults':
       case 'botadd':
@@ -811,7 +819,7 @@
       case 'schedules': return 'sched';
       case 'agent': return 'agent';
       case 'gateway': return 'gw';
-      case 'model': case 'search': case 'memory': case 'skills': return t.type;
+      case 'model': case 'search': case 'memory': case 'skills': case 'mcp': return t.type;
       case 'kernel': return t.node ? 'k:' + t.node : 'k:none';
       case 'machine': return 'm:' + t.name;
       case 'machines': return 'add:machine';
@@ -1000,6 +1008,15 @@
             <text x="62" y="24" class="t3">技能</text>
             <text x="62" y="43" class="t1">{list.length} 个技能</text>
             <text x="62" y="60" class="t2">{truncate(list.map((s: { name: string }) => s.name).join('、') || '还没有技能', 22)}</text>
+          {:else if n.kind === 'mcp'}
+            {@const list = (n.data ?? []) as MCPInfo[]}
+            {@const on = list.filter((x) => x.enabled)}
+            <rect class="card" class:off={!on.length} width={n.w} height={n.h} rx="16" />
+            <circle class="disc" cx="34" cy="36" r="18" />
+            <g class="ico"><Icon name="plug" x={23} y={25} size={22} /></g>
+            <text x="62" y="24" class="t3">MCP 服务</text>
+            <text x="62" y="43" class="t1">{on.length ? `${on.length} 个服务 · ${on.reduce((k, x) => k + x.tool_count, 0)} 个工具` : '还没有'}</text>
+            <text x="62" y="60" class="t2">{on.length ? truncate(on.map((x) => (x.online ? '● ' : '○ ') + x.name).join('  '), 24) : '外部工具：浏览器、computer use……'}</text>
           {:else if n.kind === 'schedule'}
             {@const sc = n.data as ScheduleSummary | undefined}
             <rect class="card" class:off={!sc?.total} width={n.w} height={n.h} rx="16" />

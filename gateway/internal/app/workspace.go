@@ -344,6 +344,14 @@ func maskedGatewayArgs(raw json.RawMessage) string {
 			m[k] = "***"
 		}
 	}
+	// MCP 服务的 env：名字照常显示，值都打星（密钥一般就放在这里）
+	if env, ok := m["env"].(map[string]any); ok {
+		for k, v := range env {
+			if s, _ := v.(string); s != "" {
+				env[k] = "***"
+			}
+		}
+	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	return strings.TrimSpace(string(b))
 }

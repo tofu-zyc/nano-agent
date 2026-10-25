@@ -219,3 +219,20 @@ func (s *Store) Save(list []Server) error {
 	s.mu.Unlock()
 	return nil
 }
+
+// Secrets 是所有服务 env 里的值（解密后），给脱敏用：工具结果、日志里出现就打星。
+func (s *Store) Secrets() []string {
+	var out []string
+	for _, srv := range s.List() {
+		env, err := srv.EnvFor()
+		if err != nil {
+			continue
+		}
+		for _, v := range env {
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}

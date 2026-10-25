@@ -26,8 +26,8 @@ import (
 const gatewaySchema = `{
   "type":"object",
   "properties":{
-    "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings","agents"],
-      "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明），或者 agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置）"},
+    "what":{"type":"string","enum":["status","session","turns","models","ssh","workspaces","pairing","ssh_config","logs","search","settings","agents","mcp"],
+      "description":"要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明）、agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置），或者 mcp（MCP 服务：配置、在不在线、有哪些工具，环境变量只给名字；还有能挂 MCP 的在线电脑）"},
     "lines":{"type":"integer","description":"logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"},
     "group":{"type":"string","enum":["agent","gateway","web","cli","telegram","feishu","model","memory","search","skills","local","machines"],
       "description":"settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档；每个 agent 的长期记忆设置在它自己的 settings 里，用 agent_save 改）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"}
@@ -51,13 +51,14 @@ const gatewayAdminSchema = `{
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
       "workspace_add","workspace_delete","workspace_mount","workspace_default",
-      "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set","agent_save","agent_delete","bot_bind"
+      "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set","agent_save","agent_delete","bot_bind",
+      "mcp_save","mcp_delete","mcp_test"
     ],"description":"要做什么"},
     "key":{"type":"string","description":"settings_set：设置项的 key，比如 search.enabled、context.compact_at、channels.show（先用 Gateway settings 查）"},
     "value":{"description":"settings_set：新值（数字、true/false、文本或列表，类型按 Gateway settings 里的 type）；null 表示去掉网页里改的值、恢复成配置文件里的"},
     "id":{"type":"string","description":"接口 / 模型 / SSH / 工作目录的 ID、要改的 agent ID、要换绑的机器人 ID，或配对请求 ID"},
     "node":{"type":"string","description":"要移除的已配对电脑名字"},
-    "name":{"type":"string","description":"接口或 SSH 连接的名字；agent_save 时是 agent 的名字"},
+    "name":{"type":"string","description":"接口或 SSH 连接的名字；agent_save 时是 agent 的名字；mcp_save / mcp_delete / mcp_test 时是 MCP 服务名（字母、数字、下划线、减号，也是工具名的前缀）"},
     "emoji":{"type":"string","description":"agent_save：头像，一个 emoji"},
     "style":{"type":"string","enum":["tool","life"],"description":"agent_save：类型。tool 工具型（有人找才干活，群里只回被叫到的）；life 拟人型（有作息，没事时自己上网、想事情、找人聊天，群里会插话）"},
     "settings":{"type":"object","description":"agent_save：这个 agent 自己的设置（键见 Gateway agents 里每个 agent 的 settings，比如 max_steps、mode、compact_at、group_eagerness、life_awake、life_level、life_reach、memory、dream_when）；值为 null 表示恢复跟随全局或默认"},
@@ -86,16 +87,26 @@ const gatewayAdminSchema = `{
     "from":{"type":"integer","description":"history_delete：起始轮次（从 0 开始）"},
     "to":{"type":"integer","description":"history_delete：结束轮次（含）"},
     "mount":{"type":"boolean","description":"workspace_mount：true 挂上，false 取下"},
-    "agent":{"type":"string","description":"agent_save / bot_bind：agent 的 ID（先用 Gateway agents 查）；agent_save 时留空表示新建"}
+    "agent":{"type":"string","description":"agent_save / bot_bind：agent 的 ID（先用 Gateway agents 查）；agent_save 时留空表示新建"},
+    "command":{"type":"string","description":"mcp_save：在本机或某台电脑上起的 stdio 进程，比如 npx、uvx、python（和 url 二选一）"},
+    "args":{"type":"array","items":{"type":"string"},"description":"mcp_save：命令行参数，一项一个，比如 [\"-y\",\"@modelcontextprotocol/server-filesystem\",\"/home/me\"]"},
+    "url":{"type":"string","description":"mcp_save：远程 MCP 服务的 streamable HTTP 地址（和 command 二选一）"},
+    "cwd":{"type":"string","description":"mcp_save：进程的工作目录，留空用默认"},
+    "machine":{"type":"string","description":"mcp_save：进程在哪台电脑上跑，写在线内核的名字（Gateway mcp 里的 machines）；空字符串或 gateway 表示网关本机"},
+    "env":{"type":"object","additionalProperties":{"type":"string"},"description":"mcp_save：环境变量，密钥放这里（加密保存，查的时候只给名字）；值写空字符串表示沿用已存的"},
+    "enabled":{"type":"boolean","description":"mcp_save：是否启用"},
+    "tools":{"type":"array","items":{"type":"string"},"description":"mcp_save：只开放哪些工具（服务里的原名）；写成 \"!名字\" 表示禁用这个；空数组表示全部"},
+    "agents":{"type":"array","items":{"type":"string"},"description":"mcp_save：给哪些 agent 用（agent ID）；空数组表示所有 agent"},
+    "approval":{"type":"string","enum":["never","per_turn","always"],"description":"mcp_save：调用前要不要管理员批准：never 不用；per_turn 一轮里第一次要批；always 每次都要批（放行模式下都不问）"}
   },
   "required":["action"]
 }`
 
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
-		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
+		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项、MCP 服务。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
 		{Name: "Message", Description: "给网关里的一个群（房间）、某个 agent，或者你自己的某个私聊（chat:）发一条消息；发给 agent 时把 wait 设成 true 可以等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。发到私聊的消息对方会在聊天软件里收到，他回了就在那个聊天里接着聊。", InputSchema: json.RawMessage(messageSchema)},
-		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
+		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等）、agent、MCP 服务（mcp_save 加或改、mcp_delete、mcp_test 现连一次看有哪些工具），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }
 
@@ -177,6 +188,8 @@ func (a *App) gatewayQuery(sid, raw string, reply func(bool, string)) {
 		out, err = a.settingsView(args.Group)
 	case "agents":
 		out = map[string]any{"agents": a.AgentList(), "bots": a.Bots()}
+	case "mcp":
+		out, err = a.mcpView()
 	default:
 		err = fmt.Errorf("不认识的查询 %q", args.What)
 	}
@@ -224,24 +237,59 @@ type hostAdmin interface {
 	Disconnect(string) error
 }
 
+// gatewayArgs 是 GatewayAdmin 的参数。每个字段都写明 json 名字：参数表里是 base_url、api_key 这种
+// 带下划线的写法，不写标签的话 Go 对不上（以前 AI 配模型接口时地址和 key 都丢了）。
+// TestGatewayAdminSchemaFields 保证参数表里的每个参数这里都有。
 type gatewayArgs struct {
 	HistoryDelete
 
 	Key   string `json:"key"`
 	Value any    `json:"value"`
 
-	Action, ID, Node, Name, Host, User, Password, IdentityFile           string
-	Port, ContextWindow, MaxTokens, MaxHistory                           int
-	AutoConnect, Default                                                 bool
-	Mount                                                                *bool
-	BaseURL, APIKey, Proxy, Kind, Endpoint, Model, Label, Thinking, Path string
-	ThinkingLevels, Modalities                                           []string
-	What                                                                 string
-	Lines                                                                int
-	Emoji                                                                string
-	Style                                                                string
-	Agent                                                                string
-	Settings                                                             map[string]any
+	Action         string         `json:"action"`
+	ID             string         `json:"id"`
+	Node           string         `json:"node"`
+	Name           string         `json:"name"`
+	Host           string         `json:"host"`
+	User           string         `json:"user"`
+	Password       string         `json:"password"`
+	IdentityFile   string         `json:"identity_file"`
+	Port           int            `json:"port"`
+	ContextWindow  int            `json:"context_window"`
+	MaxTokens      int            `json:"max_tokens"`
+	MaxHistory     int            `json:"max_history_tokens"`
+	AutoConnect    bool           `json:"auto_connect"`
+	Default        bool           `json:"default"`
+	Mount          *bool          `json:"mount"`
+	BaseURL        string         `json:"base_url"`
+	APIKey         string         `json:"api_key"`
+	Proxy          string         `json:"proxy"`
+	Kind           string         `json:"kind"`
+	Endpoint       string         `json:"endpoint"`
+	Model          string         `json:"model"`
+	Label          string         `json:"label"`
+	Thinking       string         `json:"thinking"`
+	Path           string         `json:"path"`
+	ThinkingLevels []string       `json:"thinking_levels"`
+	Modalities     []string       `json:"modalities"`
+	What           string         `json:"what"`
+	Lines          int            `json:"lines"`
+	Emoji          string         `json:"emoji"`
+	Style          string         `json:"style"`
+	Agent          string         `json:"agent"`
+	Settings       map[string]any `json:"settings"`
+
+	// MCP 服务（mcp_save）：没写的字段保持原样
+	Command  string            `json:"command"`
+	Args     []string          `json:"args"`
+	URL      string            `json:"url"`
+	Cwd      *string           `json:"cwd"`
+	Machine  *string           `json:"machine"`
+	Env      map[string]string `json:"env"`
+	Enabled  *bool             `json:"enabled"`
+	Tools    []string          `json:"tools"`
+	Agents   []string          `json:"agents"`
+	Approval string            `json:"approval"`
 }
 
 func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
@@ -281,6 +329,12 @@ func (a *App) gatewayAdminCall(sid, who, raw string, reply func(bool, string)) {
 
 func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 	switch args.Action {
+	case "mcp_save":
+		return a.mcpSave(args)
+	case "mcp_delete":
+		return a.mcpDelete(args)
+	case "mcp_test":
+		return a.mcpTest(args)
 	case "model_endpoint_save":
 		st := a.ModelStore()
 		if st == nil {

@@ -18,6 +18,7 @@
   import SearchPanel from './panels/SearchPanel.svelte';
   import MemoryPanel from './panels/MemoryPanel.svelte';
   import SkillsPanel from './panels/SkillsPanel.svelte';
+  import MCPPanel from './panels/MCPPanel.svelte';
   import SchedulesPanel from './panels/SchedulesPanel.svelte';
   import KernelPanel from './panels/KernelPanel.svelte';
   import MachinePanel from './panels/MachinePanel.svelte';
@@ -110,6 +111,11 @@
         return { icon: 'brain', color: 'var(--c-memory)', title: '上下文与记忆', sub: '每个 agent 记住的人和事，以及上下文怎么整理' };
       case 'skills':
         return { icon: 'book', color: 'var(--c-skill)', title: '技能', sub: `${ov.skills?.list?.length ?? 0} 个技能，所有内核共用` };
+      case 'mcp': {
+        const list = ov.mcp ?? [];
+        return { icon: 'plug', color: 'var(--c-mcp)', title: 'MCP 服务',
+          sub: list.length ? `${list.length} 个服务 · ${list.filter((m) => m.online).length} 个连着 · ${list.reduce((n, m) => n + (m.enabled ? m.tool_count : 0), 0)} 个工具` : '外部工具：文件系统、浏览器、computer use……' };
+      }
       case 'schedules': {
         const sc = ov.schedules;
         return { icon: 'clock', color: 'var(--c-cron)', title: '定时任务', sub: sc?.total ? `${sc.total} 个任务 · ${sc.enabled} 个开着` : '还没有任务' };
@@ -175,6 +181,8 @@
         <MemoryPanel agent={target.agent} />
       {:else if target.type === 'skills'}
         <SkillsPanel />
+      {:else if target.type === 'mcp'}
+        <MCPPanel />
       {:else if target.type === 'schedules'}
         <SchedulesPanel />
       {:else if target.type === 'kernel'}
