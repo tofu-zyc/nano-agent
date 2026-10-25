@@ -1073,3 +1073,50 @@ func TestInputCarriesAgentLimits(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusTimeout})
 	e.ch.wait(t, "时限在网页拓扑图的 Agent 节点里改")
 }
+
+// 访客时期冻下的工具快照：窗口被设为管理员以后要重新算，
+// 不然用户会看到“设置都改好了，还是没有 Shell / 读写文件的工具”。
+func TestToolSnapshotRefreshesWhenBecomingAdmin(t *testing.T) {
+	e := setup(t)
+	e.a.OnMessage(e.ch, channel.Message{ChatID: "visitor", SenderID: "u2", Text: "你好"})
+	in := e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	if hasTool(e.llm.lastReq().Tools, "echo") {
+		t.Fatalf("访客不该拿到内核工具：%v", toolNames(e.llm.lastReq().Tools))
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[in.SID].run == nil })
+
+	// 网页里把他设为管理员（写进 access.admins）以后，下一轮必须重新算工具
+	e.a.mu.Lock()
+	e.a.cfg.Access.Admins = append(e.a.cfg.Access.Admins, "fake:u2")
+	e.a.mu.Unlock()
+	e.a.OnMessage(e.ch, channel.Message{ChatID: "visitor", SenderID: "u2", Text: "现在呢"})
+	in = e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	if !hasTool(e.llm.lastReq().Tools, "echo") {
+		t.Fatalf("设为管理员以后应该拿到内核工具：%v", toolNames(e.llm.lastReq().Tools))
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	// 等这一轮收尾，别让后台写盘撞上 t.TempDir 的清理
+	waitFor(t, func() bool { e.a.mu.Lock(); defer e.a.mu.Unlock(); return e.a.sessions[in.SID].run == nil })
+}
+
+func hasTool(tools []llm.Tool, name string) bool {
+	for _, t := range tools {
+		if t.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(tools []llm.Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Function.Name)
+	}
+	return out
+}

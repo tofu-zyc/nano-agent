@@ -13,7 +13,8 @@ import (
 type Prefix struct {
 	System string     `json:"system"`
 	Tools  []llm.Tool `json:"tools"`
-	Ver    int        `json:"ver,omitempty"` // 网关给的工具变了（升级加了新工具）时加一，旧快照作废一次
+	Ver    int        `json:"ver,omitempty"`  // 网关给的工具变了（升级加了新工具）时加一，旧快照作废一次
+	Perm   string     `json:"perm,omitempty"` // 权限信号（管理员/访客、有没有工具、哪台内核、内核在不在）：变了就换工具快照
 }
 type Settings struct {
 	Prefix  *Prefix        `json:"prefix,omitempty"`

@@ -1320,8 +1320,10 @@ func (a *App) generateModel(s *sess) {
 	r := s.run
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
-	if st.Prefix == nil || st.Prefix.System != system || st.Prefix.Ver != prefixVer {
-		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools, Ver: prefixVer}
+	// 群聊和房间不套用快照（见 contextParts），也就不写；其余会话权限一变就重写一次
+	perm := a.permSignature(s.sid)
+	if !a.isGroupSession(s.sid) && (st.Prefix == nil || st.Prefix.System != system || st.Prefix.Ver != prefixVer || st.Prefix.Perm != perm) {
+		st.Prefix = &session.Prefix{System: system, Tools: snapshotTools, Ver: prefixVer, Perm: perm}
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存提示快照失败", "err", err)
 		}
