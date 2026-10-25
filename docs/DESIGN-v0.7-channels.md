@@ -65,6 +65,18 @@
 - `sendParts` 不再自己起协程发，改成往这个渠道的发送队列里放（`outItem.delay` 是发之前停多久），所以先说的一定先到，不会被后面一次发完的回复抢先。
 - 测试：`TestLifeDMSaysBeforeTools`（模拟模型支持 `说的话 !call 工具`）。
 
+### 看图和发文件（SendFile）
+
+用户反馈：agent 自己下载了表情包却说看不见；希望它能在聊天里发图片，以后还要音频、视频。
+
+- 执行器加了内部工具 `Fetch`（读整个文件，base64，默认最多 20 MB，读的规则和 Read 一样）；`Read` 读到 PNG/JPEG/GIF/WebP 时回“<路径> 是图片（PNG，N 字节）”。内核只多登记了一个网关工具 `SendFile`（PUBLIC_READ）。
+- 网关 `app/fetch.go`：`fetchTarget` 按这一轮的工作目录找机器（本机 / SSH / 装了内核的电脑，HOME 模式在网关本机）；`seeImage` 在 Read 结果是图片时取过来存进 `data/uploads`，附在工具结果的 `Images` 上，取完之前 `TModel` 等着（`run.fetching` / `modelWaiting`）；`session.BuildMessages` 把这批工具结果的图片作为一条“[系统] 上面的工具读到的图片”用户消息跟在后面；旧轮次的图片随工具结果一起省略。
+- `SendFile {files:[路径或网址]}`：取文件（网址下载，访客不许内网），`media.SaveFile` 存起来，放进这一轮每个聊天窗口的发送队列（`outItem.att`），渠道实现 `channel.MediaSender` 就发文件，否则发“［图片：名字］”。结果记在工具消息的 `Sent` 上，网页工具卡片下面显示图片 / 文件。
+- 渠道：飞书（上传图片 / 文件，opus 发语音，其余发文件；扫码新建的应用多申请 `im:resource`，**老应用要在开放平台补开 `im:resource` 并发布**）、Telegram（photo / animation / voice / audio / video / document）、QQ（先上传 `/files` 再发 msg_type 7，只支持图片、mp4、silk 语音）、微信（AES-128-ECB 加密传 CDN，图片 / 视频 / 文件消息）。
+- 拟人守则加了一句：想发表情包就用 SendFile，别用文字描述。`prefixVer` 升到 2（旧会话工具快照作废一次）。
+- 测试：`TestReadImageShownToModel`、`TestSendFileSendsToChat`、`TestTelegramSendMedia`、`TestQQSendMedia`、`TestWeixinSendMedia`、`kernel/tests/test_exec.py` 的 `t_fetch`、`scripts/e2e.sh` 的 SendFile 一步（e2e 这一步加了但**还没跑过**）。
+- **还没做**：`test_exec_win.py` 里 Windows 执行器的 Fetch 检查；音频、视频格式转换（QQ 语音要 silk、飞书语音要 opus）；完整的 `make test` / CI 还没跑；没发版。
+
 ## 没做、要注意的
 
 - **没有在真的 QQ、微信上跑过**，协议按官方插件源码和文档写的。用户第一次扫码时最可能出问题的地方：QQ 的 `source` 参数留空（扫码页显示“第三方机器人”）；微信的 `iLink-App-ClientVersion` 和 `channel_version` 跟着官方插件 2.4.10。

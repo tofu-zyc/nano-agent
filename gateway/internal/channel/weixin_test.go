@@ -2,7 +2,6 @@ package channel
 
 import (
 	"context"
-	"crypto/aes"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -84,17 +83,6 @@ func (f *fakeWX) messages() []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]map[string]any(nil), f.sent...)
-}
-
-func aesECBEncrypt(data, key []byte) []byte {
-	block, _ := aes.NewCipher(key)
-	pad := aes.BlockSize - len(data)%aes.BlockSize
-	data = append(append([]byte(nil), data...), []byte(strings.Repeat(string(rune(pad)), pad))...)
-	out := make([]byte, len(data))
-	for i := 0; i < len(data); i += aes.BlockSize {
-		block.Encrypt(out[i:i+aes.BlockSize], data[i:i+aes.BlockSize])
-	}
-	return out
 }
 
 func TestWeixinChannel(t *testing.T) {

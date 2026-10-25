@@ -40,7 +40,7 @@ typedef struct {
 
 static const tool_entry TOOLS[] = {
     { "Read", tool_read }, { "Write", tool_write }, { "Edit", tool_edit },
-    { "Grep", tool_grep }, { "Shell", tool_shell },
+    { "Grep", tool_grep }, { "Shell", tool_shell }, { "Fetch", tool_fetch },
 };
 
 /* ---- 输出 ---- */

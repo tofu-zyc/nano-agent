@@ -7,7 +7,7 @@
 
 ## v0.7 开发进度（dev/v0.7）
 
-见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。已完成：放行模式、飞书拟人型回复和状态、`/state`、QQ、微信（都有测试，CI 和真机还没跑）。**QQ 和微信都没在真的平台上试过**，发版前请用户扫码实测一次。
+见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。已完成：放行模式、飞书拟人型回复和状态、`/state`、QQ、微信、调工具前说的话当场发、看图（Read 读到图片交给模型）和 SendFile 发图片 / 文件（都有测试）。**接下来**：跑完整的 `scripts/test-isolated.sh`（e2e 里新加的 SendFile 一步还没跑过）、补 Windows 执行器的 Fetch 测试、推上去看 CI，然后合并 main 发 v0.7.0（用户已经说“准备一起发布”，发之前再确认一次）。**QQ 和微信都没在真的平台上试过**，发版前请用户扫码实测一次。
 
 ## v0.6 开发进度（dev/v0.6，已合并 main，v0.6.0 发布）
 

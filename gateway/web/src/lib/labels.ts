@@ -37,6 +37,7 @@ export const toolLabels: Record<string, string> = {
   Knowledge: '长期记忆',
   FollowUp: '过会儿再看',
   Diary: '读日记',
+  SendFile: '发图片 / 文件到聊天',
 };
 
 export const toolLabel = (n: string) => toolLabels[n] ?? n;

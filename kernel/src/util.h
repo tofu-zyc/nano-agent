@@ -45,6 +45,8 @@ void buf_put_utf8(buf_t *b, const char *s, size_t len);
 
 /* base64 解码（忽略换行和 =）。出错返回 NULL；结果是 malloc 的，*n 是长度。 */
 unsigned char *b64_decode(const char *s, size_t *n);
+/* base64 编码（标准字母表，带 =），追加到 b */
+void b64_encode(buf_t *b, const unsigned char *p, size_t n);
 
 int set_nonblock(int fd);
 int set_cloexec(int fd);

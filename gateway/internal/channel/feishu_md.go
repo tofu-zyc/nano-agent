@@ -1,14 +1,20 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+
+	"nano-agent/gateway/internal/media"
 )
 
 // ---- 回复正文按 Markdown 发：富文本消息（post）里的 md 段落。看起来还是普通的聊天气泡，不是卡片 ----
@@ -106,4 +112,65 @@ func (f *Feishu) Busy(chatID, msgID string) func() {
 			}()
 		})
 	}
+}
+
+// ---- 发文件：图片先上传拿 image_key 发图片消息；别的先上传拿 file_key（opus 语音发成语音消息，其余发成文件）。
+// 需要 im:resource 权限（扫码创建的应用会申请；以前的应用要在开放平台补开并发布） ----
+
+func (f *Feishu) SendMedia(ctx context.Context, chatID string, att media.Attachment, data []byte) error {
+	if f.client == nil {
+		return errors.New("飞书没有连接")
+	}
+	if media.Kind(att.MIME) == "image" {
+		r, err := f.client.Im.Image.Create(ctx, larkim.NewCreateImageReqBuilder().Body(
+			larkim.NewCreateImageReqBodyBuilder().ImageType("message").Image(bytes.NewReader(data)).Build()).Build())
+		if err != nil {
+			return err
+		}
+		if !r.Success() || r.Data == nil || r.Data.ImageKey == nil {
+			return fmt.Errorf("上传图片失败：%d %s", r.Code, r.Msg)
+		}
+		content, _ := json.Marshal(map[string]string{"image_key": *r.Data.ImageKey})
+		_, err = f.sendMsg(ctx, chatID, "", "image", string(content))
+		return err
+	}
+	fileType, msgType := feishuFileType(att), "file"
+	if fileType == "opus" {
+		msgType = "audio"
+	}
+	name := att.Name
+	if name == "" {
+		name = "file"
+	}
+	r, err := f.client.Im.File.Create(ctx, larkim.NewCreateFileReqBuilder().Body(
+		larkim.NewCreateFileReqBodyBuilder().FileType(fileType).FileName(name).File(bytes.NewReader(data)).Build()).Build())
+	if err != nil {
+		return err
+	}
+	if !r.Success() || r.Data == nil || r.Data.FileKey == nil {
+		return fmt.Errorf("上传文件失败：%d %s", r.Code, r.Msg)
+	}
+	content, _ := json.Marshal(map[string]string{"file_key": *r.Data.FileKey})
+	_, err = f.sendMsg(ctx, chatID, "", msgType, string(content))
+	return err
+}
+
+// feishuFileType 是上传文件时的类型：opus（能发成语音）、mp4、pdf、doc、xls、ppt，其余是 stream。
+func feishuFileType(att media.Attachment) string {
+	ext := strings.ToLower(filepath.Ext(att.Name))
+	switch {
+	case att.MIME == "audio/ogg" || att.MIME == "audio/opus" || ext == ".opus":
+		return "opus"
+	case att.MIME == "video/mp4" || ext == ".mp4":
+		return "mp4"
+	case ext == ".pdf":
+		return "pdf"
+	case ext == ".doc" || ext == ".docx":
+		return "doc"
+	case ext == ".xls" || ext == ".xlsx":
+		return "xls"
+	case ext == ".ppt" || ext == ".pptx":
+		return "ppt"
+	}
+	return "stream"
 }

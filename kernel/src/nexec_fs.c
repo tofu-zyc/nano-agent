@@ -237,6 +237,16 @@ static bool list_dir(const char *path, buf_t *out)
     return true;
 }
 
+/* 按文件头认出模型能看的图片：PNG、JPEG、GIF、WebP */
+static const char *image_kind(const char *p, size_t n)
+{
+    if (n >= 8 && !memcmp(p, "\x89PNG\r\n\x1a\n", 8)) return "PNG";
+    if (n >= 3 && !memcmp(p, "\xff\xd8\xff", 3)) return "JPEG";
+    if (n >= 6 && (!memcmp(p, "GIF87a", 6) || !memcmp(p, "GIF89a", 6))) return "GIF";
+    if (n >= 12 && !memcmp(p, "RIFF", 4) && !memcmp(p + 8, "WEBP", 4)) return "WebP";
+    return NULL;
+}
+
 bool tool_read(const xctx *x, const cJSON *a, buf_t *out)
 {
     char *real = path_resolve(x, arg_str(a, "path"), out);
@@ -256,9 +266,13 @@ bool tool_read(const xctx *x, const cJSON *a, buf_t *out)
     char peek[8192];
     long np = plat_file_read(peekf, peek, sizeof peek);
     plat_file_close(peekf);
-    if (np > 0 && looks_binary(peek, (size_t)np)) {
-        char note[160];
-        snprintf(note, sizeof note, "%s 是二进制文件（%lld 字节），不显示内容", real, (long long)st.size);
+    const char *img = np > 0 ? image_kind(peek, (size_t)np) : NULL;
+    if (img || (np > 0 && looks_binary(peek, (size_t)np))) {
+        char note[4400];
+        if (img) /* 网关看到这句会把图片取过去交给模型（能看图的话） */
+            snprintf(note, sizeof note, "%s 是图片（%s，%lld 字节）", real, img, (long long)st.size);
+        else
+            snprintf(note, sizeof note, "%s 是二进制文件（%lld 字节），不显示内容", real, (long long)st.size);
         buf_puts(out, note);
         ok = true;
         goto done;
@@ -470,6 +484,49 @@ done:
     buf_free(&res);
     buf_free(&needle);
     buf_free(&repl);
+    free(real);
+    return ok;
+}
+
+/* Fetch：读整个文件，结果是 base64。只给网关用（看图、把文件发到聊天里），读的规则和 Read 一样。
+ * max_bytes 是上限（默认 20 MB），超过就报错，不截断。 */
+bool tool_fetch(const xctx *x, const cJSON *a, buf_t *out)
+{
+    char *real = path_resolve(x, arg_str(a, "path"), out);
+    if (!real) return false;
+    bool ok = false;
+    plat_stat_t st;
+    long max = arg_int(a, "max_bytes", 20L << 20);
+    if (!path_can_read(x, real, out)) goto done;
+    if (!plat_stat(real, &st)) { put_errno(out, "读取", real); goto done; }
+    if (st.is_dir) {
+        buf_puts(out, real);
+        buf_puts(out, " 是目录");
+        goto done;
+    }
+    if ((long long)st.size > (long long)max) {
+        char note[4400];
+        snprintf(note, sizeof note, "%s 太大了（%lld 字节，最多 %ld 字节）", real, (long long)st.size, max);
+        buf_puts(out, note);
+        goto done;
+    }
+    plat_file *f = plat_open_read(real);
+    if (!f) { put_errno(out, "读取", real); goto done; }
+    buf_t data = {0};
+    char chunk[65536];
+    long n;
+    while ((n = plat_file_read(f, chunk, sizeof chunk)) > 0 && (long long)data.len + n <= (long long)max)
+        buf_append(&data, chunk, (size_t)n);
+    plat_file_close(f);
+    if (n < 0) {
+        buf_free(&data);
+        put_errno(out, "读取", real);
+        goto done;
+    }
+    b64_encode(out, (const unsigned char *)(data.p ? data.p : ""), data.len);
+    buf_free(&data);
+    ok = true;
+done:
     free(real);
     return ok;
 }

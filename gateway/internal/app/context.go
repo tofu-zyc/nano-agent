@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge）就加一，
+// prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 1
+const prefixVer = 2
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -84,6 +84,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		if ag.Life() {
 			all = append(all, toolOf(followUpTool()))
 		}
+		all = append(all, toolOf(sendFileTool()))
 		tools = a.groupTools(sid, all)
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
@@ -101,6 +102,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		if ag.Life() {
 			tools = append(tools, toolOf(followUpTool()))
 		}
+		tools = append(tools, toolOf(sendFileTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)

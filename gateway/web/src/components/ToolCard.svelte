@@ -1,11 +1,15 @@
 <script lang="ts">
   import { toolIcon } from '../lib/format';
   import { prettyArgs } from '../lib/conv';
+  import type { Attachment } from '../lib/types';
   import Icon from './Icon.svelte';
 
-  let { name, detail, args = '', ok, result, running = false }: {
-    name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean;
+  // media：工具读到的图片（交给模型看了）、SendFile 发出去的文件，一直显示在卡片下面
+  let { name, detail, args = '', ok, result, running = false, media = [] }: {
+    name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean; media?: Attachment[];
   } = $props();
+  const isImage = (a: Attachment) => /^image\/(png|jpeg|gif|webp)$/.test(a.mime);
+  const sizeOf = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
   let open = $state(false);
   const lines = $derived(result ? result.replace(/\n$/, '').split('\n').length : 0);
 </script>
@@ -25,6 +29,17 @@
     {#if lines > 0}<span class="lines">{lines} 行</span>{/if}
     <Icon name={open ? 'down' : 'right'} size={13} />
   </button>
+  {#if media.length}
+    <div class="media">
+      {#each media as m (m.id)}
+        {#if isImage(m)}
+          <a class="pic" href="/api/uploads/{m.id}" target="_blank" rel="noopener" title={m.name}><img src="/api/uploads/{m.id}" alt={m.name ?? '图片'} loading="lazy" /></a>
+        {:else}
+          <a class="file" href="/api/uploads/{m.id}" target="_blank" rel="noopener"><Icon name="file" size={13} />{m.name || '文件'}<span>{sizeOf(m.size)}</span></a>
+        {/if}
+      {/each}
+    </div>
+  {/if}
   {#if open}
     <div class="more">
       {#if args}
@@ -40,6 +55,35 @@
 </div>
 
 <style>
+  .media {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 12px 10px;
+  }
+  .media .pic img {
+    display: block;
+    max-width: 180px;
+    max-height: 180px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    object-fit: contain;
+    background: var(--panel-2);
+  }
+  .media .file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .media .file span {
+    color: var(--muted);
+    font-size: 11.5px;
+  }
   .tool {
     border-radius: 11px;
     border: 1px solid var(--line);

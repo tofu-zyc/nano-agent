@@ -112,7 +112,8 @@ type Host interface {
 }
 
 const (
-	maxOut = 8 << 20
+	maxOut = 40 << 20 // 取文件（Fetch）时是 base64，最大 20 MB 的文件
+
 	maxErr = 8 << 10
 )
 

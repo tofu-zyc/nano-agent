@@ -69,6 +69,12 @@ type Markdowner interface {
 	SendMarkdown(ctx context.Context, chatID, text, replyTo string) error
 }
 
+// MediaSender 是可选能力：发文件（图片、动图、音频、视频、文档）。att 里是类型和名字，data 是内容。
+// 渠道发不了某种类型时返回错误，网关会改发一行文字说明。
+type MediaSender interface {
+	SendMedia(ctx context.Context, chatID string, att media.Attachment, data []byte) error
+}
+
 // Busy 是可选能力：处理一条消息的时候在那条消息上显示“正在处理”（飞书没有“正在输入”，
 // 贴一个“敲键盘”表情），返回的函数撤掉它。不能阻塞：真正的请求在后台发。
 type Busy interface {

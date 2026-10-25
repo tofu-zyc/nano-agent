@@ -125,6 +125,7 @@ export const toolIcon: Record<string, string> = {
   Edit: 'edit',
   Grep: 'search',
   Shell: 'terminal',
+  SendFile: 'send',
 };
 
 export type NoteKind = 'memory' | 'recall' | 'life';

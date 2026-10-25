@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -133,6 +134,11 @@ func (t *Telegram) call(ctx context.Context, method string, params, out any) err
 		return t.redact(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return t.do(req, method, out)
+}
+
+// do 发请求、解析 Bot API 的回复。
+func (t *Telegram) do(req *http.Request, method string, out any) error {
 	resp, err := t.hc.Do(req)
 	if err != nil {
 		return t.redact(err) // 错误信息里带着 URL，不能把 token 打进日志
@@ -472,4 +478,45 @@ func (t *Telegram) Typing(ctx context.Context, chatID string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return t.call(cctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": "typing"}, nil)
+}
+
+// SendMedia 发文件：静态图片 sendPhoto，GIF sendAnimation，ogg 语音 sendVoice，其他音频 sendAudio，
+// 视频 sendVideo，其余 sendDocument。
+func (t *Telegram) SendMedia(ctx context.Context, chatID string, att media.Attachment, data []byte) error {
+	method, field := "sendDocument", "document"
+	switch {
+	case att.MIME == "image/gif":
+		method, field = "sendAnimation", "animation"
+	case media.Kind(att.MIME) == "image":
+		method, field = "sendPhoto", "photo"
+	case att.MIME == "audio/ogg" || att.MIME == "audio/opus":
+		method, field = "sendVoice", "voice"
+	case media.Kind(att.MIME) == "audio":
+		method, field = "sendAudio", "audio"
+	case media.Kind(att.MIME) == "video":
+		method, field = "sendVideo", "video"
+	}
+	name := att.Name
+	if name == "" {
+		name = "file"
+	}
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	w.WriteField("chat_id", chatID)
+	fw, err := w.CreateFormFile(field, name)
+	if err != nil {
+		return err
+	}
+	fw.Write(data)
+	if err := w.Close(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, t.base+"/bot"+t.token+"/"+method, &body)
+	if err != nil {
+		return t.redact(err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return t.do(req, method, nil)
 }

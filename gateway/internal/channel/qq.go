@@ -3,6 +3,7 @@ package channel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -646,4 +647,38 @@ func (q *QQ) Typing(ctx context.Context, chatID string) error {
 		"msg_type": 6, "input_notify": map[string]int{"input_type": 1, "input_second": 60},
 		"msg_id": id, "msg_seq": 1000 + rand.IntN(60000), // 和回复的序号（1–4）错开
 	}, nil)
+}
+
+// ---- 发文件：先上传（POST …/files，file_data 是 base64，最多 20 MB）拿 file_info，再发富媒体消息（msg_type 7）。
+// QQ 只收图片、mp4 视频、silk 语音；别的类型返回错误，网关改发一行说明 ----
+
+func (q *QQ) SendMedia(ctx context.Context, chatID string, att media.Attachment, data []byte) error {
+	fileType := 0
+	switch media.Kind(att.MIME) {
+	case "image":
+		fileType = 1
+	case "video":
+		if att.MIME == "video/mp4" {
+			fileType = 2
+		}
+	case "audio":
+		if bytes.Contains(data[:min(len(data), 16)], []byte("#!SILK")) {
+			fileType = 3
+		}
+	}
+	if fileType == 0 {
+		return errors.New("QQ 只能发图片、mp4 视频和 silk 语音")
+	}
+	files := strings.TrimSuffix(qqPath(chatID), "/messages") + "/files"
+	var up struct {
+		FileInfo string `json:"file_info"`
+	}
+	if err := q.api(ctx, http.MethodPost, files, map[string]any{"file_type": fileType, "srv_send_msg": false,
+		"file_data": base64.StdEncoding.EncodeToString(data)}, &up); err != nil {
+		return err
+	}
+	if up.FileInfo == "" {
+		return errors.New("QQ 没有返回上传结果")
+	}
+	return q.post(ctx, chatID, map[string]any{"msg_type": 7, "media": map[string]string{"file_info": up.FileInfo}})
 }

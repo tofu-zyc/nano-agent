@@ -599,6 +599,12 @@ class Store {
         }
         break;
       }
+      case 'tool_media': {
+        // 工具读到的图片、SendFile 发出去的文件：显示在那个工具卡片下面
+        const it = this.live[sid]?.find((x) => x.kind === 'tool' && x.id === e.id);
+        if (it && it.kind === 'tool') it.media = [...(it.media ?? []), ...(e.data?.images ?? []), ...(e.data?.sent ?? [])];
+        break;
+      }
       case 'say':
         this.pushLive(sid, { kind: 'say', text: e.text ?? '', at: e.at });
         break;

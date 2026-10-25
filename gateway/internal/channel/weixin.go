@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -448,27 +449,130 @@ func aesECBDecrypt(data, key []byte) ([]byte, error) {
 // ---- 发消息 ----
 
 func (w *Weixin) Send(ctx context.Context, chatID, text, _ string) error {
-	w.mu.Lock()
-	ctxTok := w.st.Contexts[chatID]
-	w.mu.Unlock()
 	for _, part := range Split(text, wxTextLimit) {
-		var cid [4]byte
-		_, _ = rand.Read(cid[:])
-		var r wxResult
-		err := w.call(ctx, "ilink/bot/sendmessage", map[string]any{"msg": map[string]any{
-			"from_user_id": "", "to_user_id": chatID,
-			"client_id":    fmt.Sprintf("nano-agent:%d-%x", time.Now().UnixMilli(), cid),
-			"message_type": 2, "message_state": 2, "context_token": ctxTok,
-			"item_list": []map[string]any{{"type": 1, "text_item": map[string]string{"text": part}}},
-		}}, &r, 15*time.Second)
-		if err == nil && r.code() != 0 {
-			err = fmt.Errorf("微信发送失败：%d %s", r.code(), r.Errmsg)
-		}
-		if err != nil {
+		if err := w.sendItem(ctx, chatID, map[string]any{"type": 1, "text_item": map[string]string{"text": part}}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sendItem 发一条消息（一个 item），带上和对方最近的 context_token。
+func (w *Weixin) sendItem(ctx context.Context, to string, item map[string]any) error {
+	w.mu.Lock()
+	ctxTok := w.st.Contexts[to]
+	w.mu.Unlock()
+	var cid [4]byte
+	_, _ = rand.Read(cid[:])
+	var r wxResult
+	err := w.call(ctx, "ilink/bot/sendmessage", map[string]any{"msg": map[string]any{
+		"from_user_id": "", "to_user_id": to,
+		"client_id":    fmt.Sprintf("nano-agent:%d-%x", time.Now().UnixMilli(), cid),
+		"message_type": 2, "message_state": 2, "context_token": ctxTok,
+		"item_list": []map[string]any{item},
+	}}, &r, 30*time.Second)
+	if err == nil && r.code() != 0 {
+		err = fmt.Errorf("微信发送失败：%d %s", r.code(), r.Errmsg)
+	}
+	return err
+}
+
+// SendMedia 发文件：AES-128-ECB 加密后传到微信的 CDN（getuploadurl 拿上传地址，响应头 x-encrypted-param
+// 是下载参数），再发图片 / 视频 / 文件消息。语音官方插件也没做，按文件发。
+func (w *Weixin) SendMedia(ctx context.Context, chatID string, att media.Attachment, data []byte) error {
+	mediaType, kind := 3, media.Kind(att.MIME)
+	switch kind {
+	case "image":
+		mediaType = 1
+	case "video":
+		mediaType = 2
+	}
+	key := make([]byte, 16)
+	fk := make([]byte, 16)
+	_, _ = rand.Read(key)
+	_, _ = rand.Read(fk)
+	hexKey, filekey := hex.EncodeToString(key), hex.EncodeToString(fk)
+	enc := aesECBEncrypt(data, key)
+	sum := md5.Sum(data)
+	var up struct {
+		wxResult
+		Param   string `json:"upload_param"`
+		FullURL string `json:"upload_full_url"`
+	}
+	if err := w.call(ctx, "ilink/bot/getuploadurl", map[string]any{"filekey": filekey, "media_type": mediaType, "to_user_id": chatID,
+		"rawsize": len(data), "rawfilemd5": hex.EncodeToString(sum[:]), "filesize": len(enc), "no_need_thumb": true, "aeskey": hexKey},
+		&up, 15*time.Second); err != nil {
+		return err
+	}
+	u := strings.TrimSpace(up.FullURL)
+	if u == "" {
+		if up.Param == "" {
+			return fmt.Errorf("微信没有给上传地址：%d %s", up.code(), up.Errmsg)
+		}
+		u = w.c.CDN + "/upload?encrypted_query_param=" + url.QueryEscape(up.Param) + "&filekey=" + url.QueryEscape(filekey)
+	}
+	param, err := w.uploadCDN(ctx, u, enc)
+	if err != nil {
+		return err
+	}
+	ref := map[string]any{"encrypt_query_param": param, "aes_key": base64.StdEncoding.EncodeToString([]byte(hexKey)), "encrypt_type": 1}
+	switch kind {
+	case "image":
+		return w.sendItem(ctx, chatID, map[string]any{"type": 2, "image_item": map[string]any{"media": ref, "mid_size": len(enc)}})
+	case "video":
+		return w.sendItem(ctx, chatID, map[string]any{"type": 5, "video_item": map[string]any{"media": ref, "video_size": len(enc)}})
+	}
+	name := att.Name
+	if name == "" {
+		name = "file"
+	}
+	return w.sendItem(ctx, chatID, map[string]any{"type": 4, "file_item": map[string]any{"media": ref, "file_name": name, "len": strconv.Itoa(len(data))}})
+}
+
+// uploadCDN 把密文 POST 到 CDN，返回响应头里的下载参数。4xx 不重试，其他失败最多试三次。
+func (w *Weixin) uploadCDN(ctx context.Context, u string, enc []byte) (string, error) {
+	var last error
+	for i := 0; i < 3; i++ {
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		req, err := http.NewRequestWithContext(cctx, http.MethodPost, u, bytes.NewReader(enc))
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		resp, err := w.hc.Do(req)
+		if err == nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+			resp.Body.Close()
+			param := resp.Header.Get("x-encrypted-param")
+			switch {
+			case resp.StatusCode == http.StatusOK && param != "":
+				cancel()
+				return param, nil
+			case resp.StatusCode/100 == 4:
+				cancel()
+				return "", fmt.Errorf("上传到微信 CDN 失败：HTTP %d %s", resp.StatusCode, resp.Header.Get("x-error-message"))
+			}
+			err = fmt.Errorf("上传到微信 CDN 失败：HTTP %d", resp.StatusCode)
+		}
+		cancel()
+		last = err
+	}
+	return "", last
+}
+
+func aesECBEncrypt(data, key []byte) []byte {
+	block, _ := aes.NewCipher(key)
+	pad := aes.BlockSize - len(data)%aes.BlockSize
+	buf := make([]byte, len(data)+pad)
+	copy(buf, data)
+	for i := len(data); i < len(buf); i++ {
+		buf[i] = byte(pad)
+	}
+	for i := 0; i < len(buf); i += aes.BlockSize {
+		block.Encrypt(buf[i:i+aes.BlockSize], buf[i:i+aes.BlockSize])
+	}
+	return buf
 }
 
 // SendMarkdown：微信只能显示纯文字，先把 Markdown 转成干净的文字。

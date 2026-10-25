@@ -245,6 +245,11 @@ type run struct {
 	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
 	tool       string    // 最近一次调的工具（/state 说它在干嘛）
 
+	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
+	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）
+	fetching     int                           // 正在取的图片：取完之前不请求模型
+	modelWaiting bool                          // 内核要求请求模型的时候图片还没取完
+
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
 	rt    route
 	w     workspace
@@ -290,8 +295,10 @@ type outItem struct {
 	chatID  string
 	text    string
 	replyTo string
-	md      bool          // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
-	delay   time.Duration // 发之前停一会儿（像人一样一条条发）
+	md      bool              // agent 的回复正文：渠道能渲染 Markdown 就按 Markdown 发
+	delay   time.Duration     // 发之前停一会儿（像人一样一条条发）
+	att     *media.Attachment // 不是文字而是文件（SendFile）：渠道有 MediaSender 就发文件，没有就发一行说明
+	data    []byte
 }
 
 func New(ctx context.Context, cfg *config.Config, client llm.Client, store *session.Store, p *persona.Loader, log *slog.Logger) *App {
@@ -355,6 +362,13 @@ func (a *App) AddChannel(ch channel.Channel) {
 				}
 			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
+			if it.att != nil {
+				if err := sendMedia(ctx, it.ch, it.chatID, *it.att, it.data); err != nil {
+					a.log.Warn("发送文件失败", "channel", name, "chat", it.chatID, "file", it.att.Name, "err", err)
+				}
+				cancel()
+				continue
+			}
 			if err := sendText(ctx, it.ch, it.chatID, it.text, it.replyTo, it.md); err != nil {
 				a.log.Warn("发送消息失败", "channel", name, "chat", it.chatID, "err", err)
 			}
@@ -665,6 +679,19 @@ func (a *App) enqueue(ep endpoint, it outItem) {
 	}
 }
 
+// sendMedia 发一个文件：渠道有 MediaSender 就按它的方式发（发不出去时退回一行说明），没有就发一行说明。
+func sendMedia(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error {
+	if ms, ok := ch.(channel.MediaSender); ok {
+		err := ms.SendMedia(ctx, chat, att, data)
+		if err == nil {
+			return nil
+		}
+		ch.Send(ctx, chat, fmt.Sprintf("［%s：%s，没发出去：%s］", kindLabel(att.MIME), att.Name, err), "")
+		return err
+	}
+	return ch.Send(ctx, chat, fmt.Sprintf("［%s：%s］", kindLabel(att.MIME), att.Name), "")
+}
+
 // sendText 发一条消息；md 时渠道能渲染 Markdown 就按 Markdown 发。
 func sendText(ctx context.Context, ch channel.Channel, chat, text, replyTo string, md bool) error {
 	if m, ok := ch.(channel.Markdowner); ok && md {
@@ -840,6 +867,7 @@ func (a *App) startRun(s *sess) {
 
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{},
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
@@ -1079,6 +1107,10 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	switch m.T {
 	case proto.TModel:
+		if s.run.fetching > 0 {
+			s.run.modelWaiting = true // 等图片取完（seeImage）
+			break
+		}
 		a.callModel(s)
 	case proto.TExec:
 		a.execTool(node, s, m)
@@ -1091,8 +1123,11 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if m.OK != nil && !*m.OK {
 			content = "[执行失败] " + content
 		}
-		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content}); err != nil {
-			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
+		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
+		if !a.seeImage(s, m) {
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Sent: s.run.sent[m.ID]}); err != nil {
+				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
+			}
 		}
 		for _, o := range s.run.outs {
 			if o.view == nil {
@@ -1398,6 +1433,7 @@ func (a *App) generateModel(s *sess) {
 			a.sayMidway(s, r, res.Content)
 			for _, c := range res.Calls {
 				r.tool = c.Function.Name
+				r.callArgs[c.ID] = proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)}
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)
 				for _, v := range views {

@@ -410,7 +410,7 @@
             {#if b.tools.length}
               <div class="tools">
                 {#each b.tools as t}
-                  <ToolCard name={t.name} detail={t.detail} args={t.args} ok={t.ok} result={t.result} />
+                  <ToolCard name={t.name} detail={t.detail} args={t.args} ok={t.ok} result={t.result} media={t.media} />
                 {/each}
               </div>
             {/if}
@@ -456,7 +456,7 @@
           </div>
         {:else if it.kind === 'tool'}
           <div class="msg bot">
-            <ToolCard name={it.name} detail={it.detail} args={it.args} ok={it.ok} result={it.result} running />
+            <ToolCard name={it.name} detail={it.detail} args={it.args} ok={it.ok} result={it.result} media={it.media} running />
           </div>
         {:else if it.kind === 'say' && !it.text.startsWith('⚠️ 需要审批')}
           <div class="sys say"><Icon name="bot" size={13} />{it.text}</div>
