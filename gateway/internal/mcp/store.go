@@ -74,10 +74,7 @@ func Normalize(s Server) (Server, error) {
 	switch s.Approval {
 	case "":
 		s.Approval = ApprovalNever
-	case ApprovalNever, ApprovalAlways:
-	case ApprovalPerTurn:
-		// per_turn（一轮里只批一次）还没接上，先明确拒绝，别让人以为开了
-		return s, errors.New("审批（per_turn）还没接上，先写 always（每次都要批）或 never（不批）")
+	case ApprovalNever, ApprovalAlways, ApprovalPerTurn:
 	default:
 		return s, fmt.Errorf("approval 只能是 %s、%s 或 %s", ApprovalAlways, ApprovalPerTurn, ApprovalNever)
 	}

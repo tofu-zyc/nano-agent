@@ -403,8 +403,8 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
   **Windows 内核还不支持透传**（那份是明确报错的桩），Linux / macOS 可以。
 - `env` 里写明文密钥，存盘时会自动加密成 `enc:v1:`（读的时候解）。
 - `tools` 是白名单，`"!名字"` 表示禁用；`agents` 空表示所有 agent 都能用。
-- `approval`：`never`（直接执行，默认）或 `always`（每次调用都出一张审批单，管理员在网页点批准、
-  或者在聊天里发 `/approve 编号`）。`per_turn`（一轮只批一次）还没接上，写了会被拒绝。
+- `approval`：`never`（直接执行，默认）、`per_turn`（一轮里第一次调用要批，批过就不再问）或
+  `always`（每次都要批）。管理员在网页点批准，或者在聊天里发 `/approve 编号`。
 
 工具以 `<服务>__<工具>` 交给模型，说明里带“（MCP 服务 X）”。调用时内核不认识这个名字，
 会转回网关执行（`kernel/src/core.c` 的 `FORWARDED`），所以不需要给内核加动态工具表。
@@ -413,7 +413,7 @@ python3 scripts/e2e-win.py    # 单独跑 Windows 内核端到端（需要网关
 已经有的测试：`internal/mcp`（配置校验、密钥加密、列/调工具、黑名单、内存传输和真子进程两条路）、
 `app/TestMCPEndToEnd`（模型能看见工具 → 调用拿到结果）。
 
-还没做：Windows 内核的透传（桩）、`per_turn` 审批、图片类结果的专门展示（现在是一行占位文字）。
+还没做：图片类结果的专门展示（现在工具结果里是一行占位文字，图片本身也没存下来）。
 
 两条端到端测试：`scripts/e2e-pipe.py`（假网关 + 真内核，测管道）、
 `scripts/e2e-mcp-remote.py`（真网关 + 真内核 + 最小的 MCP 服务，测 `machine=` 整条链路）。

@@ -237,16 +237,17 @@ type run struct {
 
 	streamed   bool // 回复正文已经通过 RunView 显示过了
 	start      time.Time
-	calls      int       // 这一轮请求了几次模型
-	usage      llm.Usage // 这一轮的累计用量
-	noTools    bool      // 访客没有工作目录：不给模型工具，只聊天
-	readOnly   bool      // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
-	elevate    bool      // 这个身份可以提权写工作目录外（管理员）
-	proactive  bool      // 群聊里自己凑上来的（上一次是 groupTick 触发的）
-	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
-	withImages bool      // 这一轮的模型能接收图片
-	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
-	tool       string    // 最近一次调的工具（/state 说它在干嘛）
+	calls      int             // 这一轮请求了几次模型
+	usage      llm.Usage       // 这一轮的累计用量
+	noTools    bool            // 访客没有工作目录：不给模型工具，只聊天
+	mcpOK      map[string]bool // 这一轮已经批准过的 MCP 服务（approval=per_turn）
+	readOnly   bool            // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
+	elevate    bool            // 这个身份可以提权写工作目录外（管理员）
+	proactive  bool            // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	inner      bool            // agent 自己的一轮（整理记忆、内心活动）
+	withImages bool            // 这一轮的模型能接收图片
+	usedTools  bool            // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
+	tool       string          // 最近一次调的工具（/state 说它在干嘛）
 
 	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
 	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
@@ -199,6 +201,19 @@ func (a *App) askMCPApproval(s *sess, tool string, args json.RawMessage) (<-chan
 	return ch, n
 }
 
+// mimeExt 是图片的扩展名（媒体库里按它命名）。
+func mimeExt(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	}
+	return ".png"
+}
+
 // mcpCall 执行一次 MCP 工具调用。调用方持有锁；调用本身在协程里跑。
 func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	mg := a.mcp
@@ -231,6 +246,19 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 			return
 		}
 		text := mcp.ResultText(res)
+		// 工具返回的图片：存下来附在工具结果上，网页的工具卡片会显示
+		for _, c := range res.Content {
+			img, ok := c.(*sdkmcp.ImageContent)
+			if !ok || len(img.Data) == 0 || a.media == nil || s.run == nil {
+				continue
+			}
+			att, err := a.media.Save(img.Data, "mcp-"+m.ID+mimeExt(img.MIMEType), "mcp")
+			if err != nil {
+				a.log.Warn("保存 MCP 返回的图片失败", "err", err)
+				continue
+			}
+			s.run.sent[m.ID] = append(s.run.sent[m.ID], att)
+		}
 		ok := !res.IsError
 		if !ok && text == "" {
 			text = "工具返回了错误"
@@ -238,8 +266,23 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		a.log.Info("MCP 工具调用完成", "sid", sid, "tool", m.Name, "from", from, "bytes", len(text))
 		reply(ok, text)
 	}
-	// approval=always 的服务：每次调用都先问管理员（/approve、网页按钮都能批）
-	if srv, ok := mg.Server(server); ok && srv.Approval == mcp.ApprovalAlways {
+	// approval=always 每次都要批；per_turn 一轮里只要批过一次就放行
+	need := false
+	if srv, ok := mg.Server(server); ok {
+		switch srv.Approval {
+		case mcp.ApprovalAlways:
+			need = true
+		case mcp.ApprovalPerTurn:
+			need = s.run == nil || !s.run.mcpOK[server]
+		}
+	}
+	if need {
+		if s.run != nil {
+			if s.run.mcpOK == nil {
+				s.run.mcpOK = map[string]bool{}
+			}
+			s.run.mcpOK[server] = true
+		}
 		wait, n := a.askMCPApproval(s, m.Name, m.Args)
 		limit := a.cfg.Agent.ApprovalLimit()
 		a.log.Info("MCP 工具等审批", "sid", sid, "tool", m.Name, "n", n)

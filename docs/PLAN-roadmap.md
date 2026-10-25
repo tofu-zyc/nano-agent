@@ -496,7 +496,8 @@ MCP 服务可以挂在任何一台接入的电脑上，用来实现“computer u
 > 协议 v10 **两端都做了**：网关侧（消息类型、`internal/mcp/pipe.go` 的管道传输、`machine` 配置、路由）
 > 和内核侧（`kernel/src/pipe.c`：起子进程、按行读 stdout、关 stdin 后退不退先 SIGTERM 再 SIGKILL）。
 > 端到端测过：真网关 + 真内核 + 一个最小 MCP 服务，`machine=<内核名>` 能列出并调用工具。
-> **还没做**：Windows 内核的透传（现在是明确报错的桩）、`per_turn` 审批。
+> Windows 内核的透传也补上了（`kernel/src/pipe_win.c`，读线程 + 唤醒 socket），`scripts/e2e-pipe-win.py` 实测。
+> 审批三种都支持（never / per_turn / always）。**还没做**：图片类结果的专门展示。
 > 详见 `docs/HANDOFF.md` 的「MCP（2026-10-25）」一节。
 
 ### 协议 v10（内核和网关）

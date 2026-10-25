@@ -63,13 +63,13 @@ func TestStoreRejectsBadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := []Server{
-		{Name: "", Command: "x"},                              // 没名字
-		{Name: "a b", Command: "x"},                           // 名字带空格
-		{Name: "ok", URL: "http://x", Command: "y"},           // 两个都给
-		{Name: "ok", Command: "x", Approval: "sometimes"},     // 审批方式不对
-		{Name: "ok", Command: "x", Approval: ApprovalPerTurn}, // per_turn 还没接上，明确拒绝
-		{Name: "ok", Machine: "windows-pc"},                   // 挂别的机器要给 command
-		{Name: "ok", URL: "http://x", Machine: "windows-pc"},  // 挂别的机器不能是 url
+		{Name: "", Command: "x"},                             // 没名字
+		{Name: "a b", Command: "x"},                          // 名字带空格
+		{Name: "ok", URL: "http://x", Command: "y"},          // 两个都给
+		{Name: "ok", Command: "x", Approval: "sometimes"},    // 审批方式不对
+		{Name: "ok", Command: "x", Approval: "sometimes"},    // 审批方式不对
+		{Name: "ok", Machine: "windows-pc"},                  // 挂别的机器要给 command
+		{Name: "ok", URL: "http://x", Machine: "windows-pc"}, // 挂别的机器不能是 url
 	}
 	for _, s := range bad {
 		if err := st.Save([]Server{s}); err == nil {

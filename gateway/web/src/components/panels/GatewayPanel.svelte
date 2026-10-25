@@ -241,6 +241,7 @@
         <label><span>审批</span>
           <select bind:value={mcpDraft.approval}>
             <option value="never">不用审批，直接执行</option>
+            <option value="per_turn">一轮里批准一次</option>
             <option value="always">每次调用都要批准</option>
           </select>
         </label>
