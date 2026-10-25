@@ -7,6 +7,17 @@
   let q = $state('');
   let filter = $state('all');
 
+  // 新建会话时先选 agent：后端一直支持（newSession(title, agent)），只是界面没给入口
+  let picker = $state(false);
+  function startNewSession() {
+    if (store.agents.length > 1) picker = !picker;
+    else store.newSession();
+  }
+  function newSessionFor(agent: string) {
+    picker = false;
+    store.newSession('', agent);
+  }
+
   const sessions = $derived(
     (store.ov?.sessions ?? [])
       .filter((s) => filter === 'all' || sessionChannels(s).includes(filter))
@@ -27,8 +38,21 @@
         <Icon name="search" size={14} />
         <input bind:value={q} placeholder="搜索会话" />
       </div>
-      <button class="btn sm primary" onclick={() => store.newSession()} title="新建会话"><Icon name="plus" size={14} /></button>
+      <button class="btn sm primary" onclick={startNewSession} title="新建会话"><Icon name="plus" size={14} /></button>
     </div>
+    {#if picker}
+      <button type="button" class="scrim" aria-label="关闭" onclick={() => (picker = false)}></button>
+      <div class="newmenu">
+        <div class="hint">在哪个 agent 下新建会话？</div>
+        {#each store.agents as ag (ag.id)}
+          <button onclick={() => newSessionFor(ag.id)}>
+            <span class="emoji">{ag.emoji || '🙂'}</span>
+            <span class="grow">{ag.name}</span>
+            {#if ag.default}<span class="muted small">默认</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
     <div class="filters">
       <button class:active={filter === 'all'} onclick={() => (filter = 'all')}>全部</button>
       {#each Object.entries(channelMeta) as [name, m]}
@@ -88,7 +112,7 @@
       </p>
       <div class="acts">
         <a class="btn primary" href="#/sessions/main"><Icon name="hub" size={14} />打开主会话</a>
-        <button class="btn" onclick={() => store.newSession()}><Icon name="plus" size={14} />新建会话</button>
+        <button class="btn" onclick={startNewSession}><Icon name="plus" size={14} />新建会话</button>
       </div>
     </div>
   {/if}
@@ -101,6 +125,7 @@
     display: flex;
   }
   .list {
+    position: relative;
     width: 300px;
     flex: none;
     display: flex;
@@ -133,6 +158,55 @@
     background: none;
     font-size: 13px;
   }
+    .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+  .newmenu {
+    position: absolute;
+    top: 46px;
+    right: 10px;
+    z-index: 21;
+    min-width: 200px;
+    padding: 6px;
+    border-radius: 12px;
+    background: var(--panel-solid);
+    border: 1px solid var(--line-2);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+  }
+  .newmenu .hint {
+    padding: 4px 8px 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .newmenu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--fg);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .newmenu button:hover {
+    background: var(--bg-2);
+  }
+  .newmenu .grow {
+    flex: 1;
+  }
+  .newmenu .small {
+    font-size: 11px;
+  }
+
   .filters {
     display: flex;
     flex-wrap: wrap;

@@ -792,6 +792,7 @@ def check_living(page, url, nano):
     else:
         fail("内心会话出现在会话列里")
     check_workspace_unmount(page, url)
+    check_new_session_agent(page, url)
     # 收拾：改回工具型、删掉测试记忆
     api(page, "PATCH", "/api/agents/default", {"style": "tool"})
     for pth in ["people/张三.md", "国庆去成都.md"]:
@@ -828,6 +829,36 @@ def check_workspace_unmount(page, url):
         api(page, "PATCH", "/api/sessions/main", {"workspaces": []})
         return fail(f"点了标签以后还挂着：{left}")
     ok("对话头部的工作目录标签点一下就取下")
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(400)
+
+
+def check_new_session_agent(page, url):
+    """新建会话时可以选 agent（后端一直支持，以前界面没给入口，只能建在默认 agent 下）"""
+    st, out = api(page, "POST", "/api/agents", {"name": "选会话测试"})
+    if st != 200 or not isinstance(out, dict) or not out.get("id"):
+        return fail(f"建测试 agent 失败：{st} {str(out)[:120]}")
+    ag = out["id"]
+    page.goto(url + "#/sessions")
+    page.wait_for_timeout(700)
+    page.click('button[title="新建会话"]')
+    if page.locator(".newmenu").count() == 0:
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail("新建会话没有出现选 agent 的菜单")
+    item = page.locator('.newmenu button:has-text("选会话测试")')
+    if item.count() != 1:
+        n = page.locator(".newmenu button").count()
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail(f"菜单里没有列出那个 agent（共 {n} 项）")
+    item.click()
+    page.wait_for_timeout(900)
+    sid = urllib.request.unquote(page.url.split("#/sessions/")[-1])
+    if sid.startswith("@" + ag + "/"):
+        ok("新建会话时可以选 agent")
+    else:
+        fail(f"新建的会话不在选中的 agent 下：{sid}")
+    api(page, "DELETE", "/api/agents/" + ag)
     page.goto(url + "#/")
     page.wait_for_selector("g.node.gateway")
     page.wait_for_timeout(400)
