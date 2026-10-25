@@ -588,8 +588,7 @@
   }
   function agentSub(a: AgentInfo): string {
     const bits: string[] = [];
-    if (a.memory?.dreaming) bits.push('🌙 整理记忆');
-    else if (a.life) bits.push({ sleeping: '💤 睡着', awake: '🌱 醒着', thinking: '💭 在想事情' }[a.life.state]);
+    if (a.doing) bits.push(a.doing.icon + ' ' + a.doing.brief);
     bits.push(`${a.sessions} 个会话`);
     if (a.bots.length) bits.push(`${a.bots.length} 个机器人`);
     return bits.join(' · ');

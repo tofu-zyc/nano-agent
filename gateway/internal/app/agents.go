@@ -273,6 +273,7 @@ type AgentInfo struct {
 	Style          string         `json:"style"` // tool | life
 	Memory         MemoryBrief    `json:"memory"`
 	Life           *LifeBrief     `json:"life,omitempty"` // 拟人型的内心活动状态
+	Doing          Doing          `json:"doing"`          // 现在在干嘛（doing.go）
 }
 
 // MemoryBrief 是 agent 长期记忆的概况：多少条、多少人、上次整理。
@@ -527,6 +528,7 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 		info.Style = agents.StyleLife
 		info.Life = a.lifeBrief(ag)
 	}
+	info.Doing = a.agentDoing(ag, "")
 	if a.agentRoot != "" {
 		info.Memory.On = a.memoryOn(ag)
 		info.Memory.Total, info.Memory.People, _ = a.memStore(ag.ID).Counts()

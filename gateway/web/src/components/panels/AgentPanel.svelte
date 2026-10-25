@@ -146,7 +146,9 @@
     <div class="p-grid">
       <div class="p-stat"><b>{a.sessions}</b><span>会话</span></div>
       <div class="p-stat"><b class:acc={a.bots.length > 0}>{a.bots.length}</b><span>绑的机器人</span></div>
-      {#if a.life}
+      {#if a.doing}
+        <div class="p-stat"><b>{a.doing.icon} {a.doing.brief}</b><span>现在</span></div>
+      {:else if a.life}
         <div class="p-stat"><b>{lifeState[a.life.state]?.icon} {lifeState[a.life.state]?.text}</b><span>现在</span></div>
       {:else}
         <div class="p-stat"><b>{a.running ? '在跑' : '空闲'}</b><span>现在</span></div>
@@ -167,7 +169,7 @@
       <div class="p-card lifecard">
         <div class="p-row">
           <span class="p-grow">
-            {#if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else if L.state === 'thinking'}💭 正在想事情{:else}🌱 醒着{#if L.next}，大约 {when(L.next)} 再自己醒一次{/if}{/if}
+            {#if a.doing}{a.doing.icon} {a.doing.text}{:else if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else}🌱 醒着{/if}
           </span>
         </div>
         <div class="p-note p-small">今天自己醒了 {L.wakes}/{L.max_wakes} 次 · 主动找了 {L.reaches} 次人 · 用了 {L.tokens.toLocaleString()} token{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}</div>

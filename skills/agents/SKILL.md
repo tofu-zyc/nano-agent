@@ -17,7 +17,7 @@ nano-agent 里可以有多个 **agent**：每个是一直在的个体，有自�
 
 返回 `agents` 和 `bots` 两份：
 
-- 每个 agent：`id`、`name`、`emoji`、`default`（是不是默认的）、`style`（`tool` 工具型 / `life` 拟人型）、`model`、`model_label`、`thinking`、`sessions`（几个会话）、`bots`（绑了哪些机器人）、`persona_file`、`memory`（长期记忆：开没开、多少条、多少人、上次整理）、`life`（拟人型的状态：睡着 / 醒着 / 在想事情、下次醒来、今天醒了几次、近况）、`settings`（它自己的设置：每项有 `group` 分组（work 干活 / group 群聊 / life 拟人 / memory 记忆）、`global` 全局值或默认值、`value` 它自己的值（`null` 表示跟随全局或默认）、`effective` 实际生效的值）。
+- 每个 agent：`id`、`name`、`emoji`、`default`（是不是默认的）、`style`（`tool` 工具型 / `life` 拟人型）、`model`、`model_label`、`thinking`、`sessions`（几个会话）、`bots`（绑了哪些机器人）、`persona_file`、`memory`（长期记忆：开没开、多少条、多少人、上次整理）、`life`（拟人型的状态：睡着 / 醒着 / 在想事情、下次醒来、今天醒了几次、近况）、`doing`（现在在干嘛，和聊天里 `/state` 是同一套说法：`state` 是 dreaming 整理记忆 / chatting 聊天 / working 干活 / thinking 内心活动 / sleeping 睡着 / slacking 摸鱼 / idle 发呆或闲着，`text` 是给人看的一句话）、`settings`（它自己的设置：每项有 `group` 分组（work 干活 / group 群聊 / life 拟人 / memory 记忆）、`global` 全局值或默认值、`value` 它自己的值（`null` 表示跟随全局或默认）、`effective` 实际生效的值）。
 - 每个机器人：`id`、`kind`（telegram / feishu）、`name`、`agent`（绑在谁身上）、`channel`（渠道名，比如 `tg`、`tg.bob`）、`enabled`、`legacy`（内置的）。
 
 ## 再改（每次审批；放行模式下自动批准）

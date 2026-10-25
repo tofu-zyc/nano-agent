@@ -206,6 +206,20 @@ class Store {
   }
 
   private reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  private agentsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** agent 的状态（在干嘛）跟着会话变：过一会儿只重读 agent 列表 */
+  reloadAgentsSoon() {
+    clearTimeout(this.agentsTimer);
+    this.agentsTimer = setTimeout(async () => {
+      try {
+        const r = await api.get<{ items: AgentInfo[] }>('/api/agents');
+        if (this.ov) this.ov.agents = r.items;
+      } catch {
+        /* 下次整体刷新时再读 */
+      }
+    }, 800);
+  }
 
   // 这个页面加载时网关的版本。网关更新以后（这个标签页一直开着），页面代码还是旧的，
   // 新版本加的设置项、节点在旧页面上看不到：发现版本变了就自己刷新一次。
@@ -534,6 +548,7 @@ class Store {
         break;
       }
       case 'run': {
+        this.reloadAgentsSoon();
         const s = this.session(sid);
         if (e.kind === 'start') {
           if (s) s.running = true;

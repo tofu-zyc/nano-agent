@@ -47,6 +47,7 @@ var Commands = []Command{
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
+	{Name: "state", Desc: "看 agent 现在在干嘛：睡着、在聊天、在冲浪、在摸鱼、在发呆……"},
 	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
@@ -242,6 +243,7 @@ type run struct {
 	inner      bool      // agent 自己的一轮（整理记忆、内心活动）
 	withImages bool      // 这一轮的模型能接收图片
 	usedTools  bool      // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
+	tool       string    // 最近一次调的工具（/state 说它在干嘛）
 
 	// 这一轮挂上的工作目录和怎么执行（nodes.go 的 route），交给网关执行的工具按它生成约束（exec.go）
 	rt    route
@@ -430,6 +432,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "agent":
 		a.cmdAgent(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
+		return
+	case "state":
+		a.cmdState(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
 		return
 	case "whoami":
 		sid := a.boundSession(ep, m)
@@ -631,7 +636,9 @@ func (a *App) allowed(key string) bool {
 }
 
 // deliver 把一条消息发到一个窗口。调用方持有锁。
-func (a *App) deliver(ep endpoint, text, replyTo string) { a.enqueue(ep, outItem{text: text, replyTo: replyTo}) }
+func (a *App) deliver(ep endpoint, text, replyTo string) {
+	a.enqueue(ep, outItem{text: text, replyTo: replyTo})
+}
 
 // deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
 func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
@@ -1381,6 +1388,7 @@ func (a *App) generateModel(s *sess) {
 			turn.Reason = proto.ReasonToolUse
 			r.usedTools = true
 			for _, c := range res.Calls {
+				r.tool = c.Function.Name
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)
 				for _, v := range views {

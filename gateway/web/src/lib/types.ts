@@ -269,6 +269,7 @@ export type AgentInfo = {
   style: 'tool' | 'life'; // 工具型 / 拟人型
   memory: MemoryBrief;
   life?: LifeBrief; // 拟人型的内心活动
+  doing?: AgentDoing; // 现在在干嘛
 };
 
 // agent 长期记忆的概况
@@ -380,3 +381,11 @@ export type ScheduleTask = {
  next: string; running: boolean; last?: ScheduleResult; results: ScheduleResult[];
 };
 export type ScheduleView = { tasks: ScheduleTask[]; timezone: string; error?: string };
+
+// 一个 agent 现在在干嘛（和聊天里的 /state 同一套说法）
+export interface AgentDoing {
+  state: 'dreaming' | 'chatting' | 'working' | 'thinking' | 'sleeping' | 'slacking' | 'idle';
+  icon: string;
+  text: string; // 带着在跟谁聊、几点醒
+  brief: string; // 短说法
+}
