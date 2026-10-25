@@ -149,6 +149,11 @@ func (a *App) cmdState(c in) {
 	if c.s != nil {
 		sid = c.s.sid
 	}
+	if sid == "" {
+		// 窗口还没接过线，不知道是哪个 agent 的会话：别猜，也别为它建会话
+		a.answer(c, "还没有接到会话：先在这里发一条消息，再看 /state")
+		return
+	}
 	cur := a.agentOf(sid)
 	list := []agents.Agent{cur}
 	admin := a.isAdmin(c.who)

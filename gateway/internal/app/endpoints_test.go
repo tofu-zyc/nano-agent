@@ -431,3 +431,25 @@ func TestHistoryAndSyncReadArchiveAfterCompaction(t *testing.T) {
 	}
 	e.k.none() // 查看历史不会调用模型。
 }
+
+// 窗口还没接过线时发 /state：不能顺手建出一个 ID 为空的会话（网页上会多出一个没标题的幽灵会话）
+func TestCommandOnUnattachedWindowMakesNoSession(t *testing.T) {
+	e := setup(t)
+	other := e.otherCh()
+	sayFrom(e.a, other, "c-new", "u9", "/state")
+	if msg := other.wait(t, "还没有接到会话"); !strings.Contains(msg, "/state") {
+		t.Fatalf("要提示先在这里发一条消息：%q", msg)
+	}
+	e.a.mu.Lock()
+	_, hasEmpty := e.a.sessions[""]
+	ids := e.a.sessionIDs()
+	e.a.mu.Unlock()
+	if hasEmpty {
+		t.Fatal("建出了一个 ID 为空的会话")
+	}
+	for _, sid := range ids {
+		if sid == "" {
+			t.Fatal("会话列表里出现了空 ID")
+		}
+	}
+}

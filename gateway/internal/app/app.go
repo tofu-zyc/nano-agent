@@ -642,6 +642,11 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 }
 
 func (a *App) sessOf(sid string) *sess {
+	if sid == "" {
+		// 空 ID 不是会话。窗口还没接过线时（比如在那里发 /state）以前会在这里建一个 ID 为空的
+		// 会话，网页上就多出一个没标题的幽灵会话：给一个不记账的临时会话。
+		return &sess{}
+	}
 	s := a.sessions[sid]
 	if s == nil {
 		s = &sess{sid: sid}

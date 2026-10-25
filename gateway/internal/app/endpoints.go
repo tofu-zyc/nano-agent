@@ -264,10 +264,12 @@ func (a *App) sessionIDs() []string {
 	seen := map[string]bool{mainSID: true}
 	out := []string{mainSID}
 	add := func(sid string) {
-		if !seen[sid] {
-			seen[sid] = true
-			out = append(out, sid)
+		if sid == "" || seen[sid] {
+			// 空 ID 不是会话（以前命令路径会漏出来一个标题空白的会话，网页上像幽灵）
+			return
 		}
+		seen[sid] = true
+		out = append(out, sid)
 	}
 	for _, sid := range a.store.List() {
 		add(sid)
