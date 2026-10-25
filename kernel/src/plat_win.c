@@ -467,8 +467,9 @@ bool plat_stat(const char *p, plat_stat_t *st)
     if (!w) return false;
     WIN32_FILE_ATTRIBUTE_DATA d;
     bool ok = GetFileAttributesExW(w, GetFileExInfoStandard, &d) != 0;
+    DWORD stat_err = ok ? 0 : GetLastError();
     free(w);
-    if (!ok) return false;
+    if (!ok) { set_errno_from_win(stat_err); return false; }
     st->exists = true;
     st->is_dir = (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     st->size = ((int64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow;
@@ -737,7 +738,7 @@ plat_file *plat_open_read(const char *path)
     HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(w);
-    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (h == INVALID_HANDLE_VALUE) { set_errno_from_win(GetLastError()); return NULL; }
     plat_file *f = xmalloc(sizeof *f);
     f->h = h;
     return f;
@@ -746,7 +747,7 @@ plat_file *plat_open_read(const char *path)
 long plat_file_read(plat_file *f, void *buf, size_t n)
 {
     DWORD got = 0;
-    if (!ReadFile(f->h, buf, (DWORD)n, &got, NULL)) return -1;
+    if (!ReadFile(f->h, buf, (DWORD)n, &got, NULL)) { set_errno_from_win(GetLastError()); return -1; }
     return (long)got;
 }
 

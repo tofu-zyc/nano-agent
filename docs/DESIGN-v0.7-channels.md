@@ -74,13 +74,25 @@
 - `SendFile {files:[路径或网址]}`：取文件（网址下载，访客不许内网），`media.SaveFile` 存起来，放进这一轮每个聊天窗口的发送队列（`outItem.att`），渠道实现 `channel.MediaSender` 就发文件，否则发“［图片：名字］”。结果记在工具消息的 `Sent` 上，网页工具卡片下面显示图片 / 文件。
 - 渠道：飞书（上传图片 / 文件，opus 发语音，其余发文件；扫码新建的应用多申请 `im:resource`，**老应用要在开放平台补开 `im:resource` 并发布**）、Telegram（photo / animation / voice / audio / video / document）、QQ（先上传 `/files` 再发 msg_type 7，只支持图片、mp4、silk 语音）、微信（AES-128-ECB 加密传 CDN，图片 / 视频 / 文件消息）。
 - 拟人守则加了一句：想发表情包就用 SendFile，别用文字描述。`prefixVer` 升到 2（旧会话工具快照作废一次）。
-- 测试：`TestReadImageShownToModel`、`TestSendFileSendsToChat`、`TestTelegramSendMedia`、`TestQQSendMedia`、`TestWeixinSendMedia`、`kernel/tests/test_exec.py` 的 `t_fetch`、`scripts/e2e.sh` 的 SendFile 一步（e2e 这一步加了但**还没跑过**）。
-- **还没做**：`test_exec_win.py` 里 Windows 执行器的 Fetch 检查；音频、视频格式转换（QQ 语音要 silk、飞书语音要 opus）；完整的 `make test` / CI 还没跑；没发版。
+- 测试：`TestReadImageShownToModel`、`TestSendFileSendsToChat`、`TestTelegramSendMedia`、`TestQQSendMedia`、`TestWeixinSendMedia`、`kernel/tests/test_exec.py` 的 `t_fetch`、`kernel/tests/test_exec_win.py` 的 `t_fetch`、`scripts/e2e.sh` 的 SendFile 一步（2026-10-25 跑过了，见文末「验证过」）。
+- **还没做**：音频、视频格式转换（QQ 语音要 silk、飞书语音要 opus）；合并 main、发 v0.7.0（等用户确认）。
 
 ## 没做、要注意的
 
 - **没有在真的 QQ、微信上跑过**，协议按官方插件源码和文档写的。用户第一次扫码时最可能出问题的地方：QQ 的 `source` 参数留空（扫码页显示“第三方机器人”）；微信的 `iLink-App-ClientVersion` 和 `channel_version` 跟着官方插件 2.4.10。
-- QQ 没做流式回复（`/v2/users/{openid}/stream_messages`，只支持私聊和 Markdown），工具型在 QQ 上是回完一次发；没做发图片、发文件。
-- 微信没做发图片（要先 AES 加密上传 CDN）、引用消息。
+- QQ 没做流式回复（`/v2/users/{openid}/stream_messages`，只支持私聊和 Markdown），工具型在 QQ 上是回完一次发。发图片和文件做了（先 `POST …/files` 上传拿 `file_info`，再发 `msg_type 7`；只支持图片、mp4、silk 语音）。
+- 微信没做引用消息。发图片、视频、文件做了（AES-128-ECB 加密后传 CDN）。
 - QQ 群里的发送人 openid 和私聊的不一样（每个场景一个 openid），所以主人在群里不是管理员身份（群里本来也按访客算）；私聊里是管理员，和 Telegram 的管理员一样接到主会话。
 - 发动态、朋友圈没做（见上）。
+
+## 验证过（2026-10-25）
+
+接手时（另一个会话额度用完）补做的验证和收尾。
+
+- `bash scripts/test-isolated.sh` 通过（隔离 HOME、`NANO_TEST_NO_WINDOWS=1`）：`test_core` 153 项、执行器 / 宿主测试、`go test -race`（0 个 DATA RACE）、`scripts/e2e.sh` **74 项全过**（含新加的 SendFile 一步）、`e2e-control.py` 12 项、Linux 离线安装 6 项、一行安装、升级 / 回滚、macOS 交叉编译，没有任何 make 报错。
+- **网页界面检查**单独跑过（`python3 scripts/check-web-ui.py`，0 failures）。坑：隔离脚本换了 HOME，playwright 是 `pip install --user` 装在 `~/.local` 的，所以 `make test` 里那一步会**自己跳过**、看起来像通过——要跑就单独跑，或者靠 CI（CI 装的是系统级）。
+- **Windows 执行器**（`make -C kernel test-win`，zig + WSL interop）14 项全过。新增的 `t_fetch` 覆盖：Read 说是图片、Fetch 取回 base64、中文路径和中文内容、`max_bytes`、目录、工作目录外、文件不存在；`setup()` 里补了 `pic.png`。
+- **Windows 内核端到端**（`python3 scripts/e2e-win.py`）17 项全过。CI 不跑这个（要 WSL interop），只在有 WSL 的机器上跑。
+- `scripts/test-install-win.py` 本地没跑（它要注册计划任务；CI 的 Windows runner 上用 `NANO_TEST_SERVICE=1` 跑，不必在用户的机器上试）。
+- **顺手修的 Windows 报错**：`plat_win.c` 的 `plat_stat` / `plat_open_read` / `plat_file_read` 失败时没设 `errno`，文件不存在时看到的是“读取 … 失败：No error”。现在按 `GetLastError()` 映射成 `ENOENT` / `EACCES` 等，和 Linux 上一样是“No such file or directory”。新工具 Fetch 走的正是 `plat_open_read` / `plat_file_read`，所以 v0.7 用得上；`test_exec_win.py` 加了“不存在的文件要说出原因”的断言。
+- 推送 d307b8c 之后 CI 跑完是 **success**（Linux + Windows + macOS 三个 job）。
