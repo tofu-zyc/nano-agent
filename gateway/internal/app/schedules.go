@@ -41,7 +41,7 @@ const scheduleSchema = `{"type":"object","properties":{
  "id":{"type":"string","description":"任务编号（更新、删除、立即运行时必填）"},
  "name":{"type":"string"},"when":{"type":"string","description":"cron 五段式、every 30m、at YYYY-MM-DD HH:mm；网关时区"},
  "agent":{"type":"string","enum":["default"]},"prompt":{"type":"string"},
- "deliver":{"type":"array","items":{"type":"string"},"description":"窗口 key 列表，省略时发到当前窗口；网页用 web:会话ID"},
+ "deliver":{"type":"array","items":{"type":"string"},"description":"把结果投到哪些窗口（会话的窗口 key，网页用 web:会话ID）；省略就只放在任务页，不往聊天里推"},
  "workspaces":{"type":"array","items":{"type":"string"},"description":"工作目录 ID；省略时继承当前会话"},
  "mode":{"type":"string","enum":["readonly","ask","auto"],"description":"不得高于创建者会话的模式"},
  "enabled":{"type":"boolean"},"catch_up":{"type":"boolean","description":"停机错过一小时内补跑一次，默认 true"},
@@ -49,7 +49,7 @@ const scheduleSchema = `{"type":"object","properties":{
 },"required":["action"]}`
 
 func scheduleTool() proto.ToolSpec {
-	return proto.ToolSpec{Name: "Schedule", Description: "管理定时任务（仅管理员）：create/list/update/delete/run_now。创建、修改、删除遵循当前权限模式。任务独立会话运行，结果和审批送到 deliver，默认当前窗口。先列出再按 id 修改，回答中说明运行时间和投递位置。", InputSchema: json.RawMessage(scheduleSchema)}
+	return proto.ToolSpec{Name: "Schedule", Description: "管理定时任务（仅管理员）：create/list/update/delete/run_now。创建、修改、删除遵循当前权限模式。任务独立会话运行；结果默认只放在任务页，想让谁看到就把 deliver 写成那个窗口。先列出再按 id 修改，回答中说明运行时间和投递位置。", InputSchema: json.RawMessage(scheduleSchema)}
 }
 
 // ScheduleSummary 是网页「定时任务」节点要显示的概况
@@ -183,11 +183,8 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	var task schedule.Task
 	if p.Action == "create" {
 		task = schedule.Task{ID: schedule.NewID(), Agent: agents.SessionAgent(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
-		if s := a.sessions[sid]; s != nil && s.run != nil && len(s.run.outs) > 0 && s.run.outs[0].ep.ch != "web" {
-			task.Deliver = []string{s.run.outs[0].ep.key()}
-		} else {
-			task.Deliver = []string{"web:" + sid}
-		}
+		// deliver 不写就是「只放任务页」：结果留在任务自己的会话和任务列表里，不往聊天窗口推。
+		// 以前这里默认投到创建任务时所在的那个窗口，模型在私聊里建的周期任务就会每轮往聊天里发结果。
 	} else {
 		if i < 0 {
 			return nil, errors.New("没有这个任务")
@@ -239,9 +236,6 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	}
 	if _, err := schedule.Timeout(task); err != nil {
 		return nil, err
-	}
-	if len(task.Deliver) == 0 {
-		return nil, errors.New("至少选一个投递窗口")
 	}
 	for _, key := range task.Deliver {
 		ep := parseEndpoint(key)
@@ -394,9 +388,6 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if _, ok := a.agentByID(task.Agent); !ok {
 		return fail(errors.New("任务指定的 agent 已经删掉了"))
 	}
-	if len(task.Deliver) == 0 {
-		return fail(errors.New("没有投递窗口"))
-	}
 	if !a.isAdmin(task.CreatedBy) {
 		return fail(errors.New("创建者已不再是管理员，任务未执行"))
 	}
@@ -429,7 +420,11 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 		return fail(errors.New("没有在线的内核"))
 	}
 	s.scheduled = &task
-	ep := parseEndpoint(task.Deliver[0])
+	// 没有投递窗口（只放任务页）时，这一轮挂在任务自己的会话上；结果由 completeSchedule 记进任务
+	ep := endpoint{ch: "web", chat: s.sid}
+	if len(task.Deliver) > 0 {
+		ep = parseEndpoint(task.Deliver[0])
+	}
 	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: task.Prompt, ChatID: ep.chat}}}
 	a.startRun(s)
 	if s.run == nil {
