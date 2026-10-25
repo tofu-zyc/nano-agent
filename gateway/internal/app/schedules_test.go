@@ -226,3 +226,75 @@ func TestScheduleWithoutDeliverStaysOnTaskPage(t *testing.T) {
 	}
 	e.ch.none(t) // 不往聊天窗口投递
 }
+
+// 模型回了 [不回复]：结果只记在任务页，不推到投递窗口（每 3 分钟查一次私信的任务，没新消息时
+// 以前每次都往飞书推一条“[定时任务 …] [不回复]”）。模型也要知道可以这么回。
+func TestScheduleSilentNotPushed(t *testing.T) {
+	e := setup(t)
+	task := newSchedule(t, e, ScheduleRequest{})
+	e.llm.say("[不回复]")
+	if _, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "run_now", ID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	m := e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: m.SID})
+	e.k.expect(proto.TTurn)
+	req := e.llm.lastReq()
+	if last := req.Messages[len(req.Messages)-1].Content; !strings.Contains(last, "只回 [不回复]") || !strings.Contains(last, "给我早报") {
+		t.Fatalf("模型不知道没事可以不推送：%q", last)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: m.SID, Status: proto.StatusOK})
+	waitFor(t, func() bool { return !e.a.Schedules().Tasks[0].Running })
+	e.ch.none(t)
+	if last := e.a.Schedules().Tasks[0].Last; last == nil || !last.OK || strings.Contains(last.Summary, "[不回复]") || !strings.Contains(last.Summary, "没有推送") {
+		t.Fatalf("任务页上该记一笔“没有推送”：%+v", last)
+	}
+	// 有话要说的时候照常推送
+	e.llm.say("有一条新私信，已经回了")
+	if _, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "run_now", ID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	m = e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: m.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: m.SID, Status: proto.StatusOK})
+	if got := e.ch.wait(t, "[定时任务 早报]"); !strings.Contains(got, "已经回了") {
+		t.Fatalf("推送内容：%q", got)
+	}
+}
+
+// 一样的失败连着出现：只推第一次，后面的只记在任务页；恢复以后再失败又会推。
+func TestScheduleRepeatedFailurePushedOnce(t *testing.T) {
+	e := setup(t)
+	newSchedule(t, e, ScheduleRequest{})
+	e.a.KernelDown("test")
+	run := func() {
+		task := e.a.Schedules().Tasks[0]
+		e.a.mu.Lock()
+		e.a.launchSchedule(task, false)
+		e.a.mu.Unlock()
+	}
+	run()
+	e.ch.wait(t, "没有在线的内核")
+	run()
+	run()
+	e.ch.none(t)
+	if got := e.a.Schedules().Tasks[0].Results; len(got) != 3 {
+		t.Fatalf("每次失败都该记在任务页：%d", len(got))
+	}
+}
+
+func TestScheduleSilentRule(t *testing.T) {
+	for text, want := range map[string]bool{
+		"[不回复]":       true,
+		"  [不回复]\n":   true,
+		"没有新私信。[不回复]": true,
+		"[不回复] 没什么新的": true,
+		"按规则，没事就回 [不回复]，这次有新私信": false,
+		"有新私信，已经回了":             false,
+	} {
+		if got := scheduleSilent(text); got != want {
+			t.Errorf("%q：%v，应该是 %v", text, got, want)
+		}
+	}
+}

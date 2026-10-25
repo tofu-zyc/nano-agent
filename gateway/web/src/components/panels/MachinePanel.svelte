@@ -17,6 +17,8 @@
   const conn = $derived(m?.kind === 'ssh' ? store.devices?.connections.find((c) => c.name === name) : undefined);
   const paired = $derived(m?.kind === 'kernel' ? store.devices?.paired.find((p) => p.node === name) : undefined);
   const localKernel = $derived(store.ov?.kernels.find((k) => k.managed));
+  // 挂在这台机器上跑的 MCP 服务（machine 写的是那台内核的名字）
+  const mcpHere = $derived((store.ov?.mcp ?? []).filter((x) => x.machine && (x.machine === name || (m?.kernels ?? []).includes(x.machine))));
   let browsing = $state(false);
   let editing = $state(false);
   let busy = $state(false);
@@ -99,6 +101,20 @@
 
   {#if m?.kind === 'local'}
     <FieldGroup group="local" focus={store.focus} />
+  {/if}
+
+  {#if mcpHere.length}
+    <h5 class="p-h">这台机器上跑的 MCP 服务</h5>
+    <div class="p-card">
+      {#each mcpHere as x (x.name)}
+        <button class="p-srow" onclick={() => store.open({ type: 'mcp' })}>
+          <Icon name="plug" size={14} />
+          <span class="p-grow">{x.name}</span>
+          <span class="muted p-small p-nowrap">{!x.enabled ? '已关闭' : x.online ? `连着 · ${x.tool_count} 个工具` : '没连着'}</span>
+          <Icon name="right" size={13} />
+        </button>
+      {/each}
+    </div>
   {/if}
 
   <h5 class="p-h">这台机器上的工作目录</h5>

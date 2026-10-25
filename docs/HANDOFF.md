@@ -3,11 +3,71 @@
 给接手这个项目的人（或者下一个 AI 会话）看的：项目现在是什么样、为什么这样设计、做到哪儿了、接下来做什么、有哪些坑。
 用户说明见 [README](../README.md)，内核和网关之间的协议见 [protocol.md](protocol.md)。
 
-最后更新：2026-10-25，**v0.7.1 已发布**（dev/v0.7.1 合并回 main）：MCP 服务——网关本机起进程、连远程地址，或者挂到任何一台接入的电脑上跑（协议 v10 管道透传，Linux / macOS / Windows 内核都行），网页里加改删测，审批三档；还有 v0.7.0 之后的几处修复。见下面「v0.7.0 发布后的修复」和「MCP（2026-10-25）」，**改 MCP 之前先读那一节的「锁的规矩」**。之前 **v0.7.0 已发布**（dev/v0.7 合并回 main）：QQ 和微信机器人（扫码绑定）、“放行”权限模式（拟人型默认）、飞书拟人型回复渲染 Markdown 和“正在回复”表情、`/state` 看 agent 在干嘛、调工具前说的话当场发、看图和发文件（SendFile）。**设计、调研结论、做了什么、没做什么都在 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)，接手先读它。** 之前 **v0.6.0 已发布**（dev/v0.6 合并回 main）：两种 agent（工具型 / 拟人型）、私聊和群聊统一的“活的”聊天循环、拟人型的内心活动（作息里自己醒来冲浪、找人聊天）、长期记忆（知识库、人物画像、自我认知）和睡觉做梦整理记忆。**设计、调研结论、分阶段进度都在 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)，接手先读它。** 再之前 **v0.5.1 已发布**（main）：修 v0.5.0 发布后用户报的问题——agent 的人格编辑器里看不见自带人格、找不到添加人格文件的地方、删 agent 死路、同名 agent、配置项和工具名用英文、入口直连 agent 的虚线绕得太复杂（已改回直连）。之前 **v0.5.0 已发布**（dev/v0.5 合并回 main，阶段 6、7、8 都已完成）：多 agent——每个 agent 是图上一个节点，有自己的名字、人格、模型和会话，可以绑自己的机器人；每个 agent 能覆盖全局设置，没覆盖的跟随全局；外部群聊能听会回；网关内部有群（房间）和两个 agent 的私聊；**专门给群聊做的界面（成员头像、@ 补全）还没做**，群聊现在就用普通的会话页（每一条前面带 `[谁说的]`）。验收提的问题都修了（覆盖人格、Message 权限、拓扑分列、判断费用、中文名字的 ID 等），见下面「v0.5 验收修复」。之前 **v0.4.1 已发布**（main）：网关换了版本，开着的网页自己刷新；工具调用轮数上限改名、好找（见「v0.4.1 发布后的修复」）。之前 **v0.4.0 已发布**（dev/v0.4 合并回 main）：拓扑图就是控制台，去掉设置页、设备页、定时任务页、人格页（见下面「v0.4 开发进度」）；同一个版本里还有 Windows 内核配置被写坏的修复、每条消息的上限改成网关设置、检查更新走代理（见「v0.3.2 发布后的修复」，原来准备单独发 v0.3.3，用户要求一起发）。之前 **v0.3.2 已发布**：设置页数字项改了不保存修好；显示档位单独成「消息与显示」组，Telegram、飞书、命令行节点面板里也有（见「v0.3.1 发布后的修复」）。之前 **v0.3.1 已发布**：修飞书回复出现两次、Telegram 工具记录被删（显示档位）；设置页和拓扑图补上「上下文与记忆」「网络搜索」「定时任务」；v0.3 功能的技能（web-search、scheduled-tasks、context-and-history、gateway-settings）和聊天里改设置（`settings_set`）、查对话轮次（`turns`）；默认开的开关在设置页显示对了；见下面「v0.3.0 发布后的修复」。之前 **v0.3.0 已发布**（dev/v0.3 合并回 main）：上下文真实用量计量和 `/context`、分层上下文整理（工具结果占位 + 分块滚动摘要，请求前/结束后/空闲/`/compact`）、`/reset` 归档和删除历史（整段、几轮、归档）、聊天显示档位（`/show`）、DeepSeek 网络搜索（WebSearch/WebFetch）、定时任务（`Schedule`、`/cron`、网页「定时任务」页），见下面「v0.3 开发进度」；之前 **v0.2.2 已发布**：自带人格「小纳」「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹，`nano-kernel start` 在任务不存在时直接拉起）、`nano-gateway help` / `--help` / `-h`、`nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一个大版本（v0.3 – v0.6：上下文压缩、显示档位、搜索、定时任务、多 agent 和群聊、知识库和做梦、MCP 和 computer use）见 [PLAN-roadmap.md](PLAN-roadmap.md)；更早的计划见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
+最后更新：2026-10-25，**v0.7.2 已发布**（dev/v0.7.2 合并回 main）：MCP 服务挪到拓扑图上单独的节点、AI 能在聊天里加改删测 MCP（技能 mcp），修了 AI 配模型接口时地址和 key 一直存不进去；定时任务回 `[不回复]` 不再往飞书推、编辑任务改成点选时间（含“只运行一次”）。见下面「v0.7.2 的改动和交接」。之前 **v0.7.1 已发布**（dev/v0.7.1 合并回 main）：MCP 服务——网关本机起进程、连远程地址，或者挂到任何一台接入的电脑上跑（协议 v10 管道透传，Linux / macOS / Windows 内核都行），网页里加改删测，审批三档；还有 v0.7.0 之后的几处修复。见下面「v0.7.0 发布后的修复」和「MCP（2026-10-25）」，**改 MCP 之前先读那一节的「锁的规矩」**。之前 **v0.7.0 已发布**（dev/v0.7 合并回 main）：QQ 和微信机器人（扫码绑定）、“放行”权限模式（拟人型默认）、飞书拟人型回复渲染 Markdown 和“正在回复”表情、`/state` 看 agent 在干嘛、调工具前说的话当场发、看图和发文件（SendFile）。**设计、调研结论、做了什么、没做什么都在 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)，接手先读它。** 之前 **v0.6.0 已发布**（dev/v0.6 合并回 main）：两种 agent（工具型 / 拟人型）、私聊和群聊统一的“活的”聊天循环、拟人型的内心活动（作息里自己醒来冲浪、找人聊天）、长期记忆（知识库、人物画像、自我认知）和睡觉做梦整理记忆。**设计、调研结论、分阶段进度都在 [DESIGN-v0.6-living-agent.md](DESIGN-v0.6-living-agent.md)，接手先读它。** 再之前 **v0.5.1 已发布**（main）：修 v0.5.0 发布后用户报的问题——agent 的人格编辑器里看不见自带人格、找不到添加人格文件的地方、删 agent 死路、同名 agent、配置项和工具名用英文、入口直连 agent 的虚线绕得太复杂（已改回直连）。之前 **v0.5.0 已发布**（dev/v0.5 合并回 main，阶段 6、7、8 都已完成）：多 agent——每个 agent 是图上一个节点，有自己的名字、人格、模型和会话，可以绑自己的机器人；每个 agent 能覆盖全局设置，没覆盖的跟随全局；外部群聊能听会回；网关内部有群（房间）和两个 agent 的私聊；**专门给群聊做的界面（成员头像、@ 补全）还没做**，群聊现在就用普通的会话页（每一条前面带 `[谁说的]`）。验收提的问题都修了（覆盖人格、Message 权限、拓扑分列、判断费用、中文名字的 ID 等），见下面「v0.5 验收修复」。之前 **v0.4.1 已发布**（main）：网关换了版本，开着的网页自己刷新；工具调用轮数上限改名、好找（见「v0.4.1 发布后的修复」）。之前 **v0.4.0 已发布**（dev/v0.4 合并回 main）：拓扑图就是控制台，去掉设置页、设备页、定时任务页、人格页（见下面「v0.4 开发进度」）；同一个版本里还有 Windows 内核配置被写坏的修复、每条消息的上限改成网关设置、检查更新走代理（见「v0.3.2 发布后的修复」，原来准备单独发 v0.3.3，用户要求一起发）。之前 **v0.3.2 已发布**：设置页数字项改了不保存修好；显示档位单独成「消息与显示」组，Telegram、飞书、命令行节点面板里也有（见「v0.3.1 发布后的修复」）。之前 **v0.3.1 已发布**：修飞书回复出现两次、Telegram 工具记录被删（显示档位）；设置页和拓扑图补上「上下文与记忆」「网络搜索」「定时任务」；v0.3 功能的技能（web-search、scheduled-tasks、context-and-history、gateway-settings）和聊天里改设置（`settings_set`）、查对话轮次（`turns`）；默认开的开关在设置页显示对了；见下面「v0.3.0 发布后的修复」。之前 **v0.3.0 已发布**（dev/v0.3 合并回 main）：上下文真实用量计量和 `/context`、分层上下文整理（工具结果占位 + 分块滚动摘要，请求前/结束后/空闲/`/compact`）、`/reset` 归档和删除历史（整段、几轮、归档）、聊天显示档位（`/show`）、DeepSeek 网络搜索（WebSearch/WebFetch）、定时任务（`Schedule`、`/cron`、网页「定时任务」页），见下面「v0.3 开发进度」；之前 **v0.2.2 已发布**：自带人格「小纳」「大肥鱼」（网页「人格」页套用、聊天 `/persona`，见「自带人格」）；Windows 开机自启修好（普通用户建不了“任何用户登录时”的任务：改成只对当前用户，建不了退到「启动」文件夹，`nano-kernel start` 在任务不存在时直接拉起）、`nano-gateway help` / `--help` / `-h`、`nano-kernel help` 和各命令 `--help`、去掉 `nano-kernel-ctl`（见「内核管理命令」）；更新和卸载做完（`nano-gateway update` / `uninstall`、`/update`、网页更新按钮、GatewayAdmin `update`、内核自动跟网关同版本、`nano-kernel-ctl update|uninstall`，见下面「更新和卸载」）；2026-10-22，**v0.1.1 已发布**（v0.1.1 修了安装后 PATH、卸载不停后台网关、长 socket 路径、飞书卡片体积；v0.1.0 Linux/Windows 一行安装用真实 Release 实测过；CI 在 Linux/Windows/macOS 真机全绿，macOS 第一次真正跑通）；发布准备完成（公开仓库 https://github.com/tofu-zyc/nano-agent ，Apache-2.0；GitHub Actions 在 Linux/Windows/macOS 真机上测试、推 `v*` 标签自动发布；一行安装 `install.sh` / `install.ps1`；内核自我更新（协议 v9 的 `update`，失败自动退回）；`nano-gateway export` / `import` 搬家）；网关查看和控制完成（`status/start/stop/restart/logs/url/doctor/version`、配置检查后自重启、网页重启与版本/运行时长、聊天 `/status` `/restart`、`Gateway` 日志和 `GatewayAdmin restart`、后台看护进程、WSL 启动文件夹保活；`scripts/e2e-control.py` 12 项）；跨平台阶段 4/4 完成（macOS 平台层补齐：`_NSGetExecutablePath`、无沙箱 stub、无 PDEATHSIG 的进程组清理；zig 交叉编译 aarch64/x86_64 macOS，`make release` 出 macOS 包；`install-kernel.sh` 加 launchd 用户 agent。**本机没有 Mac，macOS 只做了交叉编译检查，没有在真机上跑过**）；阶段 3/4 完成（本地交叉编译、离线安装包、Linux/Windows 安装脚本和离线安装测试）；阶段 2/4 完成（Windows 内核 nano-kernel.exe、TCP/Winsock、网关协议 v8、路径归属和 127.0.0.1 误判修复，WSL 网关 + Windows 内核实测）；阶段 1/4 完成（平台层 + Windows 执行器 nano-exec.exe，WSL 里用 zig 交叉编译、通过 interop 在真实 Windows 上测）；之前阶段 4/4 完成（Gateway / GatewayAdmin 让 AI 在聊天里配置模型、SSH、工作目录和配对）；阶段 3 完成（工作目录读写 + 外面只读 + elevated 提权）；阶段 2 完成（密钥加密、可选脱敏）；阶段 1 完成：所有 nano-agent 文件统一到 `~/.nano-agent`（`NANO_HOME` 可改），网关装成后台服务，内核/SSH 执行器/技能缓存迁移到同一目录，协议升到 v7（网关管理工具）。之前完成：模型管理重做、图片输入、多工作目录、技能移到网关、本机内核、拓扑和命令提示；权限模型是“管理员读全盘；工作目录读写，外面只读；写外面要 elevated 审批；没有工作目录时在 HOME 下工作”。界面细节见 [DESIGN-ui-interactions.md](DESIGN-ui-interactions.md)，设计说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，模型交互见 [DESIGN-model-node.md](DESIGN-model-node.md)，下一个大版本（v0.3 – v0.6：上下文压缩、显示档位、搜索、定时任务、多 agent 和群聊、知识库和做梦、MCP 和 computer use）见 [PLAN-roadmap.md](PLAN-roadmap.md)；更早的计划见 [PLAN-next.md](PLAN-next.md) 和 [PLAN-cross-platform.md](PLAN-cross-platform.md)。
 
 ## v0.7 开发进度（dev/v0.7，已合并 main，v0.7.0 发布）
 
 见 [DESIGN-v0.7-channels.md](DESIGN-v0.7-channels.md)。已完成：放行模式、飞书拟人型回复和状态、`/state`、QQ、微信、调工具前说的话当场发、看图（Read 读到图片交给模型）和 SendFile 发图片 / 文件（都有测试）。**2026-10-25 验证补完**：`scripts/test-isolated.sh` 全过（e2e 74 项，含 SendFile 那一步）、网页界面检查 0 failures（要单独跑，隔离脚本里会被跳过）、Windows 执行器 14 项（补了 `t_fetch`）、`e2e-win.py` 17 项；顺手修了 Windows 上文件不存在却报“No error”的问题（`plat_win.c` 没设 errno）。d307b8c 的 CI 也是 success。**已合并 main、发 v0.7.0**；剩下音频视频格式转换。**QQ 和微信都没在真的平台上试过**，发版后第一次扫码时留意一下；飞书发图片要老应用在开放平台补开 `im:resource` 再发一版。
+
+## v0.7.1 发布后的修复（dev/v0.7.2）
+
+- **定时任务回了 `[不回复]` 也推到飞书**：用户的 agent 在 v0.7.0 时建了一个每 3 分钟查 B 站私信的任务，那时新任务默认投递到创建它的窗口（飞书私聊）；
+  没新私信时模型老实回 `[不回复]`，但 `completeSchedule` 不看内容，每 3 分钟往飞书推一条「[定时任务 B站私信值守] [不回复]」。
+  修法（`app/schedules.go`）：回复以 `[不回复]` 开头或结尾就只记在任务页、不推送（正文中间提到这几个字不算，`scheduleSilent`）；
+  和上一次一模一样的失败只推第一次；每次运行时在 prompt 前加一行说明，告诉模型结果会推到哪、没事就只回 `[不回复]`
+  （工具型 agent 原来不知道这个约定）。技能 `scheduled-tasks` 里“deliver 不写就是现在这个窗口”是 v0.7.0 的旧说法，一并改了。
+  已有任务的 `deliver` 不动（分不清是用户选的还是当年默认的），有了上面两条，没事的那几轮不会再推。
+- **编辑任务的弹窗**：运行时间改成点选（每隔 N 分钟/小时、每天几点、每周几、只运行一次、自定义；`web/src/lib/when.ts` 负责和
+  cron / every / at 互相转换，认不出来的落到「自定义」原样保留）。「只运行一次」就是 `at …`，后端本来就会在跑完后关掉任务，
+  只是界面上没有入口。分组框叠在一起：弹窗是限高的纵向 flex，子元素被压扁、选项溢出来盖住下面——改成子元素不压缩、
+  选项在框里滚动。投递列表不再列别的定时任务、内心、做梦、网关群的会话（以前只认 `cron:` 开头，别的 agent 的会话前面有
+  `@<agent>/`），聊天窗口显示成「飞书 · 名字」；新任务默认不推送。`scripts/check-web-ui.py` 补了点选、只运行一次、重新打开认得出、
+  1280 和 390 宽不重叠的检查。
+
+### v0.7.2 的改动和交接（2026-10-25 发布）
+
+**已经做完（v0.7.2 已发布）**：
+
+1. 3d0ac02（CI 三平台全绿）：定时任务 `[不回复]` 不推送、同样的失败只推一次、编辑任务弹窗（见上一节）。
+2. 另一个提交（MCP 和 AI 配置）：
+   - **MCP 节点**：拓扑图「能力和内核」一列加了「MCP 服务」节点（在技能和模型之间，上面三个节点各上移一格，画布最小高度 900→1000）。
+     面板 `web/src/components/panels/MCPPanel.svelte`（从网关面板整块挪过来，网关面板里已删掉），补了：在哪台机器、那台机器在不在线、
+     展开看工具、只开放工具（白名单）字段、不在线的机器在下拉里也保留。挂在别的电脑上的服务从 MCP 节点连线到那台机器；
+     机器面板里列「这台机器上跑的 MCP 服务」。⌘K 能搜到。颜色 `--c-mcp`，图标 `plug`。
+   - **AI 能配 MCP**：`Gateway {"what":"mcp"}`（配置、在线、上次列到的工具和说明、能挂服务的在线电脑）；`GatewayAdmin` 的
+     `mcp_save`（没写的字段保持原样；改名用 `id` 写旧名，密钥跟着走；env 值写空表示沿用）、`mcp_delete`、`mcp_test`。
+     代码在 `app/mcp_admin.go`。审批卡上 env 的值打星；`knownSecrets` 加了 MCP 的 env 值（工具结果、日志里出现就脱敏）。
+     技能 `skills/mcp/SKILL.md`。README 加了「MCP 服务」一节。工具定义变了，`prefixVer` 2→3（升级后会话的工具快照重建一次）。
+   - **顺手修的老 bug**：`gatewayArgs` 里 `BaseURL`、`APIKey`、`IdentityFile`、`ContextWindow`、`MaxTokens`、`MaxHistory`、`AutoConnect`、
+     `ThinkingLevels` 没写 json 标签，参数表里是 `base_url` 这种带下划线的名字，Go 对不上——**AI 在聊天里配模型接口时地址和 key
+     一直是丢的**。全部字段写明了标签，`TestGatewayAdminSchemaFields` 保证参数表里每个参数都能收到。
+   - MCP 连上、断开时 `Manager.OnChange` → 发 `mcp` 事件 → 网页重新读概况（节点上的在线数跟着变）。`MCPInfo` 多了 `tool_names`。
+   - 测试：`app/mcp_admin_test.go`（参数表对齐、模型接口地址和 key 存上、AI 加查测改改名删 MCP 且不回显密钥）；
+     `check-web-ui.py` 改成点 MCP 节点。已跑：`go test -race ./internal/app ./internal/mcp`、`npm run check`、`check-web-ui.py` 0 failures。
+     **发版前跑完的**：`scripts/test-isolated.sh` 全过（C 154 项；exec、host、pipe、pipe-win、mcp-remote 全 0 failures；e2e 74、control 12、install-linux 6、oneliner、update；macOS 交叉编译通过）、
+     `python3 scripts/check-web-ui.py` 0 failures（66 项）、`make test-win`（Windows 执行器 14 项、`e2e-win.py` 17 项）全过，CI 三平台 success。
+
+**用户的原则**（2026-10-25 明确说的）：**网页上用户能配置的，AI 在聊天里也要能辅助配置**（工具 + 技能）。反过来 AI 能配的，网页也该能配。
+
+**接下来要做**：
+
+1. **核对“网页能配的 AI 也能配”**。网页所有写接口见 `web/server.go` 里 POST/PATCH/PUT/DELETE 的路由，逐个对照 AI 工具
+   （`Gateway` / `GatewayAdmin` / `Schedule` / `Message` / `Knowledge` / 聊天命令）。已经有的：模型、SSH、工作目录、配对、设置项、
+   agent（`agent_save` / `agent_delete` / `bot_bind`）、定时任务、MCP、历史删除。**很可能缺的，要逐个确认**：群（房间）的建、改、删
+   （`/api/rooms`）；人格文件（`/api/personas`、`/api/agents/{id}/persona`——看 `agent_save` 能不能改人格）；窗口设为管理员、
+   接到哪个会话（`/api/endpoints/{key}`、`/api/endpoints/{key}/admin`）；会话的新建、改名、改模式/模型、删除、重置
+   （`/api/sessions`，部分有聊天命令）；机器人的改名、删除（`/api/bots`；扫码创建 AI 做不了，可以告诉用户去网页）；
+   电脑接入地址（`PUT /api/devices/listener`）；长期记忆条目的改删（`/api/agents/{id}/memory/*`，agent 自己有 `Knowledge`）；
+   叫醒、做梦（有 `/wake`、`/sleep` 命令）。缺的加进 `GatewayAdmin`（参数加进 `gatewayAdminSchema` 时 json 标签一定写，测试会查），
+   再在对应技能里写怎么用。
+2. **用户那台网关**（`linux-pc`，0.7.1）：任务「B站私信值守」每 3 分钟往飞书推一条「[不回复]」，升到 0.7.2 才停；
+   着急的话让用户在网页的定时任务里把飞书那个投递窗口取消勾选。
+   连那台机器：非交互 shell 里 `ssh` 被 `.bashrc` 的包装函数劫持（`_linux_pc_ssh` 找不到），用 `command ssh linux-pc …`。
+   **只读查看**，用户没说不要改他的环境。
+3. 没做、等用户定的：
+   - 麦麦那种数值：建议先做“熟悉度”（按聊天次数、最近一次算）和“精力”（按时间和预算算），心情只做显示；用户还没回复要不要做。
+   - SendFile 发音频：用户说已经支持了，先不管。
+   - MCP 连远程地址（HTTP）这条路**没有测试**；也没接过真正的 computer use 服务。
 
 ## v0.7.0 发布后的修复
 

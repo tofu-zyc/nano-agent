@@ -425,7 +425,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if len(task.Deliver) > 0 {
 		ep = parseEndpoint(task.Deliver[0])
 	}
-	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: task.Prompt, ChatID: ep.chat}}}
+	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
 	a.startRun(s)
 	if s.run == nil {
 		if s.scheduled == nil {
@@ -437,19 +437,68 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	}
 	return nil
 }
+
+// scheduleNote 告诉模型这一轮的结果会去哪：有投递窗口的，没什么要说就只回 [不回复]，不推送。
+// 不说的话，工具型 agent 不知道还能这样，每一轮都会往聊天里发一条“没有新消息”。调用方持有锁。
+func (a *App) scheduleNote(task schedule.Task) string {
+	if len(task.Deliver) == 0 {
+		return "[系统] 这是定时任务「" + task.Name + "」。结果只记在任务页，不会发到聊天里。\n\n"
+	}
+	var to []string
+	for _, key := range task.Deliver {
+		ep := parseEndpoint(key)
+		name := sourceOf(ep.ch)
+		if r := a.eps[key]; r != nil && r.Name != "" {
+			name += "「" + r.Name + "」"
+		}
+		to = append(to, name)
+	}
+	return "[系统] 这是定时任务「" + task.Name + "」。你最后的回复会发到" + strings.Join(to, "、") +
+		"；没有值得告诉对方的，就只回 [不回复]（结果只记在任务页，不推送）。\n\n"
+}
+
+// scheduleSilent 是模型决定这次不推送：回复以 [不回复] 开头或结尾（只回了它，或者“没有新私信。[不回复]”）。
+// 正文中间提到这几个字（比如复述规则）不算。
+func scheduleSilent(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "[不回复]") || strings.HasSuffix(t, "[不回复]")
+}
+
+// completeSchedule 记下这一轮的结果，再按需推送到任务的投递窗口：
+//   - 模型回了 [不回复]：只记在任务页，不推送（每 3 分钟查一次私信的任务，没新消息时不该每次都来一条）；
+//   - 和上一次一模一样的失败：只推第一次（内核掉线一小时，3 分钟一次的任务不该推 20 条同样的通知）。
+//
+// 调用方持有锁。
 func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
+	silent := ok && scheduleSilent(text)
+	summary := text
+	if silent {
+		summary = strings.TrimSpace(strings.ReplaceAll(text, "[不回复]", ""))
+		if summary == "" {
+			summary = "（这次没有要说的，没有推送）"
+		} else {
+			summary += "\n（没有推送）"
+		}
+	}
+	push := !silent
 	tasks := a.schedules.List()
 	i := slices.IndexFunc(tasks, func(t schedule.Task) bool { return t.ID == task.ID })
 	if i >= 0 {
 		current := tasks[i]
+		if prev := current.Last; !ok && prev != nil && !prev.OK && prev.Summary == clip(summary, 2000) {
+			push = false
+		}
 		current.Running = false
-		schedule.Record(&current, schedule.Result{At: a.now(), OK: ok, Summary: clip(text, 2000)})
+		schedule.Record(&current, schedule.Result{At: a.now(), OK: ok, Summary: clip(summary, 2000)})
 		if err := a.saveTask(current); err != nil {
 			a.log.Error("记录任务结果失败", "err", err)
 		}
 	}
-	body := "[定时任务 " + task.Name + "]\n" + text
+	body := "[定时任务 " + task.Name + "]\n" + summary
 	a.publish(events.Event{T: "say", SID: cronSID(*task), Text: body})
+	if !push {
+		return
+	}
 	for _, key := range task.Deliver {
 		ep := parseEndpoint(key)
 		if ep.ch == "web" {

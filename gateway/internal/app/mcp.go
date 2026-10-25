@@ -37,6 +37,7 @@ type MCPInfo struct {
 	Approval  string   `json:"approval"`
 	Online    bool     `json:"online"`
 	ToolCount int      `json:"tool_count"`
+	ToolNames []string `json:"tool_names,omitempty"` // 上次列到的工具（服务里的原名，按白名单过滤过）
 }
 
 // MCPInfo 是所有 MCP 服务和它们现在的连接状态。
@@ -61,7 +62,11 @@ func (a *App) MCPInfo() []MCPInfo {
 		}
 		sort.Strings(info.EnvKeys)
 		if mgr != nil {
-			info.Online, info.ToolCount = mgr.Status(s.Name)
+			info.Online, _ = mgr.Status(s.Name)
+			for _, t := range mgr.ServerTools(s.Name) {
+				info.ToolNames = append(info.ToolNames, t.Name)
+			}
+			info.ToolCount = len(info.ToolNames)
 		}
 		out = append(out, info)
 	}

@@ -72,6 +72,23 @@ type Manager struct {
 	dial   func(Server) (sdkmcp.Transport, error)
 	pipes  *Pipes     // 透传到别的机器上的管道（没接就是 nil）
 	saveMu sync.Mutex // 写 mcp-tools.json
+	change func()     // 连上、断开时通知（网页刷新在线状态）；不拿任何锁调用
+}
+
+// OnChange 设置连接状态变化时的通知（连上、断开、连不上）。
+func (m *Manager) OnChange(f func()) {
+	m.mu.Lock()
+	m.change = f
+	m.mu.Unlock()
+}
+
+func (m *Manager) changed() {
+	m.mu.Lock()
+	f := m.change
+	m.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 // conn 是一个服务的连接状态。mu 只护着下面这几个字段，拿着它的时候**绝不能去连接、等网络或等进程**：
@@ -174,6 +191,7 @@ func (m *Manager) session(ctx context.Context, s Server) (*sdkmcp.ClientSession,
 	if err != nil {
 		c.backoff(m.now())
 		c.mu.Unlock()
+		m.changed()
 		return nil, nil, err
 	}
 	if c.gen != gen {
@@ -186,6 +204,7 @@ func (m *Manager) session(ctx context.Context, s Server) (*sdkmcp.ClientSession,
 	c.mu.Unlock()
 	m.log.Info("MCP 服务已连接", "server", s.Name, "tools", len(tools))
 	m.saveCache() // 工具列表记到磁盘：重启以后连上之前先用它
+	m.changed()
 	return cs, tools, nil
 }
 
@@ -342,6 +361,7 @@ func (m *Manager) Call(ctx context.Context, server, tool string, args any) (*sdk
 func (m *Manager) drop(name string) {
 	if cs := m.detach(name, false); cs != nil {
 		_ = cs.Close()
+		m.changed()
 	}
 }
 
@@ -382,6 +402,7 @@ func (m *Manager) Sweep() {
 		if cs != nil {
 			_ = cs.Close()
 			m.log.Info("MCP 服务空闲，先断开", "server", name)
+			m.changed()
 		}
 	}
 }
@@ -456,6 +477,7 @@ func (m *Manager) Reload() {
 			_ = cs.Close()
 		}
 	}
+	m.changed()
 }
 
 // DropMachine 是某台机器的内核断开了：它上面跑的服务连接都作废（进程已经跟着没了）。
@@ -469,6 +491,7 @@ func (m *Manager) DropMachine(machine string) {
 			go cs.Close()
 		}
 	}
+	m.changed()
 }
 
 // Wake 是某台机器的内核刚连上：挂在它上面的服务马上去连（不等退避、不等下一次维护）。
@@ -540,4 +563,17 @@ func (m *Manager) warmOne(s Server, timeout time.Duration) {
 	if _, _, err := m.session(ctx, s); err != nil {
 		m.log.Warn("MCP 服务还没连上", "server", s.Name, "err", err)
 	}
+}
+
+// ServerTools 是一个服务上次列到的工具（按它的白名单过滤），只读缓存、不连接。
+func (m *Manager) ServerTools(name string) []ToolInfo {
+	s, ok := m.store.Get(name)
+	if !ok {
+		return nil
+	}
+	c := m.conn(name)
+	c.mu.Lock()
+	tools := c.tools
+	c.mu.Unlock()
+	return toolInfos(s, tools)
 }

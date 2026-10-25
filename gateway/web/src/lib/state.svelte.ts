@@ -474,6 +474,11 @@ class Store {
       case 'skills':
         if (ov && e.data) ov.skills = { ...ov.skills, list: e.data };
         break;
+      case 'mcp':
+        // MCP 服务改了配置、连上或断开：重新读一遍概况（拓扑图上的节点、面板里的在线状态）
+        clearTimeout(this.reloadTimer);
+        this.reloadTimer = setTimeout(() => this.refresh().catch(() => {}), 400);
+        break;
       case 'models':
         this.reloadModels();
         break;

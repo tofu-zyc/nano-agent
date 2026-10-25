@@ -285,6 +285,9 @@ func (a *App) knownSecrets() []string {
 	if s, ok := a.hosts.(interface{ Secrets() []string }); ok {
 		out = append(out, s.Secrets()...)
 	}
+	if a.mcpStore != nil {
+		out = append(out, a.mcpStore.Secrets()...) // MCP 服务 env 里的密钥
+	}
 	return out
 }
 
@@ -355,7 +358,8 @@ func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
 	a.mcpStore, a.mcp = store, m
 	a.mu.Unlock()
 	if m != nil {
-		m.Warm(20 * time.Second) // 启动时后台连一遍，工具定义那边只读缓存
+		m.OnChange(func() { a.publish(events.Event{T: "mcp"}) }) // 网页刷新在线状态
+		m.Warm(20 * time.Second)                                 // 启动时后台连一遍，工具定义那边只读缓存
 	}
 }
 

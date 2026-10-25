@@ -155,6 +155,7 @@ export type MCPInfo = {
   approval: string;
   online: boolean;
   tool_count: number;
+  tool_names?: string[]; // 上次列到的工具（服务里的原名）
 };
 
 export type Overview = {
@@ -377,6 +378,7 @@ export type Target =
   | { type: 'search' }
   | { type: 'memory'; agent?: string } // 上下文整理和长期记忆；agent 是要看谁的记忆
   | { type: 'skills' }
+  | { type: 'mcp' } // MCP 服务
   | { type: 'schedules' };
 
 // /api/devices：SSH 连接、配对请求、配对过的电脑、电脑接入地址

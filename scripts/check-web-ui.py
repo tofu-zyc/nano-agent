@@ -565,12 +565,52 @@ def run(page, url, nano):
     page.wait_for_selector("form.sheet")
     page.fill("form.sheet input[placeholder='早报']", "界面检查任务")
     page.fill("form.sheet textarea", "说一句话")
+    # 运行时间是选的，不用手写 cron：每周几、只运行一次都能点出来，下面的说明跟着变
+    sheet = page.locator("form.sheet")
+    sheet.locator(".seg button", has_text="每周").click()
+    sheet.locator(".days button", has_text="六").click()  # 默认是周一到周五，再加上周六
+    if "周五、周六" in sheet.inner_text():
+        ok("运行时间：每周几可以点选，说明跟着变")
+    else:
+        fail("运行时间：点了周六，说明里没有")
+    sheet.locator(".seg button", has_text="只运行一次").click()
+    if sheet.locator("input[type='datetime-local']").count() and "跑完自动关闭" in sheet.inner_text():
+        ok("运行时间：有「只运行一次」（跑完自动关闭）")
+    else:
+        fail("运行时间：没有只运行一次的选项")
+    sheet.locator(".seg button", has_text="每隔").click()
+    sheet.locator("input[aria-label='间隔']").fill("15")
+    # 分组框不能叠在一起（以前弹窗是限高的 flex，分组被压扁，选项溢出来盖住下面的东西）
+    for w, h in ((1280, 1400), (390, 760)):
+        page.set_viewport_size({"width": w, "height": h})
+        page.wait_for_timeout(300)
+        boxes = [sheet.locator("fieldset").nth(i).bounding_box() for i in range(sheet.locator("fieldset").count())]
+        boxes.append(sheet.locator(".checks").bounding_box())
+        overlap = [i for i in range(len(boxes) - 1) if boxes[i]["y"] + boxes[i]["height"] > boxes[i + 1]["y"] + 1]
+        sheet.screenshot(path=os.path.join(SHOTS, f"schedule-editor-{w}.png"))
+        if overlap:
+            fail(f"编辑任务弹窗（{w} 宽）：分组叠在一起了 {overlap}")
+        else:
+            ok(f"编辑任务弹窗（{w} 宽）：分组没有叠在一起")
+    page.set_viewport_size({"width": 1280, "height": 820})
     page.click("form.sheet button.primary")
     page.wait_for_timeout(800)
     tasks = api(page, "GET", "/api/schedules")[1].get("tasks") or []
     t = [x for x in tasks if x["name"] == "界面检查任务"]
+    if t and t[0]["when"] == "every 15m" and not t[0]["deliver"]:
+        ok("新建任务：存成 every 15m，默认不往聊天里推")
+    elif t:
+        fail(f"新建任务存的不对：when={t[0]['when']!r} deliver={t[0]['deliver']}")
     if t and page.locator(".insp .task", has_text="界面检查任务").count():
         ok("定时任务节点里新建任务")
+        # 再打开编辑：认得出是「每隔 15 分钟」
+        page.locator(".insp .task", has_text="界面检查任务").locator("button", has_text="编辑").click()
+        page.wait_for_selector("form.sheet")
+        if sheet.locator(".seg button.active").inner_text() == "每隔" and sheet.locator("input[aria-label='间隔']").input_value() == "15":
+            ok("编辑任务：认得出原来的运行时间")
+        else:
+            fail("编辑任务：没认出原来的运行时间")
+        sheet.locator("button", has_text="取消").click()
         page.on("dialog", lambda d: d.accept())
         page.locator(".insp .task", has_text="界面检查任务").locator("button[title='删除']").click()
         page.wait_for_timeout(800)
@@ -872,21 +912,24 @@ def check_mcp_panel(page, url):
     if st != 200:
         return fail(f"加 MCP 服务失败：HTTP {st}")
     page.reload()
-    page.wait_for_selector("g.node.gateway")
+    page.wait_for_selector("g.node.mcp")
     page.wait_for_timeout(600)
-    page.click("g.node.gateway")
+    # MCP 是「能力和内核」那一列里的一个节点（以前藏在网关面板里，找不到）
+    if "1 个服务" not in (page.locator("g.node.mcp").text_content() or ""):
+        fail("拓扑图上的 MCP 节点没显示服务数")
+    page.click("g.node.mcp")
     page.wait_for_timeout(700)
-    txt = page.inner_text("body")
+    txt = page.inner_text(".insp")
     if "MCP 服务" not in txt or "uicheck" not in txt:
         api(page, "POST", "/api/mcp", {"items": []})
-        return fail("网关面板里看不到刚加的 MCP 服务")
-    page.click('button:has-text("测试")')
+        return fail("MCP 节点的面板里看不到刚加的服务")
+    page.click('.insp button.btn:has-text("测试")')
     page.wait_for_timeout(2500)
     txt = page.inner_text("body")
     if "uicheck：" not in txt:
         api(page, "POST", "/api/mcp", {"items": []})
         return fail("点测试没有回显结果")
-    ok("MCP 服务能在网页里添加、看到，测试会连一次")
+    ok("MCP 服务能在网页里添加、看到，测试会连一次（拓扑图上的 MCP 节点）")
     api(page, "POST", "/api/mcp", {"items": []})
     page.reload()
     page.wait_for_selector("g.node.gateway")
