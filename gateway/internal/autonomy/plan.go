@@ -136,6 +136,12 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 	if s.Paused {
 		b.WriteString("（自主活动现在是暂停的，这一轮是主人叫醒的。）\n")
 	}
+	if len(s.Beliefs) > 0 {
+		b.WriteString("最近形成的认识：\n")
+		for _, belief := range s.Beliefs[max(0, len(s.Beliefs)-5):] {
+			fmt.Fprintf(&b, "- %s：%s（来源：%s）\n", belief.Subject, clip(belief.Value, 200), belief.Source)
+		}
+	}
 	open := s.OpenAgenda()
 	if len(open) > 0 {
 		b.WriteString("你的安排：\n")
@@ -150,6 +156,12 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 			}
 			if a.Note != "" {
 				b.WriteString("；" + clip(a.Note, 100))
+			}
+			if a.Criteria != "" {
+				b.WriteString("；验收：" + clip(a.Criteria, 200))
+			}
+			if a.Checkpoint != "" {
+				b.WriteString("；接着做：" + clip(a.Checkpoint, 300))
 			}
 			b.WriteString("）\n")
 		}
@@ -197,7 +209,7 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 		for i := n - 1; i >= 0 && i >= n-3; i-- {
 			e := s.Executions[i]
 			status := "没完成"
-			if e.OK && e.UsedTools {
+			if e.OK && e.Verified {
 				status = "完成"
 			}
 			fmt.Fprintf(&b, "- %s %s：%s\n", time.Unix(e.Ended, 0).In(loc).Format("01-02 15:04"), status, clip(e.Summary, 150))
@@ -206,6 +218,9 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 	if n := len(s.Reflections); n > 0 {
 		r := s.Reflections[n-1]
 		fmt.Fprintf(&b, "上次反思（%s）：%s\n", time.Unix(r.At, 0).In(loc).Format("01-02"), clip(r.Text, 200))
+		if r.Change != "" {
+			fmt.Fprintf(&b, "下次的调整：%s\n", clip(r.Change, 300))
+		}
 	}
 	b.WriteString("\n这一轮只推进一件事：能现在做的就用工具真的去做（上网、查记忆、看文件、做东西都行）；" +
 		"需要以后做的用 Agenda 排时间；有新的想法用 Idea 记下来（写清来源）。做完了要说清楚真实的結果。" +

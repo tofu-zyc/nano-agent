@@ -13,6 +13,15 @@
   import AgentSwitcher from './AgentSwitcher.svelte';
 
   let { sid }: { sid: string } = $props();
+  const isRoom = $derived(sid.startsWith('room:'));
+  const room = $derived(isRoom ? store.room(sid.slice(5)) : undefined);
+  const roomMembers = $derived((room?.members ?? []).map((id) => store.agent(id)).filter((a) => !!a));
+  const roomSpeaker = (id?: string, name?: string) => store.agent(id) ?? roomMembers.find((a) => a.name === name);
+  async function toggleRoom() {
+    if (!room) return;
+    try { await api.patch('/api/rooms/' + encodeURIComponent(room.id), { paused: !room.paused }); await store.refresh(); }
+    catch (err) { store.fail(err); }
+  }
   // 拟人型的内心活动、整理记忆：agent 自己的会话，只能看
   const innerKind = $derived(/^@[^/]+\/life$/.test(sid) ? 'life' : /^@[^/]+\/dream$/.test(sid) ? 'dream' : '');
   const innerAgent = $derived(store.agent(sid.replace(/^@([^/]+)\/.*$/, '$1')));
@@ -50,6 +59,7 @@
   let fileInput = $state<HTMLInputElement>();
 
   async function addFiles(files: FileList | File[]) {
+    if (isRoom) return;
     const gen = uploadGen;
     for (const f of Array.from(files)) {
       if (!f.type.startsWith('image/')) continue;
@@ -112,7 +122,7 @@
         const lastUser = hist.map((m) => m.role).lastIndexOf('user');
         if (lastUser >= 0) hist = hist.slice(0, lastUser);
       }
-      blocks = buildBlocks(hist, !!innerKind);
+      blocks = buildBlocks(hist, !!innerKind, isRoom);
       summary = r.summary;
       missing = false;
       store.upsertSession(r.info);
@@ -203,6 +213,24 @@
 
   // ---- 命令提示：输入框里打 / 时列出命令，上下键选，Tab 补全，Enter 补全（不用参数的直接发送），Esc 收起 ----
   let ta = $state<HTMLTextAreaElement>();
+  let cursor = $state(0);
+  let mentionIndex = $state(0);
+  let mentionHidden = $state(false);
+  const mentionWord = $derived(isRoom && !mentionHidden ? text.slice(0, cursor).match(/(?:^|\s)@([^\s@]*)$/)?.[1] : undefined);
+  const mentionMatches = $derived(mentionWord === undefined ? [] : roomMembers.filter((a) =>
+    a.name.toLowerCase().includes(mentionWord.toLowerCase()) || a.id.toLowerCase().includes(mentionWord.toLowerCase())));
+  function trackCursor() { cursor = ta?.selectionStart ?? text.length; mentionHidden = false; mentionIndex = 0; }
+  async function mention(name: string, replace = false) {
+    const at = replace ? text.lastIndexOf('@', cursor) : cursor;
+    const end = replace ? cursor : at;
+    const prefix = text.slice(0, at);
+    const added = (prefix && !/\s$/.test(prefix) ? ' ' : '') + '@' + name + ' ';
+    text = prefix + added + text.slice(end);
+    cursor = prefix.length + added.length;
+    mentionHidden = true;
+    await tick();
+    ta?.focus(); ta?.setSelectionRange(cursor, cursor);
+  }
   let menuIdx = $state(0);
   let menuHidden = $state(false);
   const cmdWord = $derived(text.startsWith('/') ? text.slice(1).split(/\s/)[0].toLowerCase() : null);
@@ -228,6 +256,15 @@
   }
 
   function onkey(e: KeyboardEvent) {
+    if (mentionMatches.length && !e.isComposing) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); mentionIndex = (mentionIndex + (e.key === 'ArrowDown' ? 1 : mentionMatches.length - 1)) % mentionMatches.length; return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault(); mention(mentionMatches[mentionIndex]?.name ?? mentionMatches[0].name, true); return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); mentionHidden = true; return; }
+    }
     if (cmdMatches.length && !e.isComposing) {
       const n = cmdMatches.length;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -321,7 +358,7 @@
     <a class="btn primary" href="#/sessions/main"><Icon name="hub" size={14} />回到主会话</a>
   </div>
 {:else}
-<div class="conv">
+<div class="conv" class:room-chat={isRoom}>
   <header>
     <div class="avatar" style="--c: {meta?.color ?? 'var(--c-session)'}"><Icon name={meta?.icon ?? 'chat'} size={17} /></div>
     <div class="ht">
@@ -331,7 +368,9 @@
           <span class="tag ep" style="--c: {channelMeta[e.channel]?.color ?? 'var(--muted)'}" title="这个窗口接在这个会话上：{e.key}"><Icon name={channelMeta[e.channel]?.icon ?? 'link'} size={11} />{endpointLabel(e)}</span>
         {/each}
         {#if info}
-          {#if info.workspaces.length}
+          {#if isRoom}
+            <span class="tag">{room?.members.length ?? 0} 位 agent · {room?.mode === 'free' ? '自由讨论' : '点名发言'}</span>
+          {:else if info.workspaces.length}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
             {#each info.workspaces as mt, i (`${mt.id}:${i}`)}
               <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击取下" onclick={() => unmountWorkspace(mt.id)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
@@ -347,11 +386,20 @@
         {/if}
       </div>
     </div>
-    {#if info && !innerKind}<AgentSwitcher {sid} compact />{/if}
-    {#if !innerKind}<button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>{/if}
-    <button class="btn sm ghost" onclick={() => store.open({ type: 'session', sid })} title="会话设置"><Icon name="sliders" size={14} /></button>
+    {#if room}<button class="btn sm" onclick={toggleRoom}>{room.paused ? '恢复讨论' : '暂停讨论'}</button>{/if}
+    {#if info && !innerKind && !isRoom}<AgentSwitcher {sid} compact />{/if}
+    {#if !innerKind && !isRoom}<button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>{/if}
+    <button class="btn sm ghost" onclick={() => room ? store.open({ type: 'room', id: room.id }) : store.open({ type: 'session', sid })} title={room ? '群成员和设置' : '会话设置'}><Icon name="sliders" size={14} /></button>
   </header>
-  {#if info?.context}
+  {#if room}
+    <div class="room-members" aria-label="群成员">
+      {#each roomMembers as member (member.id)}
+        <button class="member-chip" title="@{member.name}" onclick={() => mention(member.name)}><span class="speaker-avatar">{member.emoji || '🙂'}</span>{member.name}{#if room.muted.includes(member.id)}<small>已禁言</small>{/if}</button>
+      {/each}
+      {#if room.paused}<span class="room-paused">讨论已暂停，发言或恢复后继续</span>{/if}
+    </div>
+  {/if}
+  {#if info?.context && !isRoom}
     {@const c = info.context}
     <details class="context-meter">
       <summary>上下文 {c.total.toLocaleString()} / {c.window.toLocaleString()} · {Math.round(c.total / c.window * 100)}% · {c.model}
@@ -377,7 +425,7 @@
           {#if eps.some((e) => e.channel !== 'web')}
             <p class="muted">{eps.filter((e) => e.channel !== 'web').map(endpointLabel).join('、')}也接在这个会话上，在哪边说话都是同一段上下文。</p>
           {/if}
-          {#if info && !info.workspaces.length}
+          {#if info && !info.workspaces.length && !isRoom}
             <p class="muted">想让它读写文件、执行命令？先给它 <button class="lnk" onclick={() => (picking = true)}>挂一个工作目录</button>，本机、别的电脑或者 SSH 服务器上的都行，可以挂好几个。</p>
           {/if}
         </div>
@@ -396,7 +444,8 @@
         {:else if b.type === 'user'}
           <div class="msg user">
             <div class="meta">
-              {#if i === lastBlock}<button class="undo" onclick={undo} disabled={undoing} title="撤回这一轮：连同回复从上下文里删掉，内容放回输入框"><Icon name="undo" size={12} />撤回</button>{/if}
+              {#if i === lastBlock && !isRoom}<button class="undo" onclick={undo} disabled={undoing} title="撤回这一轮：连同回复从上下文里删掉，内容放回输入框"><Icon name="undo" size={12} />撤回</button>{/if}
+              {#if isRoom}<span class="speaker-avatar human">你</span>{/if}
               {#if b.via}<i class="via" style="--c: {channelMeta[viaChannel[b.via]]?.color ?? 'var(--muted)'}"></i>{b.sender ?? b.via}{:else}{b.sender ?? '用户'}{/if}
               {#if b.time}<span>{b.time}</span>{/if}
             </div>
@@ -411,6 +460,10 @@
           </div>
         {:else}
           <div class="msg bot">
+            {#if isRoom}
+              {@const speaker = roomSpeaker(b.agent, b.sender)}
+              <div class="meta room-speaker"><span class="speaker-avatar">{speaker?.emoji || '🙂'}</span><b>{speaker?.name ?? b.sender ?? '成员'}</b>{#if b.ts}<span>{clock(b.ts * 1000)}</span>{/if}</div>
+            {/if}
             {#if b.reasoning}
               <details class="think">
                 <summary><Icon name="brain" size={13} />思考过程 · {Array.from(b.reasoning).length} 字</summary>
@@ -514,6 +567,14 @@
     </div>
   {/if}
   <div class="composer" class:dragging role="group" aria-label="输入区" onpaste={onPaste} ondragover={(e) => { e.preventDefault(); dragging = true; }} ondragleave={() => (dragging = false)} ondrop={onDrop}>
+    {#if mentionMatches.length}
+      <div class="cmdmenu mentions" role="listbox" aria-label="选择要点名的成员">
+        {#each mentionMatches as member, i (member.id)}
+          <button class="cmd" class:sel={i === mentionIndex} role="option" aria-selected={i === mentionIndex} onmousedown={(e) => { e.preventDefault(); mention(member.name, true); }} onmouseenter={() => (mentionIndex = i)}><span class="speaker-avatar">{member.emoji || '🙂'}</span><b>{member.name}</b><span class="desc">@ 点名发言</span></button>
+        {/each}
+        <div class="keys">↑↓ 选择 · Tab / Enter 点名 · Esc 收起</div>
+      </div>
+    {/if}
     {#if cmdMatches.length || cmdHint}
       <div class="cmdmenu" role="listbox">
         {#each cmdMatches as c, i (c.name)}
@@ -542,11 +603,11 @@
         {/each}
       </div>
     {/if}
-    <button class="btn ghost attach" onclick={() => fileInput?.click()} title="发图片（也可以粘贴或拖进来）" disabled={pics.length + uploading >= maxPics}>
+    <button class="btn ghost attach" onclick={() => fileInput?.click()} title={isRoom ? '群聊目前支持文字' : '发图片（也可以粘贴或拖进来）'} disabled={isRoom || pics.length + uploading >= maxPics}>
       <Icon name="file" size={16} />
     </button>
     <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={pickFiles} />
-    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder={innerKind === 'life' ? "对它说一句：它会当作一轮任务，Enter 发送；也可以先只叫醒它" : "在这个会话里说话，Enter 发送，Shift+Enter 换行；可以粘贴或拖入图片。打 / 看命令"}></textarea>
+    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} oninput={trackCursor} onclick={trackCursor} onkeyup={(e) => { if (!['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) trackCursor(); }} rows="1" placeholder={isRoom ? "对大家说一句，输入 @ 点名；Enter 发送，Shift+Enter 换行" : innerKind === 'life' ? "对它说一句：它会当作一轮任务，Enter 发送；也可以先只叫醒它" : "在这个会话里说话，Enter 发送，Shift+Enter 换行；可以粘贴或拖入图片。打 / 看命令"}></textarea>
     {#if info?.running}
       <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
     {/if}
@@ -561,6 +622,14 @@
 {/if}
 
 <style>
+  .room-members { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 22px; border-bottom: 1px solid var(--line); }
+  .member-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 20px; padding: 4px 10px 4px 5px; background: var(--bg-1); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  .member-chip:hover { border-color: var(--accent); }
+  .speaker-avatar { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 9px; background: var(--bg-2); font-size: 18px; }
+  .speaker-avatar.human { font-size: 11px; color: var(--accent); }
+  .room-speaker b { color: var(--text-2); }
+  .room-paused, .member-chip small { color: var(--muted); font-size: 12px; }
+  .room-chat .msg.bot { padding: 10px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-1); }
   .innerbar {
     display: flex;
     align-items: center;

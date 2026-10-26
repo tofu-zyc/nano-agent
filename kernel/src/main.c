@@ -528,7 +528,7 @@ static void handle_run(kernel_t *k, const cJSON *m)
     log_info("代网关执行 %s（%s）", tool, id);
 }
 
-/* 技能文件放在这台机器的 ~/.nano-agent/skills/<技能名>/ 下，工具执行时只读可见 */
+/* 技能文件放在 NANO_HOME/skill-cache/ 下，不能覆盖 skills/ 中的源文件。 */
 static bool safe_rel(const char *p)
 {
     if (!p || !*p || p[0] == '/') return false;
@@ -551,7 +551,7 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
     }
     const char *nh = getenv("NANO_HOME");
     char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(home, ".nano-agent");
-    char *root = plat_join(base, "skills");
+    char *root = plat_join(base, "skill-cache");
     char *dir = plat_join(root, name);
     char *tmpname = xasprintf(".%s.tmp", name);
     char *tmp = plat_join(root, tmpname);

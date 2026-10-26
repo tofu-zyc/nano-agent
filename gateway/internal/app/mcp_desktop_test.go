@@ -146,6 +146,94 @@ func TestDesktopSerializesSameMachine(t *testing.T) {
 	}
 }
 
+func TestDesktopLeaseSpansCallsAndCancellation(t *testing.T) {
+	e := setup(t)
+	mgr, _ := startDesktopHelper(t, e)
+	info, _ := mgr.ToolInfo("helper", "get_window_state")
+	e.a.mu.Lock()
+	e.a.sessOf("first").run = &run{id: 101}
+	e.a.sessOf("second").run = &run{id: 102}
+	e.a.mu.Unlock()
+	t.Cleanup(func() {
+		e.a.releaseDesktopLeases("first", 101)
+		e.a.releaseDesktopLeases("second", 102)
+		e.a.mu.Lock()
+		e.a.sessions["first"].run = nil
+		e.a.sessions["second"].run = nil
+		e.a.mu.Unlock()
+	})
+	if _, err := e.a.desktopCall(context.Background(), "first", "helper", info, map[string]any{}, 101); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := e.a.desktopCall(ctx, "second", "helper", info, map[string]any{}, 102); result <- err }()
+	select {
+	case err := <-result:
+		t.Fatalf("另一轮在观察和操作之间插入了: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// 同一轮后续动作可继续，等待者可以被停止。
+	if _, err := e.a.desktopCall(context.Background(), "first", "helper", info, map[string]any{}, 101); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("取消没有生效")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("等待桌面的任务不能取消")
+	}
+	e.a.releaseDesktopLeases("first", 101)
+	if _, err := e.a.desktopCall(context.Background(), "second", "helper", info, map[string]any{}, 102); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDesktopLeaseAvoidsCrossMachineDeadlock(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.sessOf("first").run = &run{id: 101}
+	e.a.sessOf("second").run = &run{id: 102}
+	e.a.mu.Unlock()
+	defer func() {
+		e.a.mu.Lock()
+		e.a.sessions["first"].run = nil
+		e.a.sessions["second"].run = nil
+		e.a.mu.Unlock()
+	}()
+	if err := e.a.reserveDesktop(context.Background(), "machine-a", "first", 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.reserveDesktop(context.Background(), "machine-b", "second", 102); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.reserveDesktop(context.Background(), "machine-b", "first", 101); err == nil {
+		t.Fatal("两轮交叉持有桌面时不应无限等待")
+	}
+	e.a.releaseDesktopLeases("first", 101)
+	e.a.releaseDesktopLeases("second", 102)
+}
+
+func TestDesktopLocalKernelAliasUsesSameLease(t *testing.T) {
+	e := setup(t)
+	startDesktopHelper(t, e)
+	e.a.mu.Lock()
+	list := e.a.mcpStore.List()
+	alias := list[0]
+	alias.Name, alias.Machine = "local-alias", "test"
+	if err := e.a.mcpStore.Save(append(list, alias)); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	if e.a.desktopMachine("local-alias") != e.a.desktopMachine("helper") {
+		t.Fatal("同一本机的直连与内核透传绕过了同桌面资源协调")
+	}
+}
+
 func TestTrimToolImages(t *testing.T) {
 	h := []session.Msg{
 		{Role: "user", Content: "开始"},

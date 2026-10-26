@@ -39,6 +39,7 @@ func TestLocalExecLsAndFiles(t *testing.T) {
 	e := testExecutor(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("NANO_HOME", filepath.Join(home, ".nano-agent"))
 	work := filepath.Join(home, "work")
 	data := filepath.Join(home, "gateway-data")
 	os.MkdirAll(work, 0o755)
@@ -82,18 +83,58 @@ func TestLocalExecLsAndFiles(t *testing.T) {
 	}
 
 	files := []File{{Path: "SKILL.md", Data: []byte("说明")}, {Path: "scripts/run.sh", Data: []byte("echo hi"), Exec: true}}
-	if err := l.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", files); err != nil {
+	if _, err := l.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", files); err != nil {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(filepath.Join(home, ".nano-agent/skills/pc/demo/scripts/run.sh"))
 	if err != nil || st.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("附带的脚本：%v %v", st, err)
 	}
-	if err := l.PutFiles(ctx, "~/../etc", files); err == nil {
+	if _, err := l.PutFiles(ctx, "~/../etc", files); err == nil {
 		t.Fatal("目录不能跑到 HOME 外面")
 	}
-	if err := l.PutFiles(ctx, "~/x", []File{{Path: "../escape"}}); err == nil {
+	if _, err := l.PutFiles(ctx, "~/x", []File{{Path: "../escape"}}); err == nil {
 		t.Fatal("文件路径不能跑到目录外面")
+	}
+}
+
+func TestSkillCacheUsesCustomHomeWithoutReplacingSource(t *testing.T) {
+	nano := t.TempDir()
+	t.Setenv("NANO_HOME", nano)
+	source := filepath.Join(nano, "skills", "demo", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("全局技能源文件"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	local := &Local{}
+	path, err := local.PutFiles(context.Background(), "~/.nano-agent/skill-cache/demo-version", []File{{Path: "SKILL.md", Data: []byte("agent 自己的版本")}, {Path: "references/use.md", Data: []byte("配套资料")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(nano, "skill-cache", "demo-version") {
+		t.Fatalf("缓存路径不准确: %s", path)
+	}
+	if content, _ := os.ReadFile(source); string(content) != "全局技能源文件" {
+		t.Fatal("缓存覆盖了全局技能")
+	}
+	if content, err := os.ReadFile(filepath.Join(path, "references", "use.md")); err != nil || string(content) != "配套资料" {
+		t.Fatalf("实际路径读不到配套资料: %s %v", content, err)
+	}
+}
+
+func TestPortableSkillPaths(t *testing.T) {
+	if got, err := relDir("~/.nano-agent/skill-cache/demo-version"); err != nil || got != ".nano-agent/skill-cache/demo-version" {
+		t.Fatalf("技能缓存协议使用正斜杠，不应随网关系统改变: %q %v", got, err)
+	}
+	if got, err := cleanRel("references/setup.md"); err != nil || got != "references/setup.md" {
+		t.Fatalf("参考文件路径不兼容: %q %v", got, err)
+	}
+	for _, value := range []string{"../escape", `..\escape`, "C:/escape", `C:\escape`, "/absolute"} {
+		if _, err := cleanRel(value); err == nil {
+			t.Fatalf("不应接受跨目录/驱动器路径: %q", value)
+		}
 	}
 }
 
@@ -193,7 +234,7 @@ func TestSSHPreparesExecutorAndRunsTools(t *testing.T) {
 	if err != nil || ls.Path != filepath.Join(root, "box") {
 		t.Fatalf("ls: %+v %v", ls, err)
 	}
-	if err := h.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", []File{{Path: "data.txt", Data: []byte("技能")}}); err != nil {
+	if _, err := h.PutFiles(ctx, "~/.nano-agent/skills/pc/demo", []File{{Path: "data.txt", Data: []byte("技能")}}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(root, "box/.nano-agent/skills/pc/demo/data.txt")); string(b) != "技能" {

@@ -7,6 +7,8 @@ description: 用 Schedule 工具创建和管理定时任务：每天、每隔一
 
 管理员会话有 `Schedule` 工具。动作：`list`、`create`、`update`、`delete`、`run_now`。
 
+这是按固定时间运行独立 prompt 的任务。拟人型 agent 自己推进的承诺、需要跨轮检查点续做和结果证据验收的工作，使用 `autonomous-tasks` 技能里的 Agenda；同一项工作只选一个调度入口，避免重复执行。
+
 ## 先查
 
 `Schedule {"action":"list"}`：所有任务的编号（`id`）、时间、下次运行、上次结果。改、删、立即运行都要用 `id`，先列出来再动手，不要猜。

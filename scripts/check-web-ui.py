@@ -404,6 +404,37 @@ def run(page, url, nano):
         ok("群能暂停")
     else:
         fail("暂停没生效")
+    # 群聊专用界面：点名补全、成员头像、实时发言和刷新后的身份。
+    page.goto(url + "#/sessions/" + urllib.request.quote(room["sid"], safe=""))
+    page.wait_for_selector(".room-chat .room-members")
+    if page.locator(".room-chat .member-chip").count() == 3:
+        ok("群聊顶部显示成员头像，能直接点名")
+    else:
+        fail("群聊没有显示全部成员")
+    page.get_by_role("button", name="恢复讨论", exact=True).click()
+    page.wait_for_selector(".room-chat button:has-text('暂停讨论')")
+    ta = page.locator(".room-chat textarea")
+    ta.fill("@阿")
+    ta.press("End")
+    page.wait_for_selector(".mentions [role=option]")
+    ta.press("Tab")
+    if ta.input_value() == "@阿强 ":
+        ok("@ 能筛选成员并用 Tab 补全中文名字")
+    else:
+        fail("@ 补全不对：" + ta.input_value())
+    ta.fill("@阿强 你好，这是群聊界面验证")
+    ta.press("Enter")
+    page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=15000)
+    if '/room:' in page.locator('aside.list').inner_text():
+        fail("群成员的内部会话从实时事件漏进了列表")
+    if page.locator(".room-chat .msg.user .bubble").count() == 1:
+        ok("群发言实时显示头像和说话人，用户消息没有重复")
+    else:
+        fail("群消息重复或没有显示")
+    page.screenshot(path=os.path.join(SHOTS, "room-chat.png"))
+    page.reload()
+    page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=10000)
+    ok("刷新群聊后保留发言人的 agent 身份")
     # 收拾干净，后面的检查不受影响
     for r in (room, room2, dm):
         if r.get("id"):
@@ -415,6 +446,7 @@ def run(page, url, nano):
             api(page, "DELETE", "/api/agents/" + aid)
 
     # ---- 会话面板：新建一个只给这个会话用的人格文件 ----
+    page.goto(url + "#/")
     page.reload()
     page.wait_for_selector("g.node.gateway")
     page.wait_for_timeout(800)

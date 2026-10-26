@@ -166,11 +166,11 @@ func TestSSHWorkspace(t *testing.T) {
 
 	// 技能在网关上：Skill 返回说明，附带文件放到服务器上
 	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Skill", Args: json.RawMessage(`{"name":"demo"}`)})
-	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || !strings.Contains(r.Content, "技能目录：~/.nano-agent/skills/demo") ||
+	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || !strings.Contains(r.Content, "技能目录（只读；按执行机器选择完整路径）") ||
 		!strings.Contains(r.Content, "附带文件：scripts/run.sh") || !strings.HasSuffix(r.Content, "照着做") {
 		t.Fatalf("skill: %+v", r)
 	}
-	if f := gpu.put["~/.nano-agent/skills/demo"]; len(f) != 2 || f[1].Path != "scripts/run.sh" || !f[1].Exec {
+	if f := onlySkillFiles(t, gpu); len(f) != 2 || f[1].Path != "scripts/run.sh" || !f[1].Exec {
 		t.Fatalf("put: %+v", gpu.put)
 	}
 	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c3", Name: "Skill", Args: json.RawMessage(`{"name":"../evil"}`)})
@@ -307,14 +307,14 @@ func TestMountsOnSeveralMachines(t *testing.T) {
 	// 技能文件放到挂着的每台机器上
 	e.k.send(proto.Msg{T: proto.TExec, SID: mainSID, ID: "c2", Name: "Skill", Args: json.RawMessage(`{"name":"demo"}`)})
 	put := laptop.expect(proto.TSkillPut)
-	if put.Skill != "demo" || len(put.Files) != 2 {
+	if !strings.HasPrefix(put.Skill, "demo-") || len(put.Files) != 2 {
 		t.Fatalf("skill_put: %+v", put)
 	}
-	laptop.send(proto.Msg{T: proto.TRunResult, ID: put.ID, OK: proto.Bool(true)})
+	laptop.send(proto.Msg{T: proto.TRunResult, ID: put.ID, OK: proto.Bool(true), Content: "/custom/nano/skill-cache/" + put.Skill})
 	if r := e.k.expect(proto.TExecResult); r.OK == nil || !*r.OK || strings.Contains(r.Content, "没能放到") {
 		t.Fatalf("skill: %+v", r)
 	}
-	if len(gpu.put["~/.nano-agent/skills/demo"]) != 2 || len(e.hosts.hosts[host.LocalName].put["~/.nano-agent/skills/demo"]) != 2 {
+	if len(onlySkillFiles(t, gpu)) != 2 || len(onlySkillFiles(t, e.hosts.hosts[host.LocalName])) != 2 {
 		t.Fatalf("put: %+v %+v", gpu.put, e.hosts.hosts[host.LocalName].put)
 	}
 	if info, _ := e.a.Session(mainSID); info.Workspaces[0].How != "local" || info.Workspaces[1].How != "gateway" || info.Workspaces[2].How != "gateway" {
@@ -410,8 +410,8 @@ func TestGatewaySkills(t *testing.T) {
 	e.say("技能删掉了")
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
-	if len(e.llm.lastReq().Tools) != 7 {
-		t.Fatal("两次整理之间工具快照改变")
+	if len(e.llm.lastReq().Tools) != 6 {
+		t.Fatal("删除技能后旧会话没有自动刷新工具目录")
 	}
 	e.say("/reset")
 	e.ch.wait(t, "上下文已清空")
@@ -421,4 +421,20 @@ func TestGatewaySkills(t *testing.T) {
 	if got := e.llm.lastReq().Tools; len(got) != 6 || got[0].Function.Name != "Gateway" || got[1].Function.Name != "GatewayAdmin" || got[2].Function.Name != "Message" || got[3].Function.Name != "Schedule" || got[4].Function.Name != "SendFile" || got[5].Function.Name != "echo" {
 		t.Fatalf("模型仍然带着已经删除的技能：%+v", got)
 	}
+}
+
+func onlySkillFiles(t *testing.T, f *fakeHost) []host.File {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.put) != 1 {
+		t.Fatalf("技能缓存数量: %v", f.put)
+	}
+	for path, files := range f.put {
+		if !strings.HasPrefix(path, "~/.nano-agent/skill-cache/demo-") {
+			t.Fatalf("错误的技能缓存: %s", path)
+		}
+		return files
+	}
+	return nil
 }

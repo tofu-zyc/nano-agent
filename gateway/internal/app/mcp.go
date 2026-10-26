@@ -220,7 +220,7 @@ func (a *App) askMCPApproval(s *sess, execID, tool string, args json.RawMessage)
 	text := fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝", n, desc, from, n, n)
 	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
 	if s.run != nil {
-		for _, o := range s.run.outs {
+		for _, o := range a.approvalOuts(s) {
 			approver, ok := a.chans[o.ep.ch].(channel.Approver)
 			if !ok {
 				a.deliver(o.ep, text, "")
@@ -246,11 +246,11 @@ func (a *App) askMCPApproval(s *sess, execID, tool string, args json.RawMessage)
 	return ch, n
 }
 
-// mcpOffered 是这个会话的工具定义里该有的 MCP 工具：只给普通会话里的管理员，
+// mcpOffered 是这个会话的工具定义里该有的 MCP 工具：给管理员及 agent 的自主活动，
 // 只读和不用工具的模式不给。contextParts 和 permSignature 共用这一处判断，
 // 保证「给了什么」和「什么时候重建工具快照」是一回事。调用方持有锁。
 func (a *App) mcpOffered(sid string, admin bool) []llm.Tool {
-	if !admin || a.mcp == nil || isDreamSID(sid) || isLifeSID(sid) || a.isGroupSession(sid) {
+	if !admin || a.mcp == nil || isDreamSID(sid) || a.isGroupSession(sid) {
 		return nil
 	}
 	switch a.workspaceOf(sid).mode {
@@ -329,7 +329,7 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 			var res *sdkmcp.CallToolResult
 			var err error
 			if desktop {
-				res, err = a.desktopCall(ctx, sid, server, info, args)
+				res, err = a.desktopCall(ctx, sid, server, info, args, r.id)
 			} else {
 				res, err = mg.Call(ctx, server, tool, args)
 			}
@@ -342,6 +342,12 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 				return
 			}
 			text := cutRunes(mcp.ResultText(res), 24000)
+			if !mcpOutcomeVerified(res.StructuredContent) {
+				if r.unverifiedTools == nil {
+					r.unverifiedTools = map[string]bool{}
+				}
+				r.unverifiedTools[id] = true
+			}
 			// 工具返回的图片：存下来附在工具结果上（网页的工具卡片显示）；模型能看图时也交给模型
 			live := s.run == r
 			hidden := false

@@ -15,7 +15,7 @@ import (
 // prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）、
 // 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 4
+const prefixVer = 6
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -40,29 +40,13 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		}
 	}
 	// 桌面操作：把 Driver 的版本相关说明接进系统提示（只在能用 MCP 的管理员会话里）
-	if admin && !noTools && !isInnerSID(sid) && !a.isGroupSession(sid) {
+	if admin && !noTools && !isDreamSID(sid) && !a.isGroupSession(sid) {
 		if g := a.desktopGuide(sid); g != "" {
 			system = strings.TrimSpace(system + "\n\n" + g)
 		}
 	}
 	if isDreamSID(sid) {
 		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
-	} else if isLifeSID(sid) {
-		// 内心活动：上网、记东西、找人
-		for _, spec := range a.searchTools() {
-			tools = append(tools, toolOf(spec))
-		}
-		if a.memoryOn(ag) {
-			tools = append(tools, toolOf(knowledgeTool()))
-		}
-		for _, spec := range a.gatewayTools() {
-			if spec.Name == "Message" {
-				tools = append(tools, toolOf(spec))
-			}
-		}
-		// 自主活动：安排日程、记下想法
-		tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
-		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
 		var all []llm.Tool
@@ -97,14 +81,19 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			tools = append(tools, toolOf(knowledgeTool()))
 		}
 		if ag.Life() {
-			tools = append(tools, toolOf(followUpTool()), toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
+			if !isLifeSID(sid) {
+				tools = append(tools, toolOf(followUpTool()))
+			}
+			if admin {
+				tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
+			}
 		}
 		tools = append(tools, toolOf(sendFileTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}
-	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
+	// 工具定义用快照保持请求前缀稳定；技能目录/MCP 工具或权限变化会刷新，不必清空聊天。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
 	// 群聊和房间的工具由白名单单独算，不套用旧快照（旧快照可能是普通会话的整套工具）
@@ -125,7 +114,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 // contextParts 用它决定给什么工具，permSignature 用它判断要不要换工具快照。调用方持有锁。
 func (a *App) permOf(sid string) (route, bool, bool) {
 	rt := a.route(a.workspaceOf(sid))
-	admin := sid == mainSID
+	admin := sid == mainSID || (isLifeSID(sid) && a.isAdmin("life:"+a.routeAgentID(sid)))
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		return s.run.rt, a.isAdmin(s.run.from), s.run.noTools
 	}
@@ -154,7 +143,12 @@ func (a *App) permSignature(sid string) string {
 	if names.Len() > 0 {
 		mcpSig = fmt.Sprintf("%x", sha256.Sum256([]byte(names.String())))[:16]
 	}
-	return fmt.Sprintf("%t|%s|%t|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig)
+	skillSig := ""
+	if spec, ok := a.skillSpec(sid); ok {
+		catalog, _ := json.Marshal(spec)
+		skillSig = fmt.Sprintf("%x", sha256.Sum256(catalog))[:16]
+	}
+	return fmt.Sprintf("%t|%s|%t|%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig)
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

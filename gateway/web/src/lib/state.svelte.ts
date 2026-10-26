@@ -397,6 +397,7 @@ class Store {
   }
 
   upsertSession(info: SessionInfo) {
+    if (/^@[^/]+\/room:/.test(info.sid)) return; // 内部成员只在公共群记录里展示
     if (!this.ov) return;
     if (!this.ov.sessions) this.ov.sessions = [];
     const list = this.ov.sessions;
@@ -541,6 +542,10 @@ class Store {
         break;
       case 'message':
         if (!this.session(sid)) this.refreshSession(sid);
+        if (sid.startsWith('room:')) {
+          this.historyTick[sid] = (this.historyTick[sid] ?? 0) + 1;
+          break;
+        }
         this.pushLive(sid, { kind: 'user', text: e.text ?? '', name: e.name, via: e.data?.via, channel: e.data?.channel, images: e.data?.images, at: e.at });
         break;
       case 'pairing':
@@ -616,6 +621,10 @@ class Store {
         break;
       }
       case 'say':
+        if (sid.startsWith('room:')) {
+          this.historyTick[sid] = (this.historyTick[sid] ?? 0) + 1;
+          break;
+        }
         this.pushLive(sid, { kind: 'say', text: e.text ?? '', at: e.at });
         break;
       case 'approval': {

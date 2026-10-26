@@ -32,6 +32,7 @@ class Gateway:
         self.buf = b""
         # 本机没有沙箱（macOS）时，自动模式下的 Shell 也要审批：不是专门测审批的用例就自动批准
         self.auto_approve = False
+        self.landlock = 0
         self.approved = set()
 
     def accept(self):
@@ -222,8 +223,15 @@ def t_host_run(gw):
             files=[{"path": "SKILL.md", "data": base64.b64encode(b"# demo").decode()},
                    {"path": "scripts/run.sh", "data": data, "exec": True}])
     r = gw.expect("run_result", id="p1", ok=True)
-    d = os.path.join(T, "home", ".nano-agent", "skills", "demo")
+    d = os.path.join(T, "home", ".nano-agent", "skill-cache", "demo")
     assert r["content"] == d and os.access(os.path.join(d, "scripts", "run.sh"), os.X_OK), r
+    gw.send(t="run", id="skill-read", req={"tool":"Read", "args":{"path":os.path.join(d,"SKILL.md")}, "dirs":[WORK], "write":False})
+    gw.expect("run_result", id="skill-read", ok=True, content=lambda c: "# demo" in c)
+    gw.send(t="run", id="skill-write", req={"tool":"Write", "args":{"path":os.path.join(d,"SKILL.md"),"content":"changed"}, "dirs":[WORK], "write":True})
+    gw.expect("run_result", id="skill-write", ok=False)
+    if gw.landlock > 0:
+        gw.send(t="run", id="skill-shell-write", req={"tool":"Shell", "args":{"command":"echo changed > '"+os.path.join(d,"SKILL.md")+"'"}, "dirs":[WORK], "write":True})
+        gw.expect("run_result", id="skill-shell-write", ok=False)
     gw.send(t="skill_put", id="p2", skill="demo", files=[{"path": "../escape", "data": data}])
     gw.expect("run_result", id="p2", ok=False, content=lambda c: "路径不能用" in c)
     assert os.path.exists(os.path.join(d, "SKILL.md")), "失败时不动原来的文件"
@@ -552,6 +560,7 @@ def main():
             assert "landlock" in hello["sandbox"], hello
             gw.send(t="welcome", v=5)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
+            gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
             for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,

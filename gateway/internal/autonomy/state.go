@@ -161,19 +161,24 @@ type Intention struct {
 
 // AgendaItem 是今日计划里的一个时间块。
 type AgendaItem struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Kind        string `json:"kind"`
-	At          int64  `json:"at"` // 计划开始（秒）
-	Minutes     int    `json:"minutes,omitempty"`
-	Movable     bool   `json:"movable,omitempty"`
-	Status      string `json:"status"`
-	Source      string `json:"source,omitempty"`
-	IntentionID string `json:"intention_id,omitempty"`
-	Note        string `json:"note,omitempty"`
-	Result      string `json:"result,omitempty"`
-	Created     int64  `json:"created"`
-	Updated     int64  `json:"updated"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Kind        string   `json:"kind"`
+	At          int64    `json:"at"` // 计划开始（秒）
+	Minutes     int      `json:"minutes,omitempty"`
+	Movable     bool     `json:"movable,omitempty"`
+	Status      string   `json:"status"`
+	Source      string   `json:"source,omitempty"`
+	IntentionID string   `json:"intention_id,omitempty"`
+	Note        string   `json:"note,omitempty"`
+	Criteria    string   `json:"criteria,omitempty"`   // 做到什么才算完成
+	Checkpoint  string   `json:"checkpoint,omitempty"` // 已做到哪，下一步是什么
+	ScopeSet    bool     `json:"scope_set,omitempty"`
+	Workspaces  []string `json:"workspaces,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	Result      string   `json:"result,omitempty"`
+	Created     int64    `json:"created"`
+	Updated     int64    `json:"updated"`
 }
 
 // Event 是进入控制层的一件事。至少一次投递、按 Dedupe 去重。
@@ -192,17 +197,28 @@ type Event struct {
 
 // Execution 是一次真实行动的记录：接着哪个意图 / 议程、有没有真的调工具、结果是什么。
 type Execution struct {
-	ID          string `json:"id"`
-	Trigger     string `json:"trigger,omitempty"`
-	IntentionID string `json:"intention_id,omitempty"`
-	AgendaID    string `json:"agenda_id,omitempty"`
-	RunSID      string `json:"run_sid,omitempty"`
-	Started     int64  `json:"started"`
-	Ended       int64  `json:"ended"`
-	OK          bool   `json:"ok"`
-	UsedTools   bool   `json:"used_tools"`
-	Summary     string `json:"summary,omitempty"`
-	Tokens      int    `json:"tokens,omitempty"`
+	ID          string         `json:"id"`
+	Trigger     string         `json:"trigger,omitempty"`
+	IntentionID string         `json:"intention_id,omitempty"`
+	AgendaID    string         `json:"agenda_id,omitempty"`
+	RunSID      string         `json:"run_sid,omitempty"`
+	Started     int64          `json:"started"`
+	Ended       int64          `json:"ended"`
+	OK          bool           `json:"ok"`
+	UsedTools   bool           `json:"used_tools"`
+	Verified    bool           `json:"verified"`
+	Evidence    []ToolEvidence `json:"evidence,omitempty"`
+	Summary     string         `json:"summary,omitempty"`
+	Tokens      int            `json:"tokens,omitempty"`
+}
+
+// ToolEvidence 由网关根据内核的实际工具结果生成，模型不能自己填成功状态。
+type ToolEvidence struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	OK       bool   `json:"ok"`
+	Verified bool   `json:"verified"`
+	Result   string `json:"result"`
 }
 
 // Reflection 是反思结果：计划和实际的偏差、下一步调整。
@@ -476,8 +492,8 @@ func (s *State) MarkStarted(t Trigger, now time.Time) {
 	s.Touch()
 }
 
-// Finish 把一次真实执行写回状态：只有真的调用了工具、并且这一轮正常结束，才算完成；
-// 只写了一段计划或没有真实结果，就把议程项往后挪，不虚构完成。
+// Finish 把一次真实执行写回状态：只有真实工具证据支持的验收且本轮正常结束才算完成。
+// 只写计划、调工具但没验收或没有真实结果，都保留检查点并延期。
 func (s *State) Finish(rec Execution, now time.Time, retry time.Duration) {
 	if rec.Ended == 0 {
 		rec.Ended = now.Unix()
@@ -488,8 +504,13 @@ func (s *State) Finish(rec Execution, now time.Time, retry time.Duration) {
 		s.Executions = append([]Execution(nil), s.Executions[len(s.Executions)-50:]...)
 	}
 	nowU := now.Unix()
-	done := rec.OK && rec.UsedTools && strings.TrimSpace(rec.Summary) != ""
+	done := rec.OK && rec.Verified && rec.UsedTools && strings.TrimSpace(rec.Summary) != ""
 	if a := s.agenda(rec.AgendaID); a != nil {
+		// 本轮取消或主动挪动过的日程保持模型/用户的新决定。
+		if a.Status == StatusCancelled || a.Status == StatusSkipped || a.Status == StatusDone || a.Status == StatusPlanned {
+			s.Touch()
+			return
+		}
 		a.Updated = nowU
 		if done {
 			a.Status, a.Result = StatusDone, rec.Summary
@@ -513,7 +534,7 @@ func (s *State) Finish(rec Execution, now time.Time, retry time.Duration) {
 			s.setBelief("最近做的事："+in.Title, rec.Summary, "execution:"+rec.ID, 0.8, now)
 		case rec.OK:
 			in.State = IntentionWaiting
-			in.Blocked = "这一轮没有真正执行（只是计划或没有工具结果），稍后再试"
+			in.Blocked = "这一轮没有真正执行或尚未验收；按检查点继续，不能直接重放结果未知的操作"
 			in.NextAt = now.Add(retry).Unix()
 			in.Attempts++
 		default:
@@ -616,7 +637,22 @@ func (s *State) CancelAgenda(id, why string, now time.Time) error {
 	return nil
 }
 
-// CompleteAgenda 是模型明确报告“这件事做完了”，并给出真实结果。
+// SetCheckpoint 保存已完成步骤和下一步，供中断或重启后重新观察并续做。
+func (s *State) SetCheckpoint(id, text string, now time.Time) error {
+	a := s.agenda(id)
+	if a == nil || a.Status == StatusCancelled || a.Status == StatusDone || a.Status == StatusSkipped {
+		return errors.New("没有正在推进的这个议程项")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("要写明已完成的步骤、下一步，以及结果未知的操作")
+	}
+	a.Checkpoint, a.Updated = clip(text, 2000), now.Unix()
+	s.Touch()
+	return nil
+}
+
+// CompleteAgenda 提交已核验的完成声明，或管理员手动确认的结果。
 func (s *State) CompleteAgenda(id, evidence string, now time.Time) error {
 	a := s.agenda(id)
 	if a == nil {
@@ -823,6 +859,10 @@ func (s *State) RecordSkipped(rec Execution, now time.Time) {
 	}
 	nowU := now.Unix()
 	if a := s.agenda(rec.AgendaID); a != nil {
+		if a.Status == StatusCancelled || a.Status == StatusDone {
+			s.Touch()
+			return
+		}
 		a.Status, a.Result, a.Updated = StatusSkipped, clip(rec.Summary, 200), nowU
 	}
 	if in := s.intention(rec.IntentionID); in != nil {

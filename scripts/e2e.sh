@@ -136,7 +136,9 @@ expect "Ctrl-C 提示再按一次退出" "再按一次 Ctrl-C 退出"
 send "/mode auto";                                    expect "切换到自动模式" "已切换为自动"
 send '!call Shell {"command":"echo auto-$((6*7))"}';  expect "自动模式直接执行" "auto-42"
 send '!call Skill {"name":"demo"}';                   expect "加载技能说明" "技能 demo"
-send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt"}'; expect "技能附带文件放到执行的机器上" "skill-e2e-data"
+DEMO_LOCAL=$(find "$NANO_HOME/skill-cache" -path '*/demo-*/data.txt' -type f -print -quit)
+READ_LOCAL=$(python3 -c 'import json,sys;print(json.dumps({"path":sys.argv[1]}))' "$DEMO_LOCAL")
+send "!call Read $READ_LOCAL"; expect "技能附带文件放到执行的机器上" "skill-e2e-data"
 send '!call Read {"path":"~/.profile"}';                expect "工作目录外也能读 HOME" "secret-profile"
 send '!call Shell {"command":"cat ~/.profile"}';        expect "Shell 也能读 HOME" "secret-profile"
 send '!call Write {"path":"/tmp/nano-e2e-outside.txt","content":"x"}'; expect "工作目录外不能写" "elevated"
@@ -213,13 +215,15 @@ if ls "$TMP"/remote/box/.nano-agent/nano-exec-* >/dev/null 2>&1 && ! ls "$TMP"/r
 else
   echo "  FAIL 服务器上只有执行器，没有内核"; fail=$((fail + 1))
 fi
-send '!call Skill {"name":"demo"}';                   expect_n "加载技能（两台机器上都放好附带文件）" "技能目录：~/.nano-agent/skills/demo" 2
-if find "$TMP/remote/box/.nano-agent/skills" -name data.txt -exec cat {} \; | grep -qF "skill-e2e-data"; then
+send '!call Skill {"name":"demo"}';                   expect_n "加载技能（两台机器上都放好附带文件）" "技能目录（只读；按执行机器选择完整路径）" 2
+if find "$TMP/remote/box/.nano-agent/skill-cache" -name data.txt -exec cat {} \; | grep -qF "skill-e2e-data"; then
   echo "  ok   技能附带文件传到服务器"; pass=$((pass + 1))
 else
   echo "  FAIL 技能附带文件传到服务器"; fail=$((fail + 1))
 fi
-send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt","workspace":"box"}'; expect_n "服务器上读技能文件" "skill-e2e-data" 2
+DEMO_REMOTE=$(find "$TMP/remote/box/.nano-agent/skill-cache" -path '*/demo-*/data.txt' -type f -print -quit)
+READ_REMOTE=$(python3 -c 'import json,sys;print(json.dumps({"path":sys.argv[1],"workspace":"box"}))' "$DEMO_REMOTE")
+send "!call Read $READ_REMOTE"; expect_n "服务器上读技能文件" "skill-e2e-data" 2
 send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
 # 网关执行的工具不挑工作目录：挂了多个目录时也不能要求 workspace（v0.7.4 修）
 send '!call Agenda {"action":"list"}'; expect "Agenda 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"

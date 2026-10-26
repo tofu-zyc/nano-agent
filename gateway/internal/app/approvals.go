@@ -6,10 +6,37 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/proto"
 )
+
+// approvalOuts 自主活动不广播过程，但审批仍送回创建日程的管理员会话。
+func (a *App) approvalOuts(s *sess) []out {
+	if !isLifeSID(s.sid) || !s.run.inner {
+		return s.run.outs
+	}
+	agentID := a.execAgentID(s.sid)
+	target := agents.SessionFor(agentID, mainSID)
+	if s.mind != nil {
+		if item, ok := a.mind(agentID).AgendaByID(s.mind.Trigger.AgendaID); ok {
+			if source, found := strings.CutPrefix(item.Source, "chat:"); found && !isInnerSID(source) {
+				target = source
+			}
+		}
+	}
+	if a.execAgentID(target) != agentID {
+		return nil
+	}
+	var outs []out
+	for key, ep := range a.eps {
+		if ep.Session == target && a.isAdmin(ep.Who) {
+			outs = append(outs, out{ep: parseEndpoint(key)})
+		}
+	}
+	return outs
+}
 
 // 审批：内核说某个工具调用要管理员批准（approve_req）。能显示按钮的渠道（Telegram、飞书）发一张带
 // “批准 / 拒绝”按钮的审批消息，其他窗口发文字（回复 /approve 编号）。不管在哪儿批（按钮、命令、网页），
@@ -43,7 +70,7 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 	a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
 	text := fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝", n, desc, m.From, n, n)
 	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
-	for _, o := range s.run.outs {
+	for _, o := range a.approvalOuts(s) {
 		ch := a.chans[o.ep.ch]
 		ap2, ok := ch.(channel.Approver)
 		if !ok {
@@ -144,8 +171,8 @@ func (a *App) canApproveFrom(c in, ap *approval) bool {
 	if ap.sid == c.s.sid {
 		return true
 	}
-	if s.run.scheduled != nil {
-		for _, o := range s.run.outs {
+	if s.run.scheduled != nil || isLifeSID(s.sid) {
+		for _, o := range a.approvalOuts(s) {
 			if o.ep == c.ep {
 				return true
 			}

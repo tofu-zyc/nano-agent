@@ -386,11 +386,29 @@ def t_home_mode():
     ok(run("Shell", {"command": "echo hi > \"$TMPDIR/t\" && cat \"$TMPDIR/t\""}, dirs=(), home=True, write=False), "hi")
 
 
+@case("技能缓存：自定义目录含符号链接时仍可按实际路径读取")
+def t_skill_cache_symlink():
+    real = os.path.join(T, "actual-nano")
+    alias = os.path.join(T, "linked-nano")
+    cached = os.path.join(real, "skill-cache", "demo")
+    os.makedirs(cached)
+    os.symlink(real, alias)
+    target = os.path.join(cached, "reference.txt")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("cache-reference")
+    ENV["NANO_HOME"] = alias
+    try:
+        ok(run("Read", {"path": target}, write=False), "cache-reference")
+        bad(run("Write", {"path": target, "content": "changed"}))
+    finally:
+        ENV.pop("NANO_HOME", None)
+
+
 def main():
     try:
         setup()
         print(f"probe：{PROBE}")
-        for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_read_all, t_write, t_write_escape, t_edit, t_grep,
+        for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
                   t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()

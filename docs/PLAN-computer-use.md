@@ -1,5 +1,38 @@
 # Computer use 接入方案
 
+## linux-pc 实测与主线补全（2026-10-26，v0.8.0）
+
+- 同桌面从“单次调用串行”改为“整轮观察、操作、核验保留桌面”；其他任务等待，取消/结束/断线释放。同一轮跨两台已占用的桌面不互相死等，返回可解释的重试原因。
+- 新增 `scripts/e2e-desktop.py`：在真实 X11 服务中启动独立 GTK 输入窗口，验证实际 PNG 画面非纯色、通过驱动 `set_value` 写入完整中英文、点击确认、核对应用进程输出。可用 `--isolated-x11` 配合 Xvfb / Openbox / xcompmgr，Python 需要 GI 的 GTK3 和 Pillow；临时桌面与正式网关隔离。
+- linux-pc 上 Driver **0.7.0 和 0.37.0** 均通过上述操作链。0.37.0 需按实际 schema 用 `tree_format:"both"` 取得结构化元素；优先 `element_token`，不假定旧版 `element_index` 仍存在。
+- 可加 `--gateway /path/nano-gateway --kernel /path/nano-kernel --executor /path/nano-exec` 走真网关 + C 内核 + 自主日程 + MCP 操作链，应用输出作为验收证据；模型仍是确定性本地替身。该组合已在 linux-pc、Driver 0.37.0 上实际通过，包括 MCP 审批、观察、截图以多模态消息送到模型接口、中英文输入、点击、读取应用输出、`Agenda done` 验收。
+- 严格验收中发现：0.7.0 / 0.37.0 的 `type_text` 在该 X11 环境写入混合中英文时可能只写部分，效果报告为未确认。`set_value` 路径完整回读通过；技能已记录选择方法，网关不允许明确未确认的结果直接用于日程验收。
+- 当前登录的 GNOME 远程会话没有显示输出，XWayland 根屏幕为 **0×0**，只读到窗口树不能算截图/输入通过。Xvfb 无合成器时透明光标可能导致黑图；测试现在检查画面内容，不能把“有 PNG”当成功。
+
+- Windows 实机补测：新增 `scripts/fixtures/desktop-win.c` 和 `scripts/e2e-desktop-win.py`。独立 Win32 窗口具有输入框、确定按钮和状态文字，只有点击确定后才从实际 Edit 控件读取内容并写出 UTF-8 文件；窗口三分钟自动退出。内核程序副本放在另一个临时目录，避免把包含内核程序的目录设为工作目录。
+- linux-pc 上真实网关通过 SSH 临时转发连接独立 Windows C 内核，使用 `pipe_*` 启动已安装的 Driver **0.37.0**。到点自主任务经审批观察/截图、`set_value` 写入「中文验证：你好 nano 42」、再次观察、点击确定、用 Windows 执行器 Read 实际输出，再提交日程证据验收。6 次模型请求含截图；测试端另核对非纯色画面和文件内容，肉眼核对控件值与成功状态。正式 Linux/Windows 内核和原有 Driver 进程未替换。
+
+- 在可重复的确定性回归外，Windows 同一链路还用 `deepseek-v4.1-flash` 实测通过：模型自己创建已到期日程，在自主活动中按最新窗口状态选择元素、输入、点击，再关联 Read 凭据验收。它接收包含辅助功能树和截图的观察；这不是纯视觉定位或任意桌面任务的可靠性评估。
+
+原生 Wayland 已补测 Sway 1.11 / wlroots 0.19：独立 headless/pixman 会话禁用 XWayland，GTK 窗口经 Sway IPC 确认 shell=xdg_shell、window=null；Driver 0.37.0 的非纯色截图、完整中英文、点击及真实应用输出通过，真网关/C 内核/自主日程/MCP 审批/证据验收组合也通过。用 `--isolated-wayland --wayland-compositor /path/to/sway` 复跑，依赖须事先具备。只在临时目录解包测试依赖，没有安装系统软件或更改正式 GNOME。
+
+不能将该结果推广到其他 Wayland 合成器。当前 GNOME 没有显示输出，Mac 没有可用实机，用户确认先完成 Windows/Linux。多窗口、纯视觉坐标、复杂滚动和长期稳定性可继续扩展评估。
+
+使用方法已经放进自带 `computer-use` 技能及 `references/setup.md` / `references/linux.md`，接入 AI 日常复用已有服务，不用从验证脚本反推操作方法；自主任务由 `autonomous-tasks` 技能串起排期、检查点和验收。
+
+### 复跑 Windows 跨机链路
+
+先构建 Windows 内核/执行器（`make -C kernel windows-kernel windows-exec`），将待测 Linux 网关放到 SSH 目标机，在 WSL 运行：
+
+```sh
+python3 scripts/e2e-desktop-win.py --ssh linux-pc --gateway /absolute/path/nano-gateway \
+  --driver 'C:/Users/me/AppData/Local/Programs/Cua/cua-driver/bin/cua-driver.exe'
+```
+
+需要已登录的 Windows 桌面、预先安装并可用的 Driver、Zig 和 Python Pillow。测试只操作自有夹具，经 `mcp --grant existing-profile` 使用现有配置，不安装驱动或修改系统授权。`--kernel` / `--executor` 可指定 Linux 目标机的程序，默认该账号 `~/.nano-agent/lib/`；不安装到正式目录。测试失败必须保留失败状态，不能将跳过算通过。
+
+加 `--real-model-home /home/me/.nano-agent --output build/verification-windows-real` 使用 Linux 目标机已配置的默认真实模型（必须支持图片，会消费 API 用量）。测试只选取该模型所需的加密端点和密钥放进私有临时目录，正常结束或 SIGTERM 中断后删除副本；不复制生产聊天、机器人或 MCP 配置。
+
 日期：2026-10-26。状态：v0.7.3 已接入，并在 Linux（WSL Fedora 43 + cua-driver 0.7.0）完成真机握手和窗口树验证；截图/输入在该 WSLg 会话里受限，Windows/macOS 实机未验证。
 
 目标是让 nano-agent 操作有桌面环境的机器，覆盖 Windows、macOS 和 Linux。优先采用 Cua Driver，复用其窗口发现、截图、辅助功能树、输入和结果验证；nano-agent 负责模型循环、设备连接、会话、工具授权和上下文。

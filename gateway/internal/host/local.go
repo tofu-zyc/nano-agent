@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nano-agent/gateway/internal/paths"
 )
 
 // LocalName 是网关所在的机器在工作目录里的名字。
@@ -111,38 +113,41 @@ func (l *Local) mark(out []byte) (*Listing, error) {
 	return &ls, nil
 }
 
-func (l *Local) PutFiles(_ context.Context, dir string, files []File) error {
+func (l *Local) PutFiles(_ context.Context, dir string, files []File) (string, error) {
 	rel, err := relDir(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	root := filepath.Join(home, rel)
+	if suffix, ok := strings.CutPrefix(filepath.ToSlash(rel), ".nano-agent/"); ok {
+		root = filepath.Join(paths.Home(), filepath.FromSlash(suffix))
+	}
 	if err := os.RemoveAll(root); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	for _, f := range files {
 		p, err := cleanRel(f.Path)
 		if err != nil {
-			return err
+			return "", err
 		}
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-			return err
+			return "", err
 		}
 		mode := os.FileMode(0o600)
 		if f.Exec {
 			mode = 0o700
 		}
 		if err := os.WriteFile(full, f.Data, mode); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return root, nil
 }

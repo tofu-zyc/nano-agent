@@ -50,7 +50,7 @@ const (
 	TExecResult = "exec_result" // exec 的结果
 	TRun        = "run"         // 请内核在它的机器上执行一次工具（工作目录在那台机器上，这一轮由别的内核跑）
 	TRunCancel  = "run_cancel"  // 停下 run
-	TSkillPut   = "skill_put"   // 把技能文件放到内核那台机器的 ~/.nano-agent/skills/<技能名>/
+	TSkillPut   = "skill_put"   // 把技能文件放到内核机器的独立技能缓存，run_result.content 返回实际目录
 	// 协议 v10：MCP 服务的 stdio 透传（把 MCP 进程放到别的电脑上跑）
 	TPipeOpen   = "pipe_open"   // 网关 → 内核：起一个子进程
 	TPipeWrite  = "pipe_write"  // 网关 → 内核：往它的 stdin 写一行

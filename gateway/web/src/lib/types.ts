@@ -238,6 +238,7 @@ export type Msg = {
   reasoning?: string;
   usage?: Usage;
   ts?: number;
+  agent?: string;
 };
 
 export type Ev = {
@@ -308,6 +309,7 @@ export type AgentInfo = {
 export type AutonomyAgenda = {
   id: string; title: string; kind: 'commitment' | 'checkup' | 'plan' | 'exploration'; at: number; minutes?: number;
   movable?: boolean; status: string; source?: string; intention_id?: string; note?: string; result?: string;
+  criteria?: string; checkpoint?: string;
 };
 // 一个目标（BDI 的意图）
 export type AutonomyIntention = {
@@ -322,7 +324,8 @@ export type AutonomyIdea = {
 // 一次真实的执行
 export type AutonomyExecution = {
   id: string; trigger?: string; agenda_id?: string; intention_id?: string; started: number; ended: number;
-  ok: boolean; used_tools: boolean; summary?: string; tokens?: number;
+  ok: boolean; used_tools: boolean; verified?: boolean; summary?: string; tokens?: number;
+  evidence?: { id: string; name: string; ok: boolean; result: string }[];
 };
 // 长期兴趣（来源必填）
 export type AutonomyInterest = { text: string; source: string; at: number };

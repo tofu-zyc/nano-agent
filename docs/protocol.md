@@ -1,7 +1,7 @@
 # 内核 ⇄ 网关协议（v9）
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
-- **版本**：v9 起 `hello` 带 `version`（内核的发布版本）和 `update_failed`（上次自动更新失败、已经退回的版本），网关可以发 `update` 让内核换成新版本（见下面「内核更新」）。**从 v9 起，网关遇到协议版本比自己旧、但不低于 9 的内核时，应先推 `update` 把它升上来，而不是直接拒绝**。v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（技能附带文件在 `~/.nano-agent/skills/<名字>/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
+- **版本**：v9 起 `hello` 带 `version`（内核的发布版本）和 `update_failed`（上次自动更新失败、已经退回的版本），网关可以发 `update` 让内核换成新版本（见下面「内核更新」）。**从 v9 起，网关遇到协议版本比自己旧、但不低于 9 的内核时，应先推 `update` 把它升上来，而不是直接拒绝**。v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（当前技能源文件在 `skills/`，执行缓存在 `skill-cache/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -48,7 +48,7 @@
 | `exec_result` | `sid` `id` `ok` `content` | `exec` 的结果：工具输出，或者 `Skill` 的说明 |
 | `run` | `id` `req` | 请这个内核在它的机器上执行一次工具（工作目录在这台机器上，但这一轮由别的内核跑）。`req` 是交给执行器的完整请求（见[执行器](#执行器)），内核照样检查路径不包含自己 |
 | `run_cancel` | `id` | 停下 `run`（不再回结果） |
-| `skill_put` | `id` `skill` `files[]` | 把技能文件放到这台机器的 `~/.nano-agent/skills/<skill>/`（先清空）。`files` 每项是 `{path, data, exec?}`，`path` 是相对路径（不能有 `..`），`data` 是 base64。内核只肯写这个目录 |
+| `skill_put` | `id` `skill` `files[]` | 把技能文件放到这台机器的 `$NANO_HOME/skill-cache/<skill>/`（默认 `~/.nano-agent/skill-cache/`，先清空；skill 可带内容版本后缀）。`files` 每项是 `{path, data, exec?}`，`path` 是相对路径（不能有 `..`），`data` 是 base64。内核只肯写这个目录 |
 
 `turn.reason`：
 
@@ -137,7 +137,7 @@ stdout {"ok":true,"content":"a.txt\nb.txt\n"}
 - 工作目录不能包含内核的配置目录和执行器本身，内核会在启动执行器之前检查；执行器自己也拒绝包含它自己的目录。
 - `nano-exec --probe` 输出本机的沙箱能力：`{"v":1,"landlock":7,"os":"Linux","arch":"x86_64","rg":true}`。
 
-`Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到这一轮挂载的每台机器的 `~/.nano-agent/skills/<技能名>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。每台机器上都是同一个路径，每次执行的 `ro` 都包含 `~/.nano-agent/skills`。
+`Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到各执行机器的独立 `skill-cache/<技能名>-<内容哈希>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。回执列出每台机器上的实际完整路径；不能假定 HOME 或 NANO_HOME 一样。缓存不覆盖全局/agent 技能源文件，每次执行只读可见。
 
 ## 内核更新（v9）
 

@@ -82,6 +82,12 @@ jobs:
           path: gateway-win
       - name: Windows 网关程序能运行
         run: .\gateway-win\nano-gateway.exe version
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Windows 技能缓存和配套文件路径
+        run: go -C gateway test ./internal/host -run 'TestPortableSkillPaths|TestSkillCacheUsesCustomHomeWithoutReplacingSource' -count=1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

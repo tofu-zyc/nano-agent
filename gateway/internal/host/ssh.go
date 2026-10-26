@@ -334,35 +334,35 @@ func (s sshHost) Ls(ctx context.Context, path string) (*Listing, error) {
 	return &ls, nil
 }
 
-func (s sshHost) PutFiles(ctx context.Context, dir string, files []File) error {
+func (s sshHost) PutFiles(ctx context.Context, dir string, files []File) (string, error) {
 	rel, err := relDir(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, f := range files {
 		p, err := cleanRel(f.Path)
 		if err != nil {
-			return err
+			return "", err
 		}
 		mode := int64(0o600)
 		if f.Exec {
 			mode = 0o700
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: p, Mode: mode, Size: int64(len(f.Data)), Typeflag: tar.TypeReg}); err != nil {
-			return err
+			return "", err
 		}
 		tw.Write(f.Data)
 	}
 	tw.Close()
 	q := shellQuote(rel)
-	_, errOut, code, err := run(ctx, s.h.muxCmd(`d="$HOME"/`+q+`; rm -rf "$d" && mkdir -p "$d" && tar xf - -C "$d"`), buf.Bytes(), false)
+	out, errOut, code, err := run(ctx, s.h.muxCmd(`d="$HOME"/`+q+`; rm -rf "$d" && mkdir -p "$d" && tar xf - -C "$d" && printf '%s' "$d"`), buf.Bytes(), false)
 	if code != 0 {
 		if code == 255 {
 			s.h.lost()
 		}
-		return fmt.Errorf("传文件到服务器 %s 失败：%s", s.h.c.Name, firstLine(errOut+" "+fmt.Sprint(err)))
+		return "", fmt.Errorf("传文件到服务器 %s 失败：%s", s.h.c.Name, firstLine(errOut+" "+fmt.Sprint(err)))
 	}
-	return nil
+	return string(out), nil
 }

@@ -93,7 +93,7 @@ description: 在 nano-agent 里查看、添加、修改、删除 MCP 服务—�
 {"action":"mcp_save","name":"desktop","machine":"有桌面的那台机器","command":"/绝对路径/cua-driver","args":["mcp"],"enabled":true,"approval":"per_turn"}
 ```
 
-装完必须 `mcp_test`，再用 `desktop__list_windows` 确认真的看见了窗口；设备在线不等于桌面可操作。
+已有同机器的桌面服务时复用，不为每个任务重新加服务或重装。缺少接入才读 computer-use 的 setup 参考；装完 `mcp_test`，再用该服务的 list_windows / get_window_state 确认目标窗口和画面。设备在线不等于桌面可操作。Windows/Linux 裸 mcp 在正确图形环境中可直接运行，不需要默认再建一个 daemon。
 
 ## 要知道的
 

@@ -44,6 +44,11 @@ func (a *App) SetHosts(h Hosts) {
 // HostsChanged：SSH 服务器连上、断开了（host 包通知），网页刷新机器和工作目录
 func (a *App) HostsChanged() {
 	a.mu.Lock()
+	if a.hosts != nil {
+		for _, h := range a.hosts.Infos() {
+			a.mindMachineChanged(h.Name, h.Ready)
+		}
+	}
 	a.publish(events.Event{T: "machines", Data: a.machineList()})
 	a.publishWorkspaces()
 	a.mu.Unlock()
@@ -205,6 +210,7 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
 	machine := a.machineOf(name)
+	a.mindMachineChanged(machine, true)
 	mg := a.mcp
 	a.mu.Unlock()
 	// 挂在这台机器上的 MCP 服务马上去连（不等下一次维护）
@@ -228,7 +234,11 @@ func (a *App) toolsChanged(name string, m *proto.Msg) {
 func (a *App) KernelDown(name string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	machine := a.machineOf(name)
 	delete(a.nodes, name)
+	if machine != host.LocalName || a.localKernel() == "" {
+		a.mindMachineChanged(machine, false)
+	}
 	if a.mcp != nil {
 		if p := a.mcp.Pipes(); p != nil {
 			p.DropNode(name) // 它上面起的 MCP 进程跟着没了

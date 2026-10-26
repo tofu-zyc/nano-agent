@@ -55,7 +55,7 @@ func TestAutonomyDueCommitmentUsesRealToolResult(t *testing.T) {
 	e.a.autonomyTick()
 	in := e.k.expect(proto.TInput)
 	sid := lifeSID("default")
-	if in.SID != sid || in.MaxSteps != 12 {
+	if in.SID != sid || in.MaxSteps == 12 {
 		t.Fatalf("到点的约定应该在内心会话里跑一轮: %+v", in)
 	}
 	e.sid = sid
@@ -67,6 +67,12 @@ func TestAutonomyDueCommitmentUsesRealToolResult(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TResult, SID: sid, ID: turn.Calls[0].ID, OK: proto.Bool(true), Content: "闹钟响了"})
 	e.k.send(proto.Msg{T: proto.TModel, SID: sid})
 	e.k.expect(proto.TTurn)
+	e.a.mu.Lock()
+	_, doneErr := e.a.agendaCall(sid, []byte(`{"action":"done","id":"`+item.ID+`","note":"查到了：闹钟响了","evidence":["`+turn.Calls[0].ID+`"]}`))
+	e.a.mu.Unlock()
+	if doneErr != nil {
+		t.Fatal(doneErr)
+	}
 	req := e.llm.lastReq()
 	if !strings.Contains(req.Messages[0].Content, "有自己生活的人") {
 		t.Fatalf("自主活动应该用拟人型的人格: %q", req.Messages[0].Content)

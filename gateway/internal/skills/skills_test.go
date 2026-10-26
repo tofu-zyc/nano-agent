@@ -37,7 +37,7 @@ func TestScanLoadAndFiles(t *testing.T) {
 		t.Fatalf("spec: %+v %s", spec, spec.InputSchema)
 	}
 	text, files, hash, ok := r.Load("demo")
-	if !ok || hash == "" || !strings.HasPrefix(text, "技能 demo\n技能目录：~/.nano-agent/skills/demo") ||
+	if !ok || hash == "" || !strings.HasPrefix(text, "技能 demo\n配套文件由网关部署到执行机器") ||
 		!strings.Contains(text, "附带文件：scripts/run.sh\n") || !strings.HasSuffix(text, "# 示例\n照着做。\n") {
 		t.Fatalf("text: %q", text)
 	}

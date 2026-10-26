@@ -16,13 +16,16 @@ import (
 )
 
 const agendaSchema = `{"type":"object","properties":{
- "action":{"type":"string","enum":["list","add","move","cancel","done"]},
+ "action":{"type":"string","enum":["list","add","move","cancel","progress","done"]},
  "id":{"type":"string","description":"议程项的 ID（move、cancel、done 必填；先 list 查）"},
  "title":{"type":"string","description":"add：要做什么"},
  "kind":{"type":"string","enum":["commitment","checkup","plan","exploration"],"description":"add：commitment 和用户明确约定的；checkup 约好过会儿再看；plan 自己定的；exploration 自选探索"},
  "when":{"type":"string","description":"add/move：15:30、明天 09:00、2026-10-27 15:00、+30m"},
  "minutes":{"type":"integer","description":"预计要做多久（分钟）"},
  "note":{"type":"string","description":"到时要想起的事；done 时写真实结果（做了什么、看到了什么）"},
+ "criteria":{"type":"string","description":"add：做到什么、如何检查才算完成"},
+ "checkpoint":{"type":"string","description":"progress：已经做到哪、下一步做什么、哪些操作结果未知而不能重放"},
+ "evidence":{"type":"array","items":{"type":"string"},"description":"done 必填：从工具结果开头 [本轮验收凭据] 复制 id 字符串（也可用 list 查），不是工具名、描述或结果文字；查询日程/想法/心智不能作证据"},
  "movable":{"type":"boolean","description":"探索可以挪动，约定默认不挪"},
  "intention":{"type":"string","description":"推进哪个目标（意图 ID，可省略）"}
 },"required":["action"]}`
@@ -81,15 +84,18 @@ func (a *App) lifeMind(sid string) (*autonomy.State, agents.Agent, error) {
 // agendaCall 执行 Agenda。调用方持有锁。
 func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 	var x struct {
-		Action    string `json:"action"`
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Kind      string `json:"kind"`
-		When      string `json:"when"`
-		Minutes   int    `json:"minutes"`
-		Note      string `json:"note"`
-		Movable   *bool  `json:"movable"`
-		Intention string `json:"intention"`
+		Action     string   `json:"action"`
+		ID         string   `json:"id"`
+		Title      string   `json:"title"`
+		Kind       string   `json:"kind"`
+		When       string   `json:"when"`
+		Minutes    int      `json:"minutes"`
+		Note       string   `json:"note"`
+		Criteria   string   `json:"criteria"`
+		Checkpoint string   `json:"checkpoint"`
+		Evidence   []string `json:"evidence"`
+		Movable    *bool    `json:"movable"`
+		Intention  string   `json:"intention"`
 	}
 	if err := json.Unmarshal(raw, &x); err != nil {
 		return "", errors.New("参数格式不对")
@@ -107,6 +113,12 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 			for _, it := range open {
 				fmt.Fprintf(&b, "- %s %s（%s，%s，%s）\n", autonomy.FormatMinute(it.At, a.loc), it.Title,
 					autonomy.KindLabel(it.Kind), autonomy.StatusLabel(it.Status), it.ID)
+				if it.Criteria != "" {
+					fmt.Fprintf(&b, "  完成条件：%s\n", it.Criteria)
+				}
+				if it.Checkpoint != "" {
+					fmt.Fprintf(&b, "  检查点：%s\n", it.Checkpoint)
+				}
 			}
 		} else {
 			b.WriteString("日程是空的。\n")
@@ -115,6 +127,11 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 			b.WriteString("在推进的目标：\n")
 			for _, in := range intents {
 				fmt.Fprintf(&b, "- %s（%s，进度 %d，%s）\n", in.Title, autonomy.StatusLabel(in.State), in.Progress, in.ID)
+			}
+		}
+		if s := a.sessions[sid]; s != nil {
+			if receipts := availableTaskEvidence(s.run); receipts != "" {
+				fmt.Fprintf(&b, "本轮可用验收凭据（evidence 复制 id；仍需按完成条件核对结果）：\n%s\n", receipts)
 			}
 		}
 		return strings.TrimSpace(b.String()), nil
@@ -135,7 +152,8 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 			movable = *x.Movable
 		}
 		item, err := st.AddAgenda(autonomy.AgendaItem{Title: x.Title, Kind: kind, At: at.Unix(), Minutes: x.Minutes,
-			Movable: movable, Source: "chat:" + sid, Note: strings.TrimSpace(x.Note), IntentionID: x.Intention}, now)
+			Movable: movable, Source: "chat:" + sid, Note: strings.TrimSpace(x.Note), IntentionID: x.Intention,
+			Criteria: strings.TrimSpace(x.Criteria), ScopeSet: true, Workspaces: a.workspaceOf(sid).ids(), Mode: a.workspaceOf(sid).mode}, now)
 		if err != nil {
 			return "", err
 		}
@@ -162,12 +180,17 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 		}
 		a.afterMindChange(st, ag, now)
 		return "取消了。", nil
-	case "done":
-		if err := st.CompleteAgenda(x.ID, x.Note, now); err != nil {
+	case "progress":
+		if err := st.SetCheckpoint(x.ID, x.Checkpoint, now); err != nil {
 			return "", err
 		}
 		a.afterMindChange(st, ag, now)
-		return "记下了结果。", nil
+		return "检查点已保存，下次从这里继续。", nil
+	case "done":
+		if err := a.stageAgendaCompletion(sid, x.ID, x.Note, x.Evidence); err != nil {
+			return "", err
+		}
+		return "验收结果已记录，本轮正常结束后提交；中断或失败不会记成完成。", nil
 	}
 	return "", fmt.Errorf("不认识的 Agenda action %q", x.Action)
 }
@@ -221,6 +244,7 @@ func (a *App) ideaCall(sid string, raw []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		item.ScopeSet, item.Workspaces, item.Mode = true, a.workspaceOf(sid).ids(), a.workspaceOf(sid).mode
 		a.afterMindChange(st, ag, now)
 		return "好，" + at.In(a.loc).Format("01-02 15:04") + " 去做「" + in.Title + "」（" + item.ID + "）", nil
 	case "drop":

@@ -9,7 +9,7 @@ export type Block =
   | { type: 'note'; kind: NoteKind; text: string }
   | { type: 'wake'; text: string } // agent 自己的会话里，网关放的整段说明（醒来时看到的情况、昨晚整理了什么）
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
-  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number };
+  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number; sender?: string; agent?: string };
 
 export function toolDetail(name: string, args: string): string {
   let a: Record<string, any>;
@@ -43,7 +43,7 @@ export function prettyArgs(args: string): string {
   }
 }
 
-export function buildBlocks(history: Msg[], inner = false): Block[] {
+export function buildBlocks(history: Msg[], inner = false, room = false): Block[] {
   const out: Block[] = [];
   const byId = new Map<string, ToolView>();
   for (const m of history) {
@@ -65,7 +65,9 @@ export function buildBlocks(history: Msg[], inner = false): Block[] {
         byId.set(c.id, t);
         return t;
       });
-      out.push({ type: 'assistant', text: m.content ?? '', reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts });
+      const speaker = room ? parseUser(m.content ?? '') : undefined;
+      out.push({ type: 'assistant', text: speaker?.text ?? m.content ?? '', sender: speaker?.sender, agent: m.agent,
+        reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts });
     } else if (m.role === 'tool') {
       const t = byId.get(m.tool_call_id ?? '');
       if (t) {

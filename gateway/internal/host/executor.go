@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -109,8 +110,8 @@ type Host interface {
 	// Exec 运行一次执行器，req 是一行请求 JSON。ctx 结束时停下（关掉执行器的 stdin，它会清理自己启动的命令）。
 	Exec(ctx context.Context, req []byte) Result
 	Ls(ctx context.Context, path string) (*Listing, error)
-	// PutFiles 把文件放到 dir（~/ 开头）下，先清空 dir。
-	PutFiles(ctx context.Context, dir string, files []File) error
+	// PutFiles 把文件放到 dir（~/ 开头）下，先清空 dir，返回执行机器上的实际目录。
+	PutFiles(ctx context.Context, dir string, files []File) (string, error)
 }
 
 const (
@@ -221,16 +222,16 @@ func firstLine(s string) string {
 // relDir 检查 ~/ 开头的目录，返回 HOME 下的相对路径
 func relDir(dir string) (string, error) {
 	rel, ok := strings.CutPrefix(dir, "~/")
-	clean := filepath.Clean(rel)
-	if !ok || clean != rel || rel == "" || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+	clean := path.Clean(rel)
+	if !ok || clean != rel || rel == "" || strings.HasPrefix(clean, "..") || path.IsAbs(clean) || strings.ContainsAny(rel, `\:`) {
 		return "", fmt.Errorf("目录 %q 不对", dir)
 	}
 	return clean, nil
 }
 
 func cleanRel(p string) (string, error) {
-	c := filepath.Clean(p)
-	if p == "" || filepath.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
+	c := path.Clean(p)
+	if p == "" || path.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") || strings.ContainsAny(p, `\:`) {
 		return "", fmt.Errorf("文件路径 %q 不对", p)
 	}
 	return c, nil

@@ -230,6 +230,61 @@ func skillsLoad(a *App, name string) (string, []byte, string, bool) {
 	return text, nil, hash, ok
 }
 
+// 已有聊天发现新增/修改/删除的技能，不要求 /reset；正文变化仍在加载时读取。
+func TestSkillCatalogRefreshesExistingConversation(t *testing.T) {
+	e := setup(t)
+	e.say("保留这段原有聊天")
+	e.k.expect(proto.TInput)
+	e.roundTrip(t)
+	if hasTool(e.llm.lastReq().Tools, "Skill") {
+		t.Fatal("初始目录不应有技能")
+	}
+	dir := filepath.Join(e.dir, "skills", "workflow")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ description, body string }{{"任务续做方法", "第一版"}, {"更新后的任务方法", "第二版"}} {
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: workflow\ndescription: "+step.description+"\n---\n"+step.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e.say("继续用可用技能")
+		e.k.expect(proto.TInput)
+		e.roundTrip(t)
+		request := e.llm.lastReq()
+		found := false
+		for _, tool := range request.Tools {
+			if tool.Function.Name == "Skill" && strings.Contains(tool.Function.Description, step.description) && strings.Contains(string(tool.Function.Parameters), "workflow") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("已有会话没有刷新技能目录: %+v", request.Tools)
+		}
+		e.a.mu.Lock()
+		text, _, _, loaded := skillsLoad(e.a, "workflow")
+		e.a.mu.Unlock()
+		if !loaded || !strings.Contains(text, step.body) {
+			t.Fatalf("没加载最新正文: %s", text)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	e.say("再次继续")
+	e.k.expect(proto.TInput)
+	messages := e.roundTrip(t)
+	if hasTool(e.llm.lastReq().Tools, "Skill") {
+		t.Fatal("已删除的技能仍留在旧工具快照里")
+	}
+	found := false
+	for _, message := range messages {
+		found = found || strings.Contains(message.Content, "保留这段原有聊天")
+	}
+	if !found {
+		t.Fatal("刷新技能不应清空聊天历史")
+	}
+}
+
 // 网页上的记忆：列出、新建、标过时再恢复、删除。
 func TestMemoryWeb(t *testing.T) {
 	e := setup(t)

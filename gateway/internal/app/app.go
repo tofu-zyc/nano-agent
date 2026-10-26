@@ -170,9 +170,11 @@ type App struct {
 	lifes          map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
 	minds          map[string]*autonomy.State  // 自主活动的心智状态（autonomy.go，data/autonomy.json）
 	mindsLoaded    bool
+	mindMachines   map[string]bool            // 已通知心智状态的设备在线状态
 	mindsRecovered map[string]bool            // 这次进程启动已经做过重启恢复的 agent（不能持久化：每次重启都要检查）
 	desktopGates   map[string]chan struct{}   // 同一台桌面上的桌面工具调用串行（computer use）
 	desktopUsed    map[string]map[string]bool // 哪些会话用过哪个桌面 MCP 服务（结束时清理 Driver session）
+	desktopLeases  map[string]*desktopLease   // 一轮任务从观察到操作、验证期间独占同一桌面
 	deskMu         sync.Mutex                 // 上面两张表单独的锁：结束 Driver session 时可能正拿着总锁
 	mcpRef         atomic.Pointer[mcp.Manager]
 	mcpStoreRef    atomic.Pointer[mcp.Store]
@@ -250,20 +252,23 @@ type run struct {
 	stopTyping func()
 	full       bool // 放行模式：内核要审批的调用由网关自动批准
 
-	streamed   bool // 回复正文已经通过 RunView 显示过了
-	start      time.Time
-	calls      int             // 这一轮请求了几次模型
-	usage      llm.Usage       // 这一轮的累计用量
-	noTools    bool            // 访客没有工作目录：不给模型工具，只聊天
-	mode       string          // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
-	mcpOK      map[string]bool // 这一轮已经批准过的 MCP 服务（approval=per_turn）
-	readOnly   bool            // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
-	elevate    bool            // 这个身份可以提权写工作目录外（管理员）
-	proactive  bool            // 群聊里自己凑上来的（上一次是 groupTick 触发的）
-	inner      bool            // agent 自己的一轮（整理记忆、内心活动）
-	withImages bool            // 这一轮的模型能接收图片
-	usedTools  bool            // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
-	tool       string          // 最近一次调的工具（/state 说它在干嘛）
+	streamed        bool // 回复正文已经通过 RunView 显示过了
+	start           time.Time
+	calls           int                              // 这一轮请求了几次模型
+	usage           llm.Usage                        // 这一轮的累计用量
+	noTools         bool                             // 访客没有工作目录：不给模型工具，只聊天
+	mode            string                           // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
+	mcpOK           map[string]bool                  // 这一轮已经批准过的 MCP 服务（approval=per_turn）
+	readOnly        bool                             // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
+	elevate         bool                             // 这个身份可以提权写工作目录外（管理员）
+	proactive       bool                             // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	inner           bool                             // agent 自己的一轮（整理记忆、内心活动）
+	withImages      bool                             // 这一轮的模型能接收图片
+	usedTools       bool                             // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
+	tool            string                           // 最近一次调的工具（/state 说它在干嘛）
+	toolEvidence    map[string]autonomy.ToolEvidence // 内核实际回报的结果，任务验收引用它
+	unverifiedTools map[string]bool                  // MCP 正常返回但明确说效果未核验/未生效
+	agendaDone      map[string]agendaCompletion      // 本轮申请完成的日程，正常结束并核验结果后提交
 
 	callArgs     map[string]proto.Call         // 这一轮的工具调用（看 Read 读到的是不是图片，fetch.go）
 	sent         map[string][]media.Attachment // SendFile 发出去的文件，记在它的工具结果上（网页显示）
@@ -874,13 +879,13 @@ func (a *App) startRun(s *sess) {
 	// 工作目录、权限、机器变了：把新的环境说明放在这条消息前面，而不是改系统提示词（前缀缓存不失效）
 	st := a.store.Settings(s.sid)
 	dirty := false
-	if !st.WorkspacesSet && len(w.wss) > 0 {
+	if !st.WorkspacesSet && len(w.wss) > 0 && !(isLifeSID(s.sid) && s.mind != nil && s.mind.Trigger.AgendaID != "") {
 		st.Workspaces, st.WorkspacesSet, dirty = w.ids(), true, true // 新会话第一次说话：定下默认挂载的工作目录
 	}
 	// 群里说话的人按访客算；管理员在群里也只能用群聊白名单里的工具
 	admin := a.isAdmin(head.who) && !group
 	note := ""
-	if !group && !head.inner && !head.trigger {
+	if !group && !isDreamSID(s.sid) && !head.trigger {
 		note = a.envNote(w, rt, admin)
 	}
 	// 长期记忆：记忆说明（变了才放）和这一轮想起来的几条，也放在消息前面（memory.go）
@@ -1006,7 +1011,7 @@ func (a *App) startRun(s *sess) {
 		in.RunTimeoutMs = int(limit / time.Millisecond)
 		in.ApprovalTimeoutMs = int((30 * time.Minute) / time.Millisecond)
 	}
-	if r.inner {
+	if r.inner && !isLifeSID(s.sid) {
 		steps, limit := innerLimits(s.sid)
 		in.MaxSteps, in.RunTimeoutMs = steps, int(limit/time.Millisecond)
 	}
@@ -1067,6 +1072,7 @@ func (a *App) endRun(s *sess, note string) {
 	for _, cancel := range r.execs {
 		cancel() // 交给网关执行的工具调用
 	}
+	a.releaseDesktopLeases(s.sid, r.id)
 	r.stopTyping()
 	for _, v := range r.views() {
 		v.Close()
@@ -1225,6 +1231,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		a.cancelMCP(s.sid, m.ID)
 	case proto.TResult:
+		a.recordToolEvidence(s.run, m)
 		content := m.Content
 		if m.OK != nil && !*m.OK {
 			content = "[执行失败] " + content
@@ -1324,8 +1331,11 @@ func (a *App) finish(s *sess, status, detail string) {
 		body, note = "", ""
 	}
 	if r.inner {
+		a.commitAgendaResults(s, r, status)
 		a.innerDone(s, r, status, strings.TrimSpace(body+"\n"+note))
 		body, note = "", ""
+	} else {
+		a.commitAgendaResults(s, r, status)
 	}
 	a.endRun(s, "")
 	// 这一轮显示到的窗口都看到了这里
@@ -1437,6 +1447,12 @@ func (a *App) generateModel(s *sess) {
 	}
 	// 桌面任务会连续截很多图：模型请求里只保留最近两张，旧的换成一句说明（历史原样留着）
 	hist := trimToolImages(a.store.EffectiveHistory(s.sid), 2)
+	for _, tool := range snapshotTools {
+		if tool.Function.Name == "Agenda" {
+			hist = evidenceHistory(r, hist)
+			break
+		}
+	}
 	req := llm.Request{
 		Messages: session.BuildMessages(system, st.Summary, hist, a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
@@ -1545,6 +1561,13 @@ func (a *App) generateModel(s *sess) {
 			a.sayMidway(s, r, res.Content)
 			for _, c := range res.Calls {
 				r.tool = c.Function.Name
+				delete(r.toolEvidence, c.ID)
+				delete(r.unverifiedTools, c.ID)
+				for agendaID, done := range r.agendaDone {
+					if slices.Contains(done.Evidence, c.ID) {
+						delete(r.agendaDone, agendaID)
+					}
+				}
 				r.callArgs[c.ID] = proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)}
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)

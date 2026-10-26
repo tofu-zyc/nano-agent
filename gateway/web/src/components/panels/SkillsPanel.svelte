@@ -21,7 +21,7 @@
     {:else}
       <p class="p-note">还没有技能。</p>
     {/each}
-    <p class="p-note p-small">目录：<code>{homeShort(skills?.dir ?? '')}</code>。每个技能一个子目录，改动下一轮自动生效；增删技能在新会话、/reset 或整理上下文之后出现在已有的会话里。附带文件在调用时放到用到的机器的 <code>~/.nano-agent/skills/</code> 下。</p>
+    <p class="p-note p-small">目录：<code>{homeShort(skills?.dir ?? '')}</code>。每个技能一个子目录，改动下一轮自动生效；增删技能会自动更新已有会话的技能目录，不必清空聊天。配套文件在调用时放到各执行机器的独立只读缓存，AI 按技能回执里的实际路径读取。</p>
   </div>
   {#if own.length}
     <h5 class="p-h">网关自己用的方法 <span class="muted p-small">不出现在模型的技能列表里</span></h5>

@@ -83,14 +83,14 @@ func (f *fakeHost) Ls(_ context.Context, path string) (*host.Listing, error) {
 	return l, nil
 }
 
-func (f *fakeHost) PutFiles(_ context.Context, dir string, files []host.File) error {
+func (f *fakeHost) PutFiles(_ context.Context, dir string, files []host.File) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.put == nil {
 		f.put = map[string][]host.File{}
 	}
 	f.put[dir] = files
-	return nil
+	return dir, nil
 }
 
 type fakeHosts struct {

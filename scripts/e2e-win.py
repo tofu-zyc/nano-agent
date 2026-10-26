@@ -6,6 +6,7 @@
 Windows 上自己的执行器、PowerShell、CRLF Edit、Grep、技能文件。
 """
 import json
+import glob
 import os
 import queue
 import shutil
@@ -103,12 +104,13 @@ klog = os.path.join(WIN_ROOT_L, "kernel.log")
 with open(ps1, "w", encoding="utf-8-sig", newline="\r\n") as f:
     f.write("$ErrorActionPreference = 'Stop'\n")
     f.write(f"$env:USERPROFILE = '{WIN_HOME}'\n$env:HOME = '{WIN_HOME}'\n")
+    f.write(f"$env:NANO_HOME = '{WIN_HOME}\\.nano-agent'\n")
     f.write(f"$env:TEMP = '{WIN_ROOT}'\n$env:TMP = '{WIN_ROOT}'\n")
     f.write("$env:PATH = '" + WIN_ROOT + r";C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0" + "'\n")
     f.write("$env:SystemRoot = 'C:\\Windows'\n$env:ComSpec = 'C:\\Windows\\System32\\cmd.exe'\n")
     f.write("$env:PATHEXT = '.COM;.EXE;.BAT;.CMD'\n")
     f.write("$p = Start-Process -FilePath '" + WIN_ROOT + "\\nano-kernel.exe' -ArgumentList @('-c','" +
-            WIN_ROOT + "\\kernel.conf') -NoNewWindow -PassThru -RedirectStandardError '" + klog + "'\n")
+            WIN_ROOT + "\\kernel.conf') -WindowStyle Hidden -PassThru -RedirectStandardError '" + klog + "'\n")
     f.write("$p.Id | Set-Content -Encoding ASCII -Path '" + pidfile + "'\n")
     f.write("$p.WaitForExit()\n")
 
@@ -227,10 +229,12 @@ try:
     send("!call Grep " + json.dumps({"pattern": "win-e2e"}, ensure_ascii=False))
     expect("Windows 上用自带 rg", "win-e2e", 20)
 
-    # 技能文件也放到 Windows 的 ~/.nano-agent/skills 下
+    # 技能文件放到独立、按内容版本分隔的缓存；读取实际路径
     send("!call Skill " + json.dumps({"name": "demo"}, ensure_ascii=False))
     expect("加载技能", "读取 data.txt", 20)
-    send("!call Read " + json.dumps({"path": "~/.nano-agent/skills/demo/data.txt"}, ensure_ascii=False))
+    cache_files = glob.glob(os.path.join(WIN_HOME_L, ".nano-agent", "skill-cache", "demo-*", "data.txt"))
+    assert len(cache_files) == 1, cache_files
+    send("!call Read " + json.dumps({"path": wslpath("-w", cache_files[0])}, ensure_ascii=False))
     expect("技能文件放到 Windows", "skill-e2e-data", 20)
 
     # 工作目录里的文件是网关保存的规范形式（不是网关按 Linux 规则拼的）

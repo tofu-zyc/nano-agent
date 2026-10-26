@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	r := s.run
 	reply := func(ok bool, content string) {
 		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, OK: proto.Bool(ok), Content: content})
+	}
+	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(r.from) {
+		reply(false, "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态")
+		return
 	}
 	if m.Name == "WebSearch" || m.Name == "WebFetch" {
 		a.webTool(s, m, reply)
@@ -208,14 +213,14 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	}()
 }
 
-// skillTool 加载一个技能：返回说明，把附带文件放到这一轮挂载的每台机器上（~/.nano-agent/skills/<名字>/）。
+// skillTool 加载技能，将配套文件放到各执行机器的独立、按内容分版本的只读缓存。
 // 调用方持有锁。
 func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, string)) {
 	var args struct {
 		Name string `json:"name"`
 	}
 	json.Unmarshal(m.Args, &args)
-	text, files, _, ok := skills.LoadAny(args.Name, a.ownSkills(a.agentOf(sid).ID), a.skills)
+	text, files, hash, ok := skills.LoadAny(args.Name, a.ownSkills(a.agentOf(sid).ID), a.skills)
 	if !ok {
 		reply(false, text)
 		return
@@ -241,15 +246,20 @@ func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, strin
 	go func() {
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		var failed []string
+		var failed, placed []string
 		for name, h := range targets {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := h.PutFiles(ctx, skills.CacheDir+"/"+args.Name, files); err != nil {
-					mu.Lock()
+				path, err := h.PutFiles(ctx, skills.CacheDir+"/"+args.Name+"-"+hash, files)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
 					failed = append(failed, name+"："+err.Error())
-					mu.Unlock()
+				} else if path != "" {
+					placed = append(placed, "- "+name+"："+path)
+				} else {
+					failed = append(failed, name+"：没有返回实际缓存目录")
 				}
 			}()
 		}
@@ -258,6 +268,12 @@ func (a *App) skillTool(r *run, sid string, m *proto.Msg, reply func(bool, strin
 		a.mu.Lock()
 		delete(r.execs, m.ID)
 		a.mu.Unlock()
+		sort.Strings(placed)
+		if len(placed) > 0 {
+			text = strings.Replace(text, "\n", "\n技能目录（只读；按执行机器选择完整路径）：\n"+strings.Join(placed, "\n")+"\n", 1)
+		} else if len(files) > 1 && len(failed) == 0 {
+			failed = append(failed, "当前没有可用的执行机器，配套文件尚未部署")
+		}
 		if len(failed) > 0 {
 			text += "\n\n（附带文件没能放到这些机器上：" + strings.Join(failed, "；") + "）"
 		}

@@ -101,7 +101,7 @@ func TestFinishRequiresRealToolResult(t *testing.T) {
 	// 真的调了工具、正常结束：完成并记下证据
 	now2 := now.Add(32 * time.Minute)
 	s.MarkStarted(Trigger{Kind: KindPlan, AgendaID: ag.ID, IntentionID: in.ID}, now2)
-	s.Finish(Execution{AgendaID: ag.ID, IntentionID: in.ID, Started: now2.Unix(), OK: true, UsedTools: true,
+	s.Finish(Execution{AgendaID: ag.ID, IntentionID: in.ID, Started: now2.Unix(), OK: true, UsedTools: true, Verified: true,
 		Summary: "查到了：下周三二面", Tokens: 1200}, now2.Add(2*time.Minute), 30*time.Minute)
 	if s.Agenda[0].Status != StatusDone || !strings.Contains(s.Agenda[0].Result, "下周三") {
 		t.Fatalf("有真实结果应该完成: %+v", s.Agenda[0])
@@ -118,6 +118,35 @@ func TestFinishRequiresRealToolResult(t *testing.T) {
 	}
 	if s.Executions[len(s.Executions)-1].OK {
 		t.Fatal("执行记录应该是失败的")
+	}
+}
+
+func TestCheckpointRecoveryAndUnverifiedCompletion(t *testing.T) {
+	s := New()
+	now := at(15, 0)
+	ag, _ := s.AddAgenda(AgendaItem{Title: "写报告", At: now.Unix(), Criteria: "文件存在且核对过内容"}, now)
+	id := ag.ID
+	if err := s.SetCheckpoint(id, "第一段已写；下一步补数据；不要重发邮件", now); err != nil {
+		t.Fatal(err)
+	}
+	s.MarkStarted(Trigger{AgendaID: id}, now)
+	s.Finish(Execution{AgendaID: id, OK: true, UsedTools: true, Summary: "只是查询了日程"}, now, time.Minute)
+	if s.Agenda[0].Status == StatusDone {
+		t.Fatal("调过工具不能替代验收")
+	}
+	s.MarkStarted(Trigger{AgendaID: id}, now.Add(time.Minute))
+	if !s.Recover(now.Add(2*time.Minute), time.Minute) {
+		t.Fatal("应当恢复未结束任务")
+	}
+	if !strings.Contains(s.BriefForModel(now, time.UTC), "不要重发邮件") {
+		t.Fatal("重启后没有保留给下一轮的检查点")
+	}
+	if err := s.CancelAgenda(id, "用户取消", now); err != nil {
+		t.Fatal(err)
+	}
+	s.Finish(Execution{AgendaID: id, OK: true, UsedTools: true, Verified: true, Summary: "迟到的完成"}, now, time.Minute)
+	if s.Agenda[0].Status != StatusCancelled {
+		t.Fatal("迟到的结果覆盖了用户取消")
 	}
 }
 

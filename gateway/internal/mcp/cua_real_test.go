@@ -139,7 +139,7 @@ func TestRealCuaDriverWindowTree(t *testing.T) {
 		t.Fatalf("MCP 握手失败：%v", err)
 	}
 
-	cmd := exec.Command("gedit")
+	cmd := exec.Command("gedit", "--standalone")
 	cmd.Env = append(os.Environ(), "GDK_BACKEND=x11")
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Start(); err != nil {
@@ -147,7 +147,7 @@ func TestRealCuaDriverWindowTree(t *testing.T) {
 	}
 	defer func() {
 		_ = cmd.Process.Kill()
-		_ = exec.Command("pkill", "-f", "gedit").Run()
+		_ = cmd.Wait()
 	}()
 
 	// 等它真的出现在窗口列表里
