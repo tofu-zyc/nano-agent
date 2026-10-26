@@ -14,7 +14,11 @@
 
 - 在可重复的确定性回归外，Windows 同一链路还用 `deepseek-v4.1-flash` 实测通过：模型自己创建已到期日程，在自主活动中按最新窗口状态选择元素、输入、点击，再关联 Read 凭据验收。它接收包含辅助功能树和截图的观察；这不是纯视觉定位或任意桌面任务的可靠性评估。
 
-验证不覆盖原生 Wayland 或 macOS 的完整操作；当前 GNOME 没有显示输出，Mac 没有可用实机，用户确认先完成 Windows/Linux。
+原生 Wayland 已补测 Sway 1.11 / wlroots 0.19：独立 headless/pixman 会话禁用 XWayland，GTK 窗口经 Sway IPC 确认 shell=xdg_shell、window=null；Driver 0.37.0 的非纯色截图、完整中英文、点击及真实应用输出通过，真网关/C 内核/自主日程/MCP 审批/证据验收组合也通过。用 `--isolated-wayland --wayland-compositor /path/to/sway` 复跑，依赖须事先具备。只在临时目录解包测试依赖，没有安装系统软件或更改正式 GNOME。
+
+不能将该结果推广到其他 Wayland 合成器。当前 GNOME 没有显示输出，Mac 没有可用实机，用户确认先完成 Windows/Linux。多窗口、纯视觉坐标、复杂滚动和长期稳定性可继续扩展评估。
+
+使用方法已经放进自带 `computer-use` 技能及 `references/setup.md` / `references/linux.md`，接入 AI 日常复用已有服务，不用从验证脚本反推操作方法；自主任务由 `autonomous-tasks` 技能串起排期、检查点和验收。
 
 ### 复跑 Windows 跨机链路
 

@@ -46,7 +46,7 @@ func TestPersonaCommand(t *testing.T) {
 	}
 }
 
-// 人格文件改了（网页保存、直接改文件）就刷新提示快照，工具定义一起刷新；人格没变时工具定义保持快照
+// 人格编辑和技能目录变化分别刷新快照，不互相依赖。
 func TestPersonaEditRefreshesPrefix(t *testing.T) {
 	e := setup(t)
 	e.say("你好")
@@ -56,8 +56,8 @@ func TestPersonaEditRefreshesPrefix(t *testing.T) {
 	e.addSkill(t, "demo")
 	e.say("加了技能")
 	e.k.expect(proto.TInput)
-	if msgs := e.roundTrip(t); len(e.llm.lastReq().Tools) != before || msgs[0].Content != "你是测试机器人" {
-		t.Fatal("人格没变时提示快照不该变")
+	if msgs := e.roundTrip(t); len(e.llm.lastReq().Tools) != before+1 || msgs[0].Content != "你是测试机器人" {
+		t.Fatal("技能目录应刷新，但人格不应改变")
 	}
 	os.WriteFile(filepath.Join(e.dir, "personas", "default.md"), []byte("你是改过的机器人"), 0o644)
 	e.say("改了人格")

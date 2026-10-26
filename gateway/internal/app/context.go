@@ -93,7 +93,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}
-	// 工具定义用会话第一次请求时的快照，新会话、/reset、整理上下文之后才刷新，保持请求前缀稳定。
+	// 工具定义用快照保持请求前缀稳定；技能目录/MCP 工具或权限变化会刷新，不必清空聊天。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
 	// 群聊和房间的工具由白名单单独算，不套用旧快照（旧快照可能是普通会话的整套工具）
@@ -143,7 +143,12 @@ func (a *App) permSignature(sid string) string {
 	if names.Len() > 0 {
 		mcpSig = fmt.Sprintf("%x", sha256.Sum256([]byte(names.String())))[:16]
 	}
-	return fmt.Sprintf("%t|%s|%t|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig)
+	skillSig := ""
+	if spec, ok := a.skillSpec(sid); ok {
+		catalog, _ := json.Marshal(spec)
+		skillSig = fmt.Sprintf("%x", sha256.Sum256(catalog))[:16]
+	}
+	return fmt.Sprintf("%t|%s|%t|%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig)
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

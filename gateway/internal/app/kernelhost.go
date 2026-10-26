@@ -79,11 +79,11 @@ func (k kernelHost) Ls(ctx context.Context, path string) (*host.Listing, error) 
 	return &host.Listing{OK: true, Path: r.Path, Home: r.Home, Blocked: r.Blocked, Entries: r.Entries, Truncated: r.Truncated}, nil
 }
 
-// PutFiles 只用来放技能文件：内核只肯写 ~/.nano-agent/skills/<技能名>/
-func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File) error {
+// PutFiles 只用来放技能文件；使用内核回报的实际目录，兼容自定义 NANO_HOME。
+func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File) (string, error) {
 	name, ok := strings.CutPrefix(dir, skills.CacheDir+"/")
 	if !ok || name == "" || strings.Contains(name, "/") {
-		return errors.New("内核只接收技能文件")
+		return "", errors.New("内核只接收技能文件")
 	}
 	list := make([]proto.SkillFile, len(files))
 	for i, f := range files {
@@ -91,12 +91,12 @@ func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File)
 	}
 	r, err := k.call(ctx, proto.Msg{T: proto.TSkillPut, Skill: name, Files: list}, "")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if r.OK == nil || !*r.OK {
-		return errors.New(r.Content)
+		return "", errors.New(r.Content)
 	}
-	return nil
+	return r.Content, nil
 }
 
 // hostWait 是一个等内核回复的请求

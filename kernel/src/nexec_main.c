@@ -194,6 +194,8 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
 
     const char *nh = getenv("NANO_HOME");
     char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(x->home, ".nano-agent");
+    /* 技能缓存独立于可写的通用 cache；自定义 NANO_HOME 时也只读可见。 */
+    push(&x->ro, &x->nro, plat_join(base, "skill-cache"));
     char *key = safe_key(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "tmp_key")));
     char *tmpbase = plat_join(base, "tmp");
     x->tmp = plat_join(tmpbase, key);

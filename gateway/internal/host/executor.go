@@ -109,8 +109,8 @@ type Host interface {
 	// Exec 运行一次执行器，req 是一行请求 JSON。ctx 结束时停下（关掉执行器的 stdin，它会清理自己启动的命令）。
 	Exec(ctx context.Context, req []byte) Result
 	Ls(ctx context.Context, path string) (*Listing, error)
-	// PutFiles 把文件放到 dir（~/ 开头）下，先清空 dir。
-	PutFiles(ctx context.Context, dir string, files []File) error
+	// PutFiles 把文件放到 dir（~/ 开头）下，先清空 dir，返回执行机器上的实际目录。
+	PutFiles(ctx context.Context, dir string, files []File) (string, error)
 }
 
 const (

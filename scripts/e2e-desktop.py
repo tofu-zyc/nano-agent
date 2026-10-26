@@ -2,7 +2,8 @@
 """Linux 真桌面驱动验证：独立输入框 → 截图 → 中文输入 → 点击确定 → 核对进程输出。
 
 用 --isolated-x11 在私有 Xvfb/DBus 会话里验证，不触碰用户现有窗口。
-也可在已有图形会话直接运行。任何截图/输入失败都会失败，不用 skip 代替通过。
+--isolated-wayland 使用私有无 XWayland 的 Sway 桌面。也可在已有图形会话直接运行。
+任何截图/输入失败都会失败，不用 skip 代替通过。
 需要 Python Pillow、GI/GTK3；隔离桌面需要 Xvfb、xauth、DBus，可搭配 Openbox、xcompmgr。
 """
 import argparse
@@ -13,6 +14,7 @@ from pathlib import Path
 import secrets
 import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -81,10 +83,34 @@ def stop(proc):
             proc.wait(timeout=5)
 
 
+def run_isolated(command, env, log):
+    """中断时通知整个私有 DBus 会话，给子测试机会停止网关/Driver。"""
+    proc = subprocess.Popen(command, env=env, stderr=log, start_new_session=True)
+    try:
+        return proc.wait()
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+            except ProcessLookupError:
+                proc.wait(timeout=5)
+
+
 def main():
+    def interrupted(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--isolated-x11", action="store_true")
+    parser.add_argument("--isolated-wayland", action="store_true")
+    parser.add_argument("--backend", choices=("x11", "wayland"), default="x11")
+    parser.add_argument("--wayland-compositor", type=Path, help="隔离 Wayland 的 Sway 程序路径")
     parser.add_argument("--window-manager", type=Path, help="隔离 X11 的窗口管理器（openbox 或 twm）")
     parser.add_argument("--compositor", type=Path, help="隔离 X11 的合成器（xcompmgr，供透明光标窗口使用）")
     parser.add_argument("--allow-desktop-capture", action="store_true", help="允许在窗口截图不可用时捕获整个测试桌面")
@@ -93,11 +119,54 @@ def main():
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--executor", type=Path)
     opts = parser.parse_args()
+    if opts.isolated_x11 and opts.isolated_wayland:
+        parser.error('--isolated-x11 和 --isolated-wayland 不能同时使用')
     root = opts.output or Path(tempfile.mkdtemp(prefix="nano-desktop-e2e-"))
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / 'report.json').write_text(json.dumps({'ok': False, 'status': 'running'}))
     env = os.environ.copy()
+    if opts.isolated_wayland:
+        sway = opts.wayland_compositor or (Path(shutil.which('sway')) if shutil.which('sway') else None)
+        if not sway or not shutil.which('dbus-run-session'):
+            parser.error('隔离 Wayland 需要 Sway 和 dbus-run-session')
+        runtime = Path(tempfile.mkdtemp(prefix='nano-wl-run-'))
+        for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'AT_SPI_BUS_ADDRESS', 'SWAYSOCK'):
+            env.pop(key, None)
+        env.update(XDG_RUNTIME_DIR=str(runtime), XDG_SESSION_TYPE='wayland', XDG_CURRENT_DESKTOP='sway',
+                   WLR_BACKENDS='headless', WLR_RENDERER='pixman', WLR_HEADLESS_OUTPUTS='1',
+                   WLR_LIBINPUT_NO_DEVICES='1', CUA_DRIVER_RS_ENABLE_WAYLAND='1',
+                   GDK_BACKEND='wayland', LIBGL_ALWAYS_SOFTWARE='1')
+        env['PATH'] = str(sway.resolve().parent) + os.pathsep + env.get('PATH', '')
+        config = root/'sway.conf'
+        config.write_text('xwayland disable\noutput * mode 1280x800\nseat seat0 fallback true\nfocus_follows_mouse no\n')
+        compositor = None
+        with (root/'sway.log').open('w') as log:
+            try:
+                compositor = subprocess.Popen([str(sway), '-c', str(config)], env=env, stdout=log, stderr=log)
+                deadline = time.monotonic() + 12
+                while True:
+                    wayland = [p for p in runtime.glob('wayland-*') if p.is_socket()]
+                    ipc = list(runtime.glob('sway-ipc.*.sock'))
+                    if wayland and ipc:
+                        env.update(WAYLAND_DISPLAY=wayland[0].name, SWAYSOCK=str(ipc[0]))
+                        break
+                    if compositor.poll() is not None or time.monotonic() > deadline:
+                        raise AssertionError('Sway 未启动：' + (root/'sway.log').read_text()[-1800:])
+                    time.sleep(.1)
+                child = [sys.executable, str(Path(__file__).resolve()), '--driver', str(opts.driver.resolve()),
+                         '--output', str(root), '--backend', 'wayland', '--allow-desktop-capture']
+                if opts.gateway:
+                    if not opts.kernel or not opts.executor:
+                        parser.error('--gateway 需要 --kernel 和 --executor')
+                    child += ['--gateway', str(opts.gateway.resolve()), '--kernel', str(opts.kernel.resolve()), '--executor', str(opts.executor.resolve())]
+                returncode = run_isolated(['dbus-run-session', '--'] + child, env, log)
+                if returncode:
+                    print((root/'sway.log').read_text()[-1800:], file=sys.stderr)
+                return returncode
+            finally:
+                stop(compositor)
+                shutil.rmtree(runtime)
     if opts.isolated_x11:
         for command in ("Xvfb", "xauth", "dbus-run-session"):
             if not shutil.which(command):
@@ -143,13 +212,13 @@ def main():
                         if opts.gateway:
                             if not opts.kernel or not opts.executor: parser.error('--gateway 需要 --kernel 和 --executor')
                             child += ['--gateway', str(opts.gateway.resolve()), '--kernel', str(opts.kernel.resolve()), '--executor', str(opts.executor.resolve())]
-                        result = subprocess.run(['dbus-run-session', '--'] + child, env=env, stderr=session_log)
+                        returncode = run_isolated(['dbus-run-session', '--'] + child, env, session_log)
                     finally:
                         stop(compositor)
                         stop(manager)
-                if result.returncode:
+                if returncode:
                     print((root / "session.log").read_text()[-1800:], file=sys.stderr)
-                return result.returncode
+                return returncode
             finally:
                 stop(xserver)
     fixture = root / "fixture.py"
@@ -170,7 +239,7 @@ window.connect("destroy", Gtk.main_quit)
 window.show_all()
 Gtk.main()
 ''')
-    env.update(GDK_BACKEND="x11", GSK_RENDERER="cairo", LIBGL_ALWAYS_SOFTWARE="1")
+    env.update(GDK_BACKEND=opts.backend, GSK_RENDERER="cairo", LIBGL_ALWAYS_SOFTWARE="1")
     driver, ui, output_file = None, None, None
     session = "nano-test-" + secrets.token_hex(5)
     checks = []
@@ -192,10 +261,20 @@ Gtk.main()
                 time.sleep(.2)
             if not windows:
                 raise AssertionError("Driver did not find the test window")
+            if opts.backend == 'wayland':
+                tree = json.loads(subprocess.check_output(['swaymsg', '-r', '-t', 'get_tree'], env=env, text=True))
+                def own_nodes(node):
+                    if node.get('pid') == ui.pid:
+                        yield node
+                    for child in node.get('nodes', []) + node.get('floating_nodes', []):
+                        yield from own_nodes(child)
+                nodes = list(own_nodes(tree))
+                assert nodes and all(n.get('shell') == 'xdg_shell' and not n.get('window') for n in nodes), '测试窗口不是原生 Wayland'
+                (root/'compositor-tree.json').write_text(json.dumps(nodes, ensure_ascii=False))
             args = {"pid": ui.pid, "window_id": windows[0]["window_id"], "session": session}
             tree_args = {"tree_format": "both"} if "tree_format" in schemas.get('get_window_state', {}).get('properties', {}) else {}
             time.sleep(.5)
-            if shutil.which("xwininfo"):
+            if opts.backend == 'x11' and shutil.which("xwininfo"):
                 info = subprocess.run(["xwininfo", "-id", str(args["window_id"])], env=env, capture_output=True, text=True, timeout=5)
                 (root / "x-window-info.txt").write_text(info.stdout + info.stderr)
             state = driver.call("get_window_state", dict(args, **tree_args, include_screenshot=True))
@@ -229,7 +308,7 @@ Gtk.main()
                 output_file.close()
                 assert ui.returncode == 0 and output_path.read_text().strip() == expected
                 (root / 'report.json').write_text(json.dumps({'ok': True, 'driver_version': driver.version,
-                    'mode': 'autonomous-gateway', 'application_output': output_path.read_text().strip(),
+                    'mode': 'autonomous-gateway', 'backend': opts.backend, 'application_output': output_path.read_text().strip(),
                     'checks': checks + ['真网关自主任务经 MCP 操作并验收']}, ensure_ascii=False, indent=2))
                 print('ok 真实应用输出已核对，桌面动作由自主任务经网关完成', flush=True)
                 return 0
@@ -249,7 +328,7 @@ Gtk.main()
             for check in checks:
                 print("ok", check, flush=True)
             (root / "report.json").write_text(json.dumps({"ok": True, "driver_version": driver.version, "input_method": input_method,
-                "checks": checks, "application_output": output.strip()}, ensure_ascii=False, indent=2))
+                "backend": opts.backend, "checks": checks, "application_output": output.strip()}, ensure_ascii=False, indent=2))
             print("验证产物", root, flush=True)
             return 0
         finally:

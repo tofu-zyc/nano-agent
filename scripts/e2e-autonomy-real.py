@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -38,6 +39,7 @@ def main():
     parser.add_argument('--executor', type=Path, required=True)
     parser.add_argument('--source-home', type=Path, required=True)
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--skills-dir', type=Path, help='待验证的技能源目录；测试技能发现、加载及实际执行')
     parser.add_argument('--kernel-listen')
     parser.add_argument('--desktop-driver')
     parser.add_argument('--desktop-machine')
@@ -65,6 +67,8 @@ def main():
     nano, work = root/'nano', root/'work'
     for path in (nano/'lib', nano/'data', nano/'personas', work):
         path.mkdir(parents=True, mode=0o700)
+    if opts.skills_dir:
+        shutil.copytree(opts.skills_dir.resolve(), nano/'skills')
     expected = '自主执行挑战：' + secrets.token_hex(12) + ' 中文与 nano 42'
     (work/'input.txt').write_text(expected, encoding='utf-8')
     for path, name in ((opts.kernel, 'nano-kernel'), (opts.executor, 'nano-exec')):
@@ -152,7 +156,8 @@ mode = "ask"
                     '重新读取 first.txt 核对，通过 Agenda progress 保存检查点并结束本轮，此时不要 done。'
                     '已有检查点时：读取 first.txt，把相同的完整文字原样保存到 final.txt，再 Read final.txt 核对，'
                     '只在一致时用 Agenda done 提交此次真实 Read 的工具调用 ID 作为 evidence。不得修改 input.txt 或重写 first.txt。')
-        api('/api/chat', {'sid': 'main', 'text': '请只创建一条已到期的 Agenda commitment，标题“真实模型自主续做验收”，when 填“2000-01-01 00:00”。'
+        lead = '先用 Skill 加载适合的任务技能，再' if opts.skills_dir else '请'
+        api('/api/chat', {'sid': 'main', 'text': lead+'只创建一条已到期的 Agenda commitment，标题“真实模型自主续做验收”，when 填“2000-01-01 00:00”。'
             '把下面的整个操作约定原文写入 criteria。创建后立刻结束聊天这一轮，不要现在执行文件任务，等自主活动处理：'+criteria})
         first = wait(lambda v: len(v.get('executions', [])) >= 1, '真实模型第一次自主执行')
         assert len(first['agenda']) == 1 and first['agenda'][0].get('checkpoint'), '真实模型未保存检查点'
@@ -170,6 +175,10 @@ mode = "ask"
         assert (work/'first.txt').stat().st_mtime_ns == first_stat.st_mtime_ns, '续做重写了已完成的文件'
         execution = final['executions'][0]
         assert any(e['name'] == 'Read' and e.get('verified') for e in execution.get('evidence', []))
+        if opts.skills_dir:
+            history = [json.loads(line) for line in (nano/'data/sessions/main.jsonl').read_text().splitlines()]
+            names = [json.loads(c['function']['arguments']).get('name') for m in history for c in m.get('tool_calls', []) if c['function']['name'] == 'Skill']
+            assert 'autonomous-tasks' in names, '真实模型没有加载自主任务技能'
         return {'ok': True, 'model': model['name'], 'directory': str(root), 'execution': execution,
                   'autonomy_tokens': sum(e.get('tokens', 0) for e in final['executions']),
                   'checks': ['真实模型自己创建日程，审批后读取未知挑战文本并写文件',
@@ -214,6 +223,8 @@ mode = "ask"
                 file.write(content)
         start()
         tools = ['Read', 'Agenda', 'desktop__get_window_state', 'desktop__set_value', 'desktop__click'] if opts.desktop_driver else ['Read', 'Write', 'Agenda']
+        if opts.skills_dir:
+            tools.append('Skill')
         api('/api/agents/default', {'style': 'life', 'tools': tools, 'settings': {'mode': 'ask', 'life_awake': '00:00-00:01',
             'life_reach': 'off', 'life_budget': 150000, 'memory': 'off', 'dream_when': 'off'}}, 'PATCH')
         if opts.desktop_driver:

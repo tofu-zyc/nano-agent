@@ -222,8 +222,12 @@ def t_host_run(gw):
             files=[{"path": "SKILL.md", "data": base64.b64encode(b"# demo").decode()},
                    {"path": "scripts/run.sh", "data": data, "exec": True}])
     r = gw.expect("run_result", id="p1", ok=True)
-    d = os.path.join(T, "home", ".nano-agent", "skills", "demo")
+    d = os.path.join(T, "home", ".nano-agent", "skill-cache", "demo")
     assert r["content"] == d and os.access(os.path.join(d, "scripts", "run.sh"), os.X_OK), r
+    gw.send(t="run", id="skill-read", req={"tool":"Read", "args":{"path":os.path.join(d,"SKILL.md")}, "dirs":[WORK], "write":False})
+    gw.expect("run_result", id="skill-read", ok=True, content=lambda c: "# demo" in c)
+    gw.send(t="run", id="skill-write", req={"tool":"Shell", "args":{"command":"echo changed > '"+os.path.join(d,"SKILL.md")+"'"}, "dirs":[WORK], "write":True})
+    gw.expect("run_result", id="skill-write", ok=False)
     gw.send(t="skill_put", id="p2", skill="demo", files=[{"path": "../escape", "data": data}])
     gw.expect("run_result", id="p2", ok=False, content=lambda c: "路径不能用" in c)
     assert os.path.exists(os.path.join(d, "SKILL.md")), "失败时不动原来的文件"

@@ -269,11 +269,11 @@ description: 处理某类任务时使用的操作步骤
 相对路径都以 Skill 返回的技能目录为基准。
 ```
 
-模型平时只看到技能的名称和简介，需要时调用 `Skill` 才读取正文。调用时网关把技能的附带文件放到这个会话挂载的每台机器的 `~/.nano-agent/skills/<技能名>/` 下（每台机器上路径一样，只读可见），之后 `Read`、`Shell` 可以直接用；脚本仍按会话的权限模式执行。技能最多 4 MB、500 个文件，不跟随符号链接。没有工作目录时管理员在 HOME 下工作（读不限，写临时目录；写外面要提权），访客没有工具。
+模型平时只看到技能的名称和简介，需要时调用 `Skill` 才读取正文。调用时网关把配套文件放到每台执行机器独立的 `skill-cache/<技能名>-<内容版本>/` 下，回执列出各机器的实际完整路径（只读可见；支持自定义 `NANO_HOME`，不覆盖技能源目录），之后 `Read`、`Shell` 可以直接用；脚本仍按会话的权限模式执行。技能最多 4 MB、500 个文件，不跟随符号链接。没有工作目录时管理员在 HOME 下工作（读不限，写临时目录；写外面要提权），访客没有工具。
 
-新增、删除或修改技能后不用重启：每一轮开始时重新扫描；网页里点顶栏的内核能看到技能列表。只修改正文和附带文件不会改变工具定义，正文在调用时重新读取。
+新增、删除或修改技能后不用重启或清空聊天：每一轮开始时重新扫描，目录变化会刷新旧会话的 Skill 工具；网页里点顶栏的内核能看到技能列表。只修改正文和附带文件不会改变工具定义，正文在调用时重新读取。
 
-仓库里自带几个技能：`device-connections` 讲机器、工作目录和接入，`model-setup` 讲怎么在聊天里配置模型，`web-search` 讲上网查资料和配置搜索，`scheduled-tasks` 讲定时任务怎么建、prompt 怎么写，`context-and-history` 讲上下文整理和删除历史，`gateway-settings` 讲其他设置项，`mcp` 讲怎么加 MCP 服务。已安装的网关在 `nano-gateway update` 时会补上新技能（改过的技能不会被覆盖）。
+仓库里自带几个技能：`device-connections` 讲机器、工作目录和接入，`model-setup` 讲怎么在聊天里配置模型，`web-search` 讲上网查资料和配置搜索，`scheduled-tasks` 讲定时任务怎么建、prompt 怎么写，`context-and-history` 讲上下文整理和删除历史，`gateway-settings` 讲其他设置项，`mcp` 讲怎么加 MCP 服务；`computer-use` 讲复用已有桌面接入、观察/操作/核验以及按需读取平台排障；`autonomous-tasks` 讲排期、检查点和真实证据验收。已安装的网关在 `nano-gateway update` 时会补上新技能（改过的技能不会被覆盖）。
 
 ## MCP 服务（v0.7.1 起）
 
@@ -292,7 +292,7 @@ MCP 服务给模型加外部工具：文件系统、浏览器、数据库、comp
 
 通过 MCP 接 [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver)，让 agent 操作有图形桌面的电脑（Windows、macOS、Linux）。Driver 跑在目标机器的图形会话里，网关只负责模型循环、调度和工具授权；用现有的 MCP 通道（本机 stdio / HTTP / 远端内核 pipe）连过去。
 
-1. 在目标机器上装好 Driver，确认图形桌面的权限（macOS 的辅助功能和录屏、Windows 的交互式登录会话、Linux 的 X11/Wayland）。可以直接让 AI 按 `computer-use` 技能装和配：它会先征求你的同意，再下载官方安装包、跑 `doctor`、用 `GatewayAdmin mcp_save` 注册 MCP 服务；macOS 的系统授权和 Windows UAC 仍需要你确认。
+1. 在目标机器上装好 Driver，确认图形桌面的权限（macOS 的辅助功能和录屏、Windows 的交互式登录会话、Linux 的 X11/Wayland）。可以直接让 AI 按 `computer-use` 技能装和配：它会先复用已有接入，确实缺少时按用户授权安装、跑 `doctor`、用 `GatewayAdmin mcp_save` 注册 MCP 服务；macOS 的系统授权和 Windows UAC 仍需要你确认。
 2. 拓扑图「MCP 服务」节点里加一个 stdio 服务：命令写 Driver 的绝对路径，参数 `mcp`；要挂到别的电脑上就选那台在线内核。审批建议「一轮批一次」或「每次都批」。
 3. 管理员会话里让模型先 `list_windows` / `get_window_state`，再点击、输入、滚动；每次动作后都要重新观察确认。Driver 的 initialize 说明会接进系统提示，技能 `computer-use` 里有完整的观察-操作-验证流程和平台差异。
 
@@ -300,7 +300,7 @@ MCP 服务给模型加外部工具：文件系统、浏览器、数据库、comp
 - MCP 工具由网关执行，不经过 `nano-exec` 的 Shell 沙箱；内核只把它们原样转给网关，不会要求 `workspace`（v0.7.5 修）。Shell 里的 Landlock 限制和 MCP/桌面工具是两条执行链，别用 Shell 连不上 Unix socket 判断 Driver 坏了。
 - 网关只保留最近两张截图给模型（旧图换成说明，历史原样保留），避免长任务把上下文塞满。
 - MCP 节点上会显示目标电脑在不在线、Driver 版本、initialize 说明和最近错误。**设备在线不等于桌面可操作**：没登录图形会话、没授权、版本不对都会失败。
-- 已验证：linux-pc 的独立 X11 桌面（Driver 0.7.0 / 0.37.0），以及 Linux 网关经 Windows C 内核连接 Windows 桌面（Driver 0.37.0）。两条链路都通过自主日程、MCP 审批、截图传给模型、`set_value` 完整中英文输入、点击确认、读取真实应用输出验收。除确定性模型回归，Windows 同一场景还通过了真实模型自行排期、选择工具和验收。macOS 无可用实机，原生 Wayland 暂未完成操作验收；详见 `docs/PLAN-computer-use.md`。
+- 已验证：linux-pc 的独立 X11 桌面（Driver 0.7.0 / 0.37.0），以及 Linux 网关经 Windows C 内核连接 Windows 桌面（Driver 0.37.0）。两条链路都通过自主日程、MCP 审批、截图传给模型、`set_value` 完整中英文输入、点击确认、读取真实应用输出验收。除确定性模型回归，Windows 同一场景还通过了真实模型自行排期、选择工具和验收。原生 Sway/Wayland（无 XWayland）也通过了真网关闭环；macOS 无可用实机，当前 GNOME 无显示输出；详见 `docs/PLAN-computer-use.md`。
 
 ## 工作目录和权限
 
