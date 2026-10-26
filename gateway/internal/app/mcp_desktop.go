@@ -27,6 +27,81 @@ import (
 	"nano-agent/gateway/internal/session"
 )
 
+type desktopLease struct {
+	sid   string
+	runID uint64
+	done  chan struct{}
+}
+
+func (a *App) desktopMachine(server string) string {
+	if store := a.mcpStoreRef.Load(); store != nil {
+		if s, ok := store.Get(server); ok && s.Machine != "" && s.Machine != "gateway" {
+			a.mu.Lock()
+			n := a.nodes[s.Machine]
+			local := n != nil && n.info.Local
+			a.mu.Unlock()
+			if local {
+				return "gateway"
+			}
+			return s.Machine
+		}
+	}
+	return "gateway"
+}
+
+// reserveDesktop 在整轮观察、操作、核验期间保留桌面，等待时不占任何锁。
+// 获取顺序为 App.mu → deskMu；停止/结束一轮时释放并唤醒等待者。
+func (a *App) reserveDesktop(ctx context.Context, machine, sid string, runID uint64) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		a.mu.Lock()
+		s := a.sessions[sid]
+		if s == nil || s.run == nil || s.run.id != runID {
+			a.mu.Unlock()
+			return fmt.Errorf("这轮桌面任务已经结束，重新观察后再操作")
+		}
+		a.deskMu.Lock()
+		if a.desktopLeases == nil {
+			a.desktopLeases = map[string]*desktopLease{}
+		}
+		owner := a.desktopLeases[machine]
+		if owner == nil {
+			a.desktopLeases[machine] = &desktopLease{sid: sid, runID: runID, done: make(chan struct{})}
+		} else if owner.sid != sid || owner.runID != runID {
+			for _, lease := range a.desktopLeases {
+				if lease.sid == sid && lease.runID == runID {
+					a.deskMu.Unlock()
+					a.mu.Unlock()
+					return fmt.Errorf("这台桌面正在被其他任务使用，本轮已占用另一台桌面；请先结束当前工作并安排稍后重试，避免互相等待")
+				}
+			}
+		}
+		a.deskMu.Unlock()
+		a.mu.Unlock()
+		if owner == nil || (owner.sid == sid && owner.runID == runID) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-owner.done:
+		}
+	}
+}
+
+func (a *App) releaseDesktopLeases(sid string, runID uint64) {
+	a.deskMu.Lock()
+	defer a.deskMu.Unlock()
+	for machine, lease := range a.desktopLeases {
+		if lease.sid == sid && lease.runID == runID {
+			delete(a.desktopLeases, machine)
+			close(lease.done)
+		}
+	}
+}
+
 // desktopSessionID 是一个 nano-agent 会话在 Driver 里的稳定 session：只跟会话 ID 有关，
 // 换 agent、刷新页面、网关重启都不变（Driver 闲着会自动回收，重新声明是幂等的）。
 func desktopSessionID(sid string) string {
@@ -80,7 +155,7 @@ func (a *App) desktopGuide(sid string) string {
 	var b strings.Builder
 	b.WriteString("# 桌面操作（computer use）\n")
 	b.WriteString("这一轮可以用 MCP 工具操作远程或本机的图形桌面。先观察再动手：先 get_window_state / list_windows / get_desktop_state，看清窗口和元素；工具返回 success 不代表操作已经生效，动作后要重新观察界面确认。\n")
-	b.WriteString("操作结果未知（超时、断线、取消）时不要重放点击或输入：重新截图/读界面，确认当前状态再决定下一步。同一台桌面上可能还有别的任务，工具调用会排队；不要假设自己独占鼠标键盘。\n")
+	b.WriteString("操作结果未知（超时、断线、取消）时不要重放点击或输入：重新截图/读界面，确认当前状态再决定下一步。网关会在本轮观察、操作、核验期间保留同一桌面，其他任务会排队；用户仍可能操作桌面，动作前核对状态。\n")
 	b.WriteString("需要更细的 Driver 用法时用 Skill 工具加载 computer-use，或调用它的 get_guide。\n")
 	for _, s := range servers {
 		ver := a.mcp.Version(s.Name)
@@ -143,12 +218,7 @@ func (a *App) desktopGate(machine string) chan struct{} {
 
 // desktopGateFor 按服务所在机器拿闸门（不依赖总锁，结束 session 时也能用）。
 func (a *App) desktopGateFor(server string) chan struct{} {
-	machine := "gateway"
-	if store := a.mcpStoreRef.Load(); store != nil {
-		if s, ok := store.Get(server); ok && s.Machine != "" && s.Machine != "gateway" {
-			machine = s.Machine
-		}
-	}
+	machine := a.desktopMachine(server)
 	a.deskMu.Lock()
 	defer a.deskMu.Unlock()
 	return a.desktopGate(machine)
@@ -208,7 +278,12 @@ func (a *App) endDesktopSession(sid string) {
 
 // desktopCall 是一次桌面工具调用的包装：同一台桌面串行、自动补 session、记下用过哪个服务。
 // 返回结果和错误；调用方负责回复模型。ctx 取消（用户停止、超时）会放弃排队。
-func (a *App) desktopCall(ctx context.Context, sid, server string, info mcp.ToolInfo, args any) (*sdkmcp.CallToolResult, error) {
+func (a *App) desktopCall(ctx context.Context, sid, server string, info mcp.ToolInfo, args any, runIDs ...uint64) (*sdkmcp.CallToolResult, error) {
+	if len(runIDs) > 0 {
+		if err := a.reserveDesktop(ctx, a.desktopMachine(server), sid, runIDs[0]); err != nil {
+			return nil, err
+		}
+	}
 	gate := a.desktopGateFor(server)
 	mg := a.mcpRef.Load()
 	if mg == nil {

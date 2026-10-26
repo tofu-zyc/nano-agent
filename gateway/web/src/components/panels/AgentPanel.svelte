@@ -239,7 +239,10 @@
             <div class="p-sub">日程</div>
             {#each auto.agenda as it (it.id)}
               <div class="p-row mind-item">
-                <span class="p-grow"><b>{when(it.at * 1000)}</b> {it.title} <span class="tag">{kindLabel[it.kind] ?? it.kind}</span></span>
+                <span class="p-grow"><b>{when(it.at * 1000)}</b> {it.title} <span class="tag">{kindLabel[it.kind] ?? it.kind}</span>
+                  {#if it.criteria}<span class="p-note p-small">完成条件：{it.criteria}</span>{/if}
+                  {#if it.checkpoint}<span class="p-note p-small">接着做：{it.checkpoint}</span>{/if}
+                </span>
                 <button class="btn sm ghost" title="取消这件事" disabled={busy} onclick={() => cancelAgenda(it.id, it.title)}><Icon name="x" size={12} /></button>
               </div>
             {/each}
@@ -267,10 +270,16 @@
           {/if}
           {#if auto.executions.length}
             <details class="mind-done">
-              <summary class="muted p-small">最近做完的（{auto.executions.length}）</summary>
+              <summary class="muted p-small">最近的执行记录（{auto.executions.length}）</summary>
               <ul class="recent">
                 {#each auto.executions as e (e.id)}
-                  <li><span class="muted">{when(e.ended * 1000)}</span> {e.ok && e.used_tools ? '✅' : '·'} {e.summary}</li>
+                  <li><span class="muted">{when(e.ended * 1000)}</span> {e.ok && e.verified ? '✅ 已验收' : e.ok ? '待验收' : '未完成'} {e.summary}
+                    {#if e.evidence?.length}
+                      <details><summary>查看执行依据</summary>
+                        {#each e.evidence as proof (proof.id)}<p class="p-note p-small"><b>{proof.name}</b>：{proof.result}</p>{/each}
+                      </details>
+                    {/if}
+                  </li>
                 {/each}
               </ul>
             </details>

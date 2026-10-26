@@ -1,5 +1,16 @@
 # Computer use 接入方案
 
+## linux-pc 实测与主线补全（2026-10-26，未发布）
+
+- 同桌面从“单次调用串行”改为“整轮观察、操作、核验保留桌面”；其他任务等待，取消/结束/断线释放。同一轮跨两台已占用的桌面不互相死等，返回可解释的重试原因。
+- 新增 `scripts/e2e-desktop.py`：在真实 X11 服务中启动独立 GTK 输入窗口，验证实际 PNG 画面非纯色、通过驱动 `set_value` 写入完整中英文、点击确认、核对应用进程输出。可用 `--isolated-x11` 配合 Xvfb / Openbox / xcompmgr，Python 需要 GI 的 GTK3 和 Pillow；临时桌面与正式网关隔离。
+- linux-pc 上 Driver **0.7.0 和 0.37.0** 均通过上述操作链。0.37.0 需按实际 schema 用 `tree_format:"both"` 取得结构化元素；优先 `element_token`，不假定旧版 `element_index` 仍存在。
+- 可加 `--gateway /path/nano-gateway --kernel /path/nano-kernel --executor /path/nano-exec` 走真网关 + C 内核 + 自主日程 + MCP 操作链，应用输出作为验收证据；模型仍是确定性本地替身。该组合已在 linux-pc、Driver 0.37.0 上实际通过，包括 MCP 审批、观察、截图以多模态消息送到模型接口、中英文输入、点击、读取应用输出、`Agenda done` 验收。
+- 严格验收中发现：0.7.0 / 0.37.0 的 `type_text` 在该 X11 环境写入混合中英文时可能只写部分，效果报告为未确认。`set_value` 路径完整回读通过；技能已记录选择方法，网关不允许明确未确认的结果直接用于日程验收。
+- 当前登录的 GNOME 远程会话没有显示输出，XWayland 根屏幕为 **0×0**，只读到窗口树不能算截图/输入通过。Xvfb 无合成器时透明光标可能导致黑图；测试现在检查画面内容，不能把“有 PNG”当成功。
+
+验证不覆盖原生 Wayland、Windows 或 macOS 的完整操作；隔离 X11 通过不能外推到这些平台。
+
 日期：2026-10-26。状态：v0.7.3 已接入，并在 Linux（WSL Fedora 43 + cua-driver 0.7.0）完成真机握手和窗口树验证；截图/输入在该 WSLg 会话里受限，Windows/macOS 实机未验证。
 
 目标是让 nano-agent 操作有桌面环境的机器，覆盖 Windows、macOS 和 Linux。优先采用 Cua Driver，复用其窗口发现、截图、辅助功能树、输入和结果验证；nano-agent 负责模型循环、设备连接、会话、工具授权和上下文。

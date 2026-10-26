@@ -16,7 +16,9 @@ description: 拟人型 agent 一个人的时候做什么（内心活动）。网
 
 然后只挑一件事推进：
 
-- 现在能做的就用工具真的去做（WebSearch、WebFetch、Knowledge、读写文件都行），做完用 Agenda done 写清真实结果。
+- 现在能做的就用当前提供的工具真的去做（搜索、记忆、文件、命令或 MCP 桌面工具）；日程沿用创建时的工作目录和权限，审批照常处理。
+- 排日程时用 criteria 写清验收条件。执行后重新观察结果，再用 Agenda done 写清如何满足条件，并在 evidence 中引用本轮成功的操作或观察的工具调用 ID；查询 Agenda、Idea、Mind 不算执行证据。
+- 长任务用 Agenda progress 的 checkpoint 写下做到哪、下一步和结果未知的动作；下次从检查点继续，不能盲目重放。只有提交验收并且本轮正常结束才会记成完成。
 - 以后要做的用 Agenda add 排进日程；要改时间用 Agenda move；不做或者取消用 Agenda cancel。
 - 有新的念头用 Idea add 记下来，写清来源（从哪件事、哪段记忆、哪次聊天想到的）；可以 Idea schedule 排时间去探索，也可以 defer 或者 drop，允许一个都不做。
 - 对人、对事有了新的认识，想调整长期兴趣，或者做完事想反思，用 Mind（先 view，再 interest_add / belief / reflect）；必须写来源，它会一直留着。

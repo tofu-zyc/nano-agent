@@ -58,7 +58,7 @@ func TestLifeWake(t *testing.T) {
 	e.a.lifeTick()
 	in := e.k.expect(proto.TInput)
 	sid := lifeSID("default")
-	if in.SID != sid || in.MaxSteps != 12 {
+	if in.SID != sid || in.MaxSteps != 200 || !in.Elevate {
 		t.Fatalf("内心活动的一轮：%+v", in)
 	}
 	e.a.mu.Lock()
@@ -68,7 +68,8 @@ func TestLifeWake(t *testing.T) {
 	for _, tl := range tools {
 		names = append(names, tl.Function.Name)
 	}
-	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") || strings.Join(names, ",") != "Agenda,Idea,Knowledge,Message,Mind" {
+	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") ||
+		!slices.Contains(names, "Agenda") || !slices.Contains(names, "echo") || !slices.Contains(names, "Schedule") {
 		t.Fatalf("内心活动的提示和工具：%v", names)
 	}
 	e.sid = sid

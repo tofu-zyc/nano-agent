@@ -43,7 +43,7 @@ func TestRoomFanout(t *testing.T) {
 			return false
 		}
 		last := h[len(h)-1]
-		return last.Role == "assistant" && strings.Contains(last.Content, "（mock）")
+		return last.Role == "assistant" && last.Agent == "default" && strings.Contains(last.Content, "（mock）")
 	})
 }
 

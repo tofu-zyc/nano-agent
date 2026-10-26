@@ -44,6 +44,20 @@ func (a *App) workspaceOf(sid string) workspace {
 	if st.Mode != "" {
 		w.mode = st.Mode
 	}
+	// 自主日程沿用创建它的会话的目录和权限上限，不借内心会话扩大权限。
+	if s := a.sessions[sid]; isLifeSID(sid) && s != nil && s.mind != nil {
+		if item, ok := a.mind(s.mind.AgentID).AgendaByID(s.mind.Trigger.AgendaID); ok && item.ScopeSet {
+			if modeRank(item.Mode) < modeRank(w.mode) {
+				w.mode = item.Mode
+			}
+			for _, id := range item.Workspaces {
+				if x := a.findWorkspace(id); x != nil {
+					w.wss = append(w.wss, x)
+				}
+			}
+			return w
+		}
+	}
 	if st.WorkspacesSet {
 		for _, id := range st.Workspaces {
 			if x := a.findWorkspace(id); x != nil {
@@ -76,6 +90,11 @@ func (w workspace) has(id string) bool {
 
 // isAdmin：命令行用户（能在这台机器上开终端的人本来就有全部权限）和登录了网页的用户始终是管理员。
 func (a *App) isAdmin(who string) bool {
+	// life 渠道只由网关内部产生；访客不能创建可执行的自主日程。
+	if id, ok := strings.CutPrefix(who, "life:"); ok {
+		ag, exists := a.agentByID(id)
+		return exists && ag.Life()
+	}
 	return strings.HasPrefix(who, "cli:") || strings.HasPrefix(who, "web:") || slices.Contains(a.cfg.Access.Admins, who)
 }
 

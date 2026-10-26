@@ -156,7 +156,7 @@ func (a *App) roomAgentSay(room rooms.Room, member, text string) {
 		name = ag.Name
 	}
 	line := fmt.Sprintf("[%s] %s", name, text)
-	if err := a.store.Append(roomLogSID(room.ID), session.Msg{Role: "assistant", Content: line}); err != nil {
+	if err := a.store.Append(roomLogSID(room.ID), session.Msg{Role: "assistant", Content: line, Agent: member}); err != nil {
 		a.log.Warn("保存房间记录失败", "room", room.ID, "err", err)
 	}
 	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: text})

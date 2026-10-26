@@ -26,6 +26,10 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	reply := func(ok bool, content string) {
 		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, OK: proto.Bool(ok), Content: content})
 	}
+	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(r.from) {
+		reply(false, "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态")
+		return
+	}
 	if m.Name == "WebSearch" || m.Name == "WebFetch" {
 		a.webTool(s, m, reply)
 		return

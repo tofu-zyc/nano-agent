@@ -44,7 +44,7 @@ irm https://cua.ai/driver/install.ps1 | iex
 
 装完确认：`command -v cua-driver`、`cua-driver --version`。nano-agent 的 MCP 配置里**必须写绝对路径**。
 
-我们在 nano-agent 上验证的是 **0.7.0**。新版通常兼容；要严格复现就按官方安装页的固定版本参数装 0.7.0（不同平台的变量/参数不同，别猜）。第一次接新版先只做只读观察。
+已在 linux-pc 的隔离 X11 桌面验证 **0.7.0 和 0.37.0**：发现窗口、非空截图、`set_value` 写入完整中英文、点击确认、核对真实应用输出。原生 Wayland、Windows、macOS 的完整操作仍需分别验证。第一次接新版先只做只读观察。
 
 ### 2. 让驱动能看见桌面（最容易卡住的一步）
 
@@ -98,17 +98,17 @@ cua-driver call list_windows --json
 
 ## 铁律
 
-1. **先观察再动手。** 先 `list_windows` / `list_apps` 找到目标窗口和 pid，再 `get_window_state {pid, window_id}` 拿辅助功能树和截图。元素地址优先用 `element_index`（辅助功能），不行再用截图坐标（窗口内像素，不是全屏坐标）。
+1. **先观察再动手。** 先 `list_windows` / `list_apps` 找到目标窗口和 pid，排除未显示的 1×1 辅助窗口，再 `get_window_state {pid, window_id}` 拿辅助功能树和截图。优先使用本次观察给出的 `element_token`；只在版本仍支持时用 `element_index`。新版可用 `tree_format:"both"` 同时取结构化元素和文字树，参数以实际 schema 为准。
 2. **工具返回 success 不等于操作成功。** 每次点击、输入、滚动、拖拽之后都要重新 `get_window_state`（或截图）确认界面变了；不要根据“调用没有报错”就说已经完成。
 3. **结果未知不要重放。** 超时、断线、取消、进程重启以后，先重新观察当前状态，再决定下一步。不要无条件重新点一次、再发一次消息或重复提交。
-4. **同一台桌面可能还有别的任务。** 网关会把同一台机器上的桌面调用排队，但不要假设自己独占鼠标键盘、剪贴板或前台窗口。操作前把窗口带到前台（`bring_to_front`），做完尽量恢复。
+4. **同一台桌面可能还有别的任务。** 网关会在同一轮观察、操作、验证期间保留桌面，其他任务等待；任务结束、停止、断线会释放。用户仍能操作桌面，动作前核对状态。跨两台忙碌桌面互相等待时，先保存检查点并结束本轮，再安排继续。
 5. **不碰危险操作。** 删除文件、付款、发送对外消息、改系统设置这类不可逆的事，先问用户。登录、授权、验证码这类需要人做的事，把看到的界面说清楚，请用户处理。
 
 ## 一次可逆任务的循环
 
 1. 找到窗口：`list_windows`（或 `list_apps` 看已安装/正在运行）。
 2. 观察：`get_window_state`；看 `structuredContent.elements` 里的角色、名字和 bounds，同时看截图。
-3. 操作：点击用 `click` / `double_click` / `right_click`（传 `element_index` 或窗口内 x,y），输入用 `type_text`，按键用 `press_key` / `hotkey`，滚动用 `scroll`。
+3. 操作：点击用 `click` / `double_click` / `right_click`（优先传 `element_token`，或窗口内 x,y）；可编辑控件优先用 `set_value` 设置完整内容，只有需要真实按键时才用 `type_text`。按键用 `press_key` / `hotkey`，滚动用 `scroll`。Linux 实测中，`type_text` 写混合中英文时可能只写入部分文本；不能仅凭返回的字符数宣称完成。
 4. 验证：再 `get_window_state`，确认文字、选中状态或窗口标题发生变化。没变就换一种方法（辅助功能动作 / 坐标 / 键盘）。
 5. 收尾：`end_session` 会用网关给的 session 释放光标和临时状态；用户停止、重置会话时网关也会调用它。
 
@@ -123,6 +123,8 @@ cua-driver call list_windows --json
 - 网页拓扑图的「MCP 服务」节点会显示：目标电脑在不在线、Driver 版本、initialize 说明和最近一次错误。
 - 设备在线只说明网络通，不代表桌面可操作：图形会话没登录、授权没给、驱动版本不对，工具都会失败。
 - Driver 自己的诊断：`cua-driver doctor`、`cua-driver diagnose`（在目标机器上跑），或者 MCP 的 `health_report` / `get_config`。
+- 截图还要确认能看见目标界面，纯黑图不算成功。无显示输出的 GNOME 远程会话可能有窗口树但屏幕为 0×0；Xvfb 的透明光标需要合成器，测试脚本可配合 Openbox 和 xcompmgr。不要把隔离 X11 的通过扩展成原生 Wayland 已通过。
+- `effect:unverifiable` / `verified:false` 说明效果未确认；重新观察，不能直接当作任务验收证据。
 - 断线重连后 Driver 的 session 状态可能丢了：重新 `list_windows` / `get_window_state`，不要沿用旧的窗口坐标和元素编号。
 
 ## 结果怎么写

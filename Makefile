@@ -17,6 +17,7 @@ test: all
 	$(MAKE) -C kernel test
 	cd gateway && go test -race ./...
 	./scripts/e2e.sh
+	python3 scripts/e2e-autonomy.py
 	python3 scripts/e2e-control.py
 	python3 scripts/e2e-pipe.py
 	python3 scripts/e2e-pipe-win.py

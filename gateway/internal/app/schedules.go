@@ -496,6 +496,9 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 		}
 	}
 	body := "[定时任务 " + task.Name + "]\n" + summary
+	if push {
+		a.mindExternal(task.Agent, "schedule:"+task.ID, body)
+	}
 	a.publish(events.Event{T: "say", SID: cronSID(*task), Text: body})
 	if !push {
 		return

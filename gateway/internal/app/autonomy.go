@@ -426,6 +426,15 @@ func (a *App) startLife(agentID string, manual bool) error {
 
 // startMindLocked 开一轮自主活动：内心会话、交接用的说明、状态先标成进行中。调用方持有锁。
 func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy.Trigger, manual bool) error {
+	if item, ok := st.AgendaByID(trig.AgendaID); ok && item.ScopeSet {
+		for _, id := range item.Workspaces {
+			if a.findWorkspace(id) == nil {
+				st.Retry(trig, "创建日程时的工作目录已删除："+id+"；请重新安排目录，不能自动改到 HOME 执行", a.now(), 5*time.Minute)
+				a.saveMinds()
+				return fmt.Errorf("日程的工作目录 %s 已删除", id)
+			}
+		}
+	}
 	s := a.sessOf(lifeSID(ag.ID))
 	if s.run != nil || len(s.queue) > 0 || s.compacting {
 		return errors.New("它正在想事情")
@@ -478,6 +487,16 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	case trig.AgendaID != "":
 		if item, ok := st.AgendaByID(trig.AgendaID); ok {
 			fmt.Fprintf(&b, "[系统] 你安排的时间到了：%s（%s）。", item.Title, autonomy.KindLabel(item.Kind))
+			fmt.Fprintf(&b, "当前日程 ID：%s。\n", item.ID)
+			if item.Note != "" {
+				fmt.Fprintf(&b, "任务说明：%s\n", item.Note)
+			}
+			if item.Criteria != "" {
+				fmt.Fprintf(&b, "完成条件：%s\n", item.Criteria)
+			}
+			if item.Checkpoint != "" {
+				fmt.Fprintf(&b, "上次的检查点（先观察，再接着做）：%s\n", item.Checkpoint)
+			}
 		} else {
 			b.WriteString("[系统] 你安排的时间到了。")
 		}
@@ -547,6 +566,21 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 	rec := autonomy.Execution{ID: st.NewID("ex"), Trigger: mr.Trigger.Kind, AgendaID: mr.Trigger.AgendaID,
 		IntentionID: mr.Trigger.IntentionID, RunSID: s.sid, Started: mr.Started.Unix(), Ended: now.Unix(),
 		OK: okRun, UsedTools: r.usedTools, Summary: summary, Tokens: tokens}
+	item, itemExists := st.AgendaByID(mr.Trigger.AgendaID)
+	if done, exists := r.agendaDone[mr.Trigger.AgendaID]; exists && okRun && itemExists && item.Status == autonomy.StatusInProgress {
+		rec.Verified, rec.Summary = true, done.Note
+		for _, id := range done.Evidence {
+			rec.Evidence = append(rec.Evidence, r.toolEvidence[id])
+		}
+	}
+	if mr.Trigger.AgendaID == "" && mr.Trigger.IntentionID == "" && okRun {
+		for _, evidence := range r.toolEvidence {
+			if evidence.OK && evidence.Verified && taskEvidence(evidence.Name) {
+				rec.Verified = true
+				rec.Evidence = append(rec.Evidence, evidence)
+			}
+		}
+	}
 	if noop && status == proto.StatusOK && !mr.Trigger.IsCommitment() {
 		// 明确决定这次不做：探索类的日程标成跳过，不反复重试；约定仍然要补上
 		st.RecordSkipped(rec, now)
@@ -644,7 +678,12 @@ func (a *App) mindExternal(agentID, source, text string) {
 		return
 	}
 	st := a.mind(agentID)
-	st.AddEvent(autonomy.Event{Kind: autonomy.EventExternal, Source: source, Text: cutRunes(text, 200)}, a.now(), 0)
+	now := a.now()
+	st.AddEvent(autonomy.Event{Kind: autonomy.EventExternal, Source: source, Dedupe: "external:" + source,
+		Text: cutRunes(text, 200)}, now, 10*time.Minute)
+	if next := now.Add(time.Minute).Unix(); st.NextCheck == 0 || st.NextCheck > next {
+		st.SetNextCheck(time.Unix(next, 0))
+	}
 	a.saveMinds()
 	a.publishAutonomy(agentID)
 }
