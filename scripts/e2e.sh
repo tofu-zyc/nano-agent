@@ -225,6 +225,7 @@ send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect
 send '!call Agenda {"action":"list"}'; expect "Agenda 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
 send '!call Idea {"action":"list"}'; expect "Idea 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
 send '!call Mind {"action":"view"}'; expect "Mind 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
+send '!call fake__echo {}'; expect "MCP 工具由网关执行，不要求 workspace" "没有这个 MCP 服务：fake"
 send "/dir -3";                                       expect "取下服务器上的目录" "取下了 $BOXWS"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。
