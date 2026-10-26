@@ -333,7 +333,7 @@
         {#if info}
           {#if info.workspaces.length}
             <button class="tag" onclick={() => store.open({ type: 'session', sid })}>{modeMeta[info.mode]?.label ?? info.mode}模式</button>
-            {#each info.workspaces as mt (mt.id)}
+            {#each info.workspaces as mt, i (`${mt.id}:${i}`)}
               <button class="tag mono" class:warnt={mt.how === 'down'} title="{mt.host}:{mt.path}{mt.how === 'down' ? '（这台机器现在用不了）' : ''} · 点击取下" onclick={() => unmountWorkspace(mt.id)}><Icon name="folder" size={11} />{mt.host}:{shortPath(homeShort(mt.path), info.workspaces.length > 1 ? 22 : 32)}</button>
             {/each}
             <button class="tag" onclick={() => (picking = true)} title="再挂一个工作目录"><Icon name="plus" size={11} />挂载</button>
@@ -402,7 +402,7 @@
             </div>
             {#if b.images?.length}
               <div class="pics">
-                {#each b.images as p (p.id)}
+                {#each b.images as p, i (`${p.id}:${i}`)}
                   <a class="pic" href="/api/uploads/{p.id}" target="_blank" rel="noopener"><img src="/api/uploads/{p.id}" alt={p.name ?? '图片'} loading="lazy" /></a>
                 {/each}
               </div>
@@ -449,7 +449,7 @@
             </div>
             {#if it.images?.length}
               <div class="pics">
-                {#each it.images as p (p.id)}
+                {#each it.images as p, i (`${p.id}:${i}`)}
                   <a class="pic" href="/api/uploads/{p.id}" target="_blank" rel="noopener"><img src="/api/uploads/{p.id}" alt={p.name ?? '图片'} /></a>
                 {/each}
               </div>

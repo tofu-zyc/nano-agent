@@ -31,7 +31,7 @@
   </button>
   {#if media.length}
     <div class="media">
-      {#each media as m (m.id)}
+      {#each media as m, i (`${m.id}:${i}`)}
         {#if isImage(m)}
           <a class="pic" href="/api/uploads/{m.id}" target="_blank" rel="noopener" title={m.name}><img src="/api/uploads/{m.id}" alt={m.name ?? '图片'} loading="lazy" /></a>
         {:else}

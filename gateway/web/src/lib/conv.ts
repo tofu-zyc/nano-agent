@@ -73,7 +73,9 @@ export function buildBlocks(history: Msg[], inner = false): Block[] {
         t.ok = !c.startsWith('[执行失败] ');
         if (!t.ok) c = c.slice('[执行失败] '.length);
         t.result = c;
-        const media = [...(m.images ?? []), ...(m.sent ?? [])];
+        // 同一个附件可能既在 images（读到/发给模型的）又在 sent（发出去的）里，
+        // 按 id 去重；否则 Svelte 的 keyed each 会抛 each_key_duplicate，整段历史都画不出来。
+        const media = [...new Map([...(m.images ?? []), ...(m.sent ?? [])].map((a) => [a.id, a])).values()];
         if (media.length) t.media = media;
       }
     }
