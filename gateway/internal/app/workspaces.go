@@ -417,15 +417,24 @@ func (a *App) SetDefaultWorkspace(id string, on bool) error {
 }
 
 // setSessionWorkspaces 设置会话挂载的工作目录（按顺序，空表示只读）。调用方持有锁。
-func (a *App) setSessionWorkspaces(sid string, ids []string) error {
+// cleanWorkspaces 去重并检查工作目录都在列表里，只验证、不写盘（整份 patch 验证用）。调用方持有锁。
+func (a *App) cleanWorkspaces(ids []string) ([]string, error) {
 	var clean []string
 	for _, id := range ids {
 		if a.findWorkspace(id) == nil {
-			return errors.New("没有这个工作目录：" + id)
+			return nil, errors.New("没有这个工作目录：" + id)
 		}
 		if !slices.Contains(clean, id) {
 			clean = append(clean, id)
 		}
+	}
+	return clean, nil
+}
+
+func (a *App) setSessionWorkspaces(sid string, ids []string) error {
+	clean, err := a.cleanWorkspaces(ids)
+	if err != nil {
+		return err
 	}
 	st := a.store.Settings(sid)
 	st.Workspaces, st.WorkspacesSet = clean, true

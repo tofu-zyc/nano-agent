@@ -39,7 +39,7 @@ func (a *App) agentDoing(ag agents.Agent, viewer string) Doing {
 	// 在跟人聊、在干活：看它的哪些会话正在跑
 	var chats, groups, jobs []string
 	for sid, s := range a.sessions {
-		if s == nil || s.run == nil || agents.SessionAgent(sid) != ag.ID || isInnerSID(sid) {
+		if s == nil || s.run == nil || a.execAgentID(sid) != ag.ID || isInnerSID(sid) {
 			continue
 		}
 		name := a.chatName(sid)

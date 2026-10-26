@@ -71,6 +71,24 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		}
 		return
 	}
+	if m.Name == "Agenda" {
+		out, err := a.agendaCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
+	if m.Name == "Idea" {
+		out, err := a.ideaCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
 	if m.Name == "Diary" {
 		out, err := a.diaryCall(s.sid, m.Args)
 		if err != nil {

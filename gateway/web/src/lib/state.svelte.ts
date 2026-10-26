@@ -488,6 +488,11 @@ class Store {
           this.toast({ kind: 'info', text: `${e.name ?? '它'} 来找你了`, detail: e.text ?? '', open: sid }, 12000);
         }
         break;
+      case 'autonomy':
+        // 自主活动状态变了：agent 节点上的日程、目标、想法跟着刷新
+        this.memoryTick++;
+        this.reloadAgentsSoon();
+        break;
       case 'memory':
       case 'dream':
       case 'life':

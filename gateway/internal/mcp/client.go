@@ -103,6 +103,12 @@ type conn struct {
 	fails   int
 	retry   time.Time
 	gen     int // 每断开一次（改了配置、调用出错）加一：连到一半的旧连接回来时作废
+
+	// 诊断用：initialize 的说明和版本、最近一次错误
+	instructions string
+	version      string
+	lastErr      string
+	lastErrAt    time.Time
 }
 
 // NewManager 接上配置；idle 到了就 Sweep 关掉空闲连接。
@@ -188,7 +194,16 @@ func (m *Manager) session(ctx context.Context, s Server) (*sdkmcp.ClientSession,
 	c.mu.Unlock()
 	cs, tools, err := m.connect(ctx, s)
 	c.mu.Lock()
+	if err == nil {
+		if init := cs.InitializeResult(); init != nil {
+			c.instructions = init.Instructions
+			if init.ServerInfo != nil {
+				c.version = init.ServerInfo.Version
+			}
+		}
+	}
 	if err != nil {
+		c.lastErr, c.lastErrAt = err.Error(), m.now()
 		c.backoff(m.now())
 		c.mu.Unlock()
 		m.changed()
@@ -201,8 +216,10 @@ func (m *Manager) session(ctx context.Context, s Server) (*sdkmcp.ClientSession,
 		return nil, nil, fmt.Errorf("MCP 服务 %s 的配置刚改过，请再试一次", s.Name)
 	}
 	c.cs, c.tools, c.used, c.fails, c.retry = cs, tools, m.now(), 0, time.Time{}
+	c.lastErr, c.lastErrAt = "", time.Time{}
+	ver := c.version
 	c.mu.Unlock()
-	m.log.Info("MCP 服务已连接", "server", s.Name, "tools", len(tools))
+	m.log.Info("MCP 服务已连接", "server", s.Name, "tools", len(tools), "version", ver)
 	m.saveCache() // 工具列表记到磁盘：重启以后连上之前先用它
 	m.changed()
 	return cs, tools, nil
@@ -427,6 +444,10 @@ func (m *Manager) Server(name string) (Server, bool) {
 
 // ResultText 把工具结果摊平成一段文字。图片单独说明（模型的工具结果放不进图片，
 // 需要的话由网关另外塞进上下文）。
+//
+// 文字和 structuredContent 都要保留：Cua Driver 这类工具的文字只是给人看的摘要，
+// 动作效果、拒绝原因、下一步建议和截图关联信息在 structuredContent 里。以前有文字就提前返回，
+// 模型会以为“工具调用正常返回 = 操作成功”，看不到结构化结果。
 func ResultText(res *sdkmcp.CallToolResult) string {
 	if res == nil {
 		return "（没有输出）"
@@ -444,13 +465,19 @@ func ResultText(res *sdkmcp.CallToolResult) string {
 			fmt.Fprintf(&b, "\n[资源 %s]", v.URI)
 		}
 	}
-	if s := strings.TrimSpace(b.String()); s != "" {
-		return s
-	}
 	if res.StructuredContent != nil {
 		if out, err := json.Marshal(res.StructuredContent); err == nil {
-			return string(out)
+			s := strings.TrimSpace(string(out))
+			if s != "" && s != "{}" && s != "null" {
+				if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+					b.WriteString("\n")
+				}
+				b.WriteString("[结构化结果] " + s)
+			}
 		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s
 	}
 	return "（没有输出）"
 }
@@ -576,4 +603,52 @@ func (m *Manager) ServerTools(name string) []ToolInfo {
 	tools := c.tools
 	c.mu.Unlock()
 	return toolInfos(s, tools)
+}
+
+// Instructions 是这个 MCP 服务在 initialize 时给的操作说明（没有就是空）。不主动连接。
+func (m *Manager) Instructions(name string) string {
+	c := m.conn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.instructions
+}
+
+// Version 是服务自报的版本（initialize 的 serverInfo.version）。
+func (m *Manager) Version(name string) string {
+	c := m.conn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.version
+}
+
+// LastError 是这个服务最近一次连接/调用失败的原因和时间（用于诊断）。
+func (m *Manager) LastError(name string) (string, time.Time) {
+	c := m.conn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastErr, c.lastErrAt
+}
+
+// ToolInfo 按原工具名找缓存里的工具定义（判断有没有 session 参数、是不是桌面工具）。
+func (m *Manager) ToolInfo(server, tool string) (ToolInfo, bool) {
+	for _, t := range m.ServerTools(server) {
+		if t.Name == tool {
+			return t, true
+		}
+	}
+	return ToolInfo{}, false
+}
+
+// CachedInstructions 是给网页/诊断用的快照，不触发连接（只读已经握手得到的说明）。
+func (m *Manager) CachedInstructions(agent string) map[string]string {
+	out := map[string]string{}
+	for _, s := range m.store.List() {
+		if !s.Enabled || !s.ForAgent(agent) {
+			continue
+		}
+		if in := m.Instructions(s.Name); strings.TrimSpace(in) != "" {
+			out[s.Name] = in
+		}
+	}
+	return out
 }

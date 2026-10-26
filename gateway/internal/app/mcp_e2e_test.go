@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,23 @@ import (
 // 环境变量一设就只跑服务，不跑测试。用来真起一个子进程验完整链路。
 const mcpHelperEnv = "NANO_APP_MCP_HELPER"
 
+// NANO_APP_MCP_LOG 让 helper 把收到的工具调用（名字 + 参数）追加到文件里，
+// 测试用来确认 Driver session 有没有带上、结束 session 有没有调用。
+const mcpHelperLog = "NANO_APP_MCP_LOG"
+
+func helperLog(tool string, args json.RawMessage) {
+	p := os.Getenv(mcpHelperLog)
+	if p == "" {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\n", tool, string(args))
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv(mcpHelperEnv) == "1" {
 		mcpHelper()
@@ -31,8 +49,79 @@ func TestMain(m *testing.M) {
 }
 
 func mcpHelper() {
-	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "helper", Version: "v0"}, nil)
+	srv := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "helper", Version: "v9.9"},
+		&sdkmcp.ServerOptions{Instructions: "桌面操作：先观察再动手；动作以后重新读取界面确认。"})
 	png, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+	// 一个假的 Cua Driver：会话、窗口、结构化结果、截图、输入。工具组合能被网关认出来。
+	obj := func(props map[string]any, required ...string) map[string]any {
+		m := map[string]any{"type": "object", "properties": props}
+		if len(required) > 0 {
+			m["required"] = required
+		}
+		return m
+	}
+	sessionProp := map[string]any{"session": map[string]any{"type": "string"}}
+	srv.AddTool(&sdkmcp.Tool{Name: "start_session", Description: "声明一个 session", InputSchema: obj(sessionProp, "session")},
+		func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			helperLog("start_session", req.Params.Arguments)
+			var in struct {
+				Session string `json:"session"`
+			}
+			json.Unmarshal(req.Params.Arguments, &in)
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "session " + in.Session}},
+				StructuredContent: map[string]any{"ok": true, "session": in.Session}}, nil
+		})
+	srv.AddTool(&sdkmcp.Tool{Name: "get_window_state", Description: "窗口树 + 截图", InputSchema: obj(map[string]any{
+		"pid": map[string]any{"type": "integer"}, "window_id": map[string]any{"type": "integer"},
+		"session": sessionProp["session"], "delay_ms": map[string]any{"type": "integer"},
+	}, "pid", "window_id")},
+		func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			helperLog("get_window_state", req.Params.Arguments)
+			var in struct {
+				PID     int    `json:"pid"`
+				Window  int    `json:"window_id"`
+				Session string `json:"session"`
+				DelayMS int    `json:"delay_ms"`
+			}
+			json.Unmarshal(req.Params.Arguments, &in)
+			if in.DelayMS > 0 {
+				time.Sleep(time.Duration(in.DelayMS) * time.Millisecond)
+			}
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{
+				&sdkmcp.TextContent{Text: "窗口：测试窗口\n[element_index 0] 按钮 「好了」"},
+				&sdkmcp.ImageContent{Data: png, MIMEType: "image/png"},
+			}, StructuredContent: map[string]any{
+				"elements": []any{map[string]any{"element_index": 0, "role": "push button", "label": "好了"}},
+				"window":   map[string]any{"pid": in.PID, "window_id": in.Window, "title": "测试窗口"},
+				"session":  in.Session,
+			}}, nil
+		})
+	srv.AddTool(&sdkmcp.Tool{Name: "list_windows", Description: "窗口列表", InputSchema: obj(sessionProp)},
+		func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			helperLog("list_windows", req.Params.Arguments)
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "1 个窗口"}},
+				StructuredContent: map[string]any{"windows": []any{map[string]any{"window_id": 7, "pid": 42, "title": "测试窗口"}}}}, nil
+		})
+	srv.AddTool(&sdkmcp.Tool{Name: "click", Description: "点一下", InputSchema: obj(map[string]any{
+		"x": map[string]any{"type": "integer"}, "y": map[string]any{"type": "integer"}, "session": sessionProp["session"],
+	}, "x", "y")},
+		func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			helperLog("click", req.Params.Arguments)
+			var in struct{ X, Y int }
+			json.Unmarshal(req.Params.Arguments, &in)
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "点了"}},
+				StructuredContent: map[string]any{"ok": true, "x": in.X, "y": in.Y}}, nil
+		})
+	srv.AddTool(&sdkmcp.Tool{Name: "end_session", Description: "结束 session", InputSchema: obj(sessionProp, "session")},
+		func(_ context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+			helperLog("end_session", req.Params.Arguments)
+			var in struct {
+				Session string `json:"session"`
+			}
+			json.Unmarshal(req.Params.Arguments, &in)
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "结束 " + in.Session}},
+				StructuredContent: map[string]any{"ended": true, "session": in.Session}}, nil
+		})
 	srv.AddTool(&sdkmcp.Tool{
 		Name:        "pic",
 		Description: "返回一张小图",

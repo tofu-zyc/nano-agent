@@ -232,3 +232,27 @@ func (s *Server) wakeAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
+
+// ---- 自主活动（AgentPanel 的日程、目标、想法）----
+
+func (s *Server) getAutonomy(w http.ResponseWriter, r *http.Request) {
+	v, err := s.app.AutonomyAgent(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) autonomyAction(w http.ResponseWriter, r *http.Request) {
+	var req app.AutonomyActionReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	v, err := s.app.AutonomyAction(r.PathValue("id"), req)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, v)
+}

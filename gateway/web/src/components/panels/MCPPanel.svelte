@@ -162,6 +162,17 @@
           </span>
         </div>
         <div class="muted p-small mono">{m.kind === 'http' ? m.url : [m.command, ...(m.args ?? [])].join(' ')}</div>
+        {#if m.desktop}
+          <div class="diag">
+            <span class="tag accent">桌面驱动 {m.driver_version || '版本未知'}</span>
+            {#if !m.machine_online}<span class="tag warn">目标电脑不在线</span>{/if}
+            <span class="muted p-small">设备在线不等于桌面可操作：图形会话要已登录，Windows 要在交互会话里，Linux 要看 X11 / Wayland，macOS 要有辅助功能和录屏授权。</span>
+            {#if m.last_error}<div class="derr">最近错误：{m.last_error}</div>{/if}
+            {#if m.instructions}
+              <details><summary class="linkish">Driver 的操作说明</summary><pre class="ins">{m.instructions}</pre></details>
+            {/if}
+          </div>
+        {/if}
         <div class="p-row">
           <button class="linkish" onclick={() => (open[m.name] = !open[m.name])} disabled={!m.tool_count}>
             {m.tool_count ? `${m.tool_count} 个工具${open[m.name] ? '（收起）' : '（展开）'}` : '还没列到工具（点“测试”连一次）'}
@@ -227,6 +238,28 @@
 </div>
 
 <style>
+  .diag {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 4px 0 2px;
+  }
+  .derr {
+    font-size: 11.5px;
+    color: var(--warn);
+    word-break: break-word;
+  }
+  .ins {
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-2);
+    background: var(--bg-2);
+    border-radius: 8px;
+    padding: 8px;
+  }
   .srv {
     display: flex;
     flex-direction: column;

@@ -134,6 +134,7 @@ func TestFollowUp(t *testing.T) {
 	_, tools, _, _ := e.a.contextParts(mainSID)
 	out, err := e.a.followUpCall(mainSID, []byte(`{"minutes":30,"note":"问问面试怎么样"}`))
 	e.a.lifeOf("default").Next = base.Add(10 * time.Hour).Unix() // 别让内心活动插进来
+	e.a.mind("default").SetNextCheck(base.Add(10 * time.Hour))
 	e.a.mu.Unlock()
 	if err != nil || !strings.Contains(out, "15:30") {
 		t.Fatalf("约：%q %v", out, err)

@@ -9,7 +9,8 @@
   import ToolCard from './ToolCard.svelte';
   import WorkspacePicker from './WorkspacePicker.svelte';
   import Icon from './Icon.svelte';
- import HistoryManager from './HistoryManager.svelte';
+  import HistoryManager from './HistoryManager.svelte';
+  import AgentSwitcher from './AgentSwitcher.svelte';
 
   let { sid }: { sid: string } = $props();
   // 拟人型的内心活动、整理记忆：agent 自己的会话，只能看
@@ -346,6 +347,7 @@
         {/if}
       </div>
     </div>
+    {#if info && !innerKind}<AgentSwitcher {sid} compact />{/if}
     {#if !innerKind}<button class="btn sm ghost" onclick={() => act('reset')} title="清空上下文"><Icon name="trash" size={14} /></button>{/if}
     <button class="btn sm ghost" onclick={() => store.open({ type: 'session', sid })} title="会话设置"><Icon name="sliders" size={14} /></button>
   </header>

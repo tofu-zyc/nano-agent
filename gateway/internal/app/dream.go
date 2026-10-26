@@ -146,7 +146,8 @@ func (a *App) diarySources(agentID string) []diarySource {
 	dirty := false
 	var out []diarySource
 	for _, sid := range a.sessionIDs() {
-		if agents.SessionAgent(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") {
+		// 按当前执行身份算：会话中途换过 agent 的，只整理现在属于它的部分
+		if a.execAgentID(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") {
 			continue
 		}
 		title, partner, label := a.diaryPartner(agentID, sid)
@@ -195,7 +196,7 @@ func (a *App) diarySources(agentID string) []diarySource {
 func (a *App) diaryPartner(agentID, sid string) (title, partner, label string) {
 	title = a.sessionInfo(sid).Title
 	switch {
-	case sid == agents.SessionFor(agentID, mainSID):
+	case a.isOwnerSID(agentID, sid):
 		return title, "主人（管理员；终端、网页和主人的各个聊天窗口都接在这里）", "主人"
 	case isLifeSID(sid):
 		return "你自己的内心活动", "没有别人，这是你一个人的时候想的、做的、上网看到的", "（醒来）"
@@ -358,8 +359,18 @@ func (a *App) diaryCall(sid string, raw []byte) (string, error) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "【%s】%s\n", d.Title, d.Partner)
 		last := from - 1
+		foreignNotice := false
 		for i := from; i < len(d.Msgs) && i < from+limit; i++ {
 			line := a.diaryLine(i, d.Msgs[i], d.Label)
+			// 会话中途换过 agent：别的 agent 的回复不能当成自己的亲历（消息自己记着来源）
+			if m := d.Msgs[i]; line != "" && (m.Role == "assistant" || m.Role == "tool") && m.Agent != "" && m.Agent != agentID {
+				if foreignNotice {
+					line = ""
+				} else {
+					line = "（下面这段之前由别的 agent 负责，它说的话不算你的亲历，已略过）"
+					foreignNotice = true
+				}
+			}
 			if line != "" {
 				if b.Len()+len(line) > dreamReadChars && i > from {
 					break
@@ -448,7 +459,7 @@ func (a *App) diaryPending(agentID string) int {
 func (a *App) agentLastActivity(agentID string) time.Time {
 	last := a.bootAt
 	for sid, s := range a.sessions {
-		if s == nil || agents.SessionAgent(sid) != agentID || isInnerSID(sid) || isCronSID(sid) {
+		if s == nil || a.execAgentID(sid) != agentID || isInnerSID(sid) || isCronSID(sid) {
 			continue
 		}
 		if s.run != nil || len(s.queue) > 0 {
@@ -616,6 +627,10 @@ func (a *App) dreamDone(s *sess, status, body string) {
 	a.publishMemory(agentID)
 	if ag, ok := a.agentByID(agentID); ok && ag.Life() {
 		a.lifeHeard(agentID, "昨晚整理记忆："+note)
+		// 反思写进心智状态：经验要能影响之后的目标和计划，而不是只写一篇日记
+		if status == proto.StatusOK {
+			a.mindDream(agentID, note)
+		}
 	}
 }
 

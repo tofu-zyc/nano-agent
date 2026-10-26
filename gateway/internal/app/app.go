@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
@@ -50,6 +51,7 @@ var Commands = []Command{
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
 	{Name: "state", Desc: "看 agent 现在在干嘛：睡着、在聊天、在冲浪、在摸鱼、在发呆……"},
+	{Name: "autonomy", Args: "[pause | resume | wake]", Desc: "查看、暂停、恢复拟人型 agent 的自主活动（日程和想法）"},
 	{Name: "room", Args: "[群名 pause|resume]", Desc: "查看网关里的群；暂停、恢复某个群", Admin: true},
 	{Name: "memory", Args: "[关键词]", Desc: "查看、搜索 agent 的长期记忆"},
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
@@ -141,35 +143,43 @@ type App struct {
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
 
-	mu            sync.Mutex
-	groupNoticed  map[string]bool     // 已经提醒过“只支持私聊”的群
-	hostWaits     map[string]hostWait // 等内核回复的列目录、代执行请求（kernelhost.go）
-	hostSeq       int
-	skills        *skills.Registry // 技能（放在网关上）
-	managedKernel string           // 网关自己启动的本机内核的名字（localkernel.go）
-	models        *models.Store    // 可以用的模型（models.go），nil 时都用 llm
-	newClient     func(config.LLM) (llm.Client, error)
-	clients       map[string]modelClient
-	media         *media.Store               // 用户发来的图片（data/uploads），nil 时不接图片
-	chans         map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
-	outboxes      map[string]chan outItem
-	eps           map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
-	wss           []Workspace       // 工作目录列表（workspaces.go）
-	hosts         Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
-	nodes         map[string]*node  // 在线的内核（nodes.go）
-	localNode     string            // 最近一个和网关在同一台机器上的内核
-	nodeSeq       int
-	totals        Totals
-	sessions      map[string]*sess
-	mems          map[string]*knowledge.Store // 每个 agent 的知识库（memory.go），"" 是共用的
-	agentSkills   map[string]*skills.Registry // 每个 agent 自己的技能目录
-	dreams        map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
-	bootAt        time.Time                   // 网关启动的时间（算“空闲多久”的起点）
-	lifes         map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
-	rnd           func() float64              // 随机数，测试里换成固定的
-	approvals     map[int]*approval
-	nextAppr      int
-	runSeq        uint64
+	mu             sync.Mutex
+	groupNoticed   map[string]bool     // 已经提醒过“只支持私聊”的群
+	hostWaits      map[string]hostWait // 等内核回复的列目录、代执行请求（kernelhost.go）
+	hostSeq        int
+	skills         *skills.Registry // 技能（放在网关上）
+	managedKernel  string           // 网关自己启动的本机内核的名字（localkernel.go）
+	models         *models.Store    // 可以用的模型（models.go），nil 时都用 llm
+	newClient      func(config.LLM) (llm.Client, error)
+	clients        map[string]modelClient
+	media          *media.Store               // 用户发来的图片（data/uploads），nil 时不接图片
+	chans          map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
+	outboxes       map[string]chan outItem
+	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
+	wss            []Workspace       // 工作目录列表（workspaces.go）
+	hosts          Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
+	nodes          map[string]*node  // 在线的内核（nodes.go）
+	localNode      string            // 最近一个和网关在同一台机器上的内核
+	nodeSeq        int
+	totals         Totals
+	sessions       map[string]*sess
+	mems           map[string]*knowledge.Store // 每个 agent 的知识库（memory.go），"" 是共用的
+	agentSkills    map[string]*skills.Registry // 每个 agent 自己的技能目录
+	dreams         map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
+	bootAt         time.Time                   // 网关启动的时间（算“空闲多久”的起点）
+	lifes          map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
+	minds          map[string]*autonomy.State  // 自主活动的心智状态（autonomy.go，data/autonomy.json）
+	mindsLoaded    bool
+	mindsRecovered map[string]bool            // 这次进程启动已经做过重启恢复的 agent（不能持久化：每次重启都要检查）
+	desktopGates   map[string]chan struct{}   // 同一台桌面上的桌面工具调用串行（computer use）
+	desktopUsed    map[string]map[string]bool // 哪些会话用过哪个桌面 MCP 服务（结束时清理 Driver session）
+	deskMu         sync.Mutex                 // 上面两张表单独的锁：结束 Driver session 时可能正拿着总锁
+	mcpRef         atomic.Pointer[mcp.Manager]
+	mcpStoreRef    atomic.Pointer[mcp.Store]
+	rnd            func() float64 // 随机数，测试里换成固定的
+	approvals      map[int]*approval
+	nextAppr       int
+	runSeq         uint64
 }
 
 type sess struct {
@@ -199,6 +209,9 @@ type sess struct {
 	groupThoughts  []time.Time // 最近一小时判断了几次
 	groupSilent    int         // 自己凑上来、又决定不说话的连续次数（退避用）
 	groupPending   int         // 上一轮之后进来的新消息条数
+
+	// mind 是这一轮如果属于自主活动：结束时把真实结果写回哪个议程 / 意图（autonomy.go）
+	mind *mindRun
 }
 
 // queued 是排队等处理的一条消息。trigger 是群聊里“该你说话了”的触发：
@@ -322,16 +335,20 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a := &App{
 		ctx: ctx, cfg: cfg, llm: client, store: store, persona: p, log: log,
 		now: time.Now, loc: loc, bus: events.NewBus(), started: time.Now(),
-		chans:        map[string]channel.Channel{},
-		groupNoticed: map[string]bool{},
-		hostWaits:    map[string]hostWait{},
-		clients:      map[string]modelClient{},
-		skills:       skills.New(cfg.Skills.Dir),
-		outboxes:     map[string]chan outItem{},
-		sessions:     map[string]*sess{},
-		roomRuns:     map[string]*roomRun{},
-		approvals:    map[int]*approval{},
-		nodes:        map[string]*node{},
+		chans:          map[string]channel.Channel{},
+		groupNoticed:   map[string]bool{},
+		hostWaits:      map[string]hostWait{},
+		clients:        map[string]modelClient{},
+		skills:         skills.New(cfg.Skills.Dir),
+		outboxes:       map[string]chan outItem{},
+		sessions:       map[string]*sess{},
+		roomRuns:       map[string]*roomRun{},
+		approvals:      map[int]*approval{},
+		nodes:          map[string]*node{},
+		minds:          map[string]*autonomy.State{},
+		mindsRecovered: map[string]bool{},
+		desktopGates:   map[string]chan struct{}{},
+		desktopUsed:    map[string]map[string]bool{},
 	}
 	a.migrate()
 	a.loadEndpoints()
@@ -357,6 +374,8 @@ func (a *App) SetMCP(store *mcp.Store, m *mcp.Manager) {
 	a.mu.Lock()
 	a.mcpStore, a.mcp = store, m
 	a.mu.Unlock()
+	a.mcpRef.Store(m)
+	a.mcpStoreRef.Store(store)
 	if m != nil {
 		m.OnChange(func() { a.publish(events.Event{T: "mcp"}) }) // 网页刷新在线状态
 		m.Warm(20 * time.Second)                                 // 启动时后台连一遍，工具定义那边只读缓存
@@ -484,6 +503,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "state":
 		a.cmdState(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who})
+		return
+	case "autonomy":
+		a.cmdAutonomy(in{s: a.sessOf(a.boundSession(ep, m)), ep: ep, who: who}, arg)
 		return
 	case "whoami":
 		sid := a.boundSession(ep, m)
@@ -651,6 +673,12 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	if m.Text == "" && len(m.Images) == 0 {
 		return
 	}
+	heard := m.Text
+	if heard == "" {
+		heard = fmt.Sprintf("（发来 %d 张图片）", len(m.Images))
+	}
+	// 心跳状态：拟人型的每次聊天都记一条事件（同一个会话合并），不每条都唤醒模型
+	a.mindHeard(c.s.sid, who, m.SenderName, heard)
 	s := c.s
 	s.lastActivity = a.now()
 	s.idleCompacted = false
@@ -877,6 +905,11 @@ func (a *App) startRun(s *sess) {
 		content = note + "\n" + content
 		st.EnvNote, dirty = note, true
 	}
+	// 会话换过 agent：下一条用户消息前给新 agent 一次交接说明（像环境说明，不改系统提示词，前缀缓存不失效）
+	if !head.inner && !head.trigger && st.Handoff != "" {
+		content = st.Handoff + "\n" + content
+		st.Handoff, dirty = "", true
+	}
 	if dirty {
 		if err := a.store.SaveSettings(s.sid, st); err != nil {
 			a.log.Warn("保存会话设置失败", "sid", s.sid, "err", err)
@@ -1019,6 +1052,14 @@ func (a *App) endRun(s *sess, note string) {
 	r := s.run
 	if r == nil {
 		return
+	}
+	// 自主活动的一轮没有正常收尾（内核断线等）：记成没做成，稍后重新确认，不能当成正常休息
+	if r.inner && s.mind != nil {
+		why := note
+		if why == "" {
+			why = "这一轮被中止，结果未知"
+		}
+		a.mindAborted(s, r, why)
 	}
 	if r.cancelLLM != nil {
 		r.cancelLLM()
@@ -1191,7 +1232,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
 		if !a.seeImage(s, m) {
 			// MCP 工具返回的图片：模型支持看图时一起发过去
-			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content,
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Agent: a.execAgentID(s.sid),
 				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID]}); err != nil {
 				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 			}
@@ -1394,8 +1435,10 @@ func (a *App) generateModel(s *sess) {
 	if r.withImages {
 		images = a.imageLoader()
 	}
+	// 桌面任务会连续截很多图：模型请求里只保留最近两张，旧的换成一句说明（历史原样留着）
+	hist := trimToolImages(a.store.EffectiveHistory(s.sid), 2)
 	req := llm.Request{
-		Messages: session.BuildMessages(system, st.Summary, a.store.EffectiveHistory(s.sid), a.cfg.LLM.SendReasoning, images),
+		Messages: session.BuildMessages(system, st.Summary, hist, a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
 	if r.proactive {
@@ -1491,7 +1534,7 @@ func (a *App) generateModel(s *sess) {
 			"completion_tokens", u.CompletionTokens, "reasoning_tokens", u.ReasoningTokens,
 			"took", time.Since(start).Round(time.Millisecond))
 		if err := a.store.Append(s.sid, session.Msg{Role: "assistant", Content: res.Content, ToolCalls: res.Calls,
-			Reasoning: res.Reasoning, Usage: &u}); err != nil {
+			Reasoning: res.Reasoning, Usage: &u, Agent: a.execAgentID(s.sid)}); err != nil {
 			a.log.Warn("保存模型回复失败", "sid", s.sid, "err", err)
 		}
 		turn := proto.Msg{T: proto.TTurn, SID: s.sid}

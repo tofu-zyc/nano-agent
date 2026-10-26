@@ -6,6 +6,7 @@
   import type { EndpointInfo, SessionInfo } from '../../lib/types';
   import WorkspacePicker from '../WorkspacePicker.svelte';
   import Icon from '../Icon.svelte';
+  import AgentSwitcher from '../AgentSwitcher.svelte';
 
   let { sid }: { sid: string } = $props();
   // agent 自己的会话（拟人型的内心活动、整理记忆）：只能看，工作目录、权限这些对它没意义
@@ -126,13 +127,19 @@
       <div class="p-warn">这是在群聊里的会话：每条群消息都记进历史，被 @ 或叫到名字才回；群里安静够了、额度也够时可以插一句。默认不挂工作目录，工具只有群聊白名单里的。</div>
     {/if}
 
-    <h5 class="p-h">属于哪个 agent <span class="muted p-small">换 agent 就是换个机器人聊</span></h5>
+    <h5 class="p-h">对话 agent <span class="muted p-small">保留聊天记录，下一条消息由新 agent 回复</span></h5>
     <div class="p-card">
       <div class="p-row">
-        <span class="p-grow">{store.agent(sess.agent)?.emoji} {store.agent(sess.agent)?.name ?? sess.agent}</span>
+        <AgentSwitcher {sid} />
         <button class="btn sm" onclick={() => store.open({ type: 'agent', id: sess.agent })}>去它的节点</button>
       </div>
-      <p class="p-note p-small">人格、模型、每条消息的上限都用这个 agent 的；会话里单独设过的优先。</p>
+      <p class="p-note p-small">
+        换过去以后，人格、模型、工具、每条消息的上限、记忆和「在做什么」都按新 agent 算；这个会话里单独设过的人格、模型和思考强度仍然优先。
+        会话 ID、历史、接入窗口和各处设置都不变。正在处理、排队或整理上下文时不能切换。
+      </p>
+      {#if sess.route_agent !== sess.agent}
+        <p class="p-note p-small">会话 ID 的路由前缀仍属于 <code>{sess.route_agent}</code>：机器人窗口、主会话和内部会话的接线不跟着切换变。</p>
+      {/if}
     </div>
 
     <h5 class="p-h">接入的窗口 <span class="muted p-small">在哪个窗口说话都是同一段上下文</span></h5>

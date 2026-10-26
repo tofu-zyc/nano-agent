@@ -20,10 +20,12 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 // SetAgents 接上 agent 列表、机器人列表和 agents 目录。
@@ -48,15 +50,10 @@ func (a *App) AgentRoot() string {
 	return a.agentRoot
 }
 
-// agentOf 是会话所属的 agent，找不到时是默认 agent。调用方持有锁。
+// agentOf 是会话当前的执行 agent（人格、模型、工具、限制、记忆都按它算），找不到时是默认 agent。
+// 身份解析在 identity.go：显式选择的 agent 优先，内部会话按 ID 前缀固定。调用方持有锁。
 func (a *App) agentOf(sid string) agents.Agent {
-	id := agents.SessionAgent(sid)
-	if a.agentStore != nil {
-		if ag, ok := a.agentStore.Get(id); ok {
-			return ag
-		}
-	}
-	return agents.Agent{ID: id, Name: id}
+	return a.execAgent(sid)
 }
 
 // agentByID 按 ID 找 agent。调用方持有锁。
@@ -272,8 +269,9 @@ type AgentInfo struct {
 	Settings       []AgentSetting `json:"settings"`
 	Style          string         `json:"style"` // tool | life
 	Memory         MemoryBrief    `json:"memory"`
-	Life           *LifeBrief     `json:"life,omitempty"` // 拟人型的内心活动状态
-	Doing          Doing          `json:"doing"`          // 现在在干嘛（doing.go）
+	Life           *LifeBrief     `json:"life,omitempty"`     // 拟人型的内心活动状态
+	Autonomy       *autonomy.View `json:"autonomy,omitempty"` // 自主活动：日程、目标、想法、执行记录（autonomy.go）
+	Doing          Doing          `json:"doing"`              // 现在在干嘛（doing.go）
 }
 
 // MemoryBrief 是 agent 长期记忆的概况：多少条、多少人、上次整理。
@@ -527,6 +525,7 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 	if ag.Life() {
 		info.Style = agents.StyleLife
 		info.Life = a.lifeBrief(ag)
+		info.Autonomy = a.autonomyView(ag)
 	}
 	info.Doing = a.agentDoing(ag, "")
 	if a.agentRoot != "" {
@@ -540,7 +539,8 @@ func (a *App) agentInfo(ag agents.Agent) AgentInfo {
 	}
 	info.ToolsAvailable = a.toolNames()
 	for _, sid := range a.sessionIDs() {
-		if agents.SessionAgent(sid) != ag.ID || isInnerSID(sid) || isRoomMemberSID(sid) {
+		// 按当前的执行身份算（会话可以切给别的 agent），内部会话不算
+		if a.execAgentID(sid) != ag.ID || isInnerSID(sid) || isRoomMemberSID(sid) {
 			continue
 		}
 		info.Sessions++
@@ -583,6 +583,8 @@ func (a *App) toolNames() []string {
 	add("Schedule")
 	add(knowledgeLabel)
 	add("FollowUp")
+	add("Agenda")
+	add("Idea")
 	add("SendFile")
 	for _, spec := range a.searchTools() {
 		add(spec.Name)
@@ -866,6 +868,9 @@ func (a *App) UpdateAgent(id string, p AgentPatch) (AgentInfo, error) {
 }
 
 // DeleteAgent 删除一个 agent。默认 agent 不能删；还有机器人绑着它时要先换绑。
+//
+// 显式选了它的会话（包括主会话）交给默认 agent，保留 ID、历史和窗口接线；有会话正在运行时先拒绝，
+// 避免删到一半。内部会话（内心活动、定时任务、房间成员）身份固定，不转交（随 agent 消失）。
 func (a *App) DeleteAgent(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -875,7 +880,35 @@ func (a *App) DeleteAgent(id string) error {
 	if id == agents.DefaultID {
 		return errors.New("默认 agent 不能删除")
 	}
-	// 机器人不能没有 agent：删的时候把它们交给默认 agent，不然用户得先一个个换绑
+	oldAg, ok := a.agentStore.Get(id)
+	if !ok {
+		return errors.New("没有这个 agent")
+	}
+	def, ok := a.agentByID(agents.DefaultID)
+	if !ok {
+		return errors.New("默认 agent 不见了，不能删除")
+	}
+	// 第一步：把会转交的会话都找出来并检查，确认能写再动任何东西
+	type takeover struct {
+		sid string
+		st  session.Settings
+	}
+	var takes []takeover
+	var busy []string
+	for _, sid := range a.sessionIDs() {
+		if fixedAgentSID(sid) || a.store.Settings(sid).Agent != id {
+			continue
+		}
+		if s := a.sessions[sid]; s != nil && (s.run != nil || len(s.queue) > 0 || s.compacting) {
+			busy = append(busy, a.sessionInfo(sid).Title)
+			continue
+		}
+		takes = append(takes, takeover{sid: sid, st: a.store.Settings(sid)})
+	}
+	if len(busy) > 0 {
+		return fmt.Errorf("这些会话正在用「%s」，先等它们处理完再删除：%s", oldAg.Name, strings.Join(busy, "、"))
+	}
+	// 第二步：机器人不能没有 agent，交给默认 agent，不然用户得先一个个换绑
 	if a.botStore != nil {
 		for _, b := range a.botStore.OfAgent(id) {
 			if err := a.botStore.Bind(b.ID, agents.DefaultID); err != nil {
@@ -884,12 +917,31 @@ func (a *App) DeleteAgent(id string) error {
 			a.log.Info("agent 删掉了，机器人交给默认 agent", "bot", b.ID, "agent", agents.DefaultID)
 		}
 	}
-	// 群里的成员/禁言名单也去掉它，免得群面板里人数对不上
+	// 第三步：会话交给默认 agent。先写全部会话设置，任何一条失败就停在这里（agent 还没删，可以重试）
+	for _, t := range takes {
+		st := t.st
+		position := st.Base + len(a.store.History(t.sid))
+		a.recordAgentSwitch(t.sid, &st, oldAg, def, position)
+		if err := a.store.SaveSettings(t.sid, st); err != nil {
+			return fmt.Errorf("把会话「%s」交给默认 agent 失败：%w", a.sessionInfo(t.sid).Title, err)
+		}
+	}
+	// 第四步：清掉旧 agent 留下的主动状态，再删 agent 和房间成员
+	for _, t := range takes {
+		a.clearAgentBoundState(t.sid, id)
+		a.endDesktopSession(t.sid)
+		a.publishSession(t.sid)
+	}
 	a.dropAgentFromRooms(id)
 	if err := a.agentStore.Delete(id); err != nil {
 		return err
 	}
-	a.log.Info("删除 agent", "id", id)
+	// 心智状态跟着删掉（历史文件留着，重新建同 ID 的 agent 从空白开始）
+	if a.minds != nil {
+		delete(a.minds, id)
+		a.saveMinds()
+	}
+	a.log.Info("删除 agent", "id", id, "sessions_taken_over", len(takes))
 	a.publishAgents()
 	return nil
 }
@@ -1027,7 +1079,7 @@ func (a *App) cmdAgent(c in) {
 	if bot, ok := a.botForChannel(c.ep.ch); ok {
 		b.WriteString("\n这个窗口的机器人：" + bot.Name + "（" + agents.ChannelName(bot) + "）")
 	}
-	b.WriteString("\n换 agent 就是换个机器人聊。管理员可以在网页拓扑图的 Agent 列里新建 agent、改人格、给它们绑机器人。")
+	b.WriteString("\n想看别的 agent？管理员可以在网页聊天顶部或会话设置里直接切换这个会话的执行 agent（聊天记录、窗口接线都保留，下一条消息按新 agent 的人格、模型和工具来）。想长期用不同身份，就在网页拓扑图的 Agent 列里新建 agent、改人格、给它们绑机器人。")
 	a.answer(c, b.String())
 }
 
