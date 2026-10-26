@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 // MCP 的 RPC 成功和动作效果已确认是两件事；明确的否定不能充当完成证据。
@@ -124,6 +126,51 @@ func taskEvidence(name string) bool {
 	return name != ""
 }
 
+// evidenceHistory 只在模型请求视图里标出可引用的凭据。兼容接口不一定把
+// tool_call_id 元数据展示给模型，不能让它猜 ID；原始历史和工具输出保持原样。
+func evidenceHistory(r *run, history []session.Msg) []session.Msg {
+	if r == nil || len(r.toolEvidence) == 0 {
+		return history
+	}
+	view := append([]session.Msg(nil), history...)
+	seen := map[string]bool{}
+	for i := len(view) - 1; i >= 0; i-- {
+		m := &view[i]
+		if m.Role == "user" {
+			break // 上一轮的回执不是本轮凭据
+		}
+		if m.Role != "tool" || seen[m.ToolCallID] {
+			continue
+		}
+		seen[m.ToolCallID] = true
+		e, ok := r.toolEvidence[m.ToolCallID]
+		if !ok || !e.OK || !e.Verified || !taskEvidence(e.Name) {
+			continue
+		}
+		receipt, _ := json.Marshal(map[string]string{"id": e.ID, "tool": e.Name})
+		m.Content = "[本轮验收凭据] " + string(receipt) + "\n" + m.Content
+	}
+	return view
+}
+
+func availableTaskEvidence(r *run) string {
+	if r == nil {
+		return ""
+	}
+	var rows []string
+	for id, e := range r.toolEvidence {
+		if e.OK && e.Verified && taskEvidence(e.Name) {
+			row, _ := json.Marshal(map[string]string{"id": id, "tool": e.Name})
+			rows = append(rows, string(row))
+		}
+	}
+	sort.Strings(rows)
+	if len(rows) > 32 {
+		rows = rows[:32]
+	}
+	return strings.Join(rows, "\n")
+}
+
 // stageAgendaCompletion 把模型的验收声明绑定到本轮真实且成功的工具结果。
 // 中断、超时、预算耗尽均不提交；手动网页验收仍由管理员显式确认。
 func (a *App) stageAgendaCompletion(sid, id, note string, ids []string) error {
@@ -137,12 +184,12 @@ func (a *App) stageAgendaCompletion(sid, id, note string, ids []string) error {
 	}
 	s := a.sessions[sid]
 	if s == nil || s.run == nil || len(ids) == 0 {
-		return errors.New("验收需要 evidence：引用本轮真实成功的操作或观察的工具调用 ID")
+		return errors.New("验收需要 evidence：复制工具结果开头 [本轮验收凭据] 的 id；也可用 Agenda list 查看本轮可用凭据")
 	}
 	for _, id := range ids {
 		e, ok := s.run.toolEvidence[id]
 		if !ok || !e.OK || !e.Verified || !taskEvidence(e.Name) {
-			return fmt.Errorf("%s 不是本轮已成功的实际操作或观察，不能用作验收证据", id)
+			return fmt.Errorf("%s 不是本轮已成功的实际操作或观察，不能用作验收证据；请复制工具结果开头 [本轮验收凭据] 的 id，或用 Agenda list 查看本轮可用凭据", id)
 		}
 	}
 	if s.run.agendaDone == nil {

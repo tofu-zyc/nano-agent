@@ -10,6 +10,7 @@ import (
 
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 func TestLifeExecutionToolsAndCreatorScope(t *testing.T) {
@@ -85,6 +86,10 @@ func TestAgendaEvidenceAndInterruptedCommit(t *testing.T) {
 	if err := e.a.stageAgendaCompletion(mainSID, item.ID, "读取到正确的内容", []string{"good"}); err != nil {
 		t.Fatal(err)
 	}
+	listing, err := e.a.agendaCall(mainSID, []byte(`{"action":"list"}`))
+	if err != nil || !strings.Contains(listing, `"id":"good"`) || strings.Contains(listing, `"id":"bad"`) || strings.Contains(listing, `"id":"unknown-effect"`) || strings.Contains(listing, `"id":"plan"`) {
+		t.Fatalf("查询凭据应只返回本轮已确认的真实操作: %s, %v", listing, err)
+	}
 	e.a.commitAgendaResults(s, r, proto.StatusCancelled)
 	st := e.a.mind("default")
 	if got, _ := st.AgendaByID(item.ID); got.Status == autonomy.StatusDone {
@@ -93,6 +98,64 @@ func TestAgendaEvidenceAndInterruptedCommit(t *testing.T) {
 	e.a.commitAgendaResults(s, r, proto.StatusOK)
 	if got, _ := st.AgendaByID(item.ID); got.Status != autonomy.StatusDone {
 		t.Fatalf("真实成功证据应可验收: %+v", got)
+	}
+}
+
+func TestAgendaReceiptsReachModelWithoutChangingHistory(t *testing.T) {
+	for _, verified := range []bool{true, false} {
+		t.Run(fmt.Sprint(verified), func(t *testing.T) {
+			e := setup(t)
+			store, _ := withAgents(t, e)
+			makeLife(t, e, store, nil)
+			e.say(`!call echo {"a":1}`)
+			e.k.expect(proto.TInput)
+			e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
+			turn := e.k.expect(proto.TTurn)
+			id := turn.Calls[0].ID
+			if !verified {
+				e.a.mu.Lock()
+				e.a.sessions[e.sid].run.unverifiedTools = map[string]bool{id: true}
+				e.a.mu.Unlock()
+			}
+			e.k.send(proto.Msg{T: proto.TResult, SID: e.sid, ID: id, OK: proto.Bool(true), Content: "真实应用输出"})
+			e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
+			e.k.expect(proto.TTurn)
+			messages := e.llm.lastReq().Messages
+			last := messages[len(messages)-1]
+			if strings.Contains(last.Content, "[本轮验收凭据]") != verified || (verified && !strings.Contains(last.Content, `"id":"`+id+`"`)) {
+				t.Fatalf("模型无法准确复制有效凭据，或拿到了未验证凭据: %+v", last)
+			}
+			history := e.a.store.History(e.sid)
+			found := false
+			for _, message := range history {
+				if message.Role == "tool" && message.ToolCallID == id {
+					found = true
+					if message.Content != "真实应用输出" {
+						t.Fatalf("请求视图修改了原始输出: %+v", message)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("没有保存原始工具结果")
+			}
+			e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
+			waitIdle(t, e, e.sid)
+		})
+	}
+}
+
+func TestReceiptsDoNotReusePreviousTurnOrDuplicateIDs(t *testing.T) {
+	r := &run{toolEvidence: map[string]autonomy.ToolEvidence{"same": {ID: "same", Name: "Read", OK: true, Verified: true}}}
+	history := []session.Msg{{Role: "tool", ToolCallID: "same", Content: "上一轮"}, {Role: "user", Content: "新一轮"},
+		{Role: "tool", ToolCallID: "same", Content: "本轮旧结果"}, {Role: "tool", ToolCallID: "same", Content: "本轮最新结果"}}
+	view := evidenceHistory(r, history)
+	for i := 0; i < 3; i++ {
+		if view[i].Content != history[i].Content {
+			t.Fatalf("旧结果不应带本次凭据: %v", view)
+		}
+	}
+	if !strings.Contains(view[3].Content, "[本轮验收凭据]") {
+		t.Fatal("最新真实结果应可引用")
 	}
 }
 

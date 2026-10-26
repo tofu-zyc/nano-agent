@@ -5,6 +5,7 @@
 可在 Linux 目标机上用 --gateway/--kernel/--executor 指定待验证的程序。
 """
 import argparse
+import base64
 import http.cookiejar
 import http.server
 import json
@@ -75,10 +76,10 @@ class Model(http.server.BaseHTTPRequestHandler):
                 result = next(m['content'] for m in reversed(later) if m.get('tool_call_id') == last['id'])
                 data, _ = json.JSONDecoder().raw_decode(result.split('[结构化结果]', 1)[1].lstrip())
                 if 'desktop__set_value' not in names:
-                    element = next(e for e in data['elements'] if e['role'] in ('text box', 'entry', 'text'))
+                    element = next(e for e in data['elements'] if e['role'].casefold() in ('text box', 'entry', 'edit', 'text'))
                     name, args = 'desktop__set_value', dict(target, element_token=element['element_token'], value='中文验证：你好 nano 42', delivery_mode='foreground')
                 else:
-                    element = next(e for e in data['elements'] if e['role'] == 'button' and '确定' in e.get('label', ''))
+                    element = next(e for e in data['elements'] if e['role'].casefold() == 'button' and '确定' in e.get('label', ''))
                     name, args = 'desktop__click', dict(target, element_token=element['element_token'])
             elif name == 'desktop__click':
                 name, args = 'Read', {'path': str(output)}
@@ -126,16 +127,24 @@ class Model(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    def interrupted(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     source = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gateway", type=Path, default=source / "gateway/nano-gateway")
     parser.add_argument("--kernel", type=Path, default=source / "kernel/nano-kernel")
     parser.add_argument("--executor", type=Path, default=source / "kernel/nano-exec")
+    parser.add_argument("--kernel-listen", help="测试内核监听地址；远端内核可经 SSH 转发连接")
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--desktop-driver", type=Path)
+    parser.add_argument("--desktop-driver", help="Driver 在目标机器上的绝对路径")
+    parser.add_argument("--desktop-machine", help="远端桌面所在的测试内核节点名")
+    parser.add_argument("--desktop-workspace", help="远端桌面夹具输出所在的工作目录")
+    parser.add_argument("--desktop-driver-arg", action="append", default=[], help="mcp 后附加的 Driver 参数")
     parser.add_argument("--desktop-pid", type=int)
     parser.add_argument("--desktop-window", type=int)
-    parser.add_argument("--desktop-output", type=Path)
+    parser.add_argument("--desktop-output")
     opts = parser.parse_args()
     if opts.report:
         opts.report.parent.mkdir(parents=True, exist_ok=True)
@@ -150,14 +159,17 @@ def main():
     if opts.desktop_driver:
         if not all((opts.desktop_pid, opts.desktop_window, opts.desktop_output)):
             parser.error('--desktop-driver 需要 --desktop-pid/--desktop-window/--desktop-output')
+        if opts.desktop_machine and not opts.desktop_workspace:
+            parser.error('--desktop-machine 需要 --desktop-workspace')
         Model.desktop = (opts.desktop_pid, opts.desktop_window, opts.desktop_output)
     model = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Model)
     threading.Thread(target=model.serve_forever, daemon=True).start()
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     config = nano / "gateway.toml"
+    kernel_listen = opts.kernel_listen or f"unix:{root}/kernel.sock"
     config.write_text(f'''[kernel]
-listen = "unix:{root}/kernel.sock"
+listen = {json.dumps(kernel_listen)}
 token = "isolated-e2e"
 [web]
 listen = "127.0.0.1:{port}"
@@ -240,20 +252,33 @@ mode = "ask"
         ws = api("/api/workspaces", {"host": "本机", "path": str(work)})
         api("/api/sessions/main", {"workspaces": [ws["id"]], "mode": "ask"}, "PATCH")
         if opts.desktop_driver:
-            api('/api/mcp', {'items': [{'name': 'desktop', 'command': str(opts.desktop_driver.resolve()), 'args': ['mcp'],
+            if opts.desktop_machine:
+                wait(lambda: any(k.get('node') == opts.desktop_machine for k in api('/api/overview').get('kernels', [])), '远端测试内核连接', timeout=45)
+                ws = api('/api/workspaces', {'host': opts.desktop_machine, 'path': opts.desktop_workspace})
+                api('/api/sessions/main', {'workspaces': [ws['id']], 'mode': 'ask'}, 'PATCH')
+            command = opts.desktop_driver if opts.desktop_machine else str(Path(opts.desktop_driver).resolve())
+            api('/api/mcp', {'items': [{'name': 'desktop', 'machine': opts.desktop_machine or '',
+                                      'command': command, 'args': ['mcp'] + opts.desktop_driver_arg,
                                       'enabled': True, 'approval': 'per_turn'}]})
             connected = api('/api/mcp/test', {'name': 'desktop'})
             assert not connected.get('error'), connected
             api('/api/chat', {'sid': 'main', 'text': 'autonomy-e2e-desktop'})
             view = wait(lambda: (v if (v := mind()).get('executions') and v['executions'][0].get('verified') else None), '自主桌面操作闭环', timeout=45)
-            assert opts.desktop_output.read_text().strip() == '中文验证：你好 nano 42'
+            if not opts.desktop_machine:
+                assert Path(opts.desktop_output).read_text().strip() == '中文验证：你好 nano 42'
             offered = [t['function']['name'] for r in Model.requests for t in r.get('tools', [])]
             assert 'desktop__set_value' in offered and 'desktop__click' in offered
             assert Model.image_requests > 0, '截图没有以多模态消息送到模型接口'
             report = {'ok': True, 'checks': ['真实网关与 C 内核到点启动自主活动，经 MCP 观察/截图/完整中英文输入/点击，读取应用输出并验收'],
-                      'image_requests': Model.image_requests, 'directory': str(root)}
+                      'image_requests': Model.image_requests, 'directory': str(root),
+                      'desktop_machine': opts.desktop_machine or '本机',
+                      'execution': view['executions'][0]}
             if opts.report:
                 opts.report.parent.mkdir(parents=True, exist_ok=True)
+                picture = next(p['image_url']['url'] for r in Model.requests for m in r['messages']
+                               if isinstance(m.get('content'), list) for p in m['content'] if p.get('type') == 'image_url')
+                assert picture.startswith('data:image/'), '模型没有收到内嵌截图'
+                opts.report.with_suffix('.png').write_bytes(base64.b64decode(picture.split(',', 1)[1], validate=True))
                 opts.report.write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print('ok', report['checks'][0], flush=True)
             return

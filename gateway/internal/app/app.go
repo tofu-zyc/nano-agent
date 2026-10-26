@@ -1447,6 +1447,12 @@ func (a *App) generateModel(s *sess) {
 	}
 	// 桌面任务会连续截很多图：模型请求里只保留最近两张，旧的换成一句说明（历史原样留着）
 	hist := trimToolImages(a.store.EffectiveHistory(s.sid), 2)
+	for _, tool := range snapshotTools {
+		if tool.Function.Name == "Agenda" {
+			hist = evidenceHistory(r, hist)
+			break
+		}
+	}
 	req := llm.Request{
 		Messages: session.BuildMessages(system, st.Summary, hist, a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),

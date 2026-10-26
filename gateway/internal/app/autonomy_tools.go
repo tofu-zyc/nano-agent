@@ -25,7 +25,7 @@ const agendaSchema = `{"type":"object","properties":{
  "note":{"type":"string","description":"到时要想起的事；done 时写真实结果（做了什么、看到了什么）"},
  "criteria":{"type":"string","description":"add：做到什么、如何检查才算完成"},
  "checkpoint":{"type":"string","description":"progress：已经做到哪、下一步做什么、哪些操作结果未知而不能重放"},
- "evidence":{"type":"array","items":{"type":"string"},"description":"done 必填：本轮已成功的实际操作或观察的工具调用 ID；查询日程/想法/心智不能作证据"},
+ "evidence":{"type":"array","items":{"type":"string"},"description":"done 必填：从工具结果开头 [本轮验收凭据] 复制 id 字符串（也可用 list 查），不是工具名、描述或结果文字；查询日程/想法/心智不能作证据"},
  "movable":{"type":"boolean","description":"探索可以挪动，约定默认不挪"},
  "intention":{"type":"string","description":"推进哪个目标（意图 ID，可省略）"}
 },"required":["action"]}`
@@ -127,6 +127,11 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 			b.WriteString("在推进的目标：\n")
 			for _, in := range intents {
 				fmt.Fprintf(&b, "- %s（%s，进度 %d，%s）\n", in.Title, autonomy.StatusLabel(in.State), in.Progress, in.ID)
+			}
+		}
+		if s := a.sessions[sid]; s != nil {
+			if receipts := availableTaskEvidence(s.run); receipts != "" {
+				fmt.Fprintf(&b, "本轮可用验收凭据（evidence 复制 id；仍需按完成条件核对结果）：\n%s\n", receipts)
 			}
 		}
 		return strings.TrimSpace(b.String()), nil
