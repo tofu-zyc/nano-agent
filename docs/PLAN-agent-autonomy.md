@@ -1,6 +1,6 @@
 # 拟人 agent 自主活动重设计：调研与实施建议
 
-## 主线闭环补全（2026-10-26，codex/autonomous-execution，未发布）
+## 主线闭环补全（2026-10-26，v0.8.0）
 
 - `life` 使用同一套文件、Shell、Skill、MCP 和桌面工具，沿用 agent 工具范围；日程保存创建时的工作目录、权限上限和验收条件。访客不再获得 Agenda / Idea / Mind，也不能伪造执行调用。
 - `Agenda progress` 保存检查点；`done` 必须引用本轮实际成功的操作/观察回执，先暂存，正常结束才提交。记录 `Execution.verified` 和证据；元操作、失败、明确 `effect:unverifiable` / `verified:false` 均不能验收。重复使用调用 ID 会使旧证据失效。
