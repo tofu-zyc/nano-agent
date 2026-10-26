@@ -16,6 +16,14 @@ type Prefix struct {
 	Ver    int        `json:"ver,omitempty"`  // 网关给的工具变了（升级加了新工具）时加一，旧快照作废一次
 	Perm   string     `json:"perm,omitempty"` // 权限信号（管理员/访客、有没有工具、哪台内核、内核在不在）：变了就换工具快照
 }
+
+// AgentSegment 是会话交给某个 agent 的一段：Position 是这一段开始的消息位置（绝对位置，含已经被整理掉的）。
+type AgentSegment struct {
+	Agent    string `json:"agent"`
+	At       int64  `json:"at,omitempty"`
+	Position int    `json:"position"`
+}
+
 type Settings struct {
 	Prefix  *Prefix        `json:"prefix,omitempty"`
 	Omitted map[int]string `json:"omitted,omitempty"`
@@ -37,8 +45,18 @@ type Settings struct {
 	Thinking string `json:"thinking,omitempty"` // 思考强度，空表示用模型的默认值
 	Model    string `json:"model,omitempty"`    // 用哪个模型（models 包里的 ID），空表示用默认模型
 	Title    string `json:"title,omitempty"`    // 会话的名字，网页里显示
-	Group    bool   `json:"group,omitempty"`    // 这是某个群聊里的会话：不挂工作目录、只发正文、用群聊的工具
-	Web      bool   `json:"web,omitempty"`      // 网页接着这个会话：在网页里新建的，或者在网页里说过话
+
+	// Agent 是这个会话当前用哪个 agent 的人格、模型、工具和限制（网页里切换）。
+	// 空表示按会话 ID 的前缀推断（@<agent>/… 属于那个 agent，其他属于默认 agent）——旧数据不用迁移。
+	// 注意：它只决定“谁来执行”，不改变会话 ID 的路由命名空间（机器人窗口接到哪个会话仍按 ID 前缀）。
+	Agent string `json:"agent,omitempty"`
+	// AgentSegments 记下切换历史：从哪条消息（绝对位置，含被整理的）开始是哪个 agent 在说话。
+	// 消息自己的 Agent 字段优先；没有字段的老消息靠它判断来源（dream 不能把旧 agent 的自述当成新 agent 的亲历）。
+	AgentSegments []AgentSegment `json:"agent_segments,omitempty"`
+	// Handoff 是切换后还没告诉新 agent 的交接说明，下一条用户消息前放一次就清掉（像 EnvNote）。
+	Handoff string `json:"handoff,omitempty"`
+	Group   bool   `json:"group,omitempty"` // 这是某个群聊里的会话：不挂工作目录、只发正文、用群聊的工具
+	Web     bool   `json:"web,omitempty"`   // 网页接着这个会话：在网页里新建的，或者在网页里说过话
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。

@@ -33,6 +33,9 @@ type Msg struct {
 	Reasoning  string             `json:"reasoning,omitempty"`
 	Usage      *llm.Usage         `json:"usage,omitempty"`
 	TS         int64              `json:"ts,omitempty"`
+	// Agent 是产生这条消息的 agent（assistant、tool）。会话中途换过 agent 时，旧消息的来源靠它和后缀
+	// （没有字段的老消息用 Settings.AgentSegments 推断）区分；用户消息没有这个字段。
+	Agent string `json:"agent,omitempty"`
 }
 
 type Store struct {
@@ -214,13 +217,15 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
 		st.EnvNote, st.Base, st.Summary = "", 0, ""
 		st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 		st.Meter = Meter{}
 		st.Prefix = nil
 		st.Omitted = nil
 		st.CompactedAt = 0
+		// 历史清空了：切换边界和交接说明都指向不存在的消息；选的 agent 本身保留
+		st.Handoff, st.AgentSegments = "", nil
 		if err := s.SaveSettings(sid, st); err != nil {
 			return err
 		}

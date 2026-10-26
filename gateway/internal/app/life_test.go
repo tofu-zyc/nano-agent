@@ -68,7 +68,7 @@ func TestLifeWake(t *testing.T) {
 	for _, tl := range tools {
 		names = append(names, tl.Function.Name)
 	}
-	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") || strings.Join(names, ",") != "Knowledge,Message" {
+	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") || strings.Join(names, ",") != "Agenda,Idea,Knowledge,Message" {
 		t.Fatalf("内心活动的提示和工具：%v", names)
 	}
 	e.sid = sid
@@ -76,7 +76,7 @@ func TestLifeWake(t *testing.T) {
 	e.k.expect(proto.TTurn)
 	wake := e.llm.lastReq().Messages
 	note := wake[len(wake)-1].Content
-	if !strings.Contains(note, "你醒着") || !strings.Contains(note, "主人（chat:main）") || !strings.Contains(note, "今天第 1 次醒来，今天还能主动找人 2 次") {
+	if !strings.Contains(note, "自主活动") || !strings.Contains(note, "主人（chat:main）") || !strings.Contains(note, "今天自己醒了 1/8 次") {
 		t.Fatalf("醒来时看到的：%q", note)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
@@ -143,10 +143,11 @@ func TestLifeBlocked(t *testing.T) {
 	noon := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	check(noon, "")
 	check(time.Date(2026, 10, 21, 2, 0, 0, 0, time.UTC), "睡着")
+	// 最近有人找过不再阻止自主活动（旧版的 20 分钟空闲门槛已经取消）
 	e.a.mu.Lock()
 	e.a.sessOf(mainSID).lastActivity = noon.Add(-5 * time.Minute)
 	e.a.mu.Unlock()
-	check(noon, "刚有人找过它")
+	check(noon, "")
 	check(noon.Add(time.Hour), "")
 	ls.Tokens = 1000
 	check(noon.Add(time.Hour), "今天的预算用完了")

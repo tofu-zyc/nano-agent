@@ -38,13 +38,26 @@ type MCPInfo struct {
 	Online    bool     `json:"online"`
 	ToolCount int      `json:"tool_count"`
 	ToolNames []string `json:"tool_names,omitempty"` // 上次列到的工具（服务里的原名，按白名单过滤过）
+
+	// 诊断（v0.7.3）：设备在线不等于桌面可操作，网页上要把这些一起显示
+	MachineOnline bool   `json:"machine_online"`
+	Desktop       bool   `json:"desktop,omitempty"` // 看起来是 Cua Driver 这类桌面驱动（有 session/界面树/输入）
+	DriverVersion string `json:"driver_version,omitempty"`
+	Instructions  string `json:"instructions,omitempty"` // initialize 给的操作说明（截断）
+	LastError     string `json:"last_error,omitempty"`
+	LastErrorAt   int64  `json:"last_error_at,omitempty"`
 }
 
 // MCPInfo 是所有 MCP 服务和它们现在的连接状态。
 func (a *App) MCPInfo() []MCPInfo {
 	a.mu.Lock()
 	store, mgr := a.mcpStore, a.mcp
+	machines := a.machineList()
 	a.mu.Unlock()
+	online := map[string]bool{}
+	for _, m := range machines {
+		online[m.Name] = m.Online
+	}
 	out := []MCPInfo{}
 	if store == nil {
 		return out
@@ -61,12 +74,26 @@ func (a *App) MCPInfo() []MCPInfo {
 			info.EnvKeys = append(info.EnvKeys, k)
 		}
 		sort.Strings(info.EnvKeys)
+		if s.Machine == "" || s.Machine == "gateway" {
+			info.MachineOnline = true
+		} else {
+			info.MachineOnline = online[s.Machine]
+		}
 		if mgr != nil {
 			info.Online, _ = mgr.Status(s.Name)
-			for _, t := range mgr.ServerTools(s.Name) {
+			tools := mgr.ServerTools(s.Name)
+			for _, t := range tools {
 				info.ToolNames = append(info.ToolNames, t.Name)
 			}
 			info.ToolCount = len(info.ToolNames)
+			info.Desktop = isDesktopTools(tools)
+			if info.Desktop {
+				info.DriverVersion = mgr.Version(s.Name)
+				info.Instructions = cutRunes(mgr.Instructions(s.Name), 1200)
+			}
+			if msg, at := mgr.LastError(s.Name); msg != "" {
+				info.LastError, info.LastErrorAt = cutRunes(msg, 300), at.UnixMilli()
+			}
 		}
 		out = append(out, info)
 	}
@@ -287,6 +314,11 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		}
 	}
 	sid, from, id := s.sid, r.from, m.ID
+	// 桌面工具：自动带上这个会话的 Driver session，同一台桌面上串行执行
+	info, desktopArgs, desktop := a.desktopToolInfo(sid, server, tool, args)
+	if desktop {
+		args = desktopArgs
+	}
 	// start 真正发起调用。调用方持有锁：取消函数登记在这一轮上，内核超时或用户停下时
 	// 发来的 exec_cancel 能把它停下来（KernelMsg 的 TExecCancel）
 	start := func() {
@@ -294,7 +326,13 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		r.execs[id] = cancel
 		go func() {
 			defer cancel()
-			res, err := mg.Call(ctx, server, tool, args)
+			var res *sdkmcp.CallToolResult
+			var err error
+			if desktop {
+				res, err = a.desktopCall(ctx, sid, server, info, args)
+			} else {
+				res, err = mg.Call(ctx, server, tool, args)
+			}
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			delete(r.execs, id)
@@ -303,7 +341,7 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 				reply(false, err.Error())
 				return
 			}
-			text := mcp.ResultText(res)
+			text := cutRunes(mcp.ResultText(res), 24000)
 			// 工具返回的图片：存下来附在工具结果上（网页的工具卡片显示）；模型能看图时也交给模型
 			live := s.run == r
 			hidden := false
@@ -319,7 +357,10 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 				}
 				r.sent[id] = append(r.sent[id], att)
 				if r.withImages {
-					r.images[id] = append(r.images[id], att)
+					// 一次工具结果最多带两张图给模型：Driver 的截图很占上下文，需要再看就重新截
+					if len(r.images[id]) < 2 {
+						r.images[id] = append(r.images[id], att)
+					}
 				} else {
 					hidden = true
 				}

@@ -77,7 +77,11 @@ export type MountInfo = { id: string; host: string; path: string; how: 'local' |
 export type EndpointInfo = { key: string; channel: string; name: string; who?: string; admin: boolean; session: string; main: string };
 
 export type SessionInfo = {
-  agent: string; // 这个会话属于哪个 agent
+  agent: string; // 当前执行身份：人格、模型、工具、限制、记忆按它算（可以切换）
+  route_agent: string; // 会话 ID 的命名空间（机器人接线、主会话按它算，不跟着切换变）
+  agent_fixed: boolean; // 身份固定：内心活动、整理记忆、定时任务、房间成员
+  can_switch_agent: boolean; // 现在能不能切换（后端最终校验）
+  switch_blocked?: string; // 不能切换的原因
   group?: boolean; // 群聊里的会话
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
@@ -156,6 +160,13 @@ export type MCPInfo = {
   online: boolean;
   tool_count: number;
   tool_names?: string[]; // 上次列到的工具（服务里的原名）
+  // 诊断（v0.7.3）：设备在线不等于桌面可操作
+  machine_online: boolean;
+  desktop?: boolean; // 看起来是 Cua Driver 这类桌面驱动
+  driver_version?: string;
+  instructions?: string;
+  last_error?: string;
+  last_error_at?: number;
 };
 
 export type Overview = {
@@ -289,7 +300,39 @@ export type AgentInfo = {
   style: 'tool' | 'life'; // 工具型 / 拟人型
   memory: MemoryBrief;
   life?: LifeBrief; // 拟人型的内心活动
+  autonomy?: AutonomyView; // 自主活动：日程、目标、想法、执行记录（v0.7.3）
   doing?: AgentDoing; // 现在在干嘛
+};
+
+// 自主活动的一个议程项（今日计划里的时间块）
+export type AutonomyAgenda = {
+  id: string; title: string; kind: 'commitment' | 'checkup' | 'plan' | 'exploration'; at: number; minutes?: number;
+  movable?: boolean; status: string; source?: string; intention_id?: string; note?: string; result?: string;
+};
+// 一个目标（BDI 的意图）
+export type AutonomyIntention = {
+  id: string; title: string; why?: string; priority?: number; state: string; next_at?: number; blocked?: string;
+  progress: number; attempts?: number; evidence?: string;
+};
+// 一个想法
+export type AutonomyIdea = {
+  id: string; text: string; source: string; interest: number; novelty: number; cost_minutes: number;
+  status: string; defer_until?: number; expires?: number;
+};
+// 一次真实的执行
+export type AutonomyExecution = {
+  id: string; trigger?: string; agenda_id?: string; intention_id?: string; started: number; ended: number;
+  ok: boolean; used_tools: boolean; summary?: string; tokens?: number;
+};
+// 一个 agent 的自主活动概况（网页的 agent 节点）
+export type AutonomyView = {
+  schema_version: number; revision: number; paused: boolean; pause_reason?: string; next_check?: number;
+  budget: { day?: string; tokens: number; limit?: number }; budget_left: number;
+  today_planned: number; today_done: number;
+  agenda: AutonomyAgenda[]; intentions: AutonomyIntention[]; ideas: AutonomyIdea[];
+  executions: AutonomyExecution[];
+  reflections: { at: number; text: string; change?: string }[];
+  beliefs: { subject: string; value: string; source?: string; confidence?: number; at: number }[];
 };
 
 // agent 长期记忆的概况

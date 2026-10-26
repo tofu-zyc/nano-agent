@@ -52,6 +52,38 @@
     store.toast({ kind: 'ok', text: style === 'life' ? '改成拟人型了：它会有自己的作息，醒着时偶尔自己活动' : '改成工具型了：只在有人找它时干活' }, 2600);
   }
 
+  // ---- 自主活动（v0.7.3）：日程、目标、想法 ----
+  const auto = $derived(a?.autonomy);
+  const kindLabel: Record<string, string> = { commitment: '约定', checkup: '复查', plan: '计划', exploration: '探索' };
+  const mindState: Record<string, string> = {
+    accepted: '推进中', running: '正在做', waiting: '等下一步', paused: '暂停', done: '完成', failed: '失败', cancelled: '取消',
+  };
+  async function autonomy(action: string, body: Record<string, unknown> = {}) {
+    busy = true;
+    try {
+      await api.post('/api/agents/' + encodeURIComponent(id) + '/autonomy', { action, ...body });
+      await store.refresh();
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      busy = false;
+    }
+  }
+  async function cancelAgenda(item: string, title: string) {
+    if (!confirm('取消这件事？\n' + title)) return;
+    await autonomy('cancel_agenda', { id: item });
+    store.toast({ kind: 'ok', text: '已取消' }, 1800);
+  }
+  async function dropIdea(item: string, text: string) {
+    if (!confirm('放弃这个想法？\n' + text)) return;
+    await autonomy('drop_idea', { id: item });
+    store.toast({ kind: 'ok', text: '已放弃' }, 1800);
+  }
+  async function deferIdea(item: string) {
+    await autonomy('defer_idea', { id: item, when: '明天 09:00' });
+    store.toast({ kind: 'ok', text: '推迟到明天上午再看' }, 1800);
+  }
+
   async function post(path: string, ok: string) {
     busy = true;
     try {
@@ -188,6 +220,65 @@
             <a class="btn sm" href="#/sessions/{encodeURIComponent(sessionOf('life'))}" onclick={() => (store.inspector = null)}><Icon name="chat" size={13} />看它的内心</a>
           {/if}
         </div>
+      </div>
+    {/if}
+
+    {#if auto}
+      <h5 class="p-h">自主活动 <span class="muted p-small">{auto.paused ? '已暂停' : '日程、目标、想法和执行记录'}</span></h5>
+      <div class="p-card">
+        <div class="p-row">
+          <span class="p-grow">{auto.paused ? '⏸ 已暂停' : '🌱 开着'}{#if auto.paused && auto.pause_reason}<span class="muted p-small"> · {auto.pause_reason}</span>{/if}</span>
+          {#if auto.paused}
+            <button class="btn sm primary" disabled={busy} onclick={() => autonomy('resume')}>恢复</button>
+          {:else}
+            <button class="btn sm" disabled={busy} onclick={() => autonomy('pause')}>暂停</button>
+          {/if}
+          <button class="btn sm" disabled={busy || a.life?.state === 'thinking'} onclick={() => post('/wake', '叫醒了，它在想事情')}>现在叫醒</button>
+        </div>
+        <p class="p-note p-small">
+          {#if auto.next_check}下次自己看 {when(auto.next_check)} · {/if}今天 {auto.today_done}/{auto.today_planned} 件 ·
+          用了 {(auto.budget?.tokens ?? 0).toLocaleString()} token{#if auto.budget?.limit}（上限 {auto.budget.limit.toLocaleString()}）{/if}
+        </p>
+        {#if auto.agenda.length}
+          <div class="p-sub">安排</div>
+          {#each auto.agenda as it (it.id)}
+            <div class="p-row mind-item">
+              <span class="p-grow"><b>{when(it.at * 1000)}</b> {it.title} <span class="tag">{kindLabel[it.kind] ?? it.kind}</span></span>
+              <button class="btn sm ghost" title="取消这件事" disabled={busy} onclick={() => cancelAgenda(it.id, it.title)}><Icon name="x" size={12} /></button>
+            </div>
+          {/each}
+        {/if}
+        {#if auto.intentions.length}
+          <div class="p-sub">在推进的目标</div>
+          {#each auto.intentions as it (it.id)}
+            <div class="mind-line">
+              {it.title} <span class="muted p-small">{mindState[it.state] ?? it.state} · 进度 {it.progress}{#if it.blocked} · {it.blocked}{/if}</span>
+            </div>
+          {/each}
+        {/if}
+        {#if auto.ideas.length}
+          <div class="p-sub">想到的事</div>
+          {#each auto.ideas as x (x.id)}
+            <div class="p-row mind-item">
+              <span class="p-grow">{x.text} <span class="muted p-small">兴趣 {x.interest} · 来源：{x.source}</span></span>
+              <button class="btn sm ghost" title="推迟到明天再想" disabled={busy} onclick={() => deferIdea(x.id)}>推迟</button>
+              <button class="btn sm ghost" title="放弃这个想法" disabled={busy} onclick={() => dropIdea(x.id, x.text)}><Icon name="x" size={12} /></button>
+            </div>
+          {/each}
+        {/if}
+        {#if !auto.agenda.length && !auto.intentions.length && !auto.ideas.length}
+          <p class="p-note p-small">没有排着的事，也没有候选的想法。约定到点、或它自己觉得该看看时再来处理。</p>
+        {/if}
+        {#if auto.executions.length}
+          <details class="mind-done">
+            <summary class="muted p-small">最近做完的（{auto.executions.length}）</summary>
+            <ul class="recent">
+              {#each auto.executions as e (e.id)}
+                <li><span class="muted">{when(e.ended * 1000)}</span> {e.ok && e.used_tools ? '✅' : '·'} {e.summary}</li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
       </div>
     {/if}
 
@@ -362,7 +453,25 @@
     border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
     background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
   }
-  .lifecard .recent {
+  .p-sub {
+    margin: 10px 0 2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  .mind-item {
+    gap: 6px;
+  }
+  .mind-line {
+    padding: 3px 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .mind-done {
+    margin-top: 8px;
+  }
+  .lifecard .recent,
+  .mind-done .recent {
     margin: 4px 0 0;
     padding-left: 16px;
     font-size: 12.5px;

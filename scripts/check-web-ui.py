@@ -758,6 +758,15 @@ def check_living(page, url, nano):
         ok("拓扑图的 agent 卡片上标了「拟人」和它的状态")
     else:
         fail("agent 卡片上没标拟人：" + card)
+    if "自主活动" in text and ("没有排着的事" in text or "安排" in text) and "暂停" in text:
+        ok("agent 节点有自主活动卡：日程、目标、想法和暂停/恢复入口")
+    else:
+        fail("agent 节点没有自主活动卡：" + text[:400])
+    st, av = api(page, "GET", "/api/agents/default/autonomy")
+    if st == 200 and isinstance(av, dict) and "agenda" in av and "ideas" in av and "budget" in av:
+        ok("自主活动接口返回日程、想法和预算")
+    else:
+        fail(f"自主活动接口不对：{st} {str(av)[:200]}")
     # 记忆：写一个人、一条事、自我认知，记忆节点里能看能搜能改
     api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 张三\ntype: 人物\nsummary: 产品经理，养了两只猫\n---\n说话直。"})
     api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 国庆去成都\ntype: 事件\n---\n吃了三次火锅。"})
@@ -833,6 +842,7 @@ def check_living(page, url, nano):
         fail("内心会话出现在会话列里")
     check_workspace_unmount(page, url)
     check_new_session_agent(page, url)
+    check_session_agent_switch(page, url)
     check_mcp_panel(page, url)
     # 收拾：改回工具型、删掉测试记忆
     api(page, "PATCH", "/api/agents/default", {"style": "tool"})
@@ -899,6 +909,57 @@ def check_new_session_agent(page, url):
         ok("新建会话时可以选 agent")
     else:
         fail(f"新建的会话不在选中的 agent 下：{sid}")
+    api(page, "DELETE", "/api/agents/" + ag)
+    page.goto(url + "#/")
+    page.wait_for_selector("g.node.gateway")
+    page.wait_for_timeout(400)
+
+
+def check_session_agent_switch(page, url):
+    """已有会话（主会话和普通会话）能在聊天顶部、会话设置里切换 agent，选择持久化"""
+    st, out = api(page, "POST", "/api/agents", {"name": "切换测试"})
+    if st != 200 or not isinstance(out, dict) or not out.get("id"):
+        return fail(f"建切换测试 agent 失败：{st} {str(out)[:120]}")
+    ag = out["id"]
+    before = api(page, "GET", "/api/sessions/main")[1]
+    msgs = before["info"]["messages"]
+    page.goto(url + "#/sessions/main")
+    page.wait_for_timeout(900)
+    sel = page.locator('header select[aria-label="这个会话用哪个 agent"]')
+    if sel.count() != 1:
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail("聊天顶部没有切换 agent 的选择器")
+    sel.select_option(ag)
+    page.wait_for_timeout(900)
+    info = api(page, "GET", "/api/sessions/main")[1]["info"]
+    if info["sid"] != "main" or info["agent"] != ag:
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail(f"聊天顶部切换没有生效：{info.get('sid')} / {info.get('agent')}")
+    if info["messages"] != msgs:
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail(f"切换会话不该动历史：{msgs} → {info['messages']}")
+    ok("聊天顶部能切换已有会话的 agent，会话 ID 和历史不变")
+    page.reload()
+    page.wait_for_timeout(900)
+    val = page.locator('header select[aria-label="这个会话用哪个 agent"]').input_value()
+    if val == ag:
+        ok("刷新后会话选择还在")
+    else:
+        fail(f"刷新后选择丢了：{val}")
+    # 会话设置里也有同一个控件；切回默认 agent
+    page.click('button[title="会话设置"]')
+    page.wait_for_timeout(700)
+    if "对话 agent" in page.inner_text(".insp"):
+        ok("会话设置里有对话 agent 的切换入口")
+    else:
+        fail("会话设置里没有对话 agent：" + page.inner_text(".insp")[:200])
+    page.locator('.insp select[aria-label="这个会话用哪个 agent"]').select_option("default")
+    page.wait_for_timeout(900)
+    info = api(page, "GET", "/api/sessions/main")[1]["info"]
+    if info["agent"] != "default":
+        api(page, "DELETE", "/api/agents/" + ag)
+        return fail(f"会话设置里切回默认 agent 失败：{info['agent']}")
+    ok("会话设置里能切回默认 agent")
     api(page, "DELETE", "/api/agents/" + ag)
     page.goto(url + "#/")
     page.wait_for_selector("g.node.gateway")

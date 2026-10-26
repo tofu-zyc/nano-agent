@@ -39,6 +39,12 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			system += "\n\n" + a.skillText(ag.ID, "life", defaultLifeSkill)
 		}
 	}
+	// 桌面操作：把 Driver 的版本相关说明接进系统提示（只在能用 MCP 的管理员会话里）
+	if admin && !noTools && !isInnerSID(sid) && !a.isGroupSession(sid) {
+		if g := a.desktopGuide(sid); g != "" {
+			system = strings.TrimSpace(system + "\n\n" + g)
+		}
+	}
 	if isDreamSID(sid) {
 		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
 	} else if isLifeSID(sid) {
@@ -54,6 +60,8 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 				tools = append(tools, toolOf(spec))
 			}
 		}
+		// 自主活动：安排日程、记下想法
+		tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
@@ -89,7 +97,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			tools = append(tools, toolOf(knowledgeTool()))
 		}
 		if ag.Life() {
-			tools = append(tools, toolOf(followUpTool()))
+			tools = append(tools, toolOf(followUpTool()), toolOf(agendaTool()), toolOf(ideaTool()))
 		}
 		tools = append(tools, toolOf(sendFileTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })

@@ -39,10 +39,14 @@ func (t *Totals) add(u llm.Usage) {
 
 type SessionInfo struct {
 	SID            string         `json:"sid"`
-	Agent          string         `json:"agent"`     // 这个会话属于哪个 agent
-	Group          bool           `json:"group"`     // 这是某个群聊里的会话
-	Channel        string         `json:"channel"`   // 主要的渠道（第一个接着的窗口所在的），网页配色用
-	Endpoints      []EndpointInfo `json:"endpoints"` // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
+	Agent          string         `json:"agent"`       // 当前执行身份：人格、模型、工具、限制、记忆按它算（可以切换）
+	RouteAgent     string         `json:"route_agent"` // 会话 ID 的命名空间（机器人接线、主会话按它算，不跟着切换变）
+	AgentFixed     bool           `json:"agent_fixed"` // 身份固定：内心活动、整理记忆、定时任务、房间成员
+	CanSwitchAgent bool           `json:"can_switch_agent"`
+	SwitchBlocked  string         `json:"switch_blocked,omitempty"` // 现在不能切换的原因（空表示可以）
+	Group          bool           `json:"group"`                    // 这是某个群聊里的会话
+	Channel        string         `json:"channel"`                  // 主要的渠道（第一个接着的窗口所在的），网页配色用
+	Endpoints      []EndpointInfo `json:"endpoints"`                // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
 	Title          string         `json:"title"`
 	Workspaces     []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只读
 	Kernel         string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
@@ -103,10 +107,13 @@ func (a *App) Snapshot() Snapshot {
 		if isRoomMemberSID(sid) || isDreamSID(sid) {
 			continue // agent 在房间里旁听的会话，用户看群那个会话就够了
 		}
-		// agent 删掉了：它的会话不再列出来（历史还在磁盘上，重新建一个同 ID 的 agent 才会再出现）
-		if ag := agents.SessionAgent(sid); ag != agents.DefaultID {
-			if _, ok := a.agentByID(ag); !ok {
-				continue
+		// 按 ID 前缀属于某个已删除 agent 的会话不再列出来（历史还在磁盘上，重新建一个同 ID 的 agent
+		// 才会再出现）；用户明确交给别的 agent 的会话不受影响，仍然可见。
+		if !a.hasExplicitAgent(sid) {
+			if ag := a.routeAgentID(sid); ag != agents.DefaultID {
+				if _, ok := a.agentByID(ag); !ok {
+					continue
+				}
 			}
 		}
 		snap.Sessions = append(snap.Sessions, a.sessionInfo(sid))
@@ -128,9 +135,12 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
-	info := SessionInfo{SID: sid, Agent: agents.SessionAgent(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
-		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsForModel(st.Model),
+	info := SessionInfo{SID: sid, Agent: a.execAgentID(sid), RouteAgent: a.routeAgentID(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
+		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
 		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
+	info.AgentFixed = fixedAgentSID(sid)
+	info.SwitchBlocked = a.agentSwitchBlocked(sid)
+	info.CanSwitchAgent = info.SwitchBlocked == "" && a.agentStore != nil
 	if m, _, ok := a.modelOf(sid); ok {
 		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
 	}
@@ -220,58 +230,114 @@ type SessionPatch struct {
 	Mode       *string   `json:"mode"`
 	Thinking   *string   `json:"thinking"` // 空字符串表示用默认值
 	Model      *string   `json:"model"`    // 空字符串表示用默认模型
+	// Agent 是当前执行的 agent：人格、模型、工具、限制、记忆都换成它的。空字符串表示恢复按会话 ID
+	// 前缀推断（一般只有“本身就是 @<agent>/…”的会话需要）。会话 ID、历史、窗口接线、会话级设置都不变。
+	Agent *string `json:"agent"`
 }
 
+// UpdateSession 改会话设置。整份 patch 先全部验证，再一次性写入：任何一项不合法都不会留下半套设置。
 func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
+	st := a.store.Settings(sid)
+	oldAgent := a.execAgent(sid)
+	newAgentID := oldAgent.ID
+	if p.Agent != nil {
+		want := strings.TrimSpace(*p.Agent)
+		if want == "" {
+			want = a.routeAgentID(sid)
+		}
+		if !a.agentExists(want) {
+			return fmt.Errorf("没有这个 agent：%s", want)
+		}
+		if fixedAgentSID(sid) && want != newAgentID {
+			return errors.New(a.agentSwitchBlocked(sid))
+		}
+		if want != newAgentID {
+			if why := a.agentSwitchBlocked(sid); why != "" {
+				return errors.New(why)
+			}
+		}
+		newAgentID = want
+	}
+	switching := newAgentID != oldAgent.ID
+	var errs []error
+	// 工作目录：先只验证，不写盘（以前的实现会在这里先保存，后面的模型校验失败就留下半套设置）
+	cleanWorkspaces, workspacesChanged := st.Workspaces, false
 	if p.Workspaces != nil {
-		if err := a.setSessionWorkspaces(sid, *p.Workspaces); err != nil {
-			return err
+		ids, err := a.cleanWorkspaces(*p.Workspaces)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			cleanWorkspaces = ids
+			workspacesChanged = !slices.Equal(ids, st.Workspaces) || !st.WorkspacesSet
 		}
 	}
-	st := a.store.Settings(sid)
-	var errs []error
+	title := st.Title
 	if p.Title != nil {
-		st.Title = strings.TrimSpace(*p.Title)
-		if len([]rune(st.Title)) > 40 {
+		title = strings.TrimSpace(*p.Title)
+		if len([]rune(title)) > 40 {
 			errs = append(errs, errors.New("名字最长 40 个字"))
 		}
 	}
+	mode := st.Mode
 	if p.Mode != nil {
 		if _, ok := modeNames[*p.Mode]; !ok {
 			errs = append(errs, errors.New("模式只能是 full、auto、ask 或 readonly"))
+		} else {
+			mode = *p.Mode
 		}
-		st.Mode = *p.Mode
 	}
+	model := st.Model
 	if p.Model != nil {
 		if *p.Model != "" && !a.modelExists(*p.Model) {
 			errs = append(errs, fmt.Errorf("没有模型 %s", *p.Model))
 		} else {
-			st.Model = *p.Model
+			model = *p.Model
 		}
 	}
-	levels := a.levelsForModel(st.Model)
+	// 思考强度按换过 agent、换过模型以后实际生效的模型检查（agent 的默认模型也算）
+	levels := a.levelsForAgentModel(newAgentID, model)
+	thinking := st.Thinking
 	if p.Thinking != nil {
 		if *p.Thinking != "" && !slices.Contains(levels, *p.Thinking) {
 			errs = append(errs, fmt.Errorf("思考强度只能是 %s", strings.Join(levels, "、")))
 		}
-		st.Thinking = *p.Thinking
+		thinking = *p.Thinking
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	// 换了模型：原来的思考强度可能不在新模型的可选值里，恢复成模型的默认值
-	if p.Model != nil && st.Thinking != "" && !slices.Contains(levels, st.Thinking) {
-		st.Thinking = ""
+	// 换了模型或者 agent：原来的思考强度可能不在新的可选值里，恢复成默认
+	if thinking != "" && !slices.Contains(levels, thinking) {
+		thinking = ""
+	}
+	st.Title, st.Mode, st.Model, st.Thinking = title, mode, model, thinking
+	if p.Workspaces != nil {
+		st.Workspaces, st.WorkspacesSet = cleanWorkspaces, true
+	}
+	if switching {
+		newAgent, _ := a.agentByID(newAgentID)
+		// 历史位置用绝对位置：被整理掉的部分也算，消息来源才定得准
+		a.recordAgentSwitch(sid, &st, oldAgent, newAgent, st.Base+len(a.store.History(sid)))
 	}
 	if err := a.store.SaveSettings(sid, st); err != nil {
 		return err
 	}
+	if switching {
+		// 旧 agent 的 FollowUp、主动消息标记、群里排着的触发都作废
+		a.clearAgentBoundState(sid, oldAgent.ID)
+		a.endDesktopSession(sid) // 旧身份占着的 Driver session 释放掉
+		a.publishAgents()        // 两个 agent 的会话计数都变了
+		a.log.Info("会话换了 agent", "sid", sid, "from", oldAgent.ID, "to", newAgentID)
+	}
 	a.publishSession(sid)
+	if workspacesChanged {
+		a.publishWorkspaces()
+	}
 	return nil
 }
 
@@ -288,6 +354,7 @@ func (a *App) ResetSession(sid string) error {
 	if err := a.resetHistory(a.sessOf(sid)); err != nil {
 		return err
 	}
+	a.endDesktopSession(sid)
 	a.publish(events.Event{T: "session", SID: sid, Data: a.sessionInfo(sid)})
 	return nil
 }
@@ -301,6 +368,7 @@ func (a *App) StopSession(sid string) error {
 		return errors.New("这个会话没有进行中的任务")
 	}
 	s.queue = nil
+	a.endDesktopSession(sid)
 	a.cancelRun(s)
 	return nil
 }

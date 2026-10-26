@@ -772,12 +772,13 @@ func (a *App) dmRoom(from, to string) (rooms.Room, error) {
 // messageChat 把一条消息发到 agent 自己的某个私聊：记进那个会话的历史，发到对方最近说话的那个窗口。
 // 内心活动里发的有规矩：找人范围、对方没回上一条不再找、每天次数、睡觉时间不打扰。调用方持有锁。
 func (a *App) messageChat(fromSID, target, text string) (string, error) {
-	agentID := agents.SessionAgent(fromSID)
+	// 发送者是这一轮的执行 agent（会话可能被切换过）；内部会话仍然按固定前缀
+	agentID := a.execAgentID(fromSID)
 	ag, ok := a.agentByID(agentID)
 	if !ok {
 		return "", errors.New("没有这个 agent")
 	}
-	if agents.SessionAgent(target) != agentID || !a.hasSession(target) || !a.isPrivateChat(target) {
+	if a.execAgentID(target) != agentID || !a.hasSession(target) || !a.isPrivateChat(target) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
 	}
 	fromLife := isLifeSID(fromSID)
@@ -788,7 +789,7 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		switch reach := pickString(ag.LifeReach, "owner"); {
 		case reach == "off":
 			return "", errors.New("你设成了不主动找人")
-		case reach == "owner" && target != agents.SessionFor(agentID, mainSID):
+		case reach == "owner" && !a.isOwnerSID(agentID, target):
 			return "", errors.New("你只能主动找主人（找人范围在 agent 设置里改）")
 		}
 		if at, waiting := ls.Awaiting[target]; waiting {
@@ -804,7 +805,7 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 	if s := a.sessions[target]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return "", errors.New("那边正在聊着，等会儿再说")
 	}
-	if err := a.store.Append(target, session.Msg{Role: "assistant", Content: text}); err != nil {
+	if err := a.store.Append(target, session.Msg{Role: "assistant", Content: text, Agent: agentID}); err != nil {
 		return "", fmt.Errorf("保存消息失败：%w", err)
 	}
 	a.publish(events.Event{T: "say", SID: target, Text: text})

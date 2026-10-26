@@ -202,8 +202,9 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 			}
 		}
 	}
-	if agents.SessionAgent(r.Session) != agentID {
-		// 机器人换绑了 agent：这个窗口跟着换到新 agent 的会话
+	if agents.SessionAgent(r.Session) != agentID && !a.hasExplicitAgent(r.Session) {
+		// 机器人换绑了 agent：这个窗口跟着换到新 agent 的会话。
+		// 用户手动把会话交给别的 agent 的（Settings.Agent），这里不跟——否则下一条消息就把选择改回去了。
 		a.log.Info("机器人换绑了 agent，聊天窗口跟着换会话", "endpoint", key, "from", r.Session, "to", want)
 		r.Session = want
 		changed = true
@@ -353,6 +354,12 @@ func (a *App) NewSession(title string) (SessionInfo, error) {
 func (a *App) NewSessionIn(agentID, title string) (SessionInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if agentID == "" {
+		agentID = agents.DefaultID
+	}
+	if !a.agentExists(agentID) {
+		return SessionInfo{}, errors.New("没有这个 agent：" + agentID)
+	}
 	sid, err := a.newSessionIn(agentID, title, true)
 	if err != nil {
 		return SessionInfo{}, err
@@ -376,6 +383,7 @@ func (a *App) DeleteSession(sid string) error {
 	if err := a.store.Delete(sid); err != nil {
 		return err
 	}
+	a.endDesktopSession(sid)
 	delete(a.sessions, sid)
 	changed := false
 	for key, r := range a.eps {

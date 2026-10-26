@@ -95,9 +95,19 @@ func (a *App) clientFor(sid string) (llm.Client, error) {
 	return c, nil
 }
 
-// levelsOf 是会话的模型可选的思考强度
+// levelsOf 是会话实际生效的模型可选的思考强度：会话选的模型，其次是当前 agent 的默认模型。
 func (a *App) levelsOf(sid string) []string {
-	return a.levelsForModel(a.store.Settings(sid).Model)
+	return a.levelsForAgentModel(a.execAgentID(sid), a.store.Settings(sid).Model)
+}
+
+// levelsForAgentModel 是 agent 用模型 modelID 时的思考强度可选值；modelID 为空表示用 agent 的默认模型。
+func (a *App) levelsForAgentModel(agentID, modelID string) []string {
+	if modelID == "" {
+		if ag, ok := a.agentByID(agentID); ok {
+			modelID = ag.Model
+		}
+	}
+	return a.levelsForModel(modelID)
 }
 
 // levelsForModel 是模型 id 的可选思考强度：空表示默认模型，找不到时用默认模型的

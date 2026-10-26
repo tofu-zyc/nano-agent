@@ -40,7 +40,7 @@ const scheduleSchema = `{"type":"object","properties":{
  "action":{"type":"string","enum":["create","list","update","delete","run_now"]},
  "id":{"type":"string","description":"任务编号（更新、删除、立即运行时必填）"},
  "name":{"type":"string"},"when":{"type":"string","description":"cron 五段式、every 30m、at YYYY-MM-DD HH:mm；网关时区"},
- "agent":{"type":"string","enum":["default"]},"prompt":{"type":"string"},
+ "agent":{"type":"string","description":"任务归哪个 agent；省略就是当前会话的执行 agent。已有任务不会被聊天里的切换改动"},"prompt":{"type":"string"},
  "deliver":{"type":"array","items":{"type":"string"},"description":"把结果投到哪些窗口（会话的窗口 key，网页用 web:会话ID）；省略就只放在任务页，不往聊天里推"},
  "workspaces":{"type":"array","items":{"type":"string"},"description":"工作目录 ID；省略时继承当前会话"},
  "mode":{"type":"string","enum":["readonly","ask","auto"],"description":"不得高于创建者会话的模式"},
@@ -182,7 +182,8 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	}
 	var task schedule.Task
 	if p.Action == "create" {
-		task = schedule.Task{ID: schedule.NewID(), Agent: agents.SessionAgent(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
+		// 新任务归当前会话的执行 agent（会话可以切换过）；已有任务不跟着聊天走
+		task = schedule.Task{ID: schedule.NewID(), Agent: a.execAgentID(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
 		// deliver 不写就是「只放任务页」：结果留在任务自己的会话和任务列表里，不往聊天窗口推。
 		// 以前这里默认投到创建任务时所在的那个窗口，模型在私聊里建的周期任务就会每轮往聊天里发结果。
 	} else {

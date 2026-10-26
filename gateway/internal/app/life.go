@@ -31,34 +31,42 @@ const defaultLifeSkill = `# 一个人的时候
 
 这是你自己的时间，没有人在等你回复。这里写下的是你的内心活动，只有你自己（和在后台看着的主人）看得到。
 
-每次醒来，先看看现在几点、最近发生了什么，再按你此刻的心情和兴趣决定做点什么。可以：
+你醒来的原因可能是：约好的时间到了、按计划该做某件事、你自己的想法想去看一看、主人叫醒你，或者刚聊完天想再理一理。醒来后先看网关放在这条消息里的几块内容：
 
-- **上网冲浪**：用 ` + "`" + `WebSearch` + "`" + `、` + "`" + `WebFetch` + "`" + ` 看看你感兴趣的东西、最近在想的问题、和你在意的人有关的事。看到有意思的，想想你怎么看；值得记住的用 ` + "`" + `Knowledge` + "`" + ` 记下来（type 知识，或者看法）。
-- **想想事情**：回想最近的聊天，琢磨某个人、某件事；有了新的看法就记下来。
-- **找人聊天**：用 ` + "`" + `Message` + "`" + ` 给某个人、某个群发消息。像朋友一样：分享刚看到的东西、接着上次没聊完的话题、问问对方最近怎么样。不要像客服，不要每次都找人；对方没回上一条，就别再找他。
-- **什么都不做**：发会儿呆、歇一歇，也很正常。
+- 「你的安排」：今天排着的事（约定、复查、计划、探索）。
+- 「在推进的目标」：已经决定要做的事、做到哪了、卡在哪。
+- 「想到的事」：还没决定做的候选想法。
+- 「最近发生」和「最近做过」：最近的聊天、执行结果。
 
-注意：
+然后只挑一件事推进：
 
-- 别人可能在忙（深夜、上班时间），少打扰；一次只找一个人，一两句话就好。
-- 别编造自己没做过的事。你上网看到的、想到的，都要是这次醒来真的发生的。
-- 最后用一两句话写下这会儿你做了什么、心情怎样。这会成为你的“近况”，和别人聊天时你会记得。`
+- 现在能做的就用工具真的去做（WebSearch、WebFetch、Knowledge、读写文件都行），做完用 Agenda done 写清真实结果。
+- 以后要做的用 Agenda add 排进日程；要改时间用 Agenda move；不做或者取消用 Agenda cancel。
+- 有新的念头用 Idea add 记下来，写清来源（从哪件事、哪段记忆、哪次聊天想到的）；可以 Idea schedule 排时间去探索，也可以 defer 或者 drop，允许一个都不做。
+- 和人有明确约定（几点提醒、答应了什么）一定要用 Agenda 记成 commitment：到点你会自己醒来，即使刚聊过天也不会被推迟。
+
+别的：
+
+- 找人聊天用 Message，像朋友一样：分享、接着上次的话题、问问近况。不要像客服；对方没回上一条就别再找他；深夜少打扰。
+- 一次只做一件；做完用一两句话写下真的做了什么、结果怎样（这会成为你的近况）。
+- 什么都没做、只歇一会儿也很正常，回 [不做] 就好。
+- 别编造自己没做过的事、没看到的东西；工具结果是什么就说什么。`
 
 // defaultLifeGuide 是拟人守则：拟人型 agent 的每个会话都带（agents/<id>/life.md 可以换掉）。
 const defaultLifeGuide = `你不是一个等着被使用的工具，而是一个有自己生活的人：
 - 你有自己的兴趣、情绪和看法，会好奇、会无聊、会累；说话像人，不说“作为一个 AI”“有什么可以帮你”。
 - 没人找你的时候，你有自己的时间：会上网看看感兴趣的东西、想想事情，有时也会主动找人聊天。
 - 你记得自己最近做过、看过、想过的事（见「近况」），聊天时可以自然地提起，但别硬塞。
+- 答应了别人什么事、决定以后做什么，就用 Agenda 记下来；有新的念头用 Idea 记下来（写明来源）。这些会一直留着，不是说完就忘。
 - 别人找你帮忙，照样认真做好；只是不用客套，做完也不用问“还有什么需要”。
 - 私聊里像朋友发消息：一两句话一段，可以用空行分成几条；对方只是说“好的”“晚安”这种收尾的话，可以不接，只回 [不回复]。
 - 想发表情包、图片，用 SendFile 真的发出去（工作目录里存着的，或者网上的图片网址），别用文字描述表情包；别每句都配图。`
 
 const (
-	lifeQuiet    = 20 * time.Minute // 刚有人找过它：这么久之内不自己醒
-	lifeBored    = 3 * time.Hour    // 这么久没人找它：下次醒得更早
-	lifeRecent   = 10               // 留几条近况
-	lifeShown    = 3                // 带进聊天的近况条数
-	lifeHighCtx  = 40000            // 内心会话的上下文超过这么多就整理（保持连续又不贵）
+	lifeBored    = 3 * time.Hour // 这么久没人找它：下次醒得更早
+	lifeRecent   = 10            // 留几条近况
+	lifeShown    = 3             // 带进聊天的近况条数
+	lifeHighCtx  = 40000         // 内心会话的上下文超过这么多就整理（保持连续又不贵）
 	lifeLowCtx   = 15000
 	lifeRecentOp = "[近况]"
 	lifeRecentEd = "[/近况]"
@@ -162,118 +170,6 @@ func (a *App) lifeInterval(ag agents.Agent, now time.Time) time.Duration {
 	return d
 }
 
-// lifeBlocked 是现在不能自己醒的原因，空表示可以。调用方持有锁。
-func (a *App) lifeBlocked(ag agents.Agent, ls *lifeState, now time.Time) string {
-	if !a.awakeOf(ag).contains(now) {
-		return "睡着"
-	}
-	if ls.Wakes >= lifeLevelOf(ag).wakes {
-		return "今天醒够了"
-	}
-	if b := pickInt(ag.LifeBudget, 0); b > 0 && ls.Tokens >= b {
-		return "今天的预算用完了"
-	}
-	if s := a.sessions[lifeSID(ag.ID)]; s != nil && (s.run != nil || len(s.queue) > 0 || s.compacting) {
-		return "正在想事情"
-	}
-	if now.Sub(a.agentLastActivity(ag.ID)) < lifeQuiet {
-		return "刚有人找过它"
-	}
-	return ""
-}
-
-// lifeTick 看看哪些拟人型 agent 该自己醒一下了。调用方不持有锁。
-func (a *App) lifeTick() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.agentStore == nil || a.agentRoot == "" {
-		return
-	}
-	now := a.now().In(a.loc)
-	if a.bootAt.IsZero() {
-		a.bootAt = now
-	}
-	for _, ag := range a.agentStore.List() {
-		if !ag.Life() {
-			continue
-		}
-		ls := a.lifeOf(ag.ID)
-		a.followUpTick(ag, ls, now)
-		if ls.Next == 0 {
-			a.lifeBegin(ag) // 第一次启动：过一会儿先醒一次
-			continue
-		}
-		if now.Unix() < ls.Next || a.lifeBlocked(ag, ls, now) != "" {
-			continue
-		}
-		if err := a.startLife(ag.ID, false); err != nil {
-			a.log.Warn("内心活动没能开始", "agent", ag.ID, "err", err)
-			ls.Next = now.Add(10 * time.Minute).Unix()
-			a.saveLife()
-		}
-	}
-}
-
-// lifeBegin：刚变成拟人型（新建时选的、或者改过来的）还没定过醒来时间，就定在 5–15 分钟后，
-// 网页上马上能看到“大约几点醒”。不是拟人型、已经定过的什么都不做。调用方持有锁。
-func (a *App) lifeBegin(ag agents.Agent) {
-	if !ag.Life() || a.agentRoot == "" {
-		return
-	}
-	ls := a.lifeOf(ag.ID)
-	if ls.Next != 0 {
-		return
-	}
-	ls.Next = a.now().Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))).Unix()
-	a.saveLife()
-	a.publish(events.Event{T: "life", Name: ag.ID, Kind: "next"})
-}
-
-// startLife 让 agent 醒一下。manual 是主人叫醒的（/wake、网页按钮），不算每天的次数。调用方持有锁。
-func (a *App) startLife(agentID string, manual bool) error {
-	ag, ok := a.agentByID(agentID)
-	if !ok {
-		return errors.New("没有这个 agent")
-	}
-	if !ag.Life() {
-		return errors.New("只有拟人型 agent 有内心活动（在 agent 节点里把类型改成拟人型）")
-	}
-	s := a.sessOf(lifeSID(agentID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
-		return errors.New("它正在想事情")
-	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return errors.New("还没有配置模型")
-	}
-	st := a.store.Settings(s.sid)
-	st.Title = ag.Name + "的内心"
-	st.Workspaces, st.WorkspacesSet = nil, true
-	if err := a.store.SaveSettings(s.sid, st); err != nil {
-		return err
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return errors.New("没有在线的内核")
-	}
-	now := a.now().In(a.loc)
-	ls := a.lifeOf(agentID)
-	text := a.wakeNote(ag, ls, now, manual)
-	if !manual {
-		ls.Wakes++
-	}
-	ls.Next = now.Add(a.lifeInterval(ag, now)).Unix()
-	a.saveLife()
-	s.queue = append(s.queue, queued{ep: endpoint{ch: "life", chat: agentID}, who: "life:" + agentID, inner: true,
-		m: channel.Message{Text: text}})
-	a.startRun(s)
-	if s.run == nil {
-		s.queue = nil
-		return errors.New("没能开始：没有可用的模型或在线的内核")
-	}
-	a.log.Info("内心活动：醒了", "agent", agentID, "manual", manual)
-	a.publish(events.Event{T: "life", Name: agentID, Kind: "start"})
-	return nil
-}
-
 // chatTarget 是内心活动时可以找的一个聊天。
 type chatTarget struct {
 	To, Name, Last string
@@ -285,13 +181,13 @@ func (a *App) lifeTargets(ag agents.Agent) []chatTarget {
 	reach := pickString(ag.LifeReach, "owner")
 	var out []chatTarget
 	if reach != "off" {
-		mainOf := agents.SessionFor(ag.ID, mainSID)
 		for _, sid := range a.sessionIDs() {
-			if agents.SessionAgent(sid) != ag.ID || !a.isPrivateChat(sid) || (reach == "owner" && sid != mainOf) {
+			// 按当前执行身份算：主会话被交给这个 agent 以后，它也能找；旧 agent 不能
+			if a.execAgentID(sid) != ag.ID || !a.isPrivateChat(sid) || (reach == "owner" && !a.isOwnerSID(ag.ID, sid)) {
 				continue
 			}
 			name := "主人"
-			if sid != mainOf {
+			if !a.isOwnerSID(ag.ID, sid) {
 				name = a.chatName(sid)
 			}
 			who, last, ts := a.lastLine(sid)
@@ -454,6 +350,7 @@ func (a *App) innerDone(s *sess, r *run, status, body string) {
 		a.dreamDone(s, status, body)
 	case isLifeSID(s.sid):
 		a.lifeDone(s, r, status, body)
+		a.autonomyDone(s, r, status, body)
 	}
 }
 
@@ -463,7 +360,7 @@ func (a *App) lifeDone(s *sess, r *run, status, body string) {
 	ls := a.lifeOf(agentID)
 	ls.Tokens += r.usage.PromptTokens + r.usage.CompletionTokens
 	text := strings.TrimSpace(body)
-	if status == proto.StatusOK && text != "" && !(strings.Contains(text, "[不回复]") && len([]rune(text)) <= 10) {
+	if status == proto.StatusOK && text != "" && !isNoopMind(text) {
 		ls.Recent = append(ls.Recent, lifeNote{At: a.now().Unix(), Text: cutRunes(text, 200)})
 		if len(ls.Recent) > lifeRecent {
 			ls.Recent = ls.Recent[len(ls.Recent)-lifeRecent:]
@@ -482,7 +379,7 @@ func (a *App) lifeHeard(agentID, text string) {
 
 // lifeAnswered：有人在这个私聊里说话了，之前的主动消息算回了。调用方持有锁。
 func (a *App) lifeAnswered(sid string) {
-	ag, ok := a.agentByID(agents.SessionAgent(sid))
+	ag, ok := a.agentByID(a.execAgentID(sid))
 	if !ok || !ag.Life() || a.agentRoot == "" {
 		return
 	}
@@ -637,8 +534,10 @@ func (a *App) followUpCall(sid string, raw []byte) (string, error) {
 		return "", errors.New("minutes 要在 1 到 1440 之间")
 	}
 	at := a.now().Add(time.Duration(x.Minutes) * time.Minute)
-	ls.FollowUps[sid] = followUp{At: at.Unix(), Note: cutRunes(strings.TrimSpace(x.Note), 200)}
+	note := cutRunes(strings.TrimSpace(x.Note), 200)
+	ls.FollowUps[sid] = followUp{At: at.Unix(), Note: note}
 	a.saveLife()
+	a.mindFollowUp(sid, ag.ID, note, at)
 	return "好，" + at.In(a.loc).Format("01-02 15:04") + " 再来看看。", nil
 }
 
@@ -651,6 +550,12 @@ func (a *App) followUpTick(ag agents.Agent, ls *lifeState, now time.Time) {
 		}
 		if w := a.awakeOf(ag); !w.contains(now) {
 			ls.FollowUps[sid] = followUp{At: w.nextStart(now).Unix(), Note: f.Note}
+			a.saveLife()
+			continue
+		}
+		// 执行前再校验归属：会话可能已经交给别的 agent 了（旧文件、恢复队列里带来的回调也不能越界）
+		if !a.followedByAgent(sid, ag.ID) {
+			delete(ls.FollowUps, sid)
 			a.saveLife()
 			continue
 		}
