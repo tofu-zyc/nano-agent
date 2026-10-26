@@ -6,9 +6,13 @@
  * 方便单元测试和回放。
  *
  * 内核保证的不变量：
- *   - 每个模型发起的工具调用恰好得到一个结果（成功、失败、超时、被拒都算），
+ *   - 每个模型发起的工具调用恰好得到一个结果（成功、失败、超时、被拒、取消都算），
  *     全部有了结果才会请求下一轮模型；
- *   - 每个 run 一定会以一条 DONE 结束（与网关断开时除外，那时 run 直接丢弃）。
+ *   - 每个 run 一定会以一条 DONE 结束（与网关断开时除外，那时 run 直接丢弃）；
+ *   - 一轮里的调用按“校验 → 审批 → 排队 → 派发 → 执行 → 完成”推进，
+ *     审批和排队都不占执行槽，同一批里的资源冲突不会重叠执行；
+ *   - 每条命令都带着完整调用身份 (sid, run_id, turn_id, call_id)，
+ *     迟到的、跨 run 的结果不会污染当前 run。
  */
 #ifndef NA_CORE_H
 #define NA_CORE_H
@@ -17,7 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 工具按会不会改动东西分三类，权限模式据此决定直接执行、先审批还是拒绝 */
+/* 工具按会不会改动东西分三类，权限模式据此决定直接执行、先审批还是拒绝。
+ * 注意：这是“权限分类”，不是“并发分类”——并发怎么排由宿主给的 res_keys 决定。 */
 typedef enum {
     NA_TOOL_PUBLIC_READ, /* 网关执行、权限由网关判断的工具（搜索、记忆、发消息、发文件……），任何模式都交给网关 */
     NA_TOOL_READ,    /* 只读：Read、Grep */
@@ -31,7 +36,7 @@ typedef enum {
 typedef struct {
     const char  *name;
     na_tool_kind kind;
-    int          timeout_ms;   /* 单次执行的兜底时限 */
+    int          timeout_ms;   /* 单次执行的兜底时限（从宿主确认 started 起算） */
 } na_tool_policy;
 
 /* 权限模式，由网关按会话设置和触发者身份决定，随 input 传来 */
@@ -50,16 +55,25 @@ typedef struct {
     int max_steps;            /* 每个 run 最多请求几次模型 */
     int run_timeout_ms;       /* 每个 run 最长持续时间 */
     int approval_timeout_ms;  /* 等待审批的最长时间 */
+
+    /* ---- 并行与排队（0 表示用下面的默认值） ---- */
+    int max_calls_per_turn;          /* 一轮最多几个工具调用，默认 32 */
+    int max_parallel_tools_per_run;  /* 同一 run 同时跑几个工具，默认 4 */
+    int max_queued_calls_per_run;    /* 同一 run 最多几个调用在排队，默认 32 */
+    int dispatch_timeout_ms;         /* 派发后等宿主确认 started 的上限，默认 30000 */
+    int queued_timeout_ms;           /* 排队等槽位的上限，0 表示只受 run 时限约束 */
+    int max_active_runs;             /* 同时活跃的 run 上限，默认 16（宿主据此排队） */
 } na_core_config;
 
 typedef enum {
-    NA_EV_INPUT,      /* 会话收到新输入，开启 run：sid, from, mode, policy */
-    NA_EV_TURN,       /* 模型完成一轮：sid, reason, calls, detail */
-    NA_EV_APPROVE,    /* 审批结果：sid, id, ok（审批人是否有权限由网关判断） */
-    NA_EV_CANCEL,     /* 用户要求停止：sid */
-    NA_EV_TOOL_DONE,  /* 本地工具执行完毕：sid, id, ok, content */
-    NA_EV_TICK,       /* 只推进时间，用来检查超时 */
-    NA_EV_RESET,      /* 与网关断开：丢弃所有 run */
+    NA_EV_INPUT,        /* 会话收到新输入，开启 run：sid, run_id, from, mode, policy */
+    NA_EV_TURN,         /* 模型完成一轮：sid, run_id, turn_id, reason, calls, detail */
+    NA_EV_APPROVE,      /* 审批结果：sid, run_id, turn_id, id, ok */
+    NA_EV_CANCEL,       /* 用户要求停止：sid */
+    NA_EV_CALL_STARTED, /* 宿主：这个调用的执行器真的起来了，执行时限从现在算：sid, run_id, turn_id, id */
+    NA_EV_TOOL_DONE,    /* 本地工具执行完毕：sid, run_id, turn_id, id, ok, content */
+    NA_EV_TICK,         /* 只推进时间，用来检查超时 */
+    NA_EV_RESET,        /* 与网关断开：丢弃所有 run */
 } na_ev_type;
 
 typedef enum {
@@ -85,15 +99,24 @@ typedef struct {
     const char *error;  /* 宿主预先检查出的问题（比如工作目录写错了）：非空时直接以此失败，不执行 */
     bool elevated;      /* 模型要求提权写工作目录外（每次都要审批） */
     const char *action; /* 参数里的 action（宿主读出来）：Schedule 和 GatewayAdmin 按它决定怎么审批 */
+    /* ---- 并发分类（宿主按真实工具和已验证参数解析，内核不猜） ----
+     * res_keys 是逗号分隔的资源键，比如 "file:/work/a.c" 或 "dir:/work"；
+     * 空表示这个调用不和别人抢东西。res_exclusive 为 true 表示独占这些键。
+     * 两个调用只要共有一个键、且其中至少一个是独占的，就不能同时跑。 */
+    const char *res_keys;
+    bool res_exclusive;
 } na_call;
 
 typedef struct {
     na_ev_type type;
     const char *sid;
+    const char *run_id;   /* 这一轮的编号，网关生成；事件里原样带回，对不上就忽略 */
+    int turn_id;          /* 第几次模型请求产生的调用；0 表示不校验 */
     const char *from;
     na_mode mode;
     /* INPUT：这一轮最多请求几次模型、总时限、审批时限。大于 0 是上限，0 用内核配置，小于 0 表示不限 */
     int max_steps, run_timeout_ms, approval_timeout_ms;
+    int max_parallel_tools; /* INPUT：这一轮的并行上限。大于 0 是上限，0 用内核配置，小于 0 表示不限 */
     bool elevate;         /* INPUT：这个身份的会话能不能提权（访客不能） */
     na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */
@@ -107,19 +130,22 @@ typedef struct {
 
 typedef enum {
     /* 发往网关 */
-    NA_CMD_MODEL,        /* 请模型基于会话上下文生成下一轮：sid */
-    NA_CMD_RESULT,       /* 工具结果：sid, id, ok, text */
-    NA_CMD_APPROVE_REQ,  /* 请求管理员审批：sid, id, name, args, from */
+    NA_CMD_MODEL,        /* 请模型基于会话上下文生成下一轮：sid, run_id, turn_id */
+    NA_CMD_RESULT,       /* 工具结果：sid, run_id, turn_id, id, ok, text */
+    NA_CMD_APPROVE_REQ,  /* 请求管理员审批：sid, run_id, turn_id, id, name, args, from */
+    NA_CMD_QUEUED,       /* 调用进入排队（等执行槽或等资源）：sid, run_id, turn_id, id, name, text */
     NA_CMD_NOTICE,       /* 给用户看的提示：sid, text */
-    NA_CMD_DONE,         /* run 结束：sid, status, text（详情，可为 NULL） */
+    NA_CMD_DONE,         /* run 结束：sid, run_id, status, text（详情，可为 NULL） */
     /* 发往本地工具执行器 */
-    NA_CMD_EXEC,         /* 执行工具：sid, id, name, args, from, policy, timeout_ms, elevated */
-    NA_CMD_KILL,         /* 终止执行：sid, id */
+    NA_CMD_EXEC,         /* 执行工具：sid, run_id, turn_id, id, name, args, from, policy, timeout_ms, elevated */
+    NA_CMD_KILL,         /* 终止执行：sid, run_id, turn_id, id */
 } na_cmd_type;
 
 typedef struct na_cmd {
     na_cmd_type type;
     char *sid, *id, *name, *args, *from, *text, *policy;
+    char *run_id;
+    int   turn_id;
     const char *status;  /* DONE："ok" "budget" "timeout" "cancelled" "refused" "error" */
     bool ok;
     bool elevated;
@@ -145,5 +171,9 @@ int64_t  na_core_next_deadline(const na_core *c);
 size_t   na_core_active_runs(const na_core *c);
 /* 会话正在进行的 run 的执行约束（INPUT 时传入的 policy），没有 run 时返回 NULL */
 const char *na_core_policy(const na_core *c, const char *sid);
+/* 同一 run 里正在执行、还在排队的调用数（宿主展示、限流用） */
+void     na_core_call_counts(const na_core *c, const char *sid, int *running, int *queued);
+/* 同时活跃的 run 上限（配置里的值，没写时是默认值）；宿主据此给 input 排队 */
+int      na_core_max_runs(const na_core *c);
 
 #endif

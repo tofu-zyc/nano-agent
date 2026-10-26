@@ -34,6 +34,8 @@ class Gateway:
         self.auto_approve = False
         self.landlock = 0
         self.approved = set()
+        # v11：网关收到 exec 后先回一条 exec_started（真的开始执行了）
+        self.send_started = True
 
     def accept(self):
         self.conn, _ = self.srv.accept()
@@ -59,6 +61,8 @@ class Gateway:
         if msg.get("t") == "ping":
             self.send(t="pong")
             return self.recv(timeout)
+        if self.send_started and msg.get("t") == "exec":
+            self.send(t="exec_started", sid=msg["sid"], id=msg["id"], run_id=msg.get("run_id", ""))
         if self.auto_approve and msg.get("t") == "approve_req":
             self.send(t="approve", sid=msg["sid"], id=msg["id"], ok=True, **{"from": "tg:admin"})
             self.approved.add(msg["sid"])
@@ -123,6 +127,18 @@ def finish(gw, sid):
 
 def start_gateway_run(gw, sid, mode="auto", landlock=7):
     start_run(gw, sid, mode=mode, workspaces=[box_ws(landlock)])
+
+
+def results_of(gw, n, sid):
+    """收齐 n 个工具结果；中间的 tool_queued（排队提示）跳过"""
+    got = {}
+    while len(got) < n:
+        m = gw.recv()
+        if m.get("t") == "tool_queued":
+            continue
+        assert m.get("t") == "result" and m.get("sid") == sid, m
+        got[m["id"]] = m
+    return got
 
 
 def expect_all(gw, n, sid):
@@ -253,16 +269,27 @@ def t_roundtrip(gw):
 @case("并行调用：全部有结果后才请求模型")
 def t_parallel(gw):
     start_run(gw, "s2")
-    call(gw, "s2", ("a", "Shell", {"command": "echo A"}), ("b", "Shell", {"command": "echo boom >&2; exit 3"}),
+    # 不同文件上的写互不冲突，可以并行；未知工具直接给错误结果
+    call(gw, "s2", ("a", "Write", {"path": "pa.txt", "content": "A"}),
+         ("b", "Write", {"path": "pb.txt", "content": "B"}),
          ("c", "Nope", {}))
-    got = {}
-    for _ in range(3):
-        r = gw.expect("result", sid="s2")
-        got[r["id"]] = r
-    assert got["a"]["ok"] is True and got["a"]["content"] == "A\n", got["a"]
-    assert got["b"]["ok"] is False and "退出码 3" in got["b"]["content"] and "boom" in got["b"]["content"], got["b"]
+    got = results_of(gw, 3, "s2")
+    assert got["a"]["ok"] is True and "已创建" in got["a"]["content"], got["a"]
+    assert got["b"]["ok"] is True and "已创建" in got["b"]["content"], got["b"]
     assert got["c"]["ok"] is False and "未知工具" in got["c"]["content"]
     finish(gw, "s2")
+
+
+@case("同一个工作目录的 Shell 按设计串行：后一个排队，前一个结束再执行")
+def t_shell_serialized(gw):
+    start_run(gw, "s2b")
+    call(gw, "s2b", ("a", "Shell", {"command": "echo A"}), ("b", "Shell", {"command": "echo burst >&2; exit 3"}))
+    gw.expect("tool_queued", sid="s2b", id="b")
+    a = gw.expect("result", sid="s2b", id="a", ok=True)
+    assert a["content"] == "A\n", a
+    b = gw.expect("result", sid="s2b", id="b", ok=False)
+    assert "退出码 3" in b["content"] and "burst" in b["content"], b
+    finish(gw, "s2b")
 
 
 @case("超时：执行器自己结束命令，连同子进程")
@@ -284,9 +311,8 @@ def t_output(gw):
     call(gw, "s4", ("c1", "Shell", {"command": "seq 1 100000"}),
          ("c2", "Shell", {"command": "printf 'ok\\377\\000end \\344\\270\\255'"}))
     got = {}
-    for _ in range(2):
-        r = gw.expect("result", sid="s4")
-        got[r["id"]] = r["content"]
+    for k, r in results_of(gw, 2, "s4").items():
+        got[k] = r["content"]
     assert "中间省略" in got["c1"] and got["c1"].endswith("100000\n"), got["c1"][-100:]
     assert len(got["c1"].encode()) < 4096 + 200, len(got["c1"].encode())
     assert got["c2"] == "ok��end 中", repr(got["c2"])
@@ -321,10 +347,7 @@ def t_modes(gw):
     finish(gw, "s5")
     start_run(gw, "s5", mode="readonly")
     call(gw, "s5", ("c1", "Read", {"path": "a.txt"}), ("c2", "Write", {"path": "b.txt", "content": "x"}))
-    got = {}
-    for _ in range(2):
-        r = gw.expect("result", sid="s5")
-        got[r["id"]] = r
+    got = results_of(gw, 2, "s5")
     assert got["c1"]["ok"] is True, got["c1"]
     assert got["c2"]["ok"] is False and "只读模式" in got["c2"]["content"], got["c2"]
     assert not os.path.exists(os.path.join(WORK, "b.txt"))
@@ -409,7 +432,7 @@ def t_reconnect(gw):
     gw.accept()
     hello = gw.expect("hello", timeout=10)
     assert hello["token"] == "t0k"
-    gw.send(t="welcome", v=5)
+    gw.send(t="welcome", v=11)
     time.sleep(0.5)
     assert not leftover("sleep 4242"), f"断线后工具还在跑：{leftover('sleep 4242')}"
     gw.send(t="turn", sid="s12", reason="final")   # 旧 run 已丢弃，内核应忽略
@@ -443,16 +466,17 @@ def t_ls(gw):
 @case("异机模式：工具交给网关执行，结果交回模型，约束不由内核给")
 def t_gateway_exec(gw):
     start_gateway_run(gw, "g1")
+    # 同一个文件上的写和读按资源锁串行：写结束之后才派发读
     call(gw, "g1", ("c1", "Write", {"path": "r.txt", "content": "x"}), ("c2", "Read", {"path": "r.txt"}))
-    got = expect_all(gw, 2, "g1")
-    w = got[("exec", "c1")]
+    w = gw.expect("exec", sid="g1", id="c1")
     assert w["name"] == "Write" and w["args"] == {"path": "r.txt", "content": "x"} and w["timeout_ms"] > 0, w
     assert "dirs" not in w and "ro" not in w and w["workspace"] == "box:~/proj", w
-    gw.send(t="exec_result", sid="g1", id="c2", ok=True, content="1\tx")
+    gw.expect("tool_queued", sid="g1", id="c2")
     gw.send(t="exec_result", sid="g1", id="c1", ok=False, content="写不了")
-    got = expect_all(gw, 2, "g1")
-    assert got[("result", "c2")]["ok"] and got[("result", "c2")]["content"] == "1\tx", got
-    assert not got[("result", "c1")]["ok"] and got[("result", "c1")]["content"] == "写不了", got
+    gw.expect("result", sid="g1", id="c1", ok=False, content="写不了")
+    gw.expect("exec", sid="g1", id="c2")
+    gw.send(t="exec_result", sid="g1", id="c2", ok=True, content="1\tx")
+    gw.expect("result", sid="g1", id="c2", ok=True, content="1\tx")
     gw.send(t="exec_result", sid="g1", id="c1", ok=True, content="迟到的结果")   # 没有在等的调用，忽略
     finish(gw, "g1")
     assert not os.path.exists(os.path.join(WORK, "r.txt")), "异机模式不该在本机执行"
@@ -482,6 +506,102 @@ def t_gateway_cancel(gw):
     got = expect_all(gw, 3, "g3")
     assert ("exec_cancel", "c1") in got and got[("result", "c1")]["content"] == "已取消", got
     assert got[("done", None)]["status"] == "cancelled", got
+
+
+
+@case("完整调用身份：run_id / turn_id 全程带上，迟到与跨 run 的结果都不改变当前 run")
+def t_identity(gw):
+    gw.send(t="input", sid="i1", run_id="r-1", mode="auto", workspaces=[local_ws()], **{"from": "tg:user"})
+    m = gw.expect("model", sid="i1")
+    assert m.get("run_id") == "r-1" and m.get("turn_id") == 1, m
+    gw.send(t="turn", sid="i1", run_id="r-1", turn_id=1, reason="tool_use",
+            calls=[{"id": "c1", "name": "Write", "args": {"path": "id.txt", "content": "x"}}])
+    r = gw.expect("result", sid="i1", id="c1", ok=True)
+    assert r.get("run_id") == "r-1" and r.get("turn_id") == 1, r
+    m = gw.expect("model", sid="i1")
+    assert m.get("turn_id") == 2, m
+    # 别的 run 的迟到结果、上一轮的 turn：内核都不认
+    gw.send(t="exec_result", sid="i1", run_id="r-0", id="c1", ok=True, content="late")
+    gw.send(t="turn", sid="i1", run_id="r-1", turn_id=1, reason="final")
+    time.sleep(0.4)
+    gw.send(t="turn", sid="i1", run_id="r-1", turn_id=2, reason="final")
+    d = gw.expect("done", sid="i1", status="ok")
+    assert d.get("run_id") == "r-1", d
+
+
+@case("并行上限：同一轮里超出的调用排队，前面的结束再按顺序执行")
+def t_parallel_limit(gw):
+    gw.send(t="input", sid="p1", mode="auto", max_parallel_tools=1, workspaces=[local_ws()], **{"from": "tg:user"})
+    gw.expect("model", sid="p1")
+    call(gw, "p1", ("a", "Write", {"path": "p1a.txt", "content": "A"}),
+         ("b", "Write", {"path": "p1b.txt", "content": "B"}))
+    q = gw.expect("tool_queued", sid="p1", id="b")
+    assert "等" in q.get("text", ""), q
+    gw.expect("result", sid="p1", id="a", ok=True)
+    gw.expect("result", sid="p1", id="b", ok=True)
+    finish(gw, "p1")
+    assert open(os.path.join(WORK, "p1a.txt")).read() == "A"
+    assert open(os.path.join(WORK, "p1b.txt")).read() == "B"
+
+
+@case("资源冲突：同一个文件的写串行，不同文件的读可以并行")
+def t_resource_locks(gw):
+    gw.send(t="input", sid="p2", mode="auto", max_parallel_tools=4, workspaces=[local_ws()], **{"from": "tg:user"})
+    gw.expect("model", sid="p2")
+    # 同一个文件写两次：第二个必须排队等第一个结束
+    call(gw, "p2", ("a", "Write", {"path": "same.txt", "content": "A"}),
+         ("b", "Write", {"path": "same.txt", "content": "B"}))
+    gw.expect("tool_queued", sid="p2", id="b")
+    first = gw.expect("result", sid="p2", id="a", ok=True)
+    second = gw.expect("result", sid="p2", id="b", ok=True)
+    assert first["content"] and second["content"], (first, second)
+    assert open(os.path.join(WORK, "same.txt")).read() == "B"
+    finish(gw, "p2")
+    # 同一个文件读两次：共享锁，可以一起跑，不该出现排队
+    gw.send(t="input", sid="p3", mode="auto", max_parallel_tools=4, workspaces=[local_ws()], **{"from": "tg:user"})
+    gw.expect("model", sid="p3")
+    call(gw, "p3", ("r1", "Read", {"path": "same.txt"}), ("r2", "Read", {"path": "same.txt"}))
+    got = {}
+    for _ in range(2):
+        r = gw.expect("result", sid="p3")
+        got[r["id"]] = r
+    assert got["r1"]["ok"] and got["r2"]["ok"], got
+    finish(gw, "p3")
+
+
+@case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
+def t_no_exec_started(gw):
+    gw.send_started = False
+    try:
+        start_gateway_run(gw, "n1")
+        call(gw, "n1", ("c1", "Read", {"path": "a"}))
+        gw.expect("exec", sid="n1", id="c1")
+        gw.send(t="exec_result", sid="n1", id="c1", ok=True, content="x")
+        gw.expect("result", sid="n1", id="c1", ok=True, content="x")
+        finish(gw, "n1")
+    finally:
+        gw.send_started = True
+
+
+@case("活跃 run 上限：超出的 input 在内核里排队，前面的结束再放行")
+def t_run_queue(gw):
+    # kernel.conf 里 max_active_runs = 2
+    for sid in ("q1", "q2"):
+        gw.send(t="input", sid=sid, mode="auto", workspaces=[], **{"from": "tg:user"})
+        gw.expect("model", sid=sid)
+    gw.send(t="input", sid="q3", mode="auto", workspaces=[], **{"from": "tg:user"})
+    try:
+        m = gw.recv(timeout=1)
+        raise AssertionError(f"第三个 input 不该马上开始：{m}")
+    except TimeoutError:
+        pass
+    gw.send(t="turn", sid="q1", reason="final")
+    gw.expect("done", sid="q1", status="ok")
+    gw.expect("model", sid="q3")
+    gw.send(t="turn", sid="q3", reason="final")
+    gw.expect("done", sid="q3", status="ok")
+    gw.send(t="turn", sid="q2", reason="final")
+    gw.expect("done", sid="q2", status="ok")
 
 
 def old_ssh_config():
@@ -542,7 +662,7 @@ def main():
         conf = os.path.join(T, "kernel.conf")
         with open(conf, "w") as f:
             f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nskills = skills\n"
-                    f"max_output = 4096\napproval_timeout = 2\n")
+                    f"max_output = 4096\napproval_timeout = 2\nmax_active_runs = 2\n")
 
         gw = Gateway(sock)
         log = open(os.path.join(T, "kernel.log"), "w")
@@ -552,19 +672,24 @@ def main():
             gw.accept()
             hello = gw.expect("hello")
             names = [t["name"] for t in hello["tools"]]
-            assert hello["token"] == "t0k" and hello["v"] == 10, hello
+            assert hello["token"] == "t0k" and hello["v"] == 11, hello
             assert hello["os"] in ("linux", "macos", "windows") and hello["arch"], hello
             assert names == ["Edit", "Grep", "Read", "Shell", "Write"], names   # Skill 由网关提供
             assert all("input_schema" in t and t["description"] for t in hello["tools"])
             assert all("workspace" in t["input_schema"]["properties"] for t in hello["tools"]), hello["tools"]
-            assert "landlock" in hello["sandbox"], hello
-            gw.send(t="welcome", v=5)
+            assert "landlock" in hello["sandbox"] and hello["sandbox"].get("mode") in ("auto", "on", "off"), hello
+            feat = hello.get("features", {})
+            assert feat.get("call_identity") == 1 and feat.get("bounded_parallel") == 1, feat
+            assert feat.get("max_parallel_tools") and feat.get("max_active_runs"), feat
+            gw.send(t="welcome", v=11)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
             for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
-                      t_gateway_cancel, t_reconnect):
+                      t_shell_serialized,
+                      t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
+                      t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理

@@ -33,7 +33,9 @@ static int parse_int(const char *v, long lo, long hi, long *out)
 }
 
 const char *const KCONF_KEYS[] = { "gateway", "token", "node", "exec", "skills", "max_steps",
-                                    "run_timeout", "approval_timeout", "max_output", NULL };
+                                    "run_timeout", "approval_timeout", "max_output",
+                                    "max_execs", "max_parallel_shells", "max_active_runs",
+                                    "max_parallel_tools", "max_live_jobs", "sandbox", NULL };
 
 /* 值里夹着另一个配置项（"65536gateway = …"）：两行粘在了一起，返回第二项开始的位置 */
 const char *kconf_glued(const char *val)
@@ -58,6 +60,12 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
     k->run_timeout = 600;
     k->approval_timeout = 300;
     k->max_output = 64 * 1024;
+    k->max_execs = 8;
+    k->max_parallel_shells = 2;
+    k->max_active_runs = 16;
+    k->max_parallel_tools = 4;
+    k->max_live_jobs = 16;
+    k->sandbox_mode = xstrdup("auto");
 
     buf_t text = {0};
     if (plat_read_file(path, &text, 1u << 20) < 0) {
@@ -124,6 +132,19 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         else if (!strcmp(key, "run_timeout") && !parse_int(val, 1, 86400, &n)) k->run_timeout = (int)n;
         else if (!strcmp(key, "approval_timeout") && !parse_int(val, 1, 86400, &n)) k->approval_timeout = (int)n;
         else if (!strcmp(key, "max_output") && !parse_int(val, 1024, 64L << 20, &n)) k->max_output = (size_t)n;
+        else if (!strcmp(key, "max_execs") && !parse_int(val, 1, 256, &n)) k->max_execs = (int)n;
+        else if (!strcmp(key, "max_parallel_shells") && !parse_int(val, 1, 64, &n)) k->max_parallel_shells = (int)n;
+        else if (!strcmp(key, "max_active_runs") && !parse_int(val, 1, 256, &n)) k->max_active_runs = (int)n;
+        else if (!strcmp(key, "max_parallel_tools") && !parse_int(val, 1, 64, &n)) k->max_parallel_tools = (int)n;
+        else if (!strcmp(key, "max_live_jobs") && !parse_int(val, 1, 256, &n)) k->max_live_jobs = (int)n;
+        else if (!strcmp(key, "sandbox")) {
+            if (strcmp(val, "auto") && strcmp(val, "on") && strcmp(val, "off")) {
+                snprintf(err, errlen, "%s 第 %d 行：sandbox 只能是 auto、on 或 off", path, lineno);
+                rc = -1;
+                break;
+            }
+            set_str(&k->sandbox_mode, val);
+        }
         else {
             snprintf(err, errlen, "%s 第 %d 行：未知配置项或取值不合法：%s = %s", path, lineno, key, val);
             rc = -1;
@@ -171,6 +192,7 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
 
 void kconf_free(kconf *k)
 {
+    free(k->sandbox_mode);
     free(k->skills);
     free(k->gateway);
     free(k->token);

@@ -27,7 +27,7 @@
 
 #include "version.h"
 
-#define PROTO_VERSION      10
+#define PROTO_VERSION      11
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
@@ -39,9 +39,29 @@ static na_wake g_wake = { -1, -1 };   /* 信号处理函数往这里写一个字
 
 /* 交给网关执行的工具调用（工作目录不在这台机器上，或者 Skill），等 exec_result */
 typedef struct gwjob {
-    char *sid, *id;
+    char *sid, *run_id, *id;
+    int   turn_id;
+    bool  started;         /* 网关已经确认这个调用真的开始执行了（协议 v11） */
     struct gwjob *next;
 } gwjob_t;
+
+/* 已经派发、在等本机执行槽的调用：槽位腾出来之后按派发顺序启动。启动之前不发
+ * CALL_STARTED，所以状态机那边的执行时限还没有开始走。 */
+typedef struct execq {
+    char  *sid, *run_id, *id, *name;
+    int    turn_id;
+    cJSON *req;
+    struct execq *next;
+} execq_t;
+
+/* 内核的活跃 run 到了上限：新来的 input 先排队（有界），等有空位再喂给状态机 */
+typedef struct pendin {
+    cJSON *m;
+    struct pendin *next;
+} pendin_t;
+
+#define PENDIN_MAX      32     /* 最多几个 input 在排队 */
+#define MAX_CALLS_WIRE  256    /* 一条 turn 消息里最多认这么多调用（网关自己会先限制成 32） */
 
 /* 执行器任务的种类：自己这一轮的工具调用，或者网关请这台机器代为执行的（run） */
 enum { JOB_TOOL = 0, JOB_HOST = 1 };
@@ -51,12 +71,16 @@ typedef struct {
     const na_tool_policy *tools;
     size_t          ntools;
     int             landlock;    /* 执行器探测到的 Landlock 版本，0 表示没有沙箱 */
+    int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
     char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
     na_core        *core;
     runner_t        runner;
     na_pipes        pipes;            /* 协议 v10：MCP 服务的 stdio 透传 */
     struct gwjob   *gwjobs;      /* 交给网关执行、还没有结果的工具调用 */
+    struct execq   *execq;       /* 等本机执行槽的调用 */
+    struct pendin  *pendin;      /* 活跃 run 到上限时排队的 input */
+    int             nshells;     /* 正在跑的 Shell 数（受 max_parallel_shells 限制） */
     link_t          link;
     int64_t         last_ping;
     int64_t         next_connect;
@@ -101,8 +125,17 @@ static void send_hello(kernel_t *k)
         free(failed);
     }
     cJSON_AddItemToObject(m, "tools", tools_specs());
+    /* 能力集合：网关按机器分别协商，缺能力时不暴露相应参数 */
+    cJSON *ft = cJSON_AddObjectToObject(m, "features");
+    cJSON_AddNumberToObject(ft, "call_identity", 1);
+    cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
+    cJSON_AddNumberToObject(ft, "sandbox_policy", 1);
+    cJSON_AddNumberToObject(ft, "max_parallel_tools", k->conf.max_parallel_tools);
+    cJSON_AddNumberToObject(ft, "max_active_runs", k->conf.max_active_runs);
+    cJSON_AddNumberToObject(ft, "max_execs", k->conf.max_execs);
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
+    cJSON_AddStringToObject(sb, "mode", k->conf.sandbox_mode);
     link_send(&k->link, m);
 }
 
@@ -239,10 +272,12 @@ static void handle_ls(kernel_t *k, const cJSON *m)
     link_send(&k->link, r);
 }
 
-static void gw_add(kernel_t *k, const char *sid, const char *id)
+static void gw_add(kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id)
 {
     gwjob_t *g = xcalloc(1, sizeof *g);
     g->sid = xstrdup(sid ? sid : "");
+    g->run_id = xstrdup(run_id ? run_id : "");
+    g->turn_id = turn_id;
     g->id = xstrdup(id ? id : "");
     g->next = k->gwjobs;
     k->gwjobs = g;
@@ -251,6 +286,7 @@ static void gw_add(kernel_t *k, const char *sid, const char *id)
 static void gw_free(gwjob_t *g)
 {
     free(g->sid);
+    free(g->run_id);
     free(g->id);
     free(g);
 }
@@ -268,9 +304,34 @@ static gwjob_t *gw_take(kernel_t *k, const char *sid, const char *id)
     return NULL;
 }
 
-static void tool_done(kernel_t *k, const char *sid, const char *id, bool ok, const char *content, int64_t now)
+/* 事件带回来的 run_id 必须和派发时一致（旧网关不带，按兼容处理） */
+static bool gw_same_run(const gwjob_t *g, const char *run_id)
 {
-    na_event ev = { .type = NA_EV_TOOL_DONE, .sid = sid, .id = id, .ok = ok, .content = content };
+    if (!run_id || !*run_id) return true;
+    if (!g->run_id || !*g->run_id) return true;
+    return strcmp(g->run_id, run_id) == 0;
+}
+
+/* 只找不摘：exec_started 用它（后面还有终态结果要配对） */
+static gwjob_t *gw_find(kernel_t *k, const char *sid, const char *id)
+{
+    for (gwjob_t *g = k->gwjobs; g; g = g->next)
+        if (!strcmp(g->sid, sid ? sid : "") && !strcmp(g->id, id ? id : "")) return g;
+    return NULL;
+}
+
+static void tool_done(kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id,
+                      bool ok, const char *content, int64_t now)
+{
+    na_event ev = { .type = NA_EV_TOOL_DONE, .sid = sid, .run_id = run_id, .turn_id = turn_id,
+                    .id = id, .ok = ok, .content = content };
+    na_core_feed(k->core, now, &ev);
+}
+
+/* 宿主确认这个调用的执行器真的起来了：执行时限从现在开始算 */
+static void call_started(kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id, int64_t now)
+{
+    na_event ev = { .type = NA_EV_CALL_STARTED, .sid = sid, .run_id = run_id, .turn_id = turn_id, .id = id };
     na_core_feed(k->core, now, &ev);
 }
 
@@ -384,6 +445,76 @@ static const cJSON *pick_workspace(const cJSON *policy, const cJSON *args, char 
     return NULL;
 }
 
+/* ---- 并发分类（设计文档 §3.2） ----
+ *
+ * 权限分类不能代替并发分类：PUBLIC_READ 里既有 Message 这种有副作用的操作，也有
+ * WebSearch 这种真正无冲突的。这里按真实工具和已验证参数算出资源键，交给状态机
+ * 排队。宁可保守也不能漏：判断不出来就退到目录级、机器级的独占，总比并行写坏
+ * 文件好。模型自报“只读”不放松这里的锁。
+ *
+ * 键的格式是 "类别:值"，多个用逗号隔开。 */
+
+/* 把模型给的路径变成资源键里用的绝对路径：能解析符号链接就解析（同一份文件的不同
+ * 写法要落到同一个键上），解析不了（比如还没创建的文件）就用拼出来的路径。 */
+static char *res_path(const char *base, const char *rel)
+{
+    if (!rel || !*rel) return NULL;
+    char *expanded = plat_expand_home(rel);
+    char *full = plat_is_abs(expanded) ? xstrdup(expanded)
+               : base && *base ? plat_join(base, expanded) : xstrdup(expanded);
+    free(expanded);
+    char *real = plat_canonical(full);
+    if (real) { free(full); return real; }
+    return full;
+}
+
+/* 追加一个键；值里的逗号和换行换成空格，免得把键拆坏 */
+static void res_add(buf_t *b, const char *cls, const char *value)
+{
+    if (!value || !*value) return;
+    if (b->len) buf_puts(b, ",");
+    buf_puts(b, cls);
+    buf_puts(b, ":");
+    for (const char *p = value; *p; p++) {
+        char ch = (*p == ',' || *p == '\n') ? ' ' : *p;
+        buf_append(b, &ch, 1);
+    }
+}
+
+/* 算出这次调用的资源键；返回 true 表示独占。ws 是这一轮选中的工作目录对象
+ * （里面有 dirs），可以为 NULL。 */
+static bool call_resource(const char *tool, const cJSON *args, const cJSON *ws, buf_t *keys)
+{
+    const char *base = NULL;
+    const cJSON *dirs = cJSON_GetObjectItemCaseSensitive(ws, "dirs");
+    const cJSON *first = cJSON_GetArrayItem(dirs, 0);
+    if (cJSON_IsString(first)) base = first->valuestring;
+    const char *given = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(args, "path"));
+    char *path = res_path(base, given);
+    char *dir = res_path(base, ".");
+    bool excl = false;
+
+    if (!strcmp(tool, "Shell")) {
+        /* 一般 Shell 没法靠字符串证明没有副作用：按工作目录独占；提权或范围不明时
+         * 扩大到机器级的文件资源 */
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"))) res_add(keys, "machine", "files");
+        else res_add(keys, "dir", dir);
+        excl = true;
+    } else if (!strcmp(tool, "Write") || !strcmp(tool, "Edit")) {
+        /* 首版按目标文件独占；没给路径时退到工作目录独占 */
+        if (path) res_add(keys, "file", path);
+        else res_add(keys, "dir", dir);
+        excl = true;
+    } else if (!strcmp(tool, "Read") || !strcmp(tool, "Grep") || !strcmp(tool, "Fetch")) {
+        /* 只读：持共享锁，可以和别的读并行 */
+        if (path) res_add(keys, "file", path);
+        else res_add(keys, "dir", dir);
+    }
+    free(path);
+    free(dir);
+    return excl;
+}
+
 /* 交给网关：Skill（技能在网关上），或者工作目录不在这台机器上的工具调用 */
 /* 这一轮工具结果的上限（网关在 input 里带上的；没带用 kernel.conf） */
 static size_t run_max_output(const kernel_t *k, const cJSON *pol)
@@ -392,7 +523,8 @@ static size_t run_max_output(const kernel_t *k, const cJSON *pol)
     return cJSON_IsNumber(mo) ? (size_t)mo->valuedouble : k->conf.max_output;
 }
 
-static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *workspace, size_t max_output)
+static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *workspace, size_t max_output,
+                      int64_t now)
 {
     cJSON *m = msg_new("exec", c->sid);
     cJSON_AddStringToObject(m, "id", c->id);
@@ -400,16 +532,22 @@ static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *wor
     cJSON_AddItemToObject(m, "args", args ? args : cJSON_CreateString(c->args ? c->args : ""));
     if (workspace) cJSON_AddStringToObject(m, "workspace", workspace);
     if (c->elevated) cJSON_AddBoolToObject(m, "elevated", true);
+    cJSON_AddStringToObject(m, "run_id", c->run_id ? c->run_id : "");
+    cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
     cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
     cJSON_AddNumberToObject(m, "max_output", (double)max_output);
     link_send(&k->link, m);
-    gw_add(k, c->sid, c->id);
+    gw_add(k, c->sid, c->run_id, c->turn_id, c->id);
+    /* 旧网关不会回 exec_started：派发就算开始，行为和以前一样。新网关先回一条
+     * exec_started，执行时限从那之后才走。 */
+    if (k->gw_ver < 11) call_started(k, c->sid, c->run_id, c->turn_id, c->id, now);
     log_info("交给网关执行 %s（%s）%s%s", c->name, c->id, workspace ? "：" : "", workspace ? workspace : "");
 }
 
-/* 启动执行器。req 是请求（接管所有权），补上执行器需要的通用字段 */
-static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *id, const char *name,
-                         char *err, size_t errlen)
+/* 启动执行器。req 是请求（接管所有权），补上执行器需要的通用字段。
+ * 调用方必须先确认本机还有执行槽（见 exec_admit）。 */
+static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *run_id, int turn_id,
+                         const char *id, const char *name, char *err, size_t errlen)
 {
     bool ok = true;
     /* 只检查工作目录：ro 只读放行；rw 只有提权时才会出现 /，已经过用户审批 */
@@ -429,9 +567,134 @@ static job_t *start_exec(kernel_t *k, cJSON *req, const char *sid, const char *i
         cJSON_free(body);
         char *argv[] = { k->conf.exec, NULL };
         j = runner_start_ex(&k->runner, argv, sid, id, name, line, strlen(line), err, errlen);
+        if (j) {
+            j->run_id = xstrdup(run_id ? run_id : "");
+            j->turn_id = turn_id;
+        }
     }
     cJSON_Delete(req);
     return j;
+}
+
+/* ---- 本机执行槽（设计文档 §3.1） ----
+ *
+ * 机器级的真实槽位在这里管：同时跑几个执行器（max_execs）、其中几个 Shell
+ * （max_parallel_shells）、还没结束的任务总数（max_live_jobs）。没有槽位就先排队，
+ * 排到之后再启动——排队期间状态机那边还是 DISPATCHED，执行时限没有开始走。 */
+
+static bool is_shell_tool(const char *name)
+{
+    return name && !strcmp(name, "Shell");
+}
+
+/* 网关请这台机器代跑的（JOB_HOST）也算真实执行器；它没有调用身份，sid 是空的 */
+static int exec_slots_used(const kernel_t *k)
+{
+    return (int)runner_count(&k->runner);
+}
+
+static void execq_free(execq_t *q)
+{
+    if (!q) return;
+    free(q->sid); free(q->run_id); free(q->id); free(q->name);
+    cJSON_Delete(q->req);
+    free(q);
+}
+
+static int execq_len(const kernel_t *k)
+{
+    int n = 0;
+    for (const execq_t *q = k->execq; q; q = q->next) n++;
+    return n;
+}
+
+/* 机器上还没结束的任务总数：正在跑的 + 在排队的 */
+static int exec_live(const kernel_t *k)
+{
+    return exec_slots_used(k) + execq_len(k);
+}
+
+/* 取消一个还没启动的执行（状态机超时、用户停止） */
+static bool execq_drop(kernel_t *k, const char *sid, const char *id)
+{
+    for (execq_t **pp = &k->execq; *pp; pp = &(*pp)->next) {
+        execq_t *q = *pp;
+        if (strcmp(q->sid, sid ? sid : "") || strcmp(q->id, id ? id : "")) continue;
+        *pp = q->next;
+        execq_free(q);
+        return true;
+    }
+    return false;
+}
+
+static void execq_clear(kernel_t *k)
+{
+    while (k->execq) {
+        execq_t *q = k->execq;
+        k->execq = q->next;
+        execq_free(q);
+    }
+    k->nshells = 0;
+}
+
+/* 有了空槽就把排在最前面的启动起来 */
+static void pump_execq(kernel_t *k, int64_t now)
+{
+    while (k->execq) {
+        execq_t *q = k->execq;
+        if (exec_slots_used(k) >= k->conf.max_execs) return;
+        if (is_shell_tool(q->name) && k->nshells >= k->conf.max_parallel_shells) return;
+        char err[1024] = "";
+        job_t *j = spawn_exec(k, q->req, q->sid, q->run_id, q->turn_id, q->id, q->name, err, sizeof err);
+        q->req = NULL;   /* spawn_exec 接管了（成功失败都由它释放） */
+        k->execq = q->next;
+        if (j) {
+            j->tag = is_shell_tool(q->name) ? 1 : 0;
+            if (j->tag) k->nshells++;
+            log_info("执行 %s（%s）", q->name, q->id);
+            call_started(k, q->sid, q->run_id, q->turn_id, q->id, now);
+        } else {
+            log_warn("无法执行 %s：%s", q->name, err);
+            tool_done(k, q->sid, q->run_id, q->turn_id, q->id, false, err, now);
+        }
+        execq_free(q);
+    }
+}
+
+/* 把一次本地执行交给执行槽：有空槽就立刻起，没有就排队（先来后到，不插队） */
+static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run_id, int turn_id,
+                       const char *id, const char *name, int64_t now, char *err, size_t errlen)
+{
+    bool shell = is_shell_tool(name);
+    bool has_slot = exec_slots_used(k) < k->conf.max_execs &&
+                    (!shell || k->nshells < k->conf.max_parallel_shells);
+    if (has_slot && !k->execq) {
+        job_t *j = spawn_exec(k, req, sid, run_id, turn_id, id, name, err, errlen);
+        if (!j) return false;
+        j->tag = shell ? 1 : 0;
+        if (shell) k->nshells++;
+        log_info("执行 %s（%s）", name, id);
+        call_started(k, sid, run_id, turn_id, id, now);
+        return true;
+    }
+    if (exec_live(k) >= k->conf.max_live_jobs) {
+        snprintf(err, errlen, "这台机器上还没结束的任务已经到上限（%d 个），这个调用没有启动。请等前面的任务结束",
+                 k->conf.max_live_jobs);
+        cJSON_Delete(req);
+        return false;
+    }
+    execq_t *q = xcalloc(1, sizeof *q);
+    q->sid = xstrdup(sid ? sid : "");
+    q->run_id = xstrdup(run_id ? run_id : "");
+    q->turn_id = turn_id;
+    q->id = xstrdup(id ? id : "");
+    q->name = xstrdup(name ? name : "");
+    q->req = req;
+    execq_t **pp = &k->execq;
+    while (*pp) pp = &(*pp)->next;
+    *pp = q;
+    log_info("%s（%s）在等执行槽", name, id);
+    return true;
 }
 
 /* 由网关执行的工具：内核只转给网关，不挑工作目录、不交给执行器 */
@@ -458,17 +721,17 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
     cJSON *pol = cJSON_Parse(c->policy ? c->policy : "{}");
     size_t max_output = run_max_output(k, pol);
     if (gateway_tool(c->name) || mcp_tool(c->name)) {
-        send_exec(k, c, args, NULL, max_output);
+        send_exec(k, c, args, NULL, max_output, now);
         cJSON_Delete(pol);
         return;
     }
     const cJSON *ws = pick_workspace(pol, args, err, sizeof err);
-    job_t *j = NULL;
+    bool admitted = false;
     if (ws) {
         cJSON_DeleteItemFromObjectCaseSensitive(args, "workspace");
         if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"))) {
             /* 工作目录不在这台机器上：交给网关，约束由网关按会话的设置生成 */
-            send_exec(k, c, args, sget(ws, "name"), max_output);
+            send_exec(k, c, args, sget(ws, "name"), max_output, now);
             cJSON_Delete(pol);
             return;
         }
@@ -490,14 +753,13 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         args = NULL;
         cJSON_AddStringToObject(req, "tmp_key", c->sid);
         cJSON_AddNumberToObject(req, "max_output", (double)max_output);
-        j = start_exec(k, req, c->sid, c->id, c->name, err, sizeof err);
-        if (j) log_info("执行 %s（%s）%s", c->name, c->id, sget(ws, "name") ? sget(ws, "name") : "");
+        admitted = exec_admit(k, req, c->sid, c->run_id, c->turn_id, c->id, c->name, now, err, sizeof err);
     }
     cJSON_Delete(args);
     cJSON_Delete(pol);
-    if (j) return;
+    if (admitted) return;
     log_warn("无法执行 %s：%s", c->name, err);
-    tool_done(k, c->sid, c->id, false, err, now);
+    tool_done(k, c->sid, c->run_id, c->turn_id, c->id, false, err, now);
 }
 
 /* ---- 网关请这台机器代为执行（工作目录在这台机器上，但这一轮由别的内核跑） ---- */
@@ -519,7 +781,10 @@ static void handle_run(kernel_t *k, const cJSON *m)
     char err[1024] = "";
     job_t *j = NULL;
     if (!id || !cJSON_IsObject(req) || !tool) snprintf(err, sizeof err, "执行请求不完整");
-    else j = start_exec(k, cJSON_Duplicate(req, 1), "", id, tool, err, sizeof err);
+    else if (exec_live(k) >= k->conf.max_live_jobs)
+        snprintf(err, sizeof err, "这台机器上还没结束的任务已经到上限（%d 个）", k->conf.max_live_jobs);
+    else
+        j = spawn_exec(k, cJSON_Duplicate(req, 1), "", "", 0, id, tool, err, sizeof err);
     if (!j) {
         send_run_result(k, id, false, err);
         return;
@@ -608,6 +873,58 @@ static void handle_skill_put(kernel_t *k, const cJSON *m)
     send_run_result(k, sget(m, "id"), ok, ok ? dir : err);
 }
 
+static void handle_msg(kernel_t *k, const cJSON *m, int64_t now);
+
+static int pendin_len(const kernel_t *k)
+{
+    int n = 0;
+    for (const pendin_t *p = k->pendin; p; p = p->next) n++;
+    return n;
+}
+
+static void pendin_push(kernel_t *k, const cJSON *m)
+{
+    pendin_t *p = xcalloc(1, sizeof *p);
+    p->m = cJSON_Duplicate(m, 1);
+    pendin_t **pp = &k->pendin;
+    while (*pp) pp = &(*pp)->next;
+    *pp = p;
+}
+
+/* 排队的 input 太多：丢掉最早的那个（有界，不能让无限输入把内存吃光） */
+static void pendin_drop_oldest(kernel_t *k)
+{
+    pendin_t *p = k->pendin;
+    if (!p) return;
+    k->pendin = p->next;
+    log_warn("排队的 input 到上限，丢掉最早的一个（sid=%s）", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(p->m, "sid")));
+    cJSON_Delete(p->m);
+    free(p);
+}
+
+static void pendin_clear(kernel_t *k)
+{
+    while (k->pendin) {
+        pendin_t *p = k->pendin;
+        k->pendin = p->next;
+        cJSON_Delete(p->m);
+        free(p);
+    }
+}
+
+/* 有 run 结束了就放一个排队的 input 进来 */
+static void feed_pending_input(kernel_t *k, int64_t now)
+{
+    while (k->pendin && na_core_active_runs(k->core) < (size_t)na_core_max_runs(k->core)) {
+        pendin_t *p = k->pendin;
+        k->pendin = p->next;
+        log_info("放行一个排队的 input");
+        handle_msg(k, p->m, now);
+        cJSON_Delete(p->m);
+        free(p);
+    }
+}
+
 static void pump(kernel_t *k, int64_t now)
 {
     na_cmd *c;
@@ -616,17 +933,31 @@ static void pump(kernel_t *k, int64_t now)
         switch (c->type) {
         case NA_CMD_MODEL:
             m = msg_new("model", c->sid);
+            if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
+            cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
             break;
         case NA_CMD_RESULT:
             m = msg_new("result", c->sid);
             cJSON_AddStringToObject(m, "id", c->id);
+            if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
+            if (c->turn_id) cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
             cJSON_AddBoolToObject(m, "ok", c->ok);
             cJSON_AddStringToObject(m, "content", c->text ? c->text : "");
             if (!c->ok) log_info("调用 %s 没有成功：%.*s", c->id, (int)utf8_cut(c->text ? c->text : "", c->text ? strlen(c->text) : 0, 200), c->text ? c->text : "");
             break;
+        case NA_CMD_QUEUED:
+            m = msg_new("tool_queued", c->sid);
+            cJSON_AddStringToObject(m, "id", c->id);
+            cJSON_AddStringToObject(m, "name", c->name ? c->name : "");
+            if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
+            cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
+            cJSON_AddStringToObject(m, "text", c->text ? c->text : "");
+            break;
         case NA_CMD_APPROVE_REQ: {
             m = msg_new("approve_req", c->sid);
             cJSON_AddStringToObject(m, "id", c->id);
+            if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
+            cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
             cJSON_AddStringToObject(m, "name", c->name);
             cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
             if (args) cJSON_AddItemToObject(m, "args", args);
@@ -642,6 +973,7 @@ static void pump(kernel_t *k, int64_t now)
         case NA_CMD_DONE:
             m = msg_new("done", c->sid);
             cJSON_AddStringToObject(m, "status", c->status);
+            if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
             if (c->text) cJSON_AddStringToObject(m, "detail", c->text);
             log_info("run 结束 sid=%s status=%s", c->sid, c->status);
             break;
@@ -655,7 +987,7 @@ static void pump(kernel_t *k, int64_t now)
                 m = msg_new("exec_cancel", c->sid);
                 cJSON_AddStringToObject(m, "id", c->id);
                 gw_free(g);
-            } else {
+            } else if (!execq_drop(k, c->sid, c->id)) {
                 runner_kill(&k->runner, c->sid, c->id);
             }
             log_info("终止 %s", c->id);
@@ -665,6 +997,7 @@ static void pump(kernel_t *k, int64_t now)
         if (m) link_send(&k->link, m);
         na_cmd_free(c);
     }
+    feed_pending_input(k, now);
 }
 
 /* ---- 协议 v10：MCP 服务的 stdio 透传 ---- */
@@ -817,7 +1150,9 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     if (!strcmp(t, "pong")) return;
     if (!strcmp(t, "welcome")) {
         k->backoff = 1000;
-        log_info("网关已接受连接");
+        const cJSON *gv = cJSON_GetObjectItemCaseSensitive(m, "v");
+        k->gw_ver = cJSON_IsNumber(gv) ? gv->valueint : 10;
+        log_info("网关已接受连接（协议 v%d）", k->gw_ver);
         set_state(k, "connected", NULL, NULL);
         if (k->update_deadline) {
             update_confirm();
@@ -862,12 +1197,22 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         handle_ls(k, m);
         return;
     }
+    if (!strcmp(t, "exec_started")) {
+        /* 网关那边真的开始执行了：派发等待结束，执行时限从现在算。
+         * 条目留在表里，终态结果还要用它配对。 */
+        gwjob_t *g = gw_find(k, sget(m, "sid"), sget(m, "id"));
+        if (!g || g->started || !gw_same_run(g, sget(m, "run_id"))) return;
+        g->started = true;
+        call_started(k, g->sid, g->run_id, g->turn_id, g->id, now);
+        return;
+    }
     if (!strcmp(t, "exec_result")) {
         gwjob_t *g = gw_take(k, sget(m, "sid"), sget(m, "id"));
         if (!g) return;   /* 已经超时或者被停止了 */
+        if (!gw_same_run(g, sget(m, "run_id"))) { gw_free(g); return; }   /* 别的 run 的迟到结果 */
         bool ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "ok"));
         log_info("网关执行 %s %s", g->id, ok ? "完成" : "失败");
-        tool_done(k, g->sid, g->id, ok, sget(m, "content") ? sget(m, "content") : "", now);
+        tool_done(k, g->sid, g->run_id, g->turn_id, g->id, ok, sget(m, "content") ? sget(m, "content") : "", now);
         gw_free(g);
         return;
     }
@@ -900,21 +1245,33 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     na_event ev = { .sid = sget(m, "sid") };
     na_call *calls = NULL;
     char **owned = NULL;
+    char **reskeys = NULL;
     char *policy = NULL;
     cJSON *run_pol = NULL;
     size_t ncalls = 0;
 
     if (!strcmp(t, "input")) {
+        /* 活跃 run 到了上限：先排队（有界），等这个内核上的 run 结束再喂进去。
+         * 网关那边只是暂时收不到 MODEL，不会被无限分配拖垮。 */
+        if (na_core_active_runs(k->core) >= (size_t)na_core_max_runs(k->core)) {
+            if (pendin_len(k) >= PENDIN_MAX) pendin_drop_oldest(k);
+            pendin_push(k, m);
+            log_info("活跃 run 已满（%d 个），input 先排队", na_core_max_runs(k->core));
+            return;
+        }
         ev.type = NA_EV_INPUT;
+        ev.run_id = sget(m, "run_id");
         ev.from = sget(m, "from");
         ev.mode = parse_mode(sget(m, "mode"));
         /* 网关的设置：大于 0 是上限，小于 0 不限，没有（旧网关）用 kernel.conf */
         const cJSON *ms = cJSON_GetObjectItemCaseSensitive(m, "max_steps");
         const cJSON *rt = cJSON_GetObjectItemCaseSensitive(m, "run_timeout_ms");
         const cJSON *at = cJSON_GetObjectItemCaseSensitive(m, "approval_timeout_ms");
+        const cJSON *mp = cJSON_GetObjectItemCaseSensitive(m, "max_parallel_tools");
         ev.max_steps = cJSON_IsNumber(ms) ? ms->valueint : 0;
         ev.run_timeout_ms = cJSON_IsNumber(rt) ? rt->valueint : 0;
         ev.approval_timeout_ms = cJSON_IsNumber(at) ? at->valueint : 0;
+        ev.max_parallel_tools = cJSON_IsNumber(mp) ? mp->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
         policy = build_policy(m, ev.mode);
         ev.policy = policy;
@@ -923,13 +1280,18 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                  sget(m, "mode") ? sget(m, "mode") : "none", cJSON_IsArray(ws) ? cJSON_GetArraySize(ws) : 0);
     } else if (!strcmp(t, "turn")) {
         ev.type = NA_EV_TURN;
+        ev.run_id = sget(m, "run_id");
+        const cJSON *tid = cJSON_GetObjectItemCaseSensitive(m, "turn_id");
+        ev.turn_id = cJSON_IsNumber(tid) ? tid->valueint : 0;
         ev.reason = parse_reason(sget(m, "reason"));
         ev.detail = sget(m, "detail");
         const cJSON *arr = cJSON_GetObjectItemCaseSensitive(m, "calls");
         ncalls = cJSON_IsArray(arr) ? (size_t)cJSON_GetArraySize(arr) : 0;
+        if (ncalls > MAX_CALLS_WIRE) ncalls = MAX_CALLS_WIRE;   /* 防御：一条消息不能把内存撑爆 */
         if (ncalls) {
             calls = xcalloc(ncalls, sizeof *calls);
             owned = xcalloc(ncalls * 2, sizeof *owned);   /* 参数文本、预检的错误 */
+            reskeys = xcalloc(ncalls, sizeof *reskeys);   /* 资源键 */
         }
         const char *pol_s = na_core_policy(k->core, ev.sid);
         run_pol = pol_s ? cJSON_Parse(pol_s) : NULL;
@@ -951,6 +1313,16 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             if (calls[i].args_ok && cJSON_IsObject(args))
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
             calls[i].action = sget(args, "action");
+            /* MCP 工具：默认每个服务串行（服务自己能证明独立时由网关放宽） */
+            if (calls[i].name && mcp_tool(calls[i].name)) {
+                const char *sep = strstr(calls[i].name, "__");
+                buf_t mk = {0};
+                buf_puts(&mk, "mcp:");
+                buf_append(&mk, calls[i].name, (size_t)(sep - calls[i].name));
+                reskeys[i] = buf_cstr(&mk);
+                calls[i].res_keys = reskeys[i];
+                calls[i].res_exclusive = true;
+            }
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
             if (calls[i].args_ok && calls[i].name && !gateway_tool(calls[i].name) && !mcp_tool(calls[i].name) && run_pol) {
                 char err[1024];
@@ -963,6 +1335,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                     const cJSON *ll = cJSON_GetObjectItemCaseSensitive(ws, "landlock");
                     int landlock = local ? k->landlock : cJSON_IsNumber(ll) ? ll->valueint : 0;
                     calls[i].sandbox = landlock > 0 ? NA_SB_YES : NA_SB_NO;
+                    /* 并发分类：按真工具、真参数算，交给状态机排队 */
+                    buf_t keys = {0};
+                    calls[i].res_exclusive = call_resource(calls[i].name, args, ws, &keys);
+                    if (keys.len) {
+                        reskeys[i] = buf_cstr(&keys);
+                        calls[i].res_keys = reskeys[i];
+                    } else {
+                        buf_free(&keys);
+                    }
                 }
             }
             log_info("模型请求 %s（%s）", calls[i].name ? calls[i].name : "?", calls[i].id ? calls[i].id : "?");
@@ -971,6 +1352,9 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.ncalls = ncalls;
     } else if (!strcmp(t, "approve")) {
         ev.type = NA_EV_APPROVE;
+        ev.run_id = sget(m, "run_id");
+        const cJSON *tid = cJSON_GetObjectItemCaseSensitive(m, "turn_id");
+        ev.turn_id = cJSON_IsNumber(tid) ? tid->valueint : 0;
         ev.id = sget(m, "id");
         ev.ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "ok"));
         ev.from = sget(m, "from");
@@ -987,8 +1371,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     for (size_t i = 0; i < ncalls; i++) {
         cJSON_free(owned[i]);
         free(owned[ncalls + i]);
+        free(reskeys ? reskeys[i] : NULL);
     }
     free(owned);
+    free(reskeys);
     free(calls);
     cJSON_free(policy);
     cJSON_Delete(run_pol);
@@ -1023,6 +1409,8 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     pipes_reset(&k->pipes);
     na_event ev = { .type = NA_EV_RESET };
     na_core_feed(k->core, now, &ev);
+    execq_clear(k);
+    pendin_clear(k);
     pump(k, now);   /* 只剩 KILL：终止所有正在执行的工具 */
     while (k->gwjobs) {
         gwjob_t *g = k->gwjobs;
@@ -1045,12 +1433,16 @@ static void collect_finished(kernel_t *k, int64_t now)
             if (j->kind == JOB_HOST) {
                 send_run_result(k, j->id, ok, res);
             } else {
-                na_event ev = { .type = NA_EV_TOOL_DONE, .sid = j->sid, .id = j->id, .ok = ok, .content = res };
-                na_core_feed(k->core, now, &ev);
+                tool_done(k, j->sid, j->run_id, j->turn_id, j->id, ok, res, now);
             }
             free(res);
+        } else if (j->kind != JOB_HOST) {
+            /* 被终止的（超时、停止、断线）也要让状态机闭合这个调用，不能只等它自己超时 */
+            tool_done(k, j->sid, j->run_id, j->turn_id, j->id, false, "已终止", now);
         }
+        if (j->tag == 1 && k->nshells > 0) k->nshells--;
         job_free(j);
+        pump_execq(k, now);   /* 腾出来的槽位给在排队的调用 */
     }
 }
 
@@ -1302,6 +1694,9 @@ int main(int argc, char **argv)
         .max_steps = k.conf.max_steps,
         .run_timeout_ms = k.conf.run_timeout * 1000,
         .approval_timeout_ms = k.conf.approval_timeout * 1000,
+        /* 本机的并行与排队限额：网关每一轮还可以往下压，但不能往上顶 */
+        .max_parallel_tools_per_run = k.conf.max_parallel_tools,
+        .max_active_runs = k.conf.max_active_runs,
     };
     k.core = na_core_new(&cc);
     pipes_init(&k.pipes);

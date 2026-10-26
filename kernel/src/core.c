@@ -6,28 +6,44 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { CALL_WAIT_APPROVAL, CALL_RUNNING, CALL_DONE } call_state;
+/* 调用的状态。审批和排队都不占执行槽；执行时限从宿主确认 started 起算，
+ * 派发到 started 之间另有一个受限的等待。 */
+typedef enum {
+    CALL_VALIDATED,      /* 刚收到，还没决定怎么处理 */
+    CALL_WAIT_APPROVAL,  /* 等管理员审批 */
+    CALL_QUEUED,         /* 等执行槽或等资源 */
+    CALL_DISPATCHED,     /* 已经交给宿主，等它确认真的开始了 */
+    CALL_RUNNING,        /* 宿主确认开始，执行时限在走 */
+    CALL_DONE,           /* 已经有终态结果 */
+} call_state;
 
 typedef struct {
-    char *id, *name, *args;
+    char *id, *name, *args, *res_keys;
     const na_tool_policy *tool;
     bool elevated;
+    bool res_exclusive;
+    int  turn_id;        /* 产生这个调用的模型轮次 */
     call_state st;
-    int64_t deadline;    /* -1 表示不限（一直等审批） */
+    int64_t deadline;    /* -1 表示不限（一直等审批 / 一直排队） */
 } call_t;
 
 typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
 
 typedef struct run {
-    char *sid, *from, *policy;
+    char *sid, *run_id, *from, *policy;
     na_mode mode;
     bool elevate;        /* 这个身份能不能提权 */
     bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
     int approval_timeout_ms;  /* 不大于 0 表示一直等 */
     int max_steps;            /* 最多请求几次模型，不大于 0 表示不限 */
-    int steps;            /* 已请求模型的次数 */
-    int64_t deadline;     /* 整个 run 的截止时刻，-1 表示不限 */
+    int steps;                /* 已请求模型的次数 */
+    int turn_id;              /* 当前轮次，从 1 开始 */
+    int parallel_limit;       /* 同一 run 同时跑几个工具，不大于 0 不限 */
+    int queued_limit;         /* 排队上限，不大于 0 不限 */
+    int dispatch_timeout_ms;  /* 派发到 started 的等待上限 */
+    int queued_timeout_ms;    /* 排队等待上限，0 表示不单独计时 */
+    int64_t deadline;         /* 整个 run 的截止时刻，-1 表示不限 */
     call_t *calls; size_t ncalls;  /* 当前这一轮的工具调用 */
     struct run *next;
 } run_t;
@@ -40,6 +56,13 @@ struct na_core {
 
 /* 错误信息里引用的参数最多保留这么多字节 */
 #define ARGS_PREVIEW 200
+
+/* 没在配置里写时的并行默认值（设计文档 §3.1） */
+#define DEF_MAX_CALLS_PER_TURN   32
+#define DEF_MAX_PARALLEL         4
+#define DEF_MAX_QUEUED           32
+#define DEF_DISPATCH_TIMEOUT_MS  30000
+#define DEF_MAX_ACTIVE_RUNS      16
 
 static void *xcalloc(size_t n, size_t sz)
 {
@@ -72,6 +95,16 @@ static char *vfmt(const char *f, va_list ap)
     char *p = xcalloc(1, (size_t)n + 1);
     vsnprintf(p, (size_t)n + 1, f, ap);
     return p;
+}
+
+PRINTF_LIKE(1, 2)
+static char *fmt(const char *f, ...)
+{
+    va_list ap;
+    va_start(ap, f);
+    char *s = vfmt(f, ap);
+    va_end(ap);
+    return s;
 }
 
 /* 截到不超过 max 字节，且不切断 UTF-8 字符 */
@@ -113,6 +146,7 @@ void na_cmd_free(na_cmd *m)
     if (!m) return;
     free(m->sid); free(m->id); free(m->name);
     free(m->args); free(m->from); free(m->text); free(m->policy);
+    free(m->run_id);
     free(m);
 }
 
@@ -133,6 +167,15 @@ static run_t *find_run(na_core *c, const char *sid)
     for (run_t *r = c->runs; r; r = r->next)
         if (strcmp(r->sid, sid) == 0) return r;
     return NULL;
+}
+
+/* 事件带回来的 run_id 必须和当前 run 一致：跨 run 的迟到消息不能改动当前 run。
+ * 空表示旧网关不带，按兼容处理。 */
+static bool same_run(const run_t *r, const na_event *ev)
+{
+    if (!ev->run_id || !*ev->run_id) return true;
+    if (!r->run_id || !*r->run_id) return true;
+    return strcmp(ev->run_id, r->run_id) == 0;
 }
 
 static call_t *find_call(run_t *r, const char *id)
@@ -199,12 +242,77 @@ static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, bool eleva
     return DECIDE_DENY;
 }
 
+/* ---- 资源冲突 ----
+ *
+ * 宿主按真实工具和已验证参数算出资源键，内核只做集合比较：两个调用只要共有一个
+ * 资源键、且其中至少一方是独占的，就不能同时跑。空键表示不和别人抢东西（比如
+ * 纯网络查询），两边都是共享锁时可以并行。 */
+
+static bool keys_conflict(const char *a, bool a_excl, const char *b, bool b_excl)
+{
+    if (!a || !*a || !b || !*b) return false;
+    if (!a_excl && !b_excl) return false;
+    for (const char *p = a; *p;) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n) {
+            for (const char *q = b; *q;) {
+                const char *f = strchr(q, ',');
+                size_t m = f ? (size_t)(f - q) : strlen(q);
+                if (m == n && !strncmp(p, q, n)) return true;
+                q += m + (f ? 1 : 0);
+            }
+        }
+        p += n + (e ? 1 : 0);
+    }
+    return false;
+}
+
+static bool call_holds_slot(call_state st)
+{
+    return st == CALL_DISPATCHED || st == CALL_RUNNING;
+}
+
+static int run_slots_used(const run_t *r)
+{
+    int n = 0;
+    for (size_t i = 0; i < r->ncalls; i++)
+        if (call_holds_slot(r->calls[i].st)) n++;
+    return n;
+}
+
+static int run_queued(const run_t *r)
+{
+    int n = 0;
+    for (size_t i = 0; i < r->ncalls; i++)
+        if (r->calls[i].st == CALL_QUEUED) n++;
+    return n;
+}
+
+static bool has_free_slot(const run_t *r)
+{
+    if (r->parallel_limit <= 0) return true;
+    return run_slots_used(r) < r->parallel_limit;
+}
+
+/* 和其他已经占了槽位的调用有没有资源冲突 */
+static bool can_start(const run_t *r, const call_t *k)
+{
+    for (size_t i = 0; i < r->ncalls; i++) {
+        const call_t *o = &r->calls[i];
+        if (o == k || !call_holds_slot(o->st)) continue;
+        if (keys_conflict(o->res_keys, o->res_exclusive, k->res_keys, k->res_exclusive)) return false;
+    }
+    return true;
+}
+
 /* ---- run 生命周期 ---- */
 
 static void free_calls(run_t *r)
 {
     for (size_t i = 0; i < r->ncalls; i++) {
         free(r->calls[i].id); free(r->calls[i].name); free(r->calls[i].args);
+        free(r->calls[i].res_keys);
     }
     free(r->calls);
     r->calls = NULL;
@@ -217,13 +325,14 @@ static void drop_run(na_core *c, run_t *r)
         if (*pp == r) { *pp = r->next; break; }
     }
     free_calls(r);
-    free(r->sid); free(r->from); free(r->policy);
+    free(r->sid); free(r->run_id); free(r->from); free(r->policy);
     free(r);
 }
 
 static void finish(na_core *c, run_t *r, const char *status, const char *detail)
 {
     na_cmd *m = push(c, NA_CMD_DONE, r->sid);
+    m->run_id = dupstr(r->run_id);
     m->status = status;
     m->text = dupstr(detail);
     drop_run(c, r);
@@ -238,17 +347,23 @@ static void step(na_core *c, run_t *r)
         return;
     }
     r->steps++;
+    r->turn_id++;
     r->st = RUN_WAIT_MODEL;
-    push(c, NA_CMD_MODEL, r->sid);
+    na_cmd *m = push(c, NA_CMD_MODEL, r->sid);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = r->turn_id;
 }
 
 static void result(na_core *c, run_t *r, call_t *k, bool ok, const char *text)
 {
     na_cmd *m = push(c, NA_CMD_RESULT, r->sid);
     m->id = dupstr(k->id);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = k->turn_id;
     m->ok = ok;
     m->text = dupstr(text);
     k->st = CALL_DONE;
+    k->deadline = -1;
 }
 
 PRINTF_LIKE(4, 5)
@@ -262,6 +377,15 @@ static void result_err(na_core *c, run_t *r, call_t *k, const char *f, ...)
     free(text);
 }
 
+static void kill_call(na_core *c, run_t *r, call_t *k)
+{
+    na_cmd *m = push(c, NA_CMD_KILL, r->sid);
+    m->id = dupstr(k->id);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = k->turn_id;
+}
+
+/* 把调用交给宿主。执行时限不在这里开始：等宿主回 CALL_STARTED 才算真的开始了。 */
 static void exec_call(na_core *c, int64_t now, run_t *r, call_t *k)
 {
     na_cmd *m = push(c, NA_CMD_EXEC, r->sid);
@@ -270,15 +394,40 @@ static void exec_call(na_core *c, int64_t now, run_t *r, call_t *k)
     m->args = dupstr(k->args);
     m->from = dupstr(r->from);
     m->policy = dupstr(r->policy);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = k->turn_id;
     m->timeout_ms = k->tool->timeout_ms;
     m->elevated = k->elevated;
-    k->st = CALL_RUNNING;
-    k->deadline = now + k->tool->timeout_ms;
+    k->st = CALL_DISPATCHED;
+    k->deadline = r->dispatch_timeout_ms > 0 ? now + r->dispatch_timeout_ms : -1;
 }
 
-static void kill_call(na_core *c, run_t *r, call_t *k)
+static void queued_notice(na_core *c, run_t *r, call_t *k, const char *why)
 {
-    push(c, NA_CMD_KILL, r->sid)->id = dupstr(k->id);
+    na_cmd *m = push(c, NA_CMD_QUEUED, r->sid);
+    m->id = dupstr(k->id);
+    m->name = dupstr(k->name);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = k->turn_id;
+    m->text = dupstr(why);
+}
+
+/* 按顺序把能开始的调用放到执行槽里。每次只有一个调用结束时也要调一次。 */
+static void dispatch(na_core *c, int64_t now, run_t *r)
+{
+    for (;;) {
+        if (!has_free_slot(r)) return;
+        call_t *pick = NULL;
+        for (size_t i = 0; i < r->ncalls; i++) {
+            call_t *k = &r->calls[i];
+            if (k->st != CALL_QUEUED) continue;
+            if (!can_start(r, k)) continue;
+            pick = k;
+            break;   /* 从最早排队的开始挑，避免后来的插队饿死前面的 */
+        }
+        if (!pick) return;
+        exec_call(c, now, r, pick);
+    }
 }
 
 /* 一轮的工具调用全部有了结果，就请求下一轮模型 */
@@ -290,13 +439,13 @@ static void maybe_advance(na_core *c, run_t *r)
     step(c, r);
 }
 
-/* 给所有还没有结果的调用补上结果，正在执行的先终止 */
+/* 给所有还没有结果的调用补上结果，正在执行（或已派发）的先终止 */
 static void abort_calls(na_core *c, run_t *r, const char *why)
 {
     for (size_t i = 0; i < r->ncalls; i++) {
         call_t *k = &r->calls[i];
         if (k->st == CALL_DONE) continue;
-        if (k->st == CALL_RUNNING) kill_call(c, r, k);
+        if (call_holds_slot(k->st)) kill_call(c, r, k);
         result(c, r, k, false, why);
     }
 }
@@ -308,6 +457,7 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     if (!ev->sid || find_run(c, ev->sid)) return -1;
     run_t *r = xcalloc(1, sizeof *r);
     r->sid = dupstr(ev->sid);
+    r->run_id = dupstr(ev->run_id ? ev->run_id : "");
     r->from = dupstr(ev->from ? ev->from : "");
     r->policy = dupstr(ev->policy ? ev->policy : "{}");
     r->mode = ev->mode;
@@ -318,16 +468,39 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->deadline = run_ms > 0 ? now + run_ms : -1;
     r->approval_timeout_ms = ev->approval_timeout_ms ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
     r->max_steps = ev->max_steps ? ev->max_steps : c->cfg.max_steps;
+    r->parallel_limit = ev->max_parallel_tools ? ev->max_parallel_tools
+                       : c->cfg.max_parallel_tools_per_run > 0 ? c->cfg.max_parallel_tools_per_run : DEF_MAX_PARALLEL;
+    r->queued_limit = c->cfg.max_queued_calls_per_run > 0 ? c->cfg.max_queued_calls_per_run : DEF_MAX_QUEUED;
+    r->dispatch_timeout_ms = c->cfg.dispatch_timeout_ms > 0 ? c->cfg.dispatch_timeout_ms : DEF_DISPATCH_TIMEOUT_MS;
+    r->queued_timeout_ms = c->cfg.queued_timeout_ms;
     r->next = c->runs;
     c->runs = r;
     step(c, r);
     return 0;
 }
 
+/* 一批调用在结构上是否自洽：数量、空 ID、重复 ID。任何一条不满足，整轮按模型协议
+ * 错误处理——不能执行其中一部分再报错，那样工具结果的配对就没法保证了。 */
+static char *turn_badness(na_core *c, const na_event *ev)
+{
+    int lim = c->cfg.max_calls_per_turn > 0 ? c->cfg.max_calls_per_turn : DEF_MAX_CALLS_PER_TURN;
+    if ((int)ev->ncalls > lim)
+        return fmt("这一轮有 %zu 个工具调用，超过了上限 %d。请分成几轮来做", ev->ncalls, lim);
+    for (size_t i = 0; i < ev->ncalls; i++) {
+        const char *id = ev->calls[i].id;
+        if (!id || !*id) return fmt("第 %zu 个工具调用没有 id，无法配对结果", i + 1);
+        for (size_t j = 0; j < i; j++)
+            if (ev->calls[j].id && !strcmp(ev->calls[j].id, id))
+                return fmt("这一轮里有两个调用用了同一个 id（%s），无法可靠配对结果", id);
+    }
+    return NULL;
+}
+
 static int on_turn(na_core *c, int64_t now, const na_event *ev)
 {
     run_t *r = find_run(c, ev->sid);
-    if (!r || r->st != RUN_WAIT_MODEL) return -1;
+    if (!r || r->st != RUN_WAIT_MODEL || !same_run(r, ev)) return -1;
+    if (ev->turn_id > 0 && ev->turn_id != r->turn_id) return -1;   /* 上一轮的迟到回复 */
 
     switch (ev->reason) {
     case NA_TURN_FINAL:   finish(c, r, "ok", NULL);            return 0;
@@ -337,6 +510,12 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
     }
     if (ev->ncalls == 0) {
         finish(c, r, "ok", NULL);
+        return 0;
+    }
+    char *bad = turn_badness(c, ev);
+    if (bad) {
+        finish(c, r, "error", bad);
+        free(bad);
         return 0;
     }
 
@@ -349,6 +528,9 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->id = dupstr(in->id ? in->id : "");
         k->name = dupstr(in->name ? in->name : "");
         k->args = dupstr(in->args ? in->args : "{}");
+        k->res_keys = dupstr(in->res_keys ? in->res_keys : "");
+        k->res_exclusive = in->res_exclusive;
+        k->turn_id = r->turn_id;
         k->tool = find_tool(c, k->name);
         /* 内核不认识的工具名（MCP 的 <服务>__<工具>）交给网关执行 */
         if (!k->tool) k->tool = &FORWARDED;
@@ -383,10 +565,20 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             m->name = dupstr(k->name);
             m->args = dupstr(k->args);
             m->from = dupstr(r->from);
+            m->run_id = dupstr(r->run_id);
+            m->turn_id = k->turn_id;
             k->st = CALL_WAIT_APPROVAL;
             k->deadline = r->approval_timeout_ms > 0 ? now + r->approval_timeout_ms : -1;
         } else {
-            exec_call(c, now, r, k);
+            if (r->queued_limit > 0 && run_queued(r) >= r->queued_limit) {
+                result_err(c, r, k, "这一轮排队的工具调用已经有 %d 个（上限），这个没有执行。请分几轮来做", r->queued_limit);
+                continue;
+            }
+            k->st = CALL_QUEUED;
+            k->deadline = r->queued_timeout_ms > 0 ? now + r->queued_timeout_ms : -1;
+            if (!has_free_slot(r) || !can_start(r, k))
+                queued_notice(c, r, k, "等前面的工具执行完");
+            dispatch(c, now, r);
         }
     }
     maybe_advance(c, r);
@@ -396,16 +588,40 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
 static int on_approve(na_core *c, int64_t now, const na_event *ev)
 {
     run_t *r = find_run(c, ev->sid);
+    if (r && !same_run(r, ev)) return -1;
     call_t *k = r ? find_call(r, ev->id) : NULL;
     if (!k || k->st != CALL_WAIT_APPROVAL) return -1;
+    if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
 
     if (ev->ok) {
         notice(c, r->sid, "已批准，开始执行 %s", k->name);
-        exec_call(c, now, r, k);
+        if (r->queued_limit > 0 && run_queued(r) >= r->queued_limit) {
+            result_err(c, r, k, "这一轮排队的工具调用已经有 %d 个（上限），这个没有执行。请分几轮来做", r->queued_limit);
+            maybe_advance(c, r);
+            return 0;
+        }
+        k->st = CALL_QUEUED;
+        k->deadline = r->queued_timeout_ms > 0 ? now + r->queued_timeout_ms : -1;
+        if (!has_free_slot(r) || !can_start(r, k))
+            queued_notice(c, r, k, "等前面的工具执行完");
+        dispatch(c, now, r);
     } else {
         result(c, r, k, false, "管理员拒绝执行");
+        dispatch(c, now, r);
         maybe_advance(c, r);
     }
+    return 0;
+}
+
+static int on_call_started(na_core *c, int64_t now, const na_event *ev)
+{
+    run_t *r = find_run(c, ev->sid);
+    if (r && !same_run(r, ev)) return -1;
+    call_t *k = r ? find_call(r, ev->id) : NULL;
+    if (!k || k->st != CALL_DISPATCHED) return -1;
+    if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
+    k->st = CALL_RUNNING;
+    k->deadline = k->tool->timeout_ms > 0 ? now + k->tool->timeout_ms : -1;
     return 0;
 }
 
@@ -418,12 +634,16 @@ static int on_cancel(na_core *c, const na_event *ev)
     return 0;
 }
 
-static int on_tool_done(na_core *c, const na_event *ev)
+static int on_tool_done(na_core *c, int64_t now, const na_event *ev)
 {
     run_t *r = find_run(c, ev->sid);
+    if (r && !same_run(r, ev)) return -1;
     call_t *k = r ? find_call(r, ev->id) : NULL;
-    if (!k || k->st != CALL_RUNNING) return -1;   /* 超时或取消之后才到的结果 */
+    /* 超时或取消之后才到的结果；跨轮次、跨 run 的迟到结果也在这里被挡住 */
+    if (!k || (k->st != CALL_RUNNING && k->st != CALL_DISPATCHED)) return -1;
+    if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     result(c, r, k, ev->ok, ev->content ? ev->content : "");
+    dispatch(c, now, r);
     maybe_advance(c, r);
     return 0;
 }
@@ -445,10 +665,16 @@ static void on_tick(na_core *c, int64_t now)
             if (k->st == CALL_RUNNING) {
                 kill_call(c, r, k);
                 result_err(c, r, k, "执行超时（%d 秒），已终止", k->tool->timeout_ms / 1000);
+            } else if (k->st == CALL_DISPATCHED) {
+                kill_call(c, r, k);
+                result(c, r, k, false, "派发超时：执行节点一直没能开始这个调用，已取消");
             } else if (k->st == CALL_WAIT_APPROVAL) {
                 result(c, r, k, false, "审批超时，未执行");
+            } else if (k->st == CALL_QUEUED) {
+                result(c, r, k, false, "排队超时：一直没等到执行槽，未执行");
             }
         }
+        dispatch(c, now, r);
         maybe_advance(c, r);
     }
 }
@@ -458,7 +684,7 @@ static void on_reset(na_core *c)
     while (c->runs) {
         run_t *r = c->runs;
         for (size_t i = 0; i < r->ncalls; i++)
-            if (r->calls[i].st == CALL_RUNNING) kill_call(c, r, &r->calls[i]);
+            if (call_holds_slot(r->calls[i].st)) kill_call(c, r, &r->calls[i]);
         drop_run(c, r);
     }
 }
@@ -466,13 +692,14 @@ static void on_reset(na_core *c)
 int na_core_feed(na_core *c, int64_t now, const na_event *ev)
 {
     switch (ev->type) {
-    case NA_EV_INPUT:     return on_input(c, now, ev);
-    case NA_EV_TURN:      return on_turn(c, now, ev);
-    case NA_EV_APPROVE:   return on_approve(c, now, ev);
-    case NA_EV_CANCEL:    return on_cancel(c, ev);
-    case NA_EV_TOOL_DONE: return on_tool_done(c, ev);
-    case NA_EV_TICK:      on_tick(c, now); return 0;
-    case NA_EV_RESET:     on_reset(c);     return 0;
+    case NA_EV_INPUT:        return on_input(c, now, ev);
+    case NA_EV_TURN:         return on_turn(c, now, ev);
+    case NA_EV_APPROVE:      return on_approve(c, now, ev);
+    case NA_EV_CANCEL:       return on_cancel(c, ev);
+    case NA_EV_CALL_STARTED: return on_call_started(c, now, ev);
+    case NA_EV_TOOL_DONE:    return on_tool_done(c, now, ev);
+    case NA_EV_TICK:         on_tick(c, now); return 0;
+    case NA_EV_RESET:        on_reset(c);     return 0;
     }
     return -1;
 }
@@ -516,9 +743,26 @@ size_t na_core_active_runs(const na_core *c)
     return n;
 }
 
+int na_core_max_runs(const na_core *c)
+{
+    return c->cfg.max_active_runs > 0 ? c->cfg.max_active_runs : DEF_MAX_ACTIVE_RUNS;
+}
+
 const char *na_core_policy(const na_core *c, const char *sid)
 {
     for (const run_t *r = c->runs; r; r = r->next)
         if (sid && !strcmp(r->sid, sid)) return r->policy;
     return NULL;
+}
+
+void na_core_call_counts(const na_core *c, const char *sid, int *running, int *queued)
+{
+    int run_n = 0, queued_n = 0;
+    for (const run_t *r = c->runs; r; r = r->next) {
+        if (sid && strcmp(r->sid, sid)) continue;
+        run_n += run_slots_used(r);
+        queued_n += run_queued(r);
+    }
+    if (running) *running = run_n;
+    if (queued) *queued = queued_n;
 }

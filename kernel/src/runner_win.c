@@ -361,6 +361,7 @@ void job_free(job_t *j)
     free(j->sid);
     free(j->id);
     free(j->name);
+    free(j->run_id);
     free(j->in);
     buf_free(&j->out);
     buf_free(&j->err);

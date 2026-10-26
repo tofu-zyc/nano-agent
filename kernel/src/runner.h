@@ -16,6 +16,8 @@
 
 typedef struct job {
     char   *sid, *id, *name;
+    char   *run_id;                /* 完整调用身份：哪个 run、哪一轮（宿主填，job_free 释放） */
+    int     turn_id;
     int     kind, tag;             /* 调用方自己定义的任务类型和附加信息 */
     bool    close_in;              /* 输入写完就关掉 stdin（上传文件时，对方要读到 EOF） */
     pid_t   pid;
