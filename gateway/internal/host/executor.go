@@ -45,11 +45,13 @@ func FindExecutor(configDir string) (Executor, error) {
 		filepath.Join(filepath.Dir(exe), "../kernel"),
 		filepath.Join(configDir, "kernel"),
 	} {
-		p := filepath.Join(d, "nano-exec")
-		if st, err := os.Stat(p); err != nil || st.IsDir() {
-			continue
+		for _, name := range []string{"nano-exec", "nano-exec.exe"} {
+			p := filepath.Join(d, name)
+			if st, err := os.Stat(p); err != nil || st.IsDir() {
+				continue
+			}
+			return NewExecutor(p)
 		}
-		return NewExecutor(p)
 	}
 	return Executor{}, errors.New("找不到执行器 nano-exec（先在仓库根目录运行 make）")
 }

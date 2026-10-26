@@ -100,11 +100,18 @@ type State struct {
 	Migrated int `json:"migrated,omitempty"` // 从旧 life.json 导入过什么
 }
 
+// Interest 是长期兴趣，必须带来源（哪次经历、哪段聊天或哪次反思让它产生的）。
+type Interest struct {
+	Text   string `json:"text"`
+	Source string `json:"source"`
+	At     int64  `json:"at"`
+}
+
 // Self 是稳定的自我描述：长期兴趣、自主范围。人格文件是基线，这里只记允许变化的部分。
 type Self struct {
-	Interests []string `json:"interests,omitempty"`
-	Notes     []string `json:"notes,omitempty"`
-	Updated   int64    `json:"updated,omitempty"`
+	Interests []Interest `json:"interests,omitempty"`
+	Notes     []string   `json:"notes,omitempty"`
+	Updated   int64      `json:"updated,omitempty"`
 }
 
 // Belief 是对环境、约定或任务状况的认识。Source 说明从哪来，避免把传闻当事实。
@@ -906,6 +913,45 @@ func (s *State) setBelief(subject, value, source string, confidence float64, now
 	if len(s.Beliefs) > 40 {
 		s.Beliefs = append([]Belief(nil), s.Beliefs[len(s.Beliefs)-40:]...)
 	}
+}
+
+// AddInterest 记一个长期兴趣；必须有来源，同一条不重复记。
+func (s *State) AddInterest(text, source string, now time.Time) (*Interest, error) {
+	text, source = strings.TrimSpace(text), strings.TrimSpace(source)
+	if text == "" {
+		return nil, errors.New("兴趣要有内容")
+	}
+	if source == "" {
+		return nil, errors.New("兴趣要写来源：从哪次经历、哪段聊天或哪次反思来的")
+	}
+	for _, old := range s.Self.Interests {
+		if strings.EqualFold(strings.TrimSpace(old.Text), text) {
+			return nil, errors.New("这个兴趣已经记过了：" + old.Text)
+		}
+	}
+	x := Interest{Text: clip(text, 100), Source: clip(source, 200), At: now.Unix()}
+	s.Self.Interests = append(s.Self.Interests, x)
+	if len(s.Self.Interests) > 20 {
+		s.Self.Interests = append([]Interest(nil), s.Self.Interests[len(s.Self.Interests)-20:]...)
+	}
+	s.Self.Updated = now.Unix()
+	s.Touch()
+	return &s.Self.Interests[len(s.Self.Interests)-1], nil
+}
+
+// RemoveInterest 删掉一条长期兴趣（不想再追了）。
+func (s *State) RemoveInterest(text string, now time.Time) bool {
+	text = strings.TrimSpace(text)
+	for i, old := range s.Self.Interests {
+		if !strings.EqualFold(strings.TrimSpace(old.Text), text) {
+			continue
+		}
+		s.Self.Interests = append(s.Self.Interests[:i], s.Self.Interests[i+1:]...)
+		s.Self.Updated = now.Unix()
+		s.Touch()
+		return true
+	}
+	return false
 }
 
 // SetBelief 是外部（聊天、执行结果）更新认识时用的。

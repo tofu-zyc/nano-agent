@@ -123,6 +123,16 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 	now = now.In(loc)
 	var b strings.Builder
 	fmt.Fprintf(&b, "[自主活动] 现在是 %s %s。\n", now.Format("01-02"), now.Format("15:04"))
+	if len(s.Self.Interests) > 0 {
+		b.WriteString("你的长期兴趣：")
+		for i, x := range s.Self.Interests {
+			if i > 0 {
+				b.WriteString("；")
+			}
+			b.WriteString(x.Text + "（来源：" + x.Source + "）")
+		}
+		b.WriteString("\n")
+	}
 	if s.Paused {
 		b.WriteString("（自主活动现在是暂停的，这一轮是主人叫醒的。）\n")
 	}
@@ -262,6 +272,7 @@ type View struct {
 	NextCheck     int64        `json:"next_check,omitempty"` // 毫秒，方便网页直接用
 	Budget        Budget       `json:"budget"`
 	BudgetLeft    int          `json:"budget_left"`
+	Self          Self         `json:"self"`
 	TodayPlanned  int          `json:"today_planned"`
 	TodayDone     int          `json:"today_done"`
 	Agenda        []AgendaItem `json:"agenda"`
@@ -276,7 +287,7 @@ type View struct {
 func (s *State) View(now time.Time, loc *time.Location, limit int) View {
 	s.Normalize()
 	v := View{SchemaVersion: s.SchemaVersion, Revision: s.Revision, Paused: s.Paused, PauseReason: s.PauseReason,
-		Budget: s.Budget, BudgetLeft: s.BudgetLeft(s.Budget.Limit),
+		Budget: s.Budget, BudgetLeft: s.BudgetLeft(s.Budget.Limit), Self: s.Self,
 		Agenda: s.OpenAgenda(), Intentions: s.ActiveIntentions(), Ideas: s.OpenIdeas(now)}
 	if s.NextCheck > 0 {
 		v.NextCheck = s.NextCheck * 1000

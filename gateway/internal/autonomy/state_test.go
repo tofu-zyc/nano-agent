@@ -301,3 +301,24 @@ func TestImportLifeOnce(t *testing.T) {
 		t.Fatalf("旧近况没有变成认识: %+v", s.Beliefs)
 	}
 }
+
+func TestInterestsNeedSourceAndCanBeRemoved(t *testing.T) {
+	s := New()
+	now := at(10, 0)
+	if _, err := s.AddInterest("读科幻", "", now); err == nil {
+		t.Fatal("没有来源的兴趣不该收")
+	}
+	x, err := s.AddInterest("读科幻", "看完三体之后想到的", now)
+	if err != nil || x.Source == "" {
+		t.Fatalf("兴趣没记上: %+v %v", x, err)
+	}
+	if _, err := s.AddInterest("读科幻", "重复", now); err == nil {
+		t.Fatal("同一个兴趣不该重复记")
+	}
+	if !s.RemoveInterest("读科幻", now) {
+		t.Fatal("兴趣应该能删掉")
+	}
+	if s.RemoveInterest("读科幻", now) {
+		t.Fatal("删过以后再删应该返回 false")
+	}
+}

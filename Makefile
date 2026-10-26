@@ -94,7 +94,7 @@ $(ZIG):
 $(RG)/linux-x86_64:
 	scripts/fetch-rg.sh --all
 
-release: release-kernel release-gateway
+release: release-kernel release-gateway release-gateway-windows
 	@cp scripts/install.sh scripts/install.ps1 $(DIST)/
 	@echo '$(VERSION)' > $(DIST)/VERSION
 	@cd $(DIST) && sha256sum *-$(VERSION)-*.tar.gz *-$(VERSION)-*.zip install.sh install.ps1 VERSION > SHA256SUMS
@@ -162,6 +162,23 @@ release-gateway: $(ZIG) $(RG)/linux-x86_64
 	  echo '$(VERSION)' > $$dir/VERSION; \
 	  tar czf $(DIST)/nano-gateway-$(VERSION)-linux-$$karch.tar.gz -C $(RELEASE) nano-gateway-$(VERSION)-linux-$$karch; \
 	done
+
+# Windows 网关：nano-gateway.exe + 本机内核/执行器/rg + 安装脚本，打成一个 zip
+release-gateway-windows: $(ZIG) $(RG)/windows-x86_64.exe
+	$(MAKE) -C kernel windows-exec windows-kernel
+	@mkdir -p $(DIST) $(RELEASE)
+	@dir=$(RELEASE)/nano-gateway-$(VERSION)-windows-x86_64; \
+	  rm -rf $$dir; mkdir -p $$dir/lib; \
+	  (cd gateway && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nano-agent/gateway/internal/version.Version=$(VERSION)" -o ../$$dir/nano-gateway.exe ./cmd/nano-gateway); \
+	  cp kernel/build/nano-kernel.exe kernel/build/nano-exec.exe $$dir/lib/; \
+	  cp $(RG)/windows-x86_64.exe $$dir/lib/rg.exe; \
+	  cp gateway.example.toml $$dir/; \
+	  cp scripts/install-gateway.ps1 $$dir/; \
+	  if [ -d personas ]; then cp -a personas/. $$dir/personas/; fi; \
+	  cp -a agents/. $$dir/agents/; \
+	  cp -a skills/. $$dir/skills/; \
+	  echo '$(VERSION)' > $$dir/VERSION; \
+	  python3 scripts/zipdir.py $$dir "$(DIST)/nano-gateway-$(VERSION)-windows-x86_64.zip"
 
 clean:
 	$(MAKE) -C kernel clean

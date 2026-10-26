@@ -55,6 +55,17 @@ jobs:
             scripts/install-kernel.ps1
           if-no-files-found: error
           retention-days: 3
+      - name: 交叉编译 Windows 网关
+        run: |
+          mkdir -p build/windows
+          cd gateway
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X nano-agent/gateway/internal/version.Version=dev" -o ../build/windows/nano-gateway.exe ./cmd/nano-gateway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-windows
+          path: build/windows/nano-gateway.exe
+          if-no-files-found: error
+          retention-days: 3
 
   windows:
     needs: linux
@@ -65,6 +76,12 @@ jobs:
         with:
           name: windows-bins
           path: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-windows
+          path: gateway-win
+      - name: Windows 网关程序能运行
+        run: .\gateway-win\nano-gateway.exe version
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

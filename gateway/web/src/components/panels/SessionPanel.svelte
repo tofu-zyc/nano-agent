@@ -97,7 +97,7 @@
     </div>
     {#if innerKind}
       <div class="p-card">
-        <p class="p-note">{innerKind === 'life' ? `这是${innerAgent?.name ?? '它'}的内心活动：它自己醒来时想的、做的、上网看到的，只能看。多久醒一次、醒着的时间、主动找谁，在它的节点里改。` : `这是${innerAgent?.name ?? '它'}最近一次整理记忆的过程，只能看。整理出来的记忆和梦境日志在「上下文与记忆」节点里。`}</p>
+        <p class="p-note">{innerKind === 'life' ? `这是${innerAgent?.name ?? '它'}的内心活动：它自己醒来时想的、做的、上网看到的。可以看，也可以在聊天框里给它留言；留言会叫醒它。多久醒一次、醒着的时间、主动找谁，在它的节点里改。` : `这是${innerAgent?.name ?? '它'}最近一次整理记忆的过程，只能看。整理出来的记忆和梦境日志在「上下文与记忆」节点里。`}</p>
         <div class="p-actions tight">
           {#if innerAgent}<button class="btn sm" onclick={() => store.open({ type: 'agent', id: innerAgent!.id })}><Icon name="persona" size={13} />去{innerAgent.name}的节点</button>{/if}
           {#if innerAgent}<button class="btn sm" onclick={() => store.open({ type: 'memory', agent: innerAgent!.id })}><Icon name="brain" size={13} />看它的记忆</button>{/if}

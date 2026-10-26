@@ -338,7 +338,7 @@
             {/each}
             <button class="tag" onclick={() => (picking = true)} title="再挂一个工作目录"><Icon name="plus" size={11} />挂载</button>
           {:else if innerKind}
-            <span class="tag">{innerKind === 'life' ? '内心活动 · 只能看' : '整理记忆 · 只能看'}</span>
+            <span class="tag">{innerKind === 'life' ? '内心活动 · 可以留言' : '整理记忆 · 只能看'}</span>
           {:else}
             <button class="tag" onclick={() => (picking = true)} title="没有挂载工作目录：在 HOME 下工作，只能写临时目录；写外面要提权。点这里挂一个">未挂目录</button>
           {/if}
@@ -500,17 +500,19 @@
       <button class="btn sm primary" onclick={() => store.openOnMap({ type: 'model' })}>去配置模型</button>
     </div>
   {/if}
-  {#if innerKind}
+  {#if innerKind === 'dream'}
     <div class="innerbar">
-      <Icon name={innerKind === 'life' ? 'sparkles' : 'brain'} size={14} />
-      {#if innerKind === 'life'}
-        <span>这是{innerAgent?.name ?? '它'}的内心活动：它自己醒来时想的、做的、上网看到的。只能看，不能在这里说话。</span>
-        <button class="btn sm" onclick={wakeInner}>现在叫醒它</button>
-      {:else}
-        <span>这是{innerAgent?.name ?? '它'}最近一次整理记忆的过程，只能看。</span>
-      {/if}
+      <Icon name="brain" size={14} />
+      <span>这是{innerAgent?.name ?? '它'}最近一次整理记忆的过程，只能看。</span>
     </div>
   {:else}
+  {#if innerKind === 'life'}
+    <div class="innerbar">
+      <Icon name="sparkles" size={14} />
+      <span>这是{innerAgent?.name ?? '它'}的内心活动。在下面说话会叫醒它，它会把这句当成一轮任务；也可以只叫醒它。</span>
+      <button class="btn sm" onclick={wakeInner}>现在叫醒它</button>
+    </div>
+  {/if}
   <div class="composer" class:dragging role="group" aria-label="输入区" onpaste={onPaste} ondragover={(e) => { e.preventDefault(); dragging = true; }} ondragleave={() => (dragging = false)} ondrop={onDrop}>
     {#if cmdMatches.length || cmdHint}
       <div class="cmdmenu" role="listbox">
@@ -544,7 +546,7 @@
       <Icon name="file" size={16} />
     </button>
     <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={pickFiles} />
-    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder="在这个会话里说话，Enter 发送，Shift+Enter 换行；可以粘贴或拖入图片。打 / 看命令"></textarea>
+    <textarea bind:this={ta} bind:value={text} onkeydown={onkey} rows="1" placeholder={innerKind === 'life' ? "对它说一句：它会当作一轮任务，Enter 发送；也可以先只叫醒它" : "在这个会话里说话，Enter 发送，Shift+Enter 换行；可以粘贴或拖入图片。打 / 看命令"}></textarea>
     {#if info?.running}
       <button class="btn stop" onclick={() => act('stop')} title="停下正在进行的任务（聊天里发「停」也行）"><Icon name="stop" size={13} />停止</button>
     {/if}

@@ -85,6 +85,16 @@ description: 在 nano-agent 里查看、添加、修改、删除 MCP 服务—�
 {"action":"mcp_delete","name":"fs"}
 ```
 
+## 接 computer use（操作桌面）
+
+要接 Cua Driver、让模型操作某台电脑的桌面，先加载 `computer-use` 技能，按里面的步骤装驱动、处理图形会话和系统权限；MCP 服务通常这样加：
+
+```json
+{"action":"mcp_save","name":"desktop","machine":"有桌面的那台机器","command":"/绝对路径/cua-driver","args":["mcp"],"enabled":true,"approval":"per_turn"}
+```
+
+装完必须 `mcp_test`，再用 `desktop__list_windows` 确认真的看见了窗口；设备在线不等于桌面可操作。
+
 ## 要知道的
 
 - MCP 工具只给管理员的会话；只读模式和不用工具的模式拿不到。

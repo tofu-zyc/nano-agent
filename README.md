@@ -19,13 +19,15 @@ nano-exec   Read / Write / Edit / Grep / Shell，关在 Landlock + seccomp 沙�
 
 ## 安装
 
-网关装在一台常开的 Linux 机器上（x86_64 / arm64），一行命令：
+网关通常装在一台常开的 Linux 机器上（x86_64 / arm64；Windows 见下），一行命令：
 
 ```sh
 curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/install.sh | sh
 ```
 
 装到 `~/.nano-agent`，注册成后台服务（有 systemd 用用户服务，没有就用后台进程 + 看护），打印网页地址；带密码的登录链接用 `nano-gateway url` 查看。再运行一次就是升级，配置和数据保留。
+
+**Windows 网关（v0.7.4 起，x86_64）**：从 Release 下载 `nano-gateway-<版本>-windows-x86_64.zip`，解压后在 PowerShell 里运行 `install-gateway.ps1`。默认装到 `%USERPROFILE%\.nano-agent`，用 TCP 7700 带一个本机内核、网页 7788；登录链接用 `nano-gateway url` 查看。脚本会尝试建登录自启的任务计划，没有管理员权限时退回「启动」文件夹。Windows 暂不支持自动更新，升级时重跑新包的安装脚本（`gateway.toml` 和 `data` 保留）。
 
 别的电脑上装内核，接到这个网关（网关的 `[kernel] listen` 要改成 `tcp:0.0.0.0:7700`）：
 
@@ -53,6 +55,7 @@ curl -fsSL https://github.com/tofu-zyc/nano-agent/releases/latest/download/insta
 ```sh
 nano-gateway update --check       # 有没有新版本（网关每天也会查一次，只提示）
 nano-gateway update               # 下载、校验、备份，用新程序检查配置后重启；新版本起不来自动退回
+# Windows 网关暂不支持自动更新：会提示下载新 zip，重跑 install-gateway.ps1
 nano-gateway update --version 0.1.1   # 换成指定版本（也能退回旧版本）
 nano-gateway uninstall            # 停服务，删程序、服务文件、PATH 行；同一个目录里装着内核时只卸网关
 nano-gateway uninstall --keep-data    # 只删程序，配置和数据留着，以后重装接着用
@@ -289,7 +292,7 @@ MCP 服务给模型加外部工具：文件系统、浏览器、数据库、comp
 
 通过 MCP 接 [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver)，让 agent 操作有图形桌面的电脑（Windows、macOS、Linux）。Driver 跑在目标机器的图形会话里，网关只负责模型循环、调度和工具授权；用现有的 MCP 通道（本机 stdio / HTTP / 远端内核 pipe）连过去。
 
-1. 在目标机器上装好 Driver，确认图形桌面的权限（macOS 的辅助功能和录屏、Windows 的交互式登录会话、Linux 的 X11/Wayland）。
+1. 在目标机器上装好 Driver，确认图形桌面的权限（macOS 的辅助功能和录屏、Windows 的交互式登录会话、Linux 的 X11/Wayland）。可以直接让 AI 按 `computer-use` 技能装和配：它会先征求你的同意，再下载官方安装包、跑 `doctor`、用 `GatewayAdmin mcp_save` 注册 MCP 服务；macOS 的系统授权和 Windows UAC 仍需要你确认。
 2. 拓扑图「MCP 服务」节点里加一个 stdio 服务：命令写 Driver 的绝对路径，参数 `mcp`；要挂到别的电脑上就选那台在线内核。审批建议「一轮批一次」或「每次都批」。
 3. 管理员会话里让模型先 `list_windows` / `get_window_state`，再点击、输入、滚动；每次动作后都要重新观察确认。Driver 的 initialize 说明会接进系统提示，技能 `computer-use` 里有完整的观察-操作-验证流程和平台差异。
 
@@ -413,6 +416,8 @@ agent 是一直在的个体：有自己的名字、头像、人格、模型和�
 - **工具型**（默认，以前的 agent 升级后都是它）：有人找它才干活；群里只回被叫到的。
 - **拟人型**：像一个有自己生活的人。
   - **有自己的目标、日程和想法（v0.7.3 起）**：不再只是“没事时随机醒一次”。聊天里的约定、自己排的计划、约好的复查、执行结果、整理记忆后的反思都会进入它的事件队列；到点时它自己醒来处理。它可以用 `Agenda` 排期、挪时间、取消、报告真实结果，用 `Idea` 记下来源明确的突发想法（可以排进日程、推迟或放弃）。明确的约定不受作息和“最近有没有人找它”的限制；探索仍看作息和每天次数；每天有 token 预算。内心决策、内心会话占用、主动找人分别判断：不会再因为刚聊过天就把日程一直往后推。
+  - **心智状态（v0.7.4 起）**：agent 节点把「拟人」和「自主活动」合成一张卡，里面有长期兴趣、对人和事的认识、最近反思，以及日程、目标、想法和执行记录；`Mind` 工具可以更新兴趣/认识/反思（必须写来源）。旧的「自主活动」卡不再单独重复状态和叫醒按钮。
+  - **life 会话可以留言（v0.7.4 起）**：在 `@agent/life` 里直接输入会叫醒它一轮；在别的会话里用 `Message chat:<自己的 life 会话>` 也能留一句。dream（整理记忆）仍然只读。
   - **有作息**：醒着的时间（默认 08:00–23:30）里，按活跃度隔一阵自己醒一次（安静 2–4 小时、平常 1–2 小时、活跃半小时到一小时；越久没人找它越容易醒），醒来可以上网冲浪、想事情、把看到的记下来，也可以主动找人聊天（默认只找主人；对方没回上一条就不会再找，每天次数有上限，睡觉时间不打扰）。它在想什么、做了什么，在 agent 节点的「看它的内心」里能看到；每次醒来的最后一句是它的「近况」，和别人聊天时它会记得。
   - **私聊像朋友发消息**：纯聊天的回复按段分几条发（飞书里是普通的聊天气泡，加粗、列表、代码块照样渲染；它在回的时候，你那条消息上会贴一个“敲键盘”表情，回完撤掉），收尾的“好的”“晚安”可以不接；它还能约好“过会儿再看”（`FollowUp`），比如问了你一个问题，半小时后来问结果，你先说话就取消。
   - **群里会插话**（见上面「群聊」）。

@@ -324,11 +324,15 @@ export type AutonomyExecution = {
   id: string; trigger?: string; agenda_id?: string; intention_id?: string; started: number; ended: number;
   ok: boolean; used_tools: boolean; summary?: string; tokens?: number;
 };
+// 长期兴趣（来源必填）
+export type AutonomyInterest = { text: string; source: string; at: number };
+
 // 一个 agent 的自主活动概况（网页的 agent 节点）
 export type AutonomyView = {
   schema_version: number; revision: number; paused: boolean; pause_reason?: string; next_check?: number;
   budget: { day?: string; tokens: number; limit?: number }; budget_left: number;
   today_planned: number; today_done: number;
+  self?: { interests?: AutonomyInterest[]; notes?: string[]; updated?: number };
   agenda: AutonomyAgenda[]; intentions: AutonomyIntention[]; ideas: AutonomyIdea[];
   executions: AutonomyExecution[];
   reflections: { at: number; text: string; change?: string }[];

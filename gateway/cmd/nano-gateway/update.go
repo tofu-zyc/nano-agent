@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -184,6 +185,9 @@ func kernelFiles(ctx context.Context, c *release.Client, ver, osName, arch strin
 // installGatewayVersion 下载、校验、预检新版本，备份后换上，写 update.json。不重启。
 // 返回给人看的提示（比如改过的人格文件，新版本放成了 .new）。
 func installGatewayVersion(ctx context.Context, c *release.Client, cfgPath, dataDir, ver string, req app.RestartRequest) ([]string, error) {
+	if runtime.GOOS == "windows" {
+		return nil, errors.New("Windows 网关暂时请手动更新：下载 nano-gateway-" + ver + "-windows-x86_64.zip，解压后重新运行 install-gateway.ps1（gateway.toml 和 data 会保留）")
+	}
 	home := paths.Home()
 	if _, err := installedExe(); err != nil {
 		return nil, err

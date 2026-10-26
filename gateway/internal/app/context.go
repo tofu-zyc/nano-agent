@@ -13,9 +13,9 @@ import (
 )
 
 // prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）、
-// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP）就加一，
+// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 3
+const prefixVer = 4
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -61,7 +61,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			}
 		}
 		// 自主活动：安排日程、记下想法
-		tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()))
+		tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
@@ -97,7 +97,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			tools = append(tools, toolOf(knowledgeTool()))
 		}
 		if ag.Life() {
-			tools = append(tools, toolOf(followUpTool()), toolOf(agendaTool()), toolOf(ideaTool()))
+			tools = append(tools, toolOf(followUpTool()), toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
 		}
 		tools = append(tools, toolOf(sendFileTool()))
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
