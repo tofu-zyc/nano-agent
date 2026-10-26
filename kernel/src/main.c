@@ -444,13 +444,20 @@ static bool gateway_tool(const char *name)
     return false;
 }
 
+/* MCP 工具名是 <服务>__<工具>，内核不认识，也不能按工作目录挑执行器；直接转给网关。
+ * 以前只认上面写死的网关工具，MCP 工具在挂了多个工作目录的会话里会先报“用 workspace 参数”。*/
+static bool mcp_tool(const char *name)
+{
+    return name && strstr(name, "__") != NULL;
+}
+
 static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
 {
     char err[1024] = "";
     cJSON *args = cJSON_Parse(c->args ? c->args : "{}");
     cJSON *pol = cJSON_Parse(c->policy ? c->policy : "{}");
     size_t max_output = run_max_output(k, pol);
-    if (gateway_tool(c->name)) {
+    if (gateway_tool(c->name) || mcp_tool(c->name)) {
         send_exec(k, c, args, NULL, max_output);
         cJSON_Delete(pol);
         return;
@@ -945,7 +952,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                 calls[i].elevated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"));
             calls[i].action = sget(args, "action");
             /* 先找好工作目录：写错了直接告诉模型；有没有沙箱按那台机器算 */
-            if (calls[i].args_ok && calls[i].name && !gateway_tool(calls[i].name) && run_pol) {
+            if (calls[i].args_ok && calls[i].name && !gateway_tool(calls[i].name) && !mcp_tool(calls[i].name) && run_pol) {
                 char err[1024];
                 const cJSON *ws = pick_workspace(run_pol, args, err, sizeof err);
                 if (!ws) {

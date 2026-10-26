@@ -68,6 +68,10 @@ Windows 使用实际的 `.exe` 路径。macOS 遵循 CuaDriver.app 和代理进�
 
 v0.7.3 已经接入 Cua Driver，并做了 Linux 真机 MCP 握手/窗口树验证；Windows/macOS 仍未实机验证，具体见下面的实施结果。
 
+## v0.7.5：MCP 工具不能被内核的 workspace 预检挡住
+
+MCP 工具名是 `<服务>__<工具>`，v0.7.4 及以前内核的审批预检只认写死的网关工具名单，导致多工作目录会话先报“用 workspace 参数”；工具 schema 又没有 workspace，模型无解。v0.7.5 在内核预检和执行入口都识别 `__`，直接交给网关；网关的 MCP 进程由 `pipe_open`/网关直接 `exec`，不经过 `nano-exec` 的 Landlock/seccomp。Shell 的沙箱报错与 MCP 无关，不能用 Shell 里的 Unix socket 失败推断 Driver 坏了。
+
 ## v0.7.4：安装和配置也写进技能（AI 来做）
 
 `skills/computer-use/SKILL.md` 增加了一节“安装和配置（AI 自己来，不要一上来让用户操作）”，把 Linux/macOS/Windows 的官方安装命令、依赖、图形会话/daemon、系统权限边界、`GatewayAdmin mcp_save` 配置、`mcp_test` 和诊断串成步骤。原则：

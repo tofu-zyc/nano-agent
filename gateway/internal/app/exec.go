@@ -136,16 +136,23 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		}
 		return
 	}
-	// MCP 工具：内核不认识 <服务>__<工具> 这种名字，会转回网关执行
-	if server, _, ok := mcp.SplitExposed(m.Name); ok && a.mcp != nil {
-		if _, exists := a.mcp.Server(server); exists {
-			if !a.isAdmin(r.from) {
-				reply(false, "只有管理员能用 MCP 工具")
-				return
-			}
-			a.mcpCall(s, m, reply)
+	// MCP 工具：内核不认识 <服务>__<工具> 这种名字，会转回网关执行。
+	// 服务没配置/没连上时给明确结果，别掉到“工作目录”分支去。
+	if server, _, ok := mcp.SplitExposed(m.Name); ok {
+		if a.mcp == nil {
+			reply(false, "没有这个 MCP 服务："+server)
 			return
 		}
+		if _, exists := a.mcp.Server(server); !exists {
+			reply(false, "没有这个 MCP 服务："+server)
+			return
+		}
+		if !a.isAdmin(r.from) {
+			reply(false, "只有管理员能用 MCP 工具")
+			return
+		}
+		a.mcpCall(s, m, reply)
+		return
 	}
 	mt := r.rt.find(m.Workspace)
 	if mt == nil {

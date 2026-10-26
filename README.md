@@ -297,6 +297,7 @@ MCP 服务给模型加外部工具：文件系统、浏览器、数据库、comp
 3. 管理员会话里让模型先 `list_windows` / `get_window_state`，再点击、输入、滚动；每次动作后都要重新观察确认。Driver 的 initialize 说明会接进系统提示，技能 `computer-use` 里有完整的观察-操作-验证流程和平台差异。
 
 - 每个会话在 Driver 里有稳定的 `session`（`na-…`），同一台桌面的调用会串行；停止、重置、删除会话或换 agent 时会结束对应 session。结果以结构化 `structuredContent` 为准，工具“正常返回”不等于操作成功。
+- MCP 工具由网关执行，不经过 `nano-exec` 的 Shell 沙箱；内核只把它们原样转给网关，不会要求 `workspace`（v0.7.5 修）。Shell 里的 Landlock 限制和 MCP/桌面工具是两条执行链，别用 Shell 连不上 Unix socket 判断 Driver 坏了。
 - 网关只保留最近两张截图给模型（旧图换成说明，历史原样保留），避免长任务把上下文塞满。
 - MCP 节点上会显示目标电脑在不在线、Driver 版本、initialize 说明和最近错误。**设备在线不等于桌面可操作**：没登录图形会话、没授权、版本不对都会失败。
 - 已验证：Linux（WSL Fedora 43 + Driver 0.7.0）的真实 MCP 握手、窗口发现和 AT-SPI 树读取。**Windows / macOS / 原生 Wayland 的实机截图和输入尚未验证**，详见 `docs/PLAN-computer-use.md`。
