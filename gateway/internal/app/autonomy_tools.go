@@ -50,6 +50,22 @@ func ideaTool() proto.ToolSpec {
 		"schedule 会变成目标和一段可以挪动的探索时间。", InputSchema: json.RawMessage(ideaSchema)}
 }
 
+const mindSchema = `{"type":"object","properties":{
+ "action":{"type":"string","enum":["view","interest_add","interest_remove","belief","reflect"]},
+ "text":{"type":"string","description":"interest_add：兴趣内容；interest_remove：要删掉的兴趣原文；reflect：这次反思"},
+ "source":{"type":"string","description":"interest_add / belief：来源，写清从哪次经历、哪段聊天或哪次反思来的（必填）"},
+ "subject":{"type":"string","description":"belief：这条认识是关于什么的（比如某个人、某件事）"},
+ "value":{"type":"string","description":"belief：你认为它是怎样的"},
+ "confidence":{"type":"number","description":"belief：置信度 0–1，默认 0.6"},
+ "change":{"type":"string","description":"reflect：这次反思之后打算怎么调整"}
+},"required":["action"]}`
+
+func mindTool() proto.ToolSpec {
+	return proto.ToolSpec{Name: "Mind", Description: "管理你跨轮次的心智状态：长期兴趣、对人和事的认识、反思。" +
+		"兴趣和认识必须写来源；它们会一直留着，下次醒来还能看到。先 view 看现在有什么。" +
+		"不要用它改人格或权限。", InputSchema: json.RawMessage(mindSchema)}
+}
+
 // lifeMind 是这个会话所属的拟人型 agent 的心智状态。调用方持有锁。
 func (a *App) lifeMind(sid string) (*autonomy.State, agents.Agent, error) {
 	ag := a.agentOf(sid)
@@ -225,6 +241,115 @@ func (a *App) ideaCall(sid string, raw []byte) (string, error) {
 		return "推迟到 " + at.In(a.loc).Format("01-02 15:04") + " 再想。", nil
 	}
 	return "", fmt.Errorf("不认识的 Idea action %q", x.Action)
+}
+
+// mindCall 执行 Mind：查看或更新长期兴趣、认识、反思。调用方持有锁。
+func (a *App) mindCall(sid string, raw []byte) (string, error) {
+	var x struct {
+		Action     string  `json:"action"`
+		Text       string  `json:"text"`
+		Source     string  `json:"source"`
+		Subject    string  `json:"subject"`
+		Value      string  `json:"value"`
+		Confidence float64 `json:"confidence"`
+		Change     string  `json:"change"`
+	}
+	if err := json.Unmarshal(raw, &x); err != nil {
+		return "", errors.New("参数格式不对")
+	}
+	st, ag, err := a.lifeMind(sid)
+	if err != nil {
+		return "", err
+	}
+	now := a.now().In(a.loc)
+	switch x.Action {
+	case "view", "":
+		return a.mindSummary(st, now), nil
+	case "interest_add":
+		it, err := st.AddInterest(x.Text, x.Source, now)
+		if err != nil {
+			return "", err
+		}
+		a.afterMindChange(st, ag, now)
+		return "记下了长期兴趣：" + it.Text + "（来源：" + it.Source + "）", nil
+	case "interest_remove":
+		if !st.RemoveInterest(x.Text, now) {
+			return "", errors.New("没有这条兴趣")
+		}
+		a.afterMindChange(st, ag, now)
+		return "不再追这个兴趣了。", nil
+	case "belief":
+		if strings.TrimSpace(x.Subject) == "" || strings.TrimSpace(x.Value) == "" {
+			return "", errors.New("belief 要写 subject 和 value")
+		}
+		if strings.TrimSpace(x.Source) == "" {
+			return "", errors.New("认识要写来源（从哪次观察、聊天或反思来的）")
+		}
+		conf := x.Confidence
+		if conf <= 0 {
+			conf = 0.6
+		}
+		if conf > 1 {
+			conf = 1
+		}
+		st.SetBelief(x.Subject, x.Value, x.Source, conf, now)
+		a.afterMindChange(st, ag, now)
+		return "记下了这条认识（置信度 " + fmt.Sprintf("%.0f%%", conf*100) + "）。", nil
+	case "reflect":
+		if strings.TrimSpace(x.Text) == "" {
+			return "", errors.New("reflect 要写这次反思")
+		}
+		st.AddReflection(x.Text, x.Change, now)
+		a.afterMindChange(st, ag, now)
+		return "记下了这次反思。", nil
+	}
+	return "", fmt.Errorf("不认识的 Mind action %q", x.Action)
+}
+
+// mindSummary 是 Mind view 看到的：兴趣、认识、反思、目标、日程。
+func (a *App) mindSummary(st *autonomy.State, now time.Time) string {
+	var b strings.Builder
+	if len(st.Self.Interests) == 0 {
+		b.WriteString("长期兴趣：还没有。\n")
+	} else {
+		b.WriteString("长期兴趣：\n")
+		for _, x := range st.Self.Interests {
+			fmt.Fprintf(&b, "- %s（来源：%s，%s）\n", x.Text, x.Source, autonomy.FormatMinute(x.At, a.loc))
+		}
+	}
+	if len(st.Beliefs) == 0 {
+		b.WriteString("认识：还没有。\n")
+	} else {
+		b.WriteString("认识：\n")
+		start := max(0, len(st.Beliefs)-8)
+		for _, x := range st.Beliefs[start:] {
+			fmt.Fprintf(&b, "- %s：%s（来源：%s，置信度 %.0f%%，%s）\n", x.Subject, x.Value, x.Source, x.Confidence*100, autonomy.FormatMinute(x.At, a.loc))
+		}
+	}
+	if len(st.Reflections) > 0 {
+		b.WriteString("最近反思：\n")
+		start := max(0, len(st.Reflections)-3)
+		for _, x := range st.Reflections[start:] {
+			fmt.Fprintf(&b, "- %s %s", autonomy.FormatMinute(x.At, a.loc), x.Text)
+			if x.Change != "" {
+				b.WriteString("（调整：" + x.Change + "）")
+			}
+			b.WriteString("\n")
+		}
+	}
+	if intents := st.ActiveIntentions(); len(intents) > 0 {
+		b.WriteString("在推进的目标：\n")
+		for _, in := range intents {
+			fmt.Fprintf(&b, "- %s（%s，进度 %d，%s）\n", in.Title, autonomy.StatusLabel(in.State), in.Progress, in.ID)
+		}
+	}
+	if open := st.OpenAgenda(); len(open) > 0 {
+		b.WriteString("日程：\n")
+		for _, it := range open {
+			fmt.Fprintf(&b, "- %s %s（%s，%s）\n", autonomy.FormatMinute(it.At, a.loc), it.Title, autonomy.KindLabel(it.Kind), it.ID)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // afterMindChange 保存改过的心智状态、把下次检查提前到最近一件事，并通知网页。调用方持有锁。

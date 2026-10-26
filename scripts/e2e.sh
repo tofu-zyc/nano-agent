@@ -221,6 +221,10 @@ else
 fi
 send '!call Read {"path":"~/.nano-agent/skills/demo/data.txt","workspace":"box"}'; expect_n "服务器上读技能文件" "skill-e2e-data" 2
 send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
+# 网关执行的工具不挑工作目录：挂了多个目录时也不能要求 workspace（v0.7.4 修）
+send '!call Agenda {"action":"list"}'; expect "Agenda 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
+send '!call Idea {"action":"list"}'; expect "Idea 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
+send '!call Mind {"action":"view"}'; expect "Mind 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
 send "/dir -3";                                       expect "取下服务器上的目录" "取下了 $BOXWS"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。

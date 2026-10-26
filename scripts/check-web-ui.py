@@ -734,7 +734,7 @@ def check_bots(page):
 
 
 def check_living(page, url, nano):
-    """v0.6：两种 agent（工具型 / 拟人型）、拟人型的状态和设置、记忆节点、内心会话只读、记忆说明折叠显示。"""
+    """v0.6/v0.7.4：两种 agent（工具型 / 拟人型）、拟人型的状态和设置、记忆节点、内心会话可看可留言、记忆说明折叠显示。"""
     # 默认是工具型：拟人那组设置不显示
     open_node(page, "ag:default")
     page.wait_for_selector(".insp .styles")
@@ -767,6 +767,19 @@ def check_living(page, url, nano):
         ok("自主活动接口返回日程、想法和预算")
     else:
         fail(f"自主活动接口不对：{st} {str(av)[:200]}")
+    wake_btns = page.locator(".insp button:has-text('现在叫醒')").count()
+    if wake_btns == 1:
+        ok("拟人状态和自主活动合成一张卡，叫醒按钮只有一处")
+    else:
+        fail(f"叫醒按钮重复或缺失：{wake_btns}")
+    page.locator(".insp details.mind-state summary").click()
+    page.wait_for_timeout(200)
+    mind = page.locator(".insp details.mind-state").inner_text()
+    if all(k in mind for k in ["长期兴趣", "认知", "最近反思"]):
+        ok("agent 节点能看到心智状态（兴趣、认知、反思）")
+    else:
+        fail("心智状态没有显示：" + mind[:300])
+    page.screenshot(path=os.path.join(SHOTS, "agent-mind.png"))
     # 记忆：写一个人、一条事、自我认知，记忆节点里能看能搜能改
     api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 张三\ntype: 人物\nsummary: 产品经理，养了两只猫\n---\n说话直。"})
     api(page, "PUT", "/api/agents/default/memory/item?path=", {"raw": "---\ntitle: 国庆去成都\ntype: 事件\n---\n吃了三次火锅。"})
@@ -828,10 +841,11 @@ def check_living(page, url, nano):
     page.goto(url + "#/sessions/" + urllib.request.quote("@default/life", safe=""))
     page.wait_for_timeout(1500)
     page.screenshot(path=os.path.join(SHOTS, "conv-life.png"))
-    if page.locator(".composer").count() == 0 and "内心活动" in page.locator(".innerbar").first.inner_text(timeout=3000):
-        ok("内心会话只能看：没有输入框，顶上说明是它的内心活动")
+    bar = page.locator(".innerbar").first.inner_text(timeout=3000)
+    if page.locator(".composer").count() == 1 and "内心活动" in bar and "在下面说话" in bar:
+        ok("内心会话可以看也可以留言：有输入框，说明是它的内心活动")
     else:
-        fail("内心会话还有输入框")
+        fail("内心会话没有留言输入框或说明不对：" + bar[:200])
     page.screenshot(path=os.path.join(SHOTS, "conv-life.png"))
     page.goto(url + "#/")
     page.wait_for_selector("g.node.gateway")

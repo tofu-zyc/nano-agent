@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"nano-agent/gateway/internal/app"
@@ -43,7 +44,7 @@ func runDoctor(args []string) int {
 		key := filepath.Join(paths.Home(), "secret.key")
 		if st, err := os.Stat(key); err != nil {
 			addItem(&items, false, "secret.key", "不存在：", "重新启动网关会生成；如果没有权限，检查 NANO_HOME")
-		} else if st.Mode().Perm()&0o077 != 0 {
+		} else if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
 			addItem(&items, false, "secret.key", fmt.Sprintf("权限是 %04o，别人能读", st.Mode().Perm()), "chmod 600 "+key)
 		} else {
 			addItem(&items, true, "secret.key", "存在，权限 0600", "")
@@ -70,7 +71,7 @@ func runDoctor(args []string) int {
 
 	if st, err := os.Stat(c.Session.DataDir); err != nil {
 		addItem(&items, false, "数据目录", "不存在："+c.Session.DataDir, "启动一次网关会创建，或检查 session.data_dir")
-	} else if st.Mode().Perm()&0o077 != 0 {
+	} else if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
 		addItem(&items, false, "数据目录", fmt.Sprintf("权限是 %04o，别人能读", st.Mode().Perm()), "chmod 700 "+c.Session.DataDir)
 	} else {
 		addItem(&items, true, "数据目录", "存在，权限 0700", "")
@@ -147,7 +148,7 @@ func runDoctor(args []string) int {
 	if err != nil {
 		addItem(&items, false, "本机执行器", "找不到 nano-exec："+err.Error(), "重新运行 make 或安装网关")
 	} else {
-		kernel := filepath.Join(filepath.Dir(exe.Path), "nano-kernel")
+		kernel := kernelBinary(filepath.Dir(exe.Path))
 		if st, err := os.Stat(kernel); err != nil || st.IsDir() {
 			addItem(&items, false, "本机内核", "找不到 "+kernel, "重新安装内核/网关")
 		} else {

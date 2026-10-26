@@ -66,7 +66,16 @@ Windows 使用实际的 `.exe` 路径。macOS 遵循 CuaDriver.app 和代理进�
 - [工具与会话约定](https://cua.ai/docs/cua-driver/reference/mcp-tools)
 - [平台支持范围](https://cua.ai/docs/cua-driver/concepts/platform-support)
 
-本次已验证 nano-agent 的现有 MCP 透传、图片、多模态请求和取消相关测试；尚未安装或连接 Cua Driver，不能据此宣称桌面操作已经可用。
+v0.7.3 已经接入 Cua Driver，并做了 Linux 真机 MCP 握手/窗口树验证；Windows/macOS 仍未实机验证，具体见下面的实施结果。
+
+## v0.7.4：安装和配置也写进技能（AI 来做）
+
+`skills/computer-use/SKILL.md` 增加了一节“安装和配置（AI 自己来，不要一上来让用户操作）”，把 Linux/macOS/Windows 的官方安装命令、依赖、图形会话/daemon、系统权限边界、`GatewayAdmin mcp_save` 配置、`mcp_test` 和诊断串成步骤。原则：
+
+- AI 先确认目标机器、图形会话和用户同意，再下载/执行第三方安装脚本；不静默 `sudo`。
+- Linux 无图形会话时可在桌面会话起 `cua-driver serve`，MCP 用 `--socket` 连（以当前版本 `--help` 为准）；Windows/macOS 的系统权限仍需用户/MDM 确认。
+- 装完必须 `doctor`/`list_windows` 真正看见窗口，才能说“桌面接好了”。
+- `skills/mcp/SKILL.md` 加了指针；v0.7.4 同时补发 Windows 网关包（可直接在 Windows 上跑网关和本机内核，但 Windows 上 CUA Driver 仍未实机验证）。
 
 ## 实施结果（v0.7.3，2026-10-26）
 

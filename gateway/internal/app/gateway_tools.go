@@ -105,7 +105,7 @@ const gatewayAdminSchema = `{
 func (a *App) gatewayTools() []proto.ToolSpec {
 	return []proto.ToolSpec{
 		{Name: "Gateway", Description: "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项、MCP 服务。配置东西之前先用它查清楚。", InputSchema: json.RawMessage(gatewaySchema)},
-		{Name: "Message", Description: "给网关里的一个群（房间）、某个 agent，或者你自己的某个私聊（chat:）发一条消息；发给 agent 时把 wait 设成 true 可以等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。发到私聊的消息对方会在聊天软件里收到，他回了就在那个聊天里接着聊。", InputSchema: json.RawMessage(messageSchema)},
+		{Name: "Message", Description: "给网关里的一个群（房间）、某个 agent，或者你自己的某个私聊（chat:）发一条消息；发给 agent 时把 wait 设成 true 可以等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。发到私聊的消息对方会在聊天软件里收到，他回了就在那个聊天里接着聊。给 chat:<自己的 life 会话> 留言不会发给任何人，只是放进它的内心。", InputSchema: json.RawMessage(messageSchema)},
 		{Name: "GatewayAdmin", Description: "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等）、agent、MCP 服务（mcp_save 加或改、mcp_delete、mcp_test 现连一次看有哪些工具），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。", InputSchema: json.RawMessage(gatewayAdminSchema)},
 	}
 }

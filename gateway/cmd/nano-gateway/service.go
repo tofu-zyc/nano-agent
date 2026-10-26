@@ -6,11 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"nano-agent/gateway/internal/config"
@@ -65,7 +63,7 @@ func runtimeMode() string {
 
 func pidFile(name string) string { return filepath.Join(paths.RunDir(), name) }
 
-func readAlivePID(path string) (int, bool) {
+func readPID(path string) (int, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false
@@ -74,7 +72,12 @@ func readAlivePID(path string) (int, bool) {
 	if err != nil || pid <= 0 {
 		return 0, false
 	}
-	if err := syscall.Kill(pid, 0); err != nil && err != syscall.EPERM {
+	return pid, true
+}
+
+func readAlivePID(path string) (int, bool) {
+	pid, ok := readPID(path)
+	if !ok || !processAlive(pid) {
 		return 0, false
 	}
 	return pid, true
@@ -92,17 +95,10 @@ func isGatewayProcess(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	if err := syscall.Kill(pid, 0); err != nil && err != syscall.EPERM {
+	if !processAlive(pid) {
 		return false
 	}
-	if b, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
-		return strings.Contains(filepath.Base(b), "nano-gateway")
-	}
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err == nil {
-		return strings.Contains(filepath.Base(strings.TrimSpace(string(out))), "nano-gateway")
-	}
-	return true
+	return processIsGateway(pid)
 }
 
 func currentExe() (string, error) {
@@ -173,7 +169,7 @@ func stopBackground(quiet bool) error {
 	sup, supOK := readAlivePID(pidFile("gateway.supervisor.pid"))
 	child, childOK := readAlivePID(pidFile("gateway.pid"))
 	if supOK && isGatewayProcess(sup) {
-		_ = syscall.Kill(sup, syscall.SIGTERM)
+		_ = terminateProcess(sup)
 		for i := 0; i < 50; i++ {
 			if !isGatewayProcess(sup) {
 				break
@@ -181,11 +177,11 @@ func stopBackground(quiet bool) error {
 			time.Sleep(100 * time.Millisecond)
 		}
 		if isGatewayProcess(sup) {
-			_ = syscall.Kill(sup, syscall.SIGKILL)
+			_ = killProcess(sup)
 		}
 	}
 	if childOK && isGatewayProcess(child) {
-		_ = syscall.Kill(child, syscall.SIGTERM)
+		_ = terminateProcess(child)
 		for i := 0; i < 30; i++ {
 			if !isGatewayProcess(child) {
 				break
@@ -195,10 +191,34 @@ func stopBackground(quiet bool) error {
 	}
 	_ = os.Remove(pidFile("gateway.supervisor.pid"))
 	_ = os.Remove(pidFile("gateway.pid"))
+	stopLocalKernel()
 	if !quiet {
 		fmt.Println("网关已停止。")
 	}
 	return nil
+}
+
+// stopLocalKernel 停掉网关自己起的本机内核。Windows 上 stop 是强制结束进程，
+// 看护进程来不及让内核退出，必须按 pid 单独收尾，否则会留下一个占用 7700 的孤儿内核。
+func stopLocalKernel() {
+	pid, ok := readPID(pidFile("local-kernel.pid"))
+	if !ok {
+		_ = os.Remove(pidFile("local-kernel.pid"))
+		return
+	}
+	// 直接按 pid 收：Windows 上 stop 是强制结束网关，内核来不及自己退；
+	// pid 文件由网关在启动内核后立刻写入，且只活到下一次启动，复用风险可以接受。
+	_ = terminateProcess(pid)
+	for i := 0; i < 30; i++ {
+		if !processAlive(pid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		_ = killProcess(pid)
+	}
+	_ = os.Remove(pidFile("local-kernel.pid"))
 }
 
 // runSupervisor 是后台模式的看护进程：网关异常退出时隔几秒拉起；stop 时一起停。
@@ -240,7 +260,7 @@ func runSupervisor(args []string) int {
 	defer os.Remove(pidFile("gateway.supervisor.pid"))
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	notifyStop(sig)
 	env := append(os.Environ(), "NANO_GATEWAY_SUPERVISED=1")
 	for {
 		cmd := exec.Command(self, "-c", *cfgPath)
@@ -257,7 +277,7 @@ func runSupervisor(args []string) int {
 		select {
 		case s := <-sig:
 			log.Info("看护进程收到停止信号", "signal", s)
-			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = terminateCmd(cmd)
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):

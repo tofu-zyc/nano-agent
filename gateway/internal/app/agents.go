@@ -585,6 +585,7 @@ func (a *App) toolNames() []string {
 	add("FollowUp")
 	add("Agenda")
 	add("Idea")
+	add("Mind")
 	add("SendFile")
 	for _, spec := range a.searchTools() {
 		add(spec.Name)

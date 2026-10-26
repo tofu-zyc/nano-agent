@@ -301,3 +301,44 @@ func TestAutonomyIdeaNeedsSourceAndSchedules(t *testing.T) {
 		t.Fatalf("想法应该变成可以挪动的探索时间: %+v", open)
 	}
 }
+
+func TestMindToolUpdatesInterestsBeliefsAndReflections(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	withModels(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 21, 15, 0, 0, 0, time.UTC))
+
+	e.a.mu.Lock()
+	out, err := e.a.mindCall(mainSID, []byte(`{"action":"view"}`))
+	if err != nil || !strings.Contains(out, "长期兴趣：还没有") {
+		e.a.mu.Unlock()
+		t.Fatalf("初始心智状态不对: %q %v", out, err)
+	}
+	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"interest_add","text":"读科幻"}`)); err == nil {
+		e.a.mu.Unlock()
+		t.Fatal("没有来源的兴趣不该收")
+	}
+	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"interest_add","text":"读科幻","source":"看完三体之后想到的"}`)); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"belief","subject":"主人的面试","value":"下周三二面","source":"主人刚才说的","confidence":0.9}`)); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"reflect","text":"约定要当天记下来，不然容易忘","change":"以后先 Agenda add"}`)); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	out, err = e.a.mindCall(mainSID, []byte(`{"action":"view"}`))
+	st := e.a.mindOf("default")
+	view := st.View(e.a.now(), e.a.loc, 10)
+	e.a.mu.Unlock()
+	if err != nil || !strings.Contains(out, "读科幻") || !strings.Contains(out, "下周三二面") || !strings.Contains(out, "容易忘") {
+		t.Fatalf("心智状态没有记住: %q %v", out, err)
+	}
+	if len(view.Self.Interests) != 1 || len(view.Beliefs) == 0 || len(view.Reflections) == 0 {
+		t.Fatalf("View 里缺兴趣/认知/反思: %+v", view)
+	}
+}

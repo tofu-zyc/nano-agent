@@ -40,6 +40,17 @@ func localKernelName(cfg *config.Config) string {
 	return name
 }
 
+// kernelBinary 找内核程序：Linux/macOS 是 nano-kernel，Windows 是 nano-kernel.exe。
+func kernelBinary(dir string) string {
+	for _, name := range []string{"nano-kernel", "nano-kernel.exe"} {
+		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return filepath.Join(dir, "nano-kernel")
+}
+
 // startLocalKernel 启动本机内核，返回的 done 在它最终退出（ctx 结束后）时关闭。不用启动时返回 nil。
 func startLocalKernel(ctx context.Context, cfg *config.Config, exe host.Executor, hub *kernel.Hub, a *app.App, log *slog.Logger) <-chan struct{} {
 	if !config.On(cfg.Kernel.Local) {
@@ -49,7 +60,7 @@ func startLocalKernel(ctx context.Context, cfg *config.Config, exe host.Executor
 		log.Warn("找不到执行器，本机内核不启动")
 		return nil
 	}
-	bin := filepath.Join(filepath.Dir(exe.Path), "nano-kernel")
+	bin := kernelBinary(filepath.Dir(exe.Path))
 	if _, err := os.Stat(bin); err != nil {
 		log.Warn("找不到 nano-kernel，本机内核不启动（本机的工作目录由网关直接执行）", "path", bin)
 		return nil
@@ -71,6 +82,11 @@ func startLocalKernel(ctx context.Context, cfg *config.Config, exe host.Executor
 		return nil
 	}
 	a.SetManagedKernel(name)
+	// 上次网关被强制结束时可能留下一个本机内核；先按 pid 收掉，免得它和新内核抢 7700
+	if pid, ok := readPID(pidFile("local-kernel.pid")); ok {
+		_ = terminateProcess(pid)
+		time.Sleep(300 * time.Millisecond)
+	}
 	logPath := filepath.Join(cfg.Session.DataDir, "kernel.log")
 	done := make(chan struct{})
 	go func() {
@@ -92,11 +108,13 @@ func startLocalKernel(ctx context.Context, cfg *config.Config, exe host.Executor
 			if err := cmd.Start(); err != nil {
 				log.Error("本机内核启动失败", "err", err)
 			} else {
+				_ = writePID(pidFile("local-kernel.pid"), cmd.Process.Pid)
 				log.Info("本机内核已启动", "node", name, "pid", cmd.Process.Pid, "log", logPath)
 				exited := make(chan error, 1)
 				go func() { exited <- cmd.Wait() }()
 				select {
 				case err := <-exited:
+					_ = os.Remove(pidFile("local-kernel.pid"))
 					log.Warn("本机内核退出了，稍后重启", "err", err, "log", logPath)
 				case <-ctx.Done():
 					// 让内核先清理它正在执行的命令

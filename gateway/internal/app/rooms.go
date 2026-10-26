@@ -778,7 +778,36 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 	if !ok {
 		return "", errors.New("没有这个 agent")
 	}
-	if a.execAgentID(target) != agentID || !a.hasSession(target) || !a.isPrivateChat(target) {
+	if a.execAgentID(target) != agentID || !a.hasSession(target) {
+		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
+	}
+	// 给拟人型自己的内心留一句话：不是对外发消息，放进 life 的历史里；它没在忙就顺手叫醒它。
+	if isLifeSID(target) {
+		if isLifeSID(fromSID) {
+			return "", errors.New("不能给自己的内心留言")
+		}
+		sender := "主人"
+		if !a.isOwnerSID(agentID, fromSID) {
+			if title := a.sessionInfo(fromSID).Title; title != "" {
+				sender = title
+			} else {
+				sender = "另一个会话"
+			}
+		}
+		line := fmt.Sprintf("[%s 留了一句] %s", sender, text)
+		if err := a.store.Append(target, session.Msg{Role: "user", Content: line}); err != nil {
+			return "", fmt.Errorf("保存留言失败：%w", err)
+		}
+		a.publishSession(target)
+		if s := a.sessions[target]; s == nil || (s.run == nil && len(s.queue) == 0 && !s.compacting) {
+			if err := a.startLife(agentID, true); err != nil {
+				a.log.Info("内心留言已保存，但它现在没法开始", "agent", agentID, "err", err)
+			}
+		}
+		a.log.Info("给内心留言", "agent", agentID, "from", fromSID)
+		return "留言放进它的内心了，它会把这句话当成一轮任务；正在想事情的话，下次醒来会看到。", nil
+	}
+	if !a.isPrivateChat(target) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
 	}
 	fromLife := isLifeSID(fromSID)

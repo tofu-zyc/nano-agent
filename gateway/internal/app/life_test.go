@@ -68,7 +68,7 @@ func TestLifeWake(t *testing.T) {
 	for _, tl := range tools {
 		names = append(names, tl.Function.Name)
 	}
-	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") || strings.Join(names, ",") != "Agenda,Idea,Knowledge,Message" {
+	if !strings.Contains(system, "有自己生活的人") || !strings.Contains(system, "一个人的时候") || strings.Join(names, ",") != "Agenda,Idea,Knowledge,Message,Mind" {
 		t.Fatalf("内心活动的提示和工具：%v", names)
 	}
 	e.sid = sid
@@ -400,4 +400,35 @@ func TestLifeDMSaysBeforeTools(t *testing.T) {
 		t.Fatalf("最后一段：%q", m)
 	}
 	e.ch.none(t) // 前面说的不会在最后再发一遍
+}
+
+func TestMessageToOwnLifeLeavesNote(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	life := lifeSID("default")
+
+	e.a.mu.Lock()
+	// 让它“正在想事情”，避免留言顺手叫醒一轮，测试只关心留言本身
+	e.a.sessOf(life).queue = []queued{{}}
+	out, err := e.a.messageChat(mainSID, life, "下午去看看日程")
+	e.a.sessOf(life).queue = nil
+	h := e.a.store.History(life)
+	e.a.mu.Unlock()
+	if err != nil || !strings.Contains(out, "留言放进它的内心") {
+		t.Fatalf("给内心留言失败：%q %v", out, err)
+	}
+	if len(h) == 0 {
+		t.Fatal("留言没有进 life 历史")
+	}
+	last := h[len(h)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "下午去看看日程") || !strings.Contains(last.Content, "留了一句") {
+		t.Fatalf("留言格式不对：%+v", last)
+	}
+	e.a.mu.Lock()
+	_, err = e.a.messageChat(life, life, "自己给自己")
+	e.a.mu.Unlock()
+	if err == nil {
+		t.Fatal("life 里不该能给自己留言")
+	}
 }

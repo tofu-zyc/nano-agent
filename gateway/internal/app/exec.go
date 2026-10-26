@@ -89,6 +89,15 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		}
 		return
 	}
+	if m.Name == "Mind" {
+		out, err := a.mindCall(s.sid, m.Args)
+		if err != nil {
+			reply(false, err.Error())
+		} else {
+			reply(true, out)
+		}
+		return
+	}
 	if m.Name == "Diary" {
 		out, err := a.diaryCall(s.sid, m.Args)
 		if err != nil {

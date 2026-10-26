@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -126,7 +127,11 @@ func New(ctx context.Context, dir string, e Executor, guard []string, hub *kerne
 func controlDir() (string, error) {
 	dir := paths.ShortRunDir("nano-ssh")
 	st, err := os.Lstat(dir)
-	if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+	if err != nil || !st.IsDir() {
+		return "", fmt.Errorf("没法使用 SSH 连接复用的目录 %s（要求是只有自己能进的目录）", dir)
+	}
+	// Windows 没有 Unix 权限位，ACL 由系统按用户目录继承；不能拿 Perm() 判断。
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("没法使用 SSH 连接复用的目录 %s（要求是只有自己能进的目录）", dir)
 	}
 	return dir, nil

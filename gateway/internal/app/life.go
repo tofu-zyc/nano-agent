@@ -43,6 +43,7 @@ const defaultLifeSkill = `# 一个人的时候
 - 现在能做的就用工具真的去做（WebSearch、WebFetch、Knowledge、读写文件都行），做完用 Agenda done 写清真实结果。
 - 以后要做的用 Agenda add 排进日程；要改时间用 Agenda move；不做或者取消用 Agenda cancel。
 - 有新的念头用 Idea add 记下来，写清来源（从哪件事、哪段记忆、哪次聊天想到的）；可以 Idea schedule 排时间去探索，也可以 defer 或者 drop，允许一个都不做。
+- 对人、对事有了新的认识，想调整长期兴趣，或者做完事想反思，用 Mind（先 view，再 interest_add / belief / reflect）；必须写来源，它会一直留着。
 - 和人有明确约定（几点提醒、答应了什么）一定要用 Agenda 记成 commitment：到点你会自己醒来，即使刚聊过天也不会被推迟。
 
 别的：
