@@ -124,6 +124,20 @@ func TestSkillCacheUsesCustomHomeWithoutReplacingSource(t *testing.T) {
 	}
 }
 
+func TestPortableSkillPaths(t *testing.T) {
+	if got, err := relDir("~/.nano-agent/skill-cache/demo-version"); err != nil || got != ".nano-agent/skill-cache/demo-version" {
+		t.Fatalf("技能缓存协议使用正斜杠，不应随网关系统改变: %q %v", got, err)
+	}
+	if got, err := cleanRel("references/setup.md"); err != nil || got != "references/setup.md" {
+		t.Fatalf("参考文件路径不兼容: %q %v", got, err)
+	}
+	for _, value := range []string{"../escape", `..\escape`, "C:/escape", `C:\escape`, "/absolute"} {
+		if _, err := cleanRel(value); err == nil {
+			t.Fatalf("不应接受跨目录/驱动器路径: %q", value)
+		}
+	}
+}
+
 // 假的 ssh：-M 建立主连接（用控制路径上的文件表示，一直挂着直到被杀）；-O check 看主连接在不在；
 // 其他命令在 $REMOTE_ROOT/<目标> 这个“服务器主目录”里用 sh 执行。目标 down 连不上。
 const fakeSSH = `#!/bin/sh

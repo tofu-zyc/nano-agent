@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -221,16 +222,16 @@ func firstLine(s string) string {
 // relDir 检查 ~/ 开头的目录，返回 HOME 下的相对路径
 func relDir(dir string) (string, error) {
 	rel, ok := strings.CutPrefix(dir, "~/")
-	clean := filepath.Clean(rel)
-	if !ok || clean != rel || rel == "" || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+	clean := path.Clean(rel)
+	if !ok || clean != rel || rel == "" || strings.HasPrefix(clean, "..") || path.IsAbs(clean) || strings.ContainsAny(rel, `\:`) {
 		return "", fmt.Errorf("目录 %q 不对", dir)
 	}
 	return clean, nil
 }
 
 func cleanRel(p string) (string, error) {
-	c := filepath.Clean(p)
-	if p == "" || filepath.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
+	c := path.Clean(p)
+	if p == "" || path.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") || strings.ContainsAny(p, `\:`) {
 		return "", fmt.Errorf("文件路径 %q 不对", p)
 	}
 	return c, nil
