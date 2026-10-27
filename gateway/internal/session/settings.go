@@ -81,7 +81,7 @@ type Settings struct {
 }
 
 func (s *Store) settingsFile(sid string) string {
-	return filepath.Join(s.dir, "sessions", Key(sid)+".settings.json")
+	return s.newPath(sid, ".settings.json")
 }
 
 // settingsReadFile 读设置时兼容旧键。
@@ -95,7 +95,7 @@ func (s *Store) Settings(sid string) Settings {
 		return st
 	}
 	var st Settings
-	if p, ok := s.settingsReadFile(sid); ok {
+	if p, ok := s.readFileFor(sid, ".settings.json"); ok {
 		if b, err := os.ReadFile(p); err == nil {
 			json.Unmarshal(b, &st)
 		}
@@ -110,39 +110,71 @@ func (s *Store) SaveSettings(sid string, st Settings) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.settingsFile(sid) + ".tmp"
+	path, _, err := s.locate(sid, ".settings.json")
+	if err != nil {
+		return err
+	}
+	if err := s.rememberLongKey(sid); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.settingsFile(sid)); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	s.settings[sid] = st
 	return nil
 }
-
 // List 返回磁盘上所有会话的 ID（有历史或者有设置的）。
 func (s *Store) List() []string {
-	entries, _ := os.ReadDir(filepath.Join(s.dir, "sessions"))
 	seen := map[string]bool{}
-	var out []string
-	for _, e := range entries {
-		name := e.Name()
-		var esc string
-		switch {
-		case strings.HasSuffix(name, ".settings.json"):
-			esc = strings.TrimSuffix(name, ".settings.json")
-		case strings.HasSuffix(name, ".jsonl"):
-			esc = strings.TrimSuffix(name, ".jsonl")
-		default:
-			continue
-		}
-		sid, ok := s.resolveKey(esc)
-		if !ok || seen[sid] {
-			continue
+	out := []string{}
+	add := func(sid string) {
+		if sid == "" || seen[sid] {
+			return
 		}
 		seen[sid] = true
 		out = append(out, sid)
+	}
+	for _, side := range []struct {
+		dir     string
+		resolve func(string) (string, bool)
+	}{
+		{s.dirV1Sessions(), s.resolveNewKey},
+		{s.dirLegacySessions(), resolveLegacyName},
+	} {
+		for _, e := range mustReadDir(side.dir) {
+			name := e.Name()
+			for _, suffix := range []string{".settings.json", ".branch.json", ".jsonl"} {
+				if strings.HasSuffix(name, suffix) {
+					if sid, ok := side.resolve(strings.TrimSuffix(name, suffix)); ok {
+						add(sid)
+					}
+					break
+				}
+			}
+		}
+	}
+	for _, e := range mustReadDir(s.dirLegacyArchive()) {
+		if !e.IsDir() {
+			continue
+		}
+		if sid, ok := resolveLegacyName(e.Name()); ok {
+			add(sid)
+		}
+	}
+	for _, e := range mustReadDir(s.dirV1Archive()) {
+		if !e.IsDir() {
+			continue
+		}
+		if sid, ok := s.resolveNewKey(e.Name()); ok {
+			add(sid)
+		}
 	}
 	return out
 }

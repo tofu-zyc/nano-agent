@@ -12,7 +12,26 @@ import (
 
 func archiveKey(sid string) string { return Key(sid) }
 func (s *Store) archiveDir(sid string) string {
-	return filepath.Join(s.dir, "archive", archiveKey(sid))
+	return filepath.Join(s.dirV1Archive(), archiveKey(sid))
+}
+
+// legacyArchiveDir 是旧布局的归档目录（迁移前读取用）。
+func (s *Store) legacyArchiveDir(sid string) string {
+	return filepath.Join(s.dirLegacyArchive(), legacyArchiveKey(sid))
+}
+
+// ArchiveDirPath 是某个会话在新布局里的归档目录（测试和诊断用）。
+func (s *Store) ArchiveDirPath(sid string) string { return s.archiveDir(sid) }
+
+// archiveReadDir 读归档时优先新布局，没有再看旧布局。
+func (s *Store) archiveReadDir(sid string) string {
+	if _, err := os.Stat(s.archiveDir(sid)); err == nil {
+		return s.archiveDir(sid)
+	}
+	if _, err := os.Stat(s.legacyArchiveDir(sid)); err == nil {
+		return s.legacyArchiveDir(sid)
+	}
+	return s.archiveDir(sid)
 }
 func (s *Store) ArchiveReset(sid string, now time.Time) error {
 	file := s.file(sid)
@@ -44,13 +63,13 @@ type ArchiveInfo struct {
 }
 
 func (s *Store) Archives(sid string) []ArchiveInfo {
-	entries, _ := os.ReadDir(s.archiveDir(sid))
+	entries, _ := os.ReadDir(s.archiveReadDir(sid))
 	out := []ArchiveInfo{}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) != ".jsonl" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(s.archiveDir(sid), e.Name()))
+		b, err := os.ReadFile(filepath.Join(s.archiveReadDir(sid), e.Name()))
 		if err != nil {
 			continue
 		}
@@ -88,26 +107,32 @@ func (s *Store) PruneArchives(now time.Time, days int) error {
 	if days == 0 {
 		return nil
 	}
-	root := filepath.Join(s.dir, "archive")
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) {
+	// 新旧两个归档根都要清：迁移前旧的、迁移后新的
+	for _, root := range []string{s.dirV1Archive(), s.dirLegacyArchive()} {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if filepath.Ext(path) == ".jsonl" && info.ModTime().Before(now.AddDate(0, 0, -days)) {
+				return os.Remove(path)
+			}
 			return nil
-		}
-		if err != nil {
+		})
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if filepath.Ext(path) == ".jsonl" && info.ModTime().Before(now.AddDate(0, 0, -days)) {
-			return os.Remove(path)
-		}
-		return nil
-	})
+	}
+	return nil
 }
 func (s *Store) DeleteAllHistory(sid string) error {
 	if err := s.Reset(sid); err != nil {

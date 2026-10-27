@@ -56,6 +56,7 @@ type Store struct {
 	hist     map[string][]Msg // 从 Settings.Base 开始的历史
 	settings map[string]Settings
 	branches map[string]BranchMeta // 分支元信息（按需从磁盘加载）
+	promoted map[string]bool       // 已经升级到新布局的会话（W1）
 
 	snapCacheMu sync.Mutex
 	snapCache   map[string][]Msg  // 快照只读缓存（有上限，空闲分支不各留一份）
@@ -64,40 +65,45 @@ type Store struct {
 }
 
 func New(dir string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
-		return nil, err
+	for _, sub := range []string{
+		filepath.Join(dir, "sessions"),
+		filepath.Join(dir, "v1", "sessions"),
+		filepath.Join(dir, "v1", "sessions", "keys"),
+		filepath.Join(dir, "v1", "active"),
+		filepath.Join(dir, "v1", "archive"),
+	} {
+		if err := os.MkdirAll(sub, 0o700); err != nil {
+			return nil, err
+		}
 	}
-	return &Store{dir: dir, hist: map[string][]Msg{}, settings: map[string]Settings{}}, nil
+	return &Store{dir: dir, hist: map[string][]Msg{}, settings: map[string]Settings{},
+		promoted: map[string]bool{}, snapBudget: 8 << 20}, nil
 }
 
 // Dir 是数据目录。
 func (s *Store) Dir() string { return s.dir }
 
 func (s *Store) file(sid string) string {
-	return filepath.Join(s.dir, "sessions", Key(sid)+".jsonl")
+	return s.newPath(sid, ".jsonl")
 }
 
-// legacyFile 是旧键对应的历史文件（只读兼容：新文件不存在时读它，迁移时复制到新键）。
-func (s *Store) legacyFile(sid string) string {
-	if k := LegacyKey(sid); k != Key(sid) {
-		return filepath.Join(s.dir, "sessions", k+".jsonl")
-	}
-	return ""
+// legacyPath 是旧布局里某一类文件的位置（只读兼容与迁移来源）。
+func (s *Store) legacyPath(sid, suffix string) string {
+	return filepath.Join(s.dirLegacySessions(), LegacyKey(sid)+suffix)
 }
 
-// readFileFor 打开一个会话相关的文件：优先新键，找不到再退到旧键。
+// readFileFor 读会话某一类文件：先走权威定位；升级失败时退回旧位置继续读，绝不在这里新建。
 func (s *Store) readFileFor(sid, suffix string) (string, bool) {
-	p := filepath.Join(s.dir, "sessions", Key(sid)+suffix)
-	if _, err := os.Stat(p); err == nil {
-		return p, true
-	}
-	if k := LegacyKey(sid); k != Key(sid) {
-		lp := filepath.Join(s.dir, "sessions", k+suffix)
-		if _, err := os.Stat(lp); err == nil {
-			return lp, true
+	p, ok, err := s.locate(sid, suffix)
+	if err != nil {
+		if lp := s.legacyPath(sid, suffix); lp != "" {
+			if _, statErr := os.Stat(lp); statErr == nil {
+				return lp, true
+			}
 		}
+		return p, false
 	}
-	return p, false
+	return p, ok
 }
 
 // History 返回会话历史（第一次访问时从磁盘加载）。调用方不要修改返回的切片。
@@ -168,13 +174,20 @@ func (s *Store) Append(sid string, m Msg) error {
 	if m.TS == 0 {
 		m.TS = time.Now().Unix()
 	}
-	// 先把内存视图定下来：写盘之后再调 History 会把刚写进去的那条也读出来，重复一次
+	// 写之前先把会话放到权威位置：旧会话要整体升级，不能只写增量把前缀留在旧文件里
+	path, _, err := s.locate(sid, ".jsonl")
+	if err != nil {
+		return err
+	}
+	if err := s.rememberLongKey(sid); err != nil {
+		return err
+	}
 	prev := s.History(sid)
 	line, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.file(sid), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("保存会话历史：%w", err)
 	}
@@ -391,19 +404,28 @@ func (s *Store) Reset(sid string) error {
 		}
 	}
 	s.hist[sid] = nil
-	err := os.Remove(s.file(sid))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+	path, ok, err := s.locate(sid, ".jsonl")
+	if err != nil {
+		return err
 	}
-	return err
+	if ok {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	// 激活标记保留：重置之后这个会话仍然只认新布局，不会再从旧备份读回来
+	return nil
 }
 
 // Exists 判断磁盘上有没有这个会话（有历史或者有设置）。
 func (s *Store) Exists(sid string) bool {
-	for _, f := range []string{s.file(sid), s.settingsFile(sid)} {
-		if _, err := os.Stat(f); err == nil {
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		if _, ok, err := s.locate(sid, suffix); err == nil && ok {
 			return true
 		}
+	}
+	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+		return true // 刚重置过：没有文件但会话仍然存在
 	}
 	return false
 }
@@ -413,10 +435,22 @@ func (s *Store) Rename(from, to string) error {
 	if s.Exists(to) {
 		return fmt.Errorf("会话 %s 已经存在", to)
 	}
-	for _, p := range [][2]string{{s.file(from), s.file(to)}, {s.settingsFile(from), s.settingsFile(to)}} {
-		if err := os.Rename(p[0], p[1]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		src, ok, err := s.locate(from, suffix)
+		if err != nil || !ok {
+			continue
+		}
+		dst := s.newPath(to, suffix)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}
+		if err := os.Rename(src, dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	if _, err := os.Stat(s.activeMarker(from)); err == nil {
+		_ = writeFileAtomic(s.activeMarker(to), []byte(Key(to)))
+		_ = os.Remove(s.activeMarker(from))
 	}
 	delete(s.hist, from)
 	delete(s.settings, from)
@@ -427,10 +461,22 @@ func (s *Store) Rename(from, to string) error {
 
 // Delete 删除会话的历史和设置。
 func (s *Store) Delete(sid string) error {
-	for _, f := range []string{s.file(sid), s.settingsFile(sid)} {
-		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		path, ok, err := s.locate(sid, suffix)
+		if err != nil || !ok {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
+	}
+	// 换成墓碑标记：旧备份保留（人工还能找回），但不会再被自动当成会话内容
+	_ = os.Remove(s.activeMarker(sid))
+	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(sid)), 0o700); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.deletedMarker(sid), []byte(Key(sid))); err != nil {
+		return err
 	}
 	delete(s.hist, sid)
 	delete(s.settings, sid)

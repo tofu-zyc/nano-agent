@@ -1,65 +1,69 @@
 package session
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
-	"time"
 	"strings"
+	"time"
 )
 
-// ---- 会话在磁盘上的键（W1） ----
+// ---- 会话在磁盘上的位置（W1） ----
 //
-// 逻辑 sid 保持原值（"tg:123"、"@bot/main"、"中文"），只改**文件名键**。
-// 旧实现用 url.PathEscape 当文件名：它在 Windows 上会留下 %3A 之类的字面名字，
-// 而且对大小写、保留字符、末尾点/空格、设备名都没有保证。
+// 逻辑 sid 保持原值，只改**文件系统位置**。新布局放在独立的命名空间目录里：
 //
-// 新键是带版本前缀的规范 ASCII：
+//	<data>/v1/sessions/<key>.jsonl | .settings.json | .branch.json
+//	<data>/v1/archive/<key>/...          （/reset 归档）
+//	<data>/v1/active/<key>               （这个会话已经在新布局里激活）
+//	<data>/v1/sessions/keys/<key>.json   （超长 sid 的映射）
 //
-//	v1-<十六进制>（原始 sid 的 UTF-8 字节）
-//	v1h-<sha256 前 32 位>（原始 sid 太长、超出文件名上限时）
+// 旧布局（url.PathEscape 直接当文件名）留在原处，只作为迁移来源和恢复备份：
 //
-// 十六进制不含大小写歧义、不含路径分隔符和保留字符，反解是唯一确定的；
-// 太长的 ID 用稳定哈希，并在 sessions/keys/<hash>.json 里持久保存原始 sid，
-// 绝不截断 ID。旧键（url.PathEscape）只用于读取兼容和迁移，不再用于新写入。
+//	<data>/sessions/<旧名>.jsonl | .settings.json ...
+//	<data>/archive/<旧名>/...
+//
+// 为什么用目录隔离而不是给文件名加前缀：旧的逻辑 sid 完全可能就是字面量 "v1-61"，
+// 它在新编码下正好等于 sid "a" 的键——只看文件名无法区分版本。放在不同目录里，
+// 目录本身就说明了格式归属，不存在歧义。
 
 const (
-	keyPrefix    = "v1-"
-	keyLongPrefix = "v1h-"
-	// keyMaxBase 是“仍然用可逆编码”的最长原始 sid（字节）。超过就走哈希 + 映射。
-	// NTFS 文件名上限 255 个 UTF-16 码元，减去后缀（".settings.json" 等）留足余量。
-	keyMaxBase = 96
+	keyPrefix     = ""
+	keyLongPrefix = "h-"
+	keyMaxBase    = 96 // 超过这个长度的 sid 用哈希键 + 持久映射
 )
 
-// Key 是会话 ID 的规范文件系统键。
+// Key 是会话 ID 的规范文件名键：UTF-8 字节的十六进制。
 func Key(sid string) string {
 	if len(sid) <= keyMaxBase {
-		return keyPrefix + hex.EncodeToString([]byte(sid))
+		return hex.EncodeToString([]byte(sid))
 	}
 	sum := sha256.Sum256([]byte(sid))
 	return keyLongPrefix + hex.EncodeToString(sum[:16])
 }
 
-// ParseKey 把文件名键还原成原始 sid。第二个返回值表示是不是规范键。
-func ParseKey(name string) (string, bool) {
-	switch {
-	case strings.HasPrefix(name, keyLongPrefix):
-		return "", false // 需要查持久映射（LookupLongKey）
-	case strings.HasPrefix(name, keyPrefix):
-		raw, err := hex.DecodeString(strings.TrimPrefix(name, keyPrefix))
-		if err != nil || len(raw) == 0 {
-			return "", false
-		}
-		return string(raw), true
+// ParseKey 把规范键还原成 sid。只接受 Key(sid) 的原样输出，不做前缀猜测。
+func ParseKey(key string) (string, bool) {
+	if key == "" || strings.HasPrefix(key, keyLongPrefix) {
+		return "", false // 长键要查持久映射
 	}
-	return "", false
+	raw, err := hex.DecodeString(key)
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	sid := string(raw)
+	if Key(sid) != key {
+		return "", false // 不是规范形式（大小写、长度不对等）
+	}
+	return sid, true
 }
 
-// LegacyKey 是旧实现用的文件名（url.PathEscape）。只读兼容，不再用于新写入。
+// LegacyKey 是旧布局用的文件名，各不相同的数据类型规则略有差异。
 func LegacyKey(sid string) string {
 	if sid == "." || sid == ".." {
 		return "%2E" + url.PathEscape(sid[1:])
@@ -67,21 +71,42 @@ func LegacyKey(sid string) string {
 	return url.PathEscape(sid)
 }
 
-// keysFor 返回一个 sid 所有可能出现的磁盘键：新键在前，旧键在后（兼容读取）。
-func keysFor(sid string) []string {
-	k := Key(sid)
-	if k == LegacyKey(sid) {
-		return []string{k}
+// legacyArchiveKey 是旧归档目录用的名字（和旧文件名的特殊规则不同）。
+func legacyArchiveKey(sid string) string {
+	if sid == "." || sid == ".." {
+		return "%2E" + url.PathEscape(sid)
 	}
-	return []string{k, LegacyKey(sid)}
+	return url.PathEscape(sid)
+}
+
+func (s *Store) dirV1() string              { return filepath.Join(s.dir, "v1") }
+func (s *Store) dirV1Sessions() string      { return filepath.Join(s.dirV1(), "sessions") }
+func (s *Store) dirV1Archive() string       { return filepath.Join(s.dirV1(), "archive") }
+func (s *Store) dirLegacySessions() string  { return filepath.Join(s.dir, "sessions") }
+func (s *Store) dirLegacyArchive() string   { return filepath.Join(s.dir, "archive") }
+
+// newPath 是会话某一类文件在新布局里的位置。
+func (s *Store) newPath(sid, suffix string) string {
+	return filepath.Join(s.dirV1Sessions(), Key(sid)+suffix)
+}
+
+// deletedMarker 是“这个会话被明确删除过”的墓碑：旧备份保留，但不再自动复活。
+func (s *Store) deletedMarker(sid string) string {
+	return filepath.Join(s.dirV1(), "deleted", Key(sid))
+}
+
+// activeMarker 是“这个会话已经在新布局里激活”的标记。
+func (s *Store) activeMarker(sid string) string {
+	return filepath.Join(s.dirV1(), "active", Key(sid))
 }
 
 // keyMapFile 是超长 sid 的哈希 → 原始 sid 映射。
 func (s *Store) keyMapFile(key string) string {
-	return filepath.Join(s.dir, "sessions", "keys", key+".json")
+	return filepath.Join(s.dirV1Sessions(), "keys", key+".json")
 }
 
-// rememberLongKey 记下超长 sid 的原始值（幂等）。
+// ---- 长键映射 ----
+
 func (s *Store) rememberLongKey(sid string) error {
 	if len(sid) <= keyMaxBase {
 		return nil
@@ -92,9 +117,13 @@ func (s *Store) rememberLongKey(sid string) error {
 		var old struct {
 			SID string `json:"sid"`
 		}
-		if json.Unmarshal(b, &old) == nil && old.SID == sid {
-			return nil
+		if json.Unmarshal(b, &old) == nil {
+			if old.SID == sid {
+				return nil
+			}
+			return fmt.Errorf("长 ID 映射冲突：%s 已经属于另一个会话", key)
 		}
+		return fmt.Errorf("长 ID 映射损坏：%s", path)
 	}
 	b, _ := json.MarshalIndent(map[string]string{"sid": sid, "key": key}, "", "  ")
 	return writeFileAtomic(path, b)
@@ -115,14 +144,19 @@ func (s *Store) LookupLongKey(key string) (string, bool) {
 	return v.SID, true
 }
 
-// resolveKey 把磁盘上的键还原成 sid：先按规范键解，再查超长映射，最后按旧键解。
-func (s *Store) resolveKey(name string) (string, bool) {
+// resolveNewKey 把新布局里的文件名键还原成 sid。
+func (s *Store) resolveNewKey(name string) (string, bool) {
 	if sid, ok := ParseKey(name); ok {
 		return sid, true
 	}
 	if strings.HasPrefix(name, keyLongPrefix) {
 		return s.LookupLongKey(name)
 	}
+	return "", false
+}
+
+// resolveLegacyName 把旧布局里的文件名还原成 sid（旧规则，允许任意名称）。
+func resolveLegacyName(name string) (string, bool) {
 	sid, err := url.PathUnescape(name)
 	if err != nil || sid == "" {
 		return "", false
@@ -130,144 +164,169 @@ func (s *Store) resolveKey(name string) (string, bool) {
 	return sid, true
 }
 
-// ---- 迁移 ----
+// ---- 权威定位 ----
 
-// MigrationRecord 是一次键迁移的结果（持久记录，中断后接着做同一项）。
-type MigrationRecord struct {
-	Version int      `json:"version"`
-	At      int64    `json:"at"`
-	Moved   []string `json:"moved"`   // 已经复制到新键的 sid
-	Failed  []string `json:"failed,omitempty"`
-	Kept    []string `json:"kept,omitempty"` // 无法确定归属、保留现场的项目
-}
-
-// MigrationKind 是一个要迁移的“流”：目录 + 后缀。
-type migrationKind struct {
-	dir    string
-	suffix string // 例如 ".jsonl"
-	check  func([]byte) error
-}
-
-// MigrateKeys 把旧的 url.PathEscape 键复制成新的规范键。
+// locate 返回会话某一类文件的权威位置和是否存在。
 //
-// 只复制、不删旧文件（保留旧流和备份）；目标已存在时先比对内容，相同就算完成，
-// 不同就保留双方并记进 Kept。每一项都先校验内容再提交，失败不影响其他项。
-// 整个过程幂等：中断后再跑会跳过已经迁移好的。
-func (s *Store) MigrateKeys() (MigrationRecord, error) {
-	rec := MigrationRecord{Version: 1, At: time.Now().Unix()}
-	kinds := []migrationKind{
-		{dir: filepath.Join(s.dir, "sessions"), suffix: ".jsonl", check: jsonlCheck},
-		{dir: filepath.Join(s.dir, "sessions"), suffix: ".settings.json", check: jsonCheck},
-		{dir: filepath.Join(s.dir, "sessions"), suffix: ".branch.json", check: jsonCheck},
-		{dir: filepath.Join(s.dir, "interjections"), suffix: ".jsonl", check: jsonlCheck},
+//  1. 新布局里有这个文件 → 用它；
+//  2. 会话已经激活（有标记）→ 用新位置，即使文件不存在（重置/删除后不回退旧备份）；
+//  3. 旧布局里有 → 先把整个会话提升到新布局（校验后提交），再用新位置；
+//  4. 都没有 → 新位置（新会话）。
+//
+// 写入路径必须用这个接口，不能各自猜文件在不在。
+func (s *Store) locate(sid, suffix string) (string, bool, error) {
+	np := s.newPath(sid, suffix)
+	if _, err := os.Stat(np); err == nil {
+		return np, true, nil
 	}
-	for _, k := range kinds {
-		entries, err := os.ReadDir(k.dir)
+	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+		return np, false, nil // 已激活：新位置就是权威位置
+	}
+	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
+		return np, false, nil // 删除过的会话：旧备份只作为恢复来源，不再自动使用
+	}
+	// 旧布局里有没有这个会话的任何一类文件
+	if !s.hasLegacy(sid) {
+		return np, false, nil
+	}
+	if err := s.promote(sid); err != nil {
+		return np, false, fmt.Errorf("把旧会话数据升级到新布局失败：%w", err)
+	}
+	if _, err := os.Stat(np); err == nil {
+		return np, true, nil
+	}
+	return np, false, nil
+}
+
+// hasLegacy 报告旧布局里有没有这个会话的文件（历史 / 设置 / 分支 / 归档）。
+func (s *Store) hasLegacy(sid string) bool {
+	ln := LegacyKey(sid)
+	for _, p := range []string{
+		filepath.Join(s.dirLegacySessions(), ln+".jsonl"),
+		filepath.Join(s.dirLegacySessions(), ln+".settings.json"),
+		filepath.Join(s.dirLegacySessions(), ln+".branch.json"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(s.dirLegacyArchive(), legacyArchiveKey(sid))); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
+}
+
+// promote 把一个会话的旧文件升级到新布局：逐项校验、复制、回读比对，最后写激活标记。
+// 只复制不删旧文件；任何一项失败都不写标记，下次进来还会重试。
+func (s *Store) promote(sid string) error {
+	ln := LegacyKey(sid)
+	for _, item := range []struct {
+		suffix string
+		check  func([]byte) error
+	}{
+		{".jsonl", jsonlCheck},
+		{".settings.json", jsonCheck},
+		{".branch.json", jsonCheck},
+	} {
+		src := filepath.Join(s.dirLegacySessions(), ln+item.suffix)
+		data, err := os.ReadFile(src)
 		if err != nil {
-			continue
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if err := item.check(data); err != nil {
+			return fmt.Errorf("%s 内容无法校验：%w", src, err)
+		}
+		dst := s.newPath(sid, item.suffix)
+		if old, err := os.ReadFile(dst); err == nil {
+			if string(old) == string(data) {
+				continue
+			}
+			return fmt.Errorf("%s 已经有不同内容，保留现场等待人工核对", dst)
+		}
+		if err := writeFileAtomic(dst, data); err != nil {
+			return err
+		}
+	}
+	// 归档目录：逐份文件复制
+	oldArch := filepath.Join(s.dirLegacyArchive(), legacyArchiveKey(sid))
+	if entries, err := os.ReadDir(oldArch); err == nil {
+		newArch := filepath.Join(s.dirV1Archive(), Key(sid))
+		if err := os.MkdirAll(newArch, 0o700); err != nil {
+			return err
 		}
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), k.suffix) {
+			if e.IsDir() {
 				continue
 			}
-			old := e.Name()
-			base := strings.TrimSuffix(old, k.suffix)
-			sid, ok := s.resolveKey(base)
-			if !ok {
-				rec.Kept = append(rec.Kept, filepath.Join(k.dir, old))
-				continue
-			}
-			newKey := Key(sid)
-			if base == newKey {
-				continue // 已经是新键
-			}
-			if len(sid) > keyMaxBase {
-				if err := s.rememberLongKey(sid); err != nil {
-					rec.Failed = append(rec.Failed, filepath.Join(k.dir, newKey+k.suffix))
-					continue
-				}
-			}
-			src := filepath.Join(k.dir, old)
-			dst := filepath.Join(k.dir, newKey+k.suffix)
-			data, err := os.ReadFile(src)
+			data, err := os.ReadFile(filepath.Join(oldArch, e.Name()))
 			if err != nil {
-				rec.Failed = append(rec.Failed, src)
-				continue
+				return err
 			}
-			if err := k.check(data); err != nil {
-				rec.Kept = append(rec.Kept, src) // 内容看不懂：保留现场，不动
-				continue
+			if err := jsonlCheck(data); err != nil {
+				return fmt.Errorf("归档 %s 内容无法校验：%w", e.Name(), err)
 			}
-			if oldData, err := os.ReadFile(dst); err == nil {
-				if string(oldData) == string(data) {
-					continue // 已经迁移过
-				}
-				rec.Kept = append(rec.Kept, src) // 两边内容不同：都留着，报告冲突
+			dst := filepath.Join(newArch, e.Name())
+			if old, err := os.ReadFile(dst); err == nil && string(old) == string(data) {
 				continue
 			}
 			if err := writeFileAtomic(dst, data); err != nil {
-				rec.Failed = append(rec.Failed, src)
-				continue
+				return err
 			}
-			if got, err := os.ReadFile(dst); err != nil || string(got) != string(data) {
-				rec.Failed = append(rec.Failed, src)
-				continue
-			}
-			rec.Moved = append(rec.Moved, sid)
 		}
 	}
-	// 归档目录：每个会话一个子目录，同样按旧键命名
-	arch := filepath.Join(s.dir, "archive")
-	if entries, err := os.ReadDir(arch); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			sid, ok := s.resolveKey(e.Name())
-			if !ok || e.Name() == Key(sid) {
-				continue
-			}
-			dst := filepath.Join(arch, Key(sid))
-			if _, err := os.Stat(dst); err == nil {
-				continue // 已迁移（归档目录里的文件本来就可以并存）
-			}
-			if err := os.MkdirAll(dst, 0o700); err != nil {
-				rec.Failed = append(rec.Failed, filepath.Join(arch, e.Name()))
-				continue
-			}
-			files, err := os.ReadDir(filepath.Join(arch, e.Name()))
-			if err != nil {
-				continue
-			}
-			for _, f := range files {
-				if f.IsDir() {
-					continue
-				}
-				data, err := os.ReadFile(filepath.Join(arch, e.Name(), f.Name()))
-				if err != nil {
-					rec.Failed = append(rec.Failed, f.Name())
-					continue
-				}
-				if err := writeFileAtomic(filepath.Join(dst, f.Name()), data); err != nil {
-					rec.Failed = append(rec.Failed, f.Name())
-				}
-			}
-			rec.Moved = append(rec.Moved, sid)
-		}
+	if err := s.rememberLongKey(sid); err != nil {
+		return err
 	}
-	sort.Strings(rec.Moved)
-	if b, err := json.MarshalIndent(rec, "", "  "); err == nil {
-		_ = writeFileAtomic(filepath.Join(s.dir, "sessions", "keys", "migration.json"), b)
+	// 最后写激活标记：只有所有东西都就位，这个会话才算搬到新布局
+	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
+		return err
 	}
-	return rec, nil
+	if err := writeFileAtomic(s.activeMarker(sid), []byte(Key(sid))); err != nil {
+		return err
+	}
+	s.legacyActive(sid)
+	return nil
 }
 
-// HasLegacyKeys 报告磁盘上还有没有旧键文件（启动时用来决定要不要迁移）。
-func (s *Store) HasLegacyKeys() bool {
+// legacyActive 标记内存里这个会话已经升级过（避免每次访问都 stat 旧目录）。
+func (s *Store) legacyActive(sid string) {
+	if s.promoted == nil {
+		s.promoted = map[string]bool{}
+	}
+	s.promoted[sid] = true
+}
+
+// ---- 迁移 ----
+
+// MigrationItem 是单个文件的迁移阶段记录。
+type MigrationItem struct {
+	SID    string `json:"sid"`
+	Kind   string `json:"kind"`   // history | settings | branch | archive
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Stage  string `json:"stage"` // copied | verified | conflict | failed
+	Bytes  int64  `json:"bytes"`
+}
+
+// MigrationRecord 是一次迁移的真实结果。
+type MigrationRecord struct {
+	Version int             `json:"version"`
+	At      int64           `json:"at"`
+	Items   []MigrationItem `json:"items"`
+}
+
+// Migrate 把旧布局升级到新布局。只复制不删旧文件；逐项记录阶段；
+// 清单提交失败会作为错误返回（调用方不能把部分完成当成成功）。
+func (s *Store) Migrate() (MigrationRecord, error) {
+	rec := MigrationRecord{Version: 1, At: time.Now().Unix()}
+	sids := map[string]bool{}
 	for _, k := range []struct{ dir, suffix string }{
-		{filepath.Join(s.dir, "sessions"), ".settings.json"},
-		{filepath.Join(s.dir, "sessions"), ".jsonl"},
-		{filepath.Join(s.dir, "interjections"), ".jsonl"},
+		{s.dirLegacySessions(), ".jsonl"},
+		{s.dirLegacySessions(), ".settings.json"},
+		{s.dirLegacySessions(), ".branch.json"},
 	} {
 		entries, err := os.ReadDir(k.dir)
 		if err != nil {
@@ -277,15 +336,76 @@ func (s *Store) HasLegacyKeys() bool {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), k.suffix) {
 				continue
 			}
-			base := strings.TrimSuffix(e.Name(), k.suffix)
-			sid, ok := s.resolveKey(base)
-			if !ok || base == Key(sid) {
-				continue // 解不出来，或者本来就是新键
+			if sid, ok := resolveLegacyName(strings.TrimSuffix(e.Name(), k.suffix)); ok {
+				sids[sid] = true
 			}
-			// 旧键文件：新键那份已经在了就说明迁移过了
-			if _, err := os.Stat(filepath.Join(k.dir, Key(sid)+k.suffix)); err == nil {
+		}
+	}
+	if entries, err := os.ReadDir(s.dirLegacyArchive()); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
 				continue
 			}
+			if sid, ok := resolveLegacyName(e.Name()); ok {
+				sids[sid] = true
+			}
+		}
+	}
+	var firstErr error
+	for sid := range sids {
+		if err := s.promote(sid); err != nil {
+			rec.Items = append(rec.Items, MigrationItem{SID: sid, Stage: "failed"})
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ln := LegacyKey(sid)
+		for _, item := range []struct{ suffix, kind string }{
+			{".jsonl", "history"}, {".settings.json", "settings"}, {".branch.json", "branch"},
+		} {
+			src := filepath.Join(s.dirLegacySessions(), ln+item.suffix)
+			st, err := os.Stat(src)
+			if err != nil {
+				continue
+			}
+			rec.Items = append(rec.Items, MigrationItem{SID: sid, Kind: item.kind, Source: src,
+				Target: s.newPath(sid, item.suffix), Stage: "verified", Bytes: st.Size()})
+		}
+	}
+	b, _ := json.MarshalIndent(rec, "", "  ")
+	if err := writeFileAtomic(filepath.Join(s.dirV1Sessions(), "keys", "migration.json"), b); err != nil {
+		return rec, fmt.Errorf("写迁移清单失败：%w", err)
+	}
+	return rec, firstErr
+}
+
+// HasLegacyKeys 报告旧布局里还有没有**没升级过**的会话（已经写激活标记的不算）。
+func (s *Store) HasLegacyKeys() bool {
+	check := func(sid string) bool {
+		if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+			return false
+		}
+		return true
+	}
+	for _, e := range mustReadDir(s.dirLegacySessions()) {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+			if strings.HasSuffix(name, suffix) {
+				if sid, ok := resolveLegacyName(strings.TrimSuffix(name, suffix)); ok && check(sid) {
+					return true
+				}
+			}
+		}
+	}
+	for _, e := range mustReadDir(s.dirLegacyArchive()) {
+		if !e.IsDir() {
+			continue
+		}
+		if sid, ok := resolveLegacyName(e.Name()); ok && check(sid) {
 			return true
 		}
 	}
@@ -301,8 +421,11 @@ func jsonCheck(b []byte) error {
 }
 
 func jsonlCheck(b []byte) error {
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
+	sc := bufio.NewScanner(strings.NewReader(string(b)))
+	sc.Buffer(make([]byte, 64*1024), 64<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
 			continue
 		}
 		var v any
@@ -311,4 +434,13 @@ func jsonlCheck(b []byte) error {
 		}
 	}
 	return nil
+}
+
+// mustReadDir 读目录，失败返回空（不存在和读失败在这里等价）。
+func mustReadDir(dir string) []os.DirEntry {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	return entries
 }
