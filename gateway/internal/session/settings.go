@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"nano-agent/gateway/internal/llm"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,7 +81,12 @@ type Settings struct {
 }
 
 func (s *Store) settingsFile(sid string) string {
-	return filepath.Join(s.dir, "sessions", url.PathEscape(sid)+".settings.json")
+	return filepath.Join(s.dir, "sessions", Key(sid)+".settings.json")
+}
+
+// settingsReadFile 读设置时兼容旧键。
+func (s *Store) settingsReadFile(sid string) (string, bool) {
+	return s.readFileFor(sid, ".settings.json")
 }
 
 // Settings 返回会话设置（第一次访问时从磁盘加载）。
@@ -91,8 +95,10 @@ func (s *Store) Settings(sid string) Settings {
 		return st
 	}
 	var st Settings
-	if b, err := os.ReadFile(s.settingsFile(sid)); err == nil {
-		json.Unmarshal(b, &st)
+	if p, ok := s.settingsReadFile(sid); ok {
+		if b, err := os.ReadFile(p); err == nil {
+			json.Unmarshal(b, &st)
+		}
 	}
 	s.settings[sid] = st
 	return st
@@ -131,8 +137,8 @@ func (s *Store) List() []string {
 		default:
 			continue
 		}
-		sid, err := url.PathUnescape(esc)
-		if err != nil || seen[sid] {
+		sid, ok := s.resolveKey(esc)
+		if !ok || seen[sid] {
 			continue
 		}
 		seen[sid] = true

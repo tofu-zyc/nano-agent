@@ -107,7 +107,7 @@ func (s *Store) snapshotDir(id string) string {
 }
 
 func (s *Store) branchFile(sid string) string {
-	return filepath.Join(s.dir, "sessions", archiveKey(sid)+".branch.json")
+	return filepath.Join(s.dir, "sessions", Key(sid)+".branch.json")
 }
 
 func (s *Store) opFile(requestID string) string {

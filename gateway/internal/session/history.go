@@ -4,19 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 )
 
-func archiveKey(sid string) string {
-	if sid == "." || sid == ".." {
-		return "%2E" + url.PathEscape(sid)
-	}
-	return url.PathEscape(sid)
-}
+func archiveKey(sid string) string { return Key(sid) }
 func (s *Store) archiveDir(sid string) string {
 	return filepath.Join(s.dir, "archive", archiveKey(sid))
 }

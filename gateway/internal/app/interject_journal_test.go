@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -887,7 +886,7 @@ func TestResetFailureReportsError(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
 	e.ch.wait(t, "收到：第一问")
 	// 用文件占住归档目录的位置，让归档必然失败
-	arch := filepath.Join(e.dir, "data", "archive", url.PathEscape(e.sid))
+	arch := filepath.Join(e.dir, "data", "archive", session.Key(e.sid))
 	if err := os.MkdirAll(filepath.Dir(arch), 0o700); err != nil {
 		t.Fatal(err)
 	}

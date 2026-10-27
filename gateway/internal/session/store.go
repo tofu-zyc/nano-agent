@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,7 +74,30 @@ func New(dir string) (*Store, error) {
 func (s *Store) Dir() string { return s.dir }
 
 func (s *Store) file(sid string) string {
-	return filepath.Join(s.dir, "sessions", url.PathEscape(sid)+".jsonl")
+	return filepath.Join(s.dir, "sessions", Key(sid)+".jsonl")
+}
+
+// legacyFile 是旧键对应的历史文件（只读兼容：新文件不存在时读它，迁移时复制到新键）。
+func (s *Store) legacyFile(sid string) string {
+	if k := LegacyKey(sid); k != Key(sid) {
+		return filepath.Join(s.dir, "sessions", k+".jsonl")
+	}
+	return ""
+}
+
+// readFileFor 打开一个会话相关的文件：优先新键，找不到再退到旧键。
+func (s *Store) readFileFor(sid, suffix string) (string, bool) {
+	p := filepath.Join(s.dir, "sessions", Key(sid)+suffix)
+	if _, err := os.Stat(p); err == nil {
+		return p, true
+	}
+	if k := LegacyKey(sid); k != Key(sid) {
+		lp := filepath.Join(s.dir, "sessions", k+suffix)
+		if _, err := os.Stat(lp); err == nil {
+			return lp, true
+		}
+	}
+	return p, false
 }
 
 // History 返回会话历史（第一次访问时从磁盘加载）。调用方不要修改返回的切片。
@@ -99,7 +121,13 @@ func (s *Store) load(sid string) []Msg {
 // Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
 func (s *Store) Archive(sid string) []Msg { return s.loadFrom(sid, 0) }
 
-func (s *Store) loadFrom(sid string, skip int) []Msg { return readMsgs(s.file(sid), skip) }
+func (s *Store) loadFrom(sid string, skip int) []Msg {
+	p, ok := s.readFileFor(sid, ".jsonl")
+	if !ok {
+		return nil
+	}
+	return readMsgs(p, skip)
+}
 
 // ReadArchive 读一份归档（/reset 时挪走的历史）的全部消息。整理记忆时当日记读。
 func (s *Store) ReadArchive(sid, id string) []Msg {
@@ -225,7 +253,11 @@ func (s *Store) findInArchive(sid string, match func(Msg) bool) (Msg, bool) {
 	if s.Settings(sid).Base <= 0 {
 		return Msg{}, false
 	}
-	f, err := os.Open(s.file(sid))
+	path, okFile := s.readFileFor(sid, ".jsonl")
+	if !okFile {
+		return Msg{}, false
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return Msg{}, false
 	}
@@ -308,7 +340,11 @@ func (s *Store) Undo(sid string) ([]Msg, error) {
 
 // offsetOf 是历史文件里第 n 条消息（从 0 数，和 loadFrom 一样跳过坏行）开头的字节位置。
 func (s *Store) offsetOf(sid string, n int) (int64, error) {
-	f, err := os.Open(s.file(sid))
+	path, okFile := s.readFileFor(sid, ".jsonl")
+	if !okFile {
+		return 0, fmt.Errorf("撤回：历史文件不存在")
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
