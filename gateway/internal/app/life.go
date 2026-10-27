@@ -563,7 +563,6 @@ type LifeBrief struct {
 	WakesFree   bool `json:"wakes_unlimited,omitempty"`
 	ReachesFree bool `json:"reaches_unlimited,omitempty"`
 	Tokens  int        `json:"tokens"`
-	MaxWake int        `json:"max_wakes"`
 	Recent  []lifeNote `json:"recent"`
 	Waiting []string   `json:"waiting,omitempty"` // 主动找了还没回的人
 }
@@ -578,7 +577,7 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	p := effectiveLifePolicy(ag)
 	b := &LifeBrief{State: "awake", Next: ls.Next * 1000, Wakes: ls.Wakes, Reaches: ls.Reaches, Tokens: ls.Tokens,
 		MaxWakes: p.MaxWakes, MaxReaches: p.MaxReaches, WakesFree: p.WakesUnlimited(), ReachesFree: p.ReachesUnlimited(),
-		MaxWake: lifeLevelOf(ag).wakes, Recent: []lifeNote{}}
+		Recent: []lifeNote{}}
 	w := a.awakeOf(ag)
 	if !w.contains(now) {
 		b.State, b.WakeAt = "sleeping", w.nextStart(now).UnixMilli()
