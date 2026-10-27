@@ -1,7 +1,6 @@
 package session
 
 import (
-	"strconv"
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -80,11 +80,11 @@ func legacyArchiveKey(sid string) string {
 	return url.PathEscape(sid)
 }
 
-func (s *Store) dirV1() string              { return filepath.Join(s.dir, "v1") }
-func (s *Store) dirV1Sessions() string      { return filepath.Join(s.dirV1(), "sessions") }
-func (s *Store) dirV1Archive() string       { return filepath.Join(s.dirV1(), "archive") }
-func (s *Store) dirLegacySessions() string  { return filepath.Join(s.dir, "sessions") }
-func (s *Store) dirLegacyArchive() string   { return filepath.Join(s.dir, "archive") }
+func (s *Store) dirV1() string             { return filepath.Join(s.dir, "v1") }
+func (s *Store) dirV1Sessions() string     { return filepath.Join(s.dirV1(), "sessions") }
+func (s *Store) dirV1Archive() string      { return filepath.Join(s.dirV1(), "archive") }
+func (s *Store) dirLegacySessions() string { return filepath.Join(s.dir, "sessions") }
+func (s *Store) dirLegacyArchive() string  { return filepath.Join(s.dir, "archive") }
 
 // newPath 是会话某一类文件在新布局里的位置。
 func (s *Store) newPath(sid, suffix string) string {
@@ -112,9 +112,15 @@ func (s *Store) readGen(sid string) int64 {
 	if err != nil {
 		return 0
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if err != nil {
+	txt := strings.TrimSpace(string(b))
+	if txt == "" {
 		return 0
+	}
+	n, err := strconv.ParseInt(txt, 10, 64)
+	if err != nil {
+		// 上一版的标记写的是键本身（不是数字）：那也算“已经开过新一代”，
+		// 按第 1 代处理，旧根备份不会被重新授权。
+		return 1
 	}
 	return n
 }
@@ -364,7 +370,7 @@ func (s *Store) legacyActive(sid string) {
 // MigrationItem 是单个文件的迁移阶段记录。
 type MigrationItem struct {
 	SID    string `json:"sid"`
-	Kind   string `json:"kind"`   // history | settings | branch | archive
+	Kind   string `json:"kind"` // history | settings | branch | archive
 	Source string `json:"source"`
 	Target string `json:"target"`
 	Stage  string `json:"stage"` // copied | verified | conflict | failed

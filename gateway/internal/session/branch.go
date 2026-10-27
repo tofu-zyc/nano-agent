@@ -69,16 +69,16 @@ type BranchMeta struct {
 
 // SnapshotInfo 是一份不可变快照的说明（context.json）。
 type SnapshotInfo struct {
-	SnapshotID string `json:"snapshot_id"`
-	SourceSID  string `json:"source_sid"`
-	Messages   int    `json:"messages"` // 快照里的总条数（含已压缩前缀）
-	Base       int    `json:"base"`     // 当时已经压缩掉多少条
-	Effective  int    `json:"effective"`// 有效窗口条数 = Messages - Base
+	SnapshotID string         `json:"snapshot_id"`
+	SourceSID  string         `json:"source_sid"`
+	Messages   int            `json:"messages"`  // 快照里的总条数（含已压缩前缀）
+	Base       int            `json:"base"`      // 当时已经压缩掉多少条
+	Effective  int            `json:"effective"` // 有效窗口条数 = Messages - Base
 	Omitted    map[int]string `json:"omitted,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	Generation int64  `json:"generation,omitempty"`
-	CreatedAt  int64  `json:"created_at"`
-	Bytes      int64  `json:"bytes"`
+	Summary    string         `json:"summary,omitempty"`
+	Generation int64          `json:"generation,omitempty"`
+	CreatedAt  int64          `json:"created_at"`
+	Bytes      int64          `json:"bytes"`
 	// Settings 是分叉时适用的会话设置（模型、思考、agent、工作目录、权限模式、标题）
 	Settings SnapshotSettings `json:"settings"`
 }

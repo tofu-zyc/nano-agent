@@ -105,9 +105,13 @@ func (s *Store) Settings(sid string) Settings {
 }
 
 // SaveSettings 保存会话设置。
+// SaveSettings 保存会话设置。已删除的会话同样要先开新一代，不能靠保存设置清掉墓碑。
 func (s *Store) SaveSettings(sid string, st Settings) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := s.startNewGeneration(sid); err != nil {
 		return err
 	}
 	path, _, err := s.locate(sid, ".settings.json")
@@ -133,6 +137,7 @@ func (s *Store) SaveSettings(sid string, st Settings) error {
 	s.settings[sid] = st
 	return nil
 }
+
 // List 返回磁盘上所有会话的 ID（有历史或者有设置的）。
 func (s *Store) List() []string {
 	seen := map[string]bool{}

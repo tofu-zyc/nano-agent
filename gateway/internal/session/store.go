@@ -619,17 +619,22 @@ func (s *Store) Rename(from, to string) error {
 		stage = "copied"
 	}
 	if stage == "copied" {
-		// 源在这一笔期间有没有被写新内容：变了就报冲突，绝不把新内容丢掉
+		// 源在这一笔期间有没有变：每次都要把**完整文件集合**核对一遍。
+		// 复制之后新出现的文件（例如原本没有历史、后来写了一条）也要算进来，
+		// 否则发布后清理会把这条已受理的消息删掉。
 		for _, suffix := range suffixes {
 			meta, tracked := op.Files[suffix]
-			if !tracked {
-				continue
-			}
 			src, ok, err := s.locate(from, suffix)
 			if err != nil {
 				return err
 			}
-			if !ok {
+			if !tracked && !ok {
+				continue
+			}
+			if !tracked && ok {
+				return fmt.Errorf("源在这一笔改名期间新出现了文件（%s），保留双方等待人工核对", suffix)
+			}
+			if tracked && !ok {
 				return fmt.Errorf("改名的源文件不见了（%s），保留现场等待人工核对", suffix)
 			}
 			data, err := os.ReadFile(src)
@@ -638,6 +643,21 @@ func (s *Store) Rename(from, to string) error {
 			}
 			if int64(len(data)) != meta.Len || sumOf(data) != meta.Sum {
 				return fmt.Errorf("源在这一笔改名期间又被写了新内容（%s），保留双方等待人工核对", suffix)
+			}
+		}
+		// 暂存副本必须齐全：记录里有、暂存里没了，就是丢了内容，不能继续发布再删源
+		for _, suffix := range suffixes {
+			meta, tracked := op.Files[suffix]
+			if !tracked {
+				continue
+			}
+			staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
+			data, err := os.ReadFile(staged)
+			if err != nil {
+				return fmt.Errorf("改名的暂存副本不见了（%s），保留源和现场", suffix)
+			}
+			if int64(len(data)) != meta.Len || sumOf(data) != meta.Sum {
+				return fmt.Errorf("改名的暂存副本与记录不一致（%s），保留源和现场", suffix)
 			}
 		}
 		if err := s.ensureActive(to); err != nil {
