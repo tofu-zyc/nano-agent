@@ -645,6 +645,29 @@ static void test_parallel_limit_queues(void)
     na_core_free(c);
 }
 
+/* 明确关闭隔离（sandbox = off）：自动模式下普通 Shell 不再退回每次审批；
+ * 而“这台机器意外没有沙箱”仍然要审批。 */
+static void test_sandbox_off_vs_missing(void)
+{
+    na_call calls[] = { { "s", "Shell", "{}", true, NA_SB_OFF, NULL } };
+    na_core *c = mk_sb(16, false);   /* 本机没有沙箱，但这一轮明确关了隔离 */
+    na_event ev = { .type = NA_EV_INPUT, .sid = "s1", .from = "tg:1", .mode = NA_MODE_AUTO };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
+    EXPECT(c, "EXEC(s,Shell,30000)");
+    na_core_free(c);
+
+    na_call missing[] = { { "s", "Shell", "{}", true, NA_SB_NO, NULL } };
+    c = mk_sb(16, false);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s2", .from = "tg:1", .mode = NA_MODE_AUTO };
+    CHECK(na_core_feed(c, 0, &ev) == 0);
+    drain(c);
+    turn(c, 10, "s2", NA_TURN_TOOL_USE, missing, 1);
+    EXPECT(c, "APPROVE_REQ(s,Shell,tg:1)");   /* 意外没有沙箱：仍要审批 */
+    na_core_free(c);
+}
+
 /* 同一个文件上的写只能串行；两个读共享锁可以一起跑；不同文件的写互不影响 */
 static void test_resource_locks(void)
 {
@@ -845,6 +868,7 @@ int main(void)
     test_admin_tool_always_approves();
     test_parallel_limit_queues();
     test_resource_locks();
+    test_sandbox_off_vs_missing();
     test_queued_timeout();
     test_dispatch_timeout();
     test_call_identity();

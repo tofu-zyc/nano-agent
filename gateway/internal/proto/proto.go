@@ -132,6 +132,8 @@ type Msg struct {
 	Features map[string]json.RawMessage `json:"features,omitempty"`
 	// MaxParallelTools 是网关希望这一轮同时跑几个工具（0 用内核配置）
 	MaxParallelTools int `json:"max_parallel_tools,omitempty"`
+	// SandboxMode 是这一轮请求的沙箱模式（auto / on / off）；执行节点的本机要求优先
+	SandboxMode string `json:"sandbox_mode,omitempty"`
 
 	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权。
 	// 最多请求模型几次、总时限、审批时限：大于 0 是上限，小于 0 表示不限（不带就用内核自己的配置）；

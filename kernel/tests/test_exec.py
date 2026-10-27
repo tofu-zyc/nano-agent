@@ -26,9 +26,12 @@ PROBE = json.loads(subprocess.run([EXEC, "--probe"], capture_output=True, text=T
 SANDBOX = PROBE["landlock"] > 0
 
 
-def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30):
+def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30,
+        sandbox=None):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
            "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
+    if sandbox is not None:
+        req["sandbox"] = sandbox
     p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
     p.stdin.write((json.dumps(req) + "\n").encode())
     p.stdin.flush()
@@ -267,6 +270,25 @@ def t_sandbox_fs():
     assert "Permission denied" in c or "Read-only" in c, c
 
 
+@case("沙箱模式：off 真的跳过隔离，auto 照旧拦住，非法取值报错", need_sandbox=True)
+def t_sandbox_modes():
+    # 同一个操作：auto 被拦住，off 放行（用此前会被 provider 拒绝的合法操作验证“真的关掉了”）
+    c = bad(run("Shell", {"command": "cat ../other/secret.txt"}))
+    assert "Permission denied" in c or "权限" in c, c
+    ok(run("Shell", {"command": "cat ../other/secret.txt"}, sandbox="off"), "top secret")
+    # off 时应用层的路径权限仍然有效：Read 还是不能读工作目录外
+    bad(run("Read", {"path": "../other/secret.txt"}, sandbox="off"), "工作目录")
+    # 写工作目录外：auto 拦，off 放行
+    bad(run("Shell", {"command": "echo x > ../other/off-new.txt"}))
+    ok(run("Shell", {"command": "echo off-written > ../other/off-new.txt && cat ../other/off-new.txt"}, sandbox="off"),
+       "off-written")
+    os.unlink(os.path.join(OTHER, "off-new.txt"))
+    # on 在这台机器上（有 Landlock）和 auto 一样正常工作
+    ok(run("Shell", {"command": "echo on-ok"}, sandbox="on"), "on-ok")
+    # 非法取值：明确报错，不执行
+    bad(run("Shell", {"command": "echo nope"}, sandbox="banana"), "sandbox 只能是")
+
+
 @case("沙箱：环境变量里的密钥不会带进来", need_sandbox=False)
 def t_sandbox_env():
     c = ok(run("Shell", {"command": "env"}), "TMPDIR=", "HOME=" + HOME)
@@ -410,7 +432,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
+                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

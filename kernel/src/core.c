@@ -200,7 +200,8 @@ static const na_tool_policy FORWARDED = { "?", NA_TOOL_PUBLIC_READ, 30 * 60 * 10
 typedef enum { DECIDE_RUN, DECIDE_ASK, DECIDE_DENY } decision;
 
 /* 按权限模式决定这次调用怎么处理；拒绝时 why 是给模型看的原因 */
-static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, bool elevated, bool allowElevate, const char **why)
+static decision decide(bool sandbox, bool sandbox_off, na_mode mode, na_tool_kind kind, bool elevated,
+                       bool allowElevate, const char **why)
 {
     if (kind == NA_TOOL_PUBLIC_READ) return DECIDE_RUN;
     if (kind == NA_TOOL_ADMIN) {
@@ -236,7 +237,8 @@ static decision decide(bool sandbox, na_mode mode, na_tool_kind kind, bool eleva
     case NA_MODE_ASK:
         return kind == NA_TOOL_READ ? DECIDE_RUN : DECIDE_ASK;
     case NA_MODE_AUTO:
-        return kind == NA_TOOL_SHELL && !sandbox ? DECIDE_ASK : DECIDE_RUN;
+        /* 没有沙箱时 Shell 退回审批；但“管理员明确配置了 off”不是意外，按配置直接执行 */
+        return kind == NA_TOOL_SHELL && !sandbox && !sandbox_off ? DECIDE_ASK : DECIDE_RUN;
     }
     *why = "未知的权限模式";
     return DECIDE_DENY;
@@ -535,7 +537,9 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         /* 内核不认识的工具名（MCP 的 <服务>__<工具>）交给网关执行 */
         if (!k->tool) k->tool = &FORWARDED;
         const char *why = NULL;
-        bool sandbox = in->sandbox == NA_SB_DEFAULT ? r->sandbox : in->sandbox == NA_SB_YES;
+        na_sandbox run_sb = in->sandbox == NA_SB_DEFAULT ? (r->sandbox ? NA_SB_YES : NA_SB_NO) : in->sandbox;
+        bool sandbox = run_sb == NA_SB_YES || run_sb == NA_SB_OFF;   /* OFF 也算“隔离状态已经明确” */
+        bool sandbox_off = run_sb == NA_SB_OFF;
         k->elevated = in->elevated;
         na_tool_kind kind = k->tool ? k->tool->kind : NA_TOOL_WRITE;
         bool schedule = kind == NA_TOOL_SCHEDULE;
@@ -543,7 +547,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         /* Schedule：查看和立即运行按只读算，增删改按写算 */
         if (schedule)
             kind = in->action && (!strcmp(in->action, "list") || !strcmp(in->action, "run_now")) ? NA_TOOL_READ : NA_TOOL_WRITE;
-        decision d = k->tool ? decide(sandbox, r->mode, kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
+        decision d = k->tool ? decide(sandbox, sandbox_off, r->mode, kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
         if (schedule && !r->elevate) {
             d = DECIDE_DENY;
             why = "只有管理员能管理定时任务";

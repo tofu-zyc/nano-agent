@@ -83,11 +83,14 @@ typedef enum {
     NA_TURN_ERROR,     /* 模型调用失败（网关已经重试过） */
 } na_turn_reason;
 
-/* 执行工具的机器有没有沙箱（工作目录可能在别的机器上，和本机不同） */
+/* 执行工具的机器有没有沙箱（工作目录可能在别的机器上，和本机不同）。
+ * NA_SB_OFF 是管理员明确配置的关闭，和“这台机器意外没有沙箱”不是一回事：
+ * 前者不再退回每次审批，后者保留旧的审批退化行为。 */
 typedef enum {
     NA_SB_DEFAULT = 0,   /* 用 run 的设置（再没有就用 na_core_config.sandbox） */
     NA_SB_YES,
     NA_SB_NO,
+    NA_SB_OFF,           /* 明确关闭了执行隔离（sandbox = off） */
 } na_sandbox;
 
 typedef struct {

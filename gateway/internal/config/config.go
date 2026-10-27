@@ -34,9 +34,28 @@ type Config struct {
 	Web       Web       `toml:"web" json:"web"`
 	Network   Network   `toml:"network" json:"network"`
 	Security  Security  `toml:"security" json:"security"`
+	Sandbox   Sandbox   `toml:"sandbox" json:"sandbox"`
 	Update    Update    `toml:"update" json:"update"`
 
 	Dir string `toml:"-" json:"-"` // 配置文件所在目录（里面有密钥，不能被设为工作目录）
+}
+
+// Sandbox 是执行隔离的请求策略（设计文档 §5）。和审批策略分开表达：
+//   - auto：用当前可用的实现；没有完整隔离时保留旧行为（Shell 审批）
+//   - on：要求完整隔离，机器给不了就明确失败，不静默降级
+//   - off：明确跳过 Landlock / seccomp / no_new_privs，按当前 OS 用户身份执行
+// 执行节点自己的 kernel.conf 里 sandbox 更严时以节点为准（节点要求不能被网关绕开）。
+type Sandbox struct {
+	Mode string `toml:"mode" json:"mode"` // auto（默认）/ on / off
+}
+
+// Mode 是请求的沙箱模式，空表示 auto。
+func (s Sandbox) ModeOrDefault() string {
+	switch s.Mode {
+	case "on", "off":
+		return s.Mode
+	}
+	return "auto"
 }
 
 // Agent 是每条消息怎么跑：最多请求模型几次、最长多久、等审批多久、工具结果留多少。

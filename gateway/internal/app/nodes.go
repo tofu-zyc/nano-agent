@@ -189,6 +189,29 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock
+		n.info.SandboxMode = hello.Sandbox.Mode
+		n.info.SandboxEffective = hello.Sandbox.Effective
+		if n.info.SandboxMode == "" {
+			n.info.SandboxMode = "auto"
+		}
+		if n.info.SandboxEffective == "" {
+			n.info.SandboxEffective = "full"
+			if n.info.Landlock == 0 {
+				n.info.SandboxEffective = "none"
+			}
+		}
+	}
+	// 能力集合：缺的能力不暴露、也不假装支持
+	if len(hello.Features) > 0 {
+		n.info.Features = map[string]int{}
+		for k, raw := range hello.Features {
+			var v int
+			if json.Unmarshal(raw, &v) == nil {
+				n.info.Features[k] = v
+			}
+		}
+		n.info.MaxParallelTools = n.info.Features["max_parallel_tools"]
+		n.info.MaxActiveRuns = n.info.Features["max_active_runs"]
 	}
 	a.nodeSeq++
 	n.seq = a.nodeSeq
@@ -213,7 +236,10 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.publish(events.Event{T: "kernel", Name: name, Data: n.info})
 	a.publish(events.Event{T: "machines", Data: a.machineList()})
 	a.log.Info("内核报告的工具", "node", name, "local", local, "tools", strings.Join(n.info.Tools, ","), "landlock", n.info.Landlock)
-	if n.info.Landlock == 0 {
+	switch {
+	case n.info.SandboxMode == "off":
+		a.log.Warn("这个内核所在的机器明确关闭了执行隔离（sandbox = off），命令按系统用户身份执行", "node", name)
+	case n.info.Landlock == 0:
 		a.log.Warn("这个内核所在的机器没有沙箱（Landlock），自动模式下的 Shell 也需要审批", "node", name)
 	}
 	machine := a.machineOf(name)

@@ -28,11 +28,21 @@
 #include "version.h"
 
 #define PROTO_VERSION      11
+
+/* 沙箱请求模式（设计文档 §5）：auto 用当前可用的，on 要求完整隔离，off 明确跳过。
+ * 这是“请求”，执行器回报的 sandbox_effective 才是实际生效的程度。 */
+enum { SB_AUTO = 0, SB_ON, SB_OFF };
 #define PING_INTERVAL_MS   30000
 #define DEAD_AFTER_MS      90000    /* 这么久没收到网关任何消息就认为连接已死 */
 #define CONNECT_TIMEOUT_MS 5000
 #define MAX_BACKOFF_MS     30000
 #define MAX_POLL           1024
+
+/* 沙箱模式的名字，用于协议和日志 */
+static const char *sb_name(int mode)
+{
+    return mode == SB_OFF ? "off" : mode == SB_ON ? "on" : "auto";
+}
 
 static volatile int g_stop;
 static na_wake g_wake = { -1, -1 };   /* 信号处理函数往这里写一个字节，唤醒 poll */
@@ -71,6 +81,7 @@ typedef struct {
     const na_tool_policy *tools;
     size_t          ntools;
     int             landlock;    /* 执行器探测到的 Landlock 版本，0 表示没有沙箱 */
+    int             sb_mode;     /* 本机请求的沙箱模式：SB_AUTO / SB_ON / SB_OFF */
     int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
     char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
@@ -92,6 +103,13 @@ typedef struct {
     char            state[16];        /* 写进 status.json 的连接状态 */
     int64_t         update_deadline;  /* 刚更新完：这之前要被网关接受，否则退回旧版本 */
 } kernel_t;
+
+/* 这台机器实际能达到的隔离程度：off 是明确关掉，其余看有没有可用的 Landlock */
+static const char *sb_effective(const kernel_t *k)
+{
+    if (k->sb_mode == SB_OFF) return "none";
+    return k->landlock > 0 ? "full" : "none";
+}
 
 /* ---- 协议辅助 ---- */
 
@@ -135,7 +153,10 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft, "max_execs", k->conf.max_execs);
     cJSON *sb = cJSON_AddObjectToObject(m, "sandbox");
     cJSON_AddNumberToObject(sb, "landlock", k->landlock);
-    cJSON_AddStringToObject(sb, "mode", k->conf.sandbox_mode);
+    cJSON_AddStringToObject(sb, "mode", sb_name(k->sb_mode));
+    cJSON_AddStringToObject(sb, "effective", sb_effective(k));
+    if (k->sb_mode != SB_OFF && k->landlock == 0)
+        cJSON_AddStringToObject(sb, "reason", "这台机器没有可用的 Landlock");
     link_send(&k->link, m);
 }
 
@@ -562,6 +583,9 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
             k->runner.out_cap = (size_t)mo->valuedouble * 6 + 4096;   /* 执行器的输出是转义后的 JSON，留足余量 */
         cJSON_DeleteItemFromObjectCaseSensitive(req, "watch_stdin");
         cJSON_AddBoolToObject(req, "watch_stdin", true);
+        /* 这一轮最终的沙箱请求模式：本机部署要求优先，网关的请求只能更严不能更松 */
+        cJSON_DeleteItemFromObjectCaseSensitive(req, "sandbox");
+        cJSON_AddStringToObject(req, "sandbox", sb_name(k->sb_mode));
         char *body = cJSON_PrintUnformatted(req);
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
@@ -1273,6 +1297,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.approval_timeout_ms = cJSON_IsNumber(at) ? at->valueint : 0;
         ev.max_parallel_tools = cJSON_IsNumber(mp) ? mp->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
+        /* 这一轮执行工具的机器有没有沙箱：本机部署要求优先，其次是网关在 input 里说的 */
+        ev.sandbox = k->sb_mode == SB_OFF ? NA_SB_OFF : k->landlock > 0 ? NA_SB_YES : NA_SB_NO;
+        const cJSON *gm = cJSON_GetObjectItemCaseSensitive(m, "sandbox_mode");
+        if (cJSON_IsString(gm) && !strcmp(gm->valuestring, "off") && k->sb_mode != SB_ON) ev.sandbox = NA_SB_OFF;
         policy = build_policy(m, ev.mode);
         ev.policy = policy;
         const cJSON *ws = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
@@ -1334,7 +1362,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                     bool local = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"));
                     const cJSON *ll = cJSON_GetObjectItemCaseSensitive(ws, "landlock");
                     int landlock = local ? k->landlock : cJSON_IsNumber(ll) ? ll->valueint : 0;
-                    calls[i].sandbox = landlock > 0 ? NA_SB_YES : NA_SB_NO;
+                    /* 明确关掉隔离的（本机 off，或者那台机器上的内核也是 off）不再退回审批；
+                     * 其余按那台机器有没有沙箱算 */
+                    int mode = k->sb_mode;
+                    const cJSON *rs = cJSON_GetObjectItemCaseSensitive(ws, "sandbox_mode");
+                    if (!local && cJSON_IsString(rs)) {
+                        if (!strcmp(rs->valuestring, "off")) mode = SB_OFF;
+                        else if (!strcmp(rs->valuestring, "on")) mode = SB_ON;
+                    }
+                    calls[i].sandbox = mode == SB_OFF ? NA_SB_OFF : landlock > 0 ? NA_SB_YES : NA_SB_NO;
                     /* 并发分类：按真工具、真参数算，交给状态机排队 */
                     buf_t keys = {0};
                     calls[i].res_exclusive = call_resource(calls[i].name, args, ws, &keys);
@@ -1656,8 +1692,21 @@ int main(int argc, char **argv)
     log_info("节点 %s，网关 %s", k.conf.node, k.conf.gateway);
     if (k.conf.skills)
         log_warn("kernel.conf 里的 skills 不再使用：技能改放在网关上（网关配置目录的 skills/），这一行可以删掉");
+    /* 本机的沙箱请求模式：配置里写的（默认 auto），执行节点自己的要求不能被网关绕开 */
+    k.sb_mode = !strcmp(k.conf.sandbox_mode, "off") ? SB_OFF
+              : !strcmp(k.conf.sandbox_mode, "on") ? SB_ON : SB_AUTO;
+    if (k.sb_mode == SB_ON && k.landlock == 0) {
+        log_error("kernel.conf 里 sandbox = on，但这台机器没有可用的 Landlock：明确失败，不静默降级。"
+                  "改用 sandbox = auto 或 off 再启动");
+        free(k.exec_real);
+        kconf_free(&k.conf);
+        return 1;
+    }
     if (k.landlock > 0)
-        log_info("执行器 %s，沙箱 Landlock v%d%s", k.conf.exec, k.landlock, k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
+        log_info("执行器 %s，沙箱 Landlock v%d（模式 %s）%s", k.conf.exec, k.landlock, sb_name(k.sb_mode),
+                 k.rg ? "" : "（没有 rg，Grep 用 grep 代替）");
+    else if (k.sb_mode == SB_OFF)
+        log_warn("执行器 %s：sandbox = off，命令按当前 OS 用户身份直接执行，没有 Landlock / seccomp 隔离", k.conf.exec);
     else
         log_warn("执行器 %s：本机没有沙箱，自动模式下的 Shell 也需要审批", k.conf.exec);
     if (check_only) {

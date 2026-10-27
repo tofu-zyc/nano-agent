@@ -38,6 +38,26 @@ typedef struct {
     bool (*fn)(const xctx *, const cJSON *, buf_t *);
 } tool_entry;
 
+/* 请求的沙箱模式（设计文档 §5）：auto 用当前可用的，on 要求完整隔离，off 明确跳过。
+ * 施加到进程上的限制不能撤销，所以这里是“这次执行”的启动快照。 */
+enum { SB_AUTO = 0, SB_ON, SB_OFF };
+
+static int parse_sandbox(const char *s)
+{
+    if (!s || !*s || !strcmp(s, "auto")) return SB_AUTO;
+    if (!strcmp(s, "on")) return SB_ON;
+    if (!strcmp(s, "off")) return SB_OFF;
+    return -1;
+}
+
+/* 这次执行实际生效的隔离程度：full / partial / none */
+static const char *sb_effective(int mode, int landlock)
+{
+    if (mode == SB_OFF) return "none";
+    if (landlock > 0) return "full";
+    return mode == SB_ON ? "none" : "partial";
+}
+
 static const tool_entry TOOLS[] = {
     { "Read", tool_read }, { "Write", tool_write }, { "Edit", tool_edit },
     { "Grep", tool_grep }, { "Shell", tool_shell }, { "Fetch", tool_fetch },
@@ -45,11 +65,13 @@ static const tool_entry TOOLS[] = {
 
 /* ---- 输出 ---- */
 
-static void respond(bool ok, const char *content)
+static void respond(bool ok, const char *content, const char *effective)
 {
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", ok);
     cJSON_AddStringToObject(r, "content", content);
+    /* 这次执行实际生效的隔离程度：full / partial / none（界面和状态里区分“请求”和“实际”） */
+    if (effective && *effective) cJSON_AddStringToObject(r, "sandbox_effective", effective);
     char *s = cJSON_PrintUnformatted(r);
     if (s) {
         fputs(s, stdout);
@@ -160,7 +182,7 @@ static char *safe_key(const char *k)
     return s;
 }
 
-static int setup(xctx *x, const cJSON *req, buf_t *err)
+static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
 {
     memset(x, 0, sizeof *x);
     x->home = plat_home();
@@ -177,8 +199,10 @@ static int setup(xctx *x, const cJSON *req, buf_t *err)
         return -1;
     /* 可写的目录不能包含执行器自己：改写了它，下一次调用就不在沙箱里了。
      * 本机由内核把关；远程时执行器放在服务器的 ~/.nano-agent 里，工作目录是 ~ 的话会被包含进来 */
+    /* 沙箱里可写目录不能包含执行器自己（改写它下一次就不在沙箱里了）。明确关掉隔离时
+     * 这条不成立：那时执行器本来就不在沙箱里，不能因此挡掉 HOME 之类的工作目录。 */
     char *self = plat_self_exe();
-    for (size_t i = 0; self && i < x->ndirs; i++) {
+    for (size_t i = 0; self && mode != SB_OFF && i < x->ndirs; i++) {
         const char *d = x->dirs[i];
         if (x->write && plat_inside(self, d)) {
             buf_puts(err, "工作目录 ");
@@ -235,8 +259,13 @@ static void add_path_dirs(const xctx *x, char ***ro, size_t *nro)
 }
 #endif
 
-static int enter_sandbox(const xctx *x, buf_t *err)
+static int enter_sandbox(const xctx *x, int mode, buf_t *err)
 {
+    if (mode == SB_OFF) {
+        /* 明确关闭：按当前 OS 用户身份直接执行，不套 Landlock / seccomp / no_new_privs。
+         * 应用层的路径权限（文件工具的检查）仍然照旧。 */
+        return 0;
+    }
     char **rw = NULL, **ro = NULL;
     size_t nrw = 0, nro = 0;
     for (size_t i = 0; i < x->ndirs; i++) push(x->write ? &rw : &ro, x->write ? &nrw : &nro, xstrdup(x->dirs[i]));
@@ -259,6 +288,11 @@ static int enter_sandbox(const xctx *x, buf_t *err)
     if (rc < 0) {
         buf_puts(err, "沙箱启动失败，没有执行：");
         buf_puts(err, msg);
+    } else if (rc > 0 && mode == SB_ON) {
+        /* 要求完整隔离，但这台机器给不了：明确失败，不静默降级 */
+        buf_puts(err, "这台机器没法提供 sandbox=on 需要的完整隔离（没有可用的 Landlock）：");
+        buf_puts(err, msg);
+        rc = -1;
     }
     for (size_t i = 0; i < nrw; i++) free(rw[i]);
     for (size_t i = 0; i < nro; i++) free(ro[i]);
@@ -277,6 +311,11 @@ static int probe(void)
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "v", NEXEC_VERSION);
     cJSON_AddNumberToObject(r, "landlock", sb_landlock_abi());
+    /* 能接受哪些沙箱请求模式：on 只有在有 Landlock 时才真正成立 */
+    cJSON *modes = cJSON_AddArrayToObject(r, "sandbox_modes");
+    cJSON_AddItemToArray(modes, cJSON_CreateString("auto"));
+    cJSON_AddItemToArray(modes, cJSON_CreateString("off"));
+    if (sb_landlock_abi() > 0) cJSON_AddItemToArray(modes, cJSON_CreateString("on"));
     cJSON_AddStringToObject(r, "os", plat_os());
     cJSON_AddStringToObject(r, "arch", plat_arch());
     cJSON_AddBoolToObject(r, "rg", rg != NULL);
@@ -402,14 +441,14 @@ int main(int argc, char **argv)
 
     char *line = read_request();
     if (!line) {
-        respond(false, "执行器没有收到请求");
+        respond(false, "执行器没有收到请求", "");
         return 1;
     }
     cJSON *req = cJSON_Parse(line);
     free(line);
     if (!cJSON_IsObject(req)) {
         cJSON_Delete(req);
-        respond(false, "执行器收到的请求不是合法的 JSON 对象");
+        respond(false, "执行器收到的请求不是合法的 JSON 对象", "");
         return 1;
     }
 
@@ -422,18 +461,21 @@ int main(int argc, char **argv)
     buf_t out = {0};
     bool ok = false;
     xctx x = {0};
+    int mode = parse_sandbox(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "sandbox")));
     if (!t) {
         buf_puts(&out, "未知工具：");
         buf_puts(&out, name ? name : "（空）");
     } else if (args && !cJSON_IsObject(args)) {
         buf_puts(&out, "参数应为 JSON 对象");
-    } else if (setup(&x, req, &out) == 0 && enter_sandbox(&x, &out) == 0) {
+    } else if (mode < 0) {
+        buf_puts(&out, "sandbox 只能是 auto、on 或 off");
+    } else if (setup(&x, req, mode, &out) == 0 && enter_sandbox(&x, mode, &out) == 0) {
         cJSON *empty = args ? NULL : cJSON_CreateObject();
         ok = t->fn(&x, args ? args : empty, &out);
         cJSON_Delete(empty);
     }
     if (!out.len) buf_puts(&out, "（无输出）");
-    respond(ok, buf_cstr(&out));
+    respond(ok, buf_cstr(&out), mode >= 0 ? sb_effective(mode, sb_landlock_abi()) : "");
     buf_free(&out);
     xctx_free(&x);
     cJSON_Delete(req);

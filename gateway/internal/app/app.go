@@ -1021,7 +1021,8 @@ func (a *App) startRun(s *sess) {
 		r.full, mode = true, proto.ModeAuto
 	}
 	r.mode = mode
-	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode}
+	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
+		SandboxMode: a.cfg.Sandbox.ModeOrDefault()}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
 	in.MaxSteps = wireLimit(ag.Steps)
