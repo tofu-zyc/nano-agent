@@ -881,7 +881,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
 static bool gateway_tool(const char *name)
 {
     static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
-                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind" };
+                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(name, names[i])) return true;
     return false;

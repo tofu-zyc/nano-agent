@@ -125,6 +125,8 @@ func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	if spec, ok := a.skillSpec(sid); ok {
 		tools = append(tools, toolOf(spec))
 	}
+	// 会话分叉：任何会话都能用（分支就是从它分出来的）
+	tools = append(tools, toolOf(sessionTool()))
 	if admin {
 		tools = append(tools, toolOf(scheduleTool()))
 		for _, spec := range a.gatewayTools() {

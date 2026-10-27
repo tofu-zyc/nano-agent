@@ -180,6 +180,7 @@ type App struct {
 	mcpStoreRef    atomic.Pointer[mcp.Store]
 	rnd            func() float64 // 随机数，测试里换成固定的
 	journals       map[string]*interjectionJournal // 插话日志句柄（interject_journal.go）
+	pendingForks   map[string][]forkPending        // 等安全边界的 Fork 操作（session_fork.go）
 	approvals      map[int]*approval
 	nextAppr       int
 	runSeq         uint64
@@ -375,6 +376,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		sessions:       map[string]*sess{},
 		roomRuns:       map[string]*roomRun{},
 		approvals:      map[int]*approval{},
+		pendingForks:   map[string][]forkPending{},
 		nodes:          map[string]*node{},
 		minds:          map[string]*autonomy.State{},
 		mindsRecovered: map[string]bool{},
@@ -604,6 +606,10 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.cmdForget(c, arg)
 		return
 	case "session":
+		if strings.HasPrefix(strings.TrimSpace(arg), "fork") {
+			a.cmdSessionFork(c, strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "fork")))
+			return
+		}
 		a.cmdSession(c, arg)
 		return
 	case "cron":
@@ -673,6 +679,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "undo":
 		a.undo(c)
+		return
+	case "sessionfork":
+		a.cmdSessionFork(c, arg)
 		return
 	case "reset":
 		if arg == "删除" && !a.isAdmin(c.who) {
@@ -1125,6 +1134,8 @@ func (a *App) endRun(s *sess, note string) {
 	if r.cancelLLM != nil {
 		r.cancelLLM()
 	}
+	// 源会话到了安全边界：这一轮的工具批次和生成都已经结束，等着的 Fork 可以复制上下文了
+	a.finishPendingForks(s.sid)
 	for _, cancel := range r.execs {
 		cancel() // 交给网关执行的工具调用
 	}

@@ -38,6 +38,12 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		a.webTool(s, m, reply)
 		return
 	}
+	if m.Name == "Session" {
+		// 会话分叉在网关执行：不碰文件、不需要工作目录
+		text, ok := a.handleSessionTool(s, m)
+		reply(ok, text)
+		return
+	}
 	if m.Name == "Schedule" {
 		var args ScheduleRequest
 		if err := json.Unmarshal(m.Args, &args); err != nil {

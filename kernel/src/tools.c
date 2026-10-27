@@ -66,6 +66,7 @@ static const builtin BUILTINS[] = {
     /* 下面这些由网关执行，谁能用、能做什么由网关判断（Message 只给管理员和内心活动；Knowledge 在群里只读……），
      * 内核不按权限模式拦：整理记忆、内心活动、群聊这些轮次没有工作目录，模式是 none */
     { { "Message", NA_TOOL_PUBLIC_READ, 320 * 1000 }, NULL, NULL },   /* 给群/别的 agent/私聊发消息 */
+    { { "Session", NA_TOOL_PUBLIC_READ, 60 * 1000 }, NULL, NULL },    /* 会话分叉：网关执行 */
     { { "Knowledge", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL }, /* 长期记忆 */
     { { "Diary", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },     /* 整理记忆时读聊天记录 */
     { { "FollowUp", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },  /* 约好过会儿再看 */
