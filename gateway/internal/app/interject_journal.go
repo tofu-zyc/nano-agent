@@ -69,6 +69,7 @@ type journalRec struct {
 	Text       string             `json:"text,omitempty"`
 	Images     []media.Attachment `json:"images,omitempty"`
 	Who        string             `json:"who,omitempty"`
+	Agent      string             `json:"agent,omitempty"` // 受理时是哪个 agent，切换后不能再交给新身份
 	Channel    string             `json:"channel,omitempty"`
 	Chat       string             `json:"chat,omitempty"`
 	At         int64              `json:"at,omitempty"` // 接收时间（毫秒）：和历史的秒不是一回事
@@ -201,6 +202,7 @@ type interjState struct {
 	Channel    string
 	Chat       string
 	At         int64
+	Agent      string
 	Generation int64
 	received   bool
 	injected   bool
@@ -241,7 +243,7 @@ func foldJournal(recs []journalRec, generation int64) []*interjState {
 			s.received = true
 			s.Seq, s.Text, s.Images = rec.Seq, rec.Text, rec.Images
 			s.Who, s.Channel, s.Chat = rec.Who, rec.Channel, rec.Chat
-			s.At, s.Generation = rec.At, rec.Generation
+			s.At, s.Generation, s.Agent = rec.At, rec.Generation, rec.Agent
 		case jrecInjected:
 			s.injected = true
 			if rec.HistoryID != "" {
@@ -443,6 +445,11 @@ func (a *App) restoreInterjections(s *sess) {
 	var pending []*interjState
 	for _, st := range states {
 		if st.withdrawn || !st.received {
+			continue
+		}
+		// 身份切换：这条补充是发给原来的 agent 的，不能交给别人
+		if st.Agent != "" && st.Agent != a.execAgentID(s.sid) {
+			_ = a.journalAppend(s.sid, journalRec{Kind: jrecWithdrawn, ID: st.ID, Note: "会话换成别的 agent 了"})
 			continue
 		}
 		if st.injected || st.included {

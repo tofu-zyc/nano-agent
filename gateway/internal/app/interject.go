@@ -77,7 +77,8 @@ func (a *App) acceptInterjection(s *sess, r *run, ep endpoint, m channel.Message
 	}
 	// **先确认持久提交成功，再回执**：只进内存不算受理
 	rec := journalRec{Kind: jrecReceived, Seq: s.interjectSeq, ID: id, Dedup: dedup, Text: text,
-		Images: m.Images, Who: who, Channel: ep.ch, Chat: ep.chat, At: a.now().UnixMilli(), RunID: r.runID}
+		Images: m.Images, Who: who, Agent: a.execAgentID(s.sid), Channel: ep.ch, Chat: ep.chat,
+		At: a.now().UnixMilli(), RunID: r.runID}
 	if err := a.journalAppend(s.sid, rec); err != nil {
 		a.log.Warn("插话没能写进持久日志", "sid", s.sid, "err", err)
 		a.deliver(ep, "这条补充没能保存下来（磁盘写入失败），请稍后重发。", "")

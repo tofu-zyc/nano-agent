@@ -215,3 +215,42 @@ func TestJournalDedupOnResend(t *testing.T) {
 		t.Fatalf("收件箱：%d 条", n)
 	}
 }
+
+// 日志尾部半条（写到一半崩了）视为未提交，前面已提交的记录照常可用。
+func TestJournalIgnoresTruncatedTail(t *testing.T) {
+	e := setup(t)
+	id := "ij-tail"
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: id, Seq: 1, Text: "补充"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(e.a.journalPath(e.sid), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"v":1,"kind":"received","id":"half"`) // 没有换行
+	f.Close()
+	recs, err := readJournal(e.a.journalPath(e.sid))
+	if err != nil {
+		t.Fatalf("尾部半条不该报错：%v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != id {
+		t.Fatalf("记录：%+v", recs)
+	}
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 1 {
+		t.Fatalf("恢复：%d", got)
+	}
+}
+
+// 会话换了 agent：原来受理的补充不能再交给新身份。
+func TestJournalAgentSwitchDiscards(t *testing.T) {
+	e := setup(t)
+	id := "ij-agent"
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: id, Seq: 1, Text: "旧补充", Agent: "other-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("换了 agent 还恢复：%d", got)
+	}
+}
