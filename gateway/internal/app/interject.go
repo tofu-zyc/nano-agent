@@ -31,6 +31,7 @@ const (
 
 // interjection 是一条已经受理、还没写进历史的用户补充。
 type interjection struct {
+	id   string // 稳定 interjection_id（日志里按它对账）
 	seq  int
 	msg  channel.Message
 	ep   endpoint
@@ -51,17 +52,16 @@ func (r *run) canInterject(who string) bool {
 // acceptInterjection 把一条消息放进当前 run 的收件箱。返回 true 表示已经受理，
 // 调用方不要再把它塞进会话队列。
 func (a *App) acceptInterjection(s *sess, r *run, ep endpoint, m channel.Message, who string) bool {
-	if m.MsgID != "" {
-		if r.seenIDs == nil {
-			r.seenIDs = map[string]bool{}
-		}
-		if r.seenIDs[m.MsgID] {
-			return true // 渠道重发的同一条消息：已经受理过，别插两次
-		}
-	}
 	text := strings.TrimSpace(m.Text)
 	if text == "" && len(m.Images) == 0 {
 		return false
+	}
+	// 渠道会重发，进程也可能重启后重新收到同一条：按稳定去重键只受理一次
+	dedup := dedupKey(s.sid, ep.ch, ep.chat, m.MsgID)
+	if dedup != "" {
+		if rec, ok := a.journalByDedup(s.sid, dedup); ok && rec.Kind == jrecReceived {
+			return true // 已经受理过（可能在上一个进程里）
+		}
 	}
 	// 条数和字节数都设上限：超出时明确回执未受理，提示稍后发送
 	if len(r.inbox) >= maxInterjections || r.inboxBytes+len(text) > maxInterjectionBytes {
@@ -69,15 +69,22 @@ func (a *App) acceptInterjection(s *sess, r *run, ep endpoint, m channel.Message
 			"请等这一轮处理完再发，或者先发 /stop 停下当前任务", len(r.inbox), maxInterjections, maxInterjectionBytes>>10), "")
 		return true
 	}
-	r.interjectSeq++
-	r.inbox = append(r.inbox, interjection{seq: r.interjectSeq, msg: m, ep: ep, who: who, text: text, at: a.now()})
+	s.interjectSeq++
+	id := interjectionID(dedup)
+	if dedup == "" {
+		// 平台没给消息 ID：用会话 + 序号生成一个稳定的 ID，仍然可以按 ID 对账
+		id = interjectionID(fmt.Sprintf("%s|seq-%d", s.sid, s.interjectSeq))
+	}
+	// **先确认持久提交成功，再回执**：只进内存不算受理
+	rec := journalRec{Kind: jrecReceived, Seq: s.interjectSeq, ID: id, Dedup: dedup, Text: text,
+		Images: m.Images, Who: who, Channel: ep.ch, Chat: ep.chat, At: a.now().UnixMilli(), RunID: r.runID}
+	if err := a.journalAppend(s.sid, rec); err != nil {
+		a.log.Warn("插话没能写进持久日志", "sid", s.sid, "err", err)
+		a.deliver(ep, "这条补充没能保存下来（磁盘写入失败），请稍后重发。", "")
+		return true
+	}
+	r.inbox = append(r.inbox, interjection{seq: int(s.interjectSeq), id: id, msg: m, ep: ep, who: who, text: text, at: a.now()})
 	r.inboxBytes += len(text)
-	if len(r.seenIDs) >= maxInterjectionIDs {
-		r.seenIDs = map[string]bool{} // 只用来挡住紧跟着的重发，满了就清掉
-	}
-	if m.MsgID != "" {
-		r.seenIDs[m.MsgID] = true
-	}
 	// 工具还在跑就等这一批结束；正在生成就等这次生成结束
 	state := "本轮工具调用结束"
 	if r.cancelLLM != nil {
@@ -105,8 +112,9 @@ func (a *App) drainInterjections(s *sess, r *run) bool {
 	ids := make([]string, 0, len(batch))
 	for _, it := range batch {
 		images = append(images, it.msg.Images...)
-		ids = append(ids, it.msg.MsgID)
+		ids = append(ids, it.id)
 	}
+	histID := interjectionHistoryID(ids)
 	msg := session.Msg{
 		Role:      "user",
 		Content:   wrapInterjections(batch),
@@ -114,18 +122,30 @@ func (a *App) drainInterjections(s *sess, r *run) bool {
 		Kind:      "user_interjection",
 		ParentRun: r.runID,
 		SourceID:  strings.Join(ids, ","),
+		SourceIDs: ids,
+		ID:        histID,
 		Sender:    batch[0].who,
 		TS:        a.now().Unix(),   // 和其他历史消息一样用秒；毫秒是接收时间，另记在事件里
 	}
-	if err := a.store.Append(s.sid, msg); err != nil {
-		// 写历史失败：消息留着，下一个边界再试（仍受 run 总时限约束）
-		a.log.Warn("写入用户插话失败，等下一个边界重试", "sid", s.sid, "err", err)
-		r.inbox = append(batch, r.inbox...)
-		for _, it := range batch {
-			r.inboxBytes += len(it.text)
+	// 历史里已经有一条（上次写完历史、日志没记 injected 就崩了）：补记，不再追加正文
+	if _, ok := a.store.FindMessage(s.sid, histID, 50); !ok {
+		if err := a.store.Append(s.sid, msg); err != nil {
+			// 写历史失败：消息留着，下一个边界再试（仍受 run 总时限约束）
+			a.log.Warn("写入用户插话失败，等下一个边界重试", "sid", s.sid, "err", err)
+			r.inbox = append(batch, r.inbox...)
+			for _, it := range batch {
+				r.inboxBytes += len(it.text)
+			}
+			return false
 		}
-		return false
 	}
+	// 历史已经落盘：即使下面日志写失败，也不能把正文再写一遍；恢复时按历史 ID 补记
+	for _, it := range batch {
+		if err := a.journalAppend(s.sid, journalRec{Kind: jrecInjected, ID: it.id, HistoryID: histID, RunID: r.runID}); err != nil {
+			a.log.Warn("记录插话已注入失败（历史已写入，恢复时会补记）", "sid", s.sid, "id", it.id, "err", err)
+		}
+	}
+	r.pendingInclude = append(r.pendingInclude, ids...)
 	r.injected += len(batch)
 	r.notified = false
 	last := batch[len(batch)-1].ep
@@ -169,6 +189,13 @@ func (a *App) requeueInterjections(s *sess, r *run) []queued {
 	}
 	batch := r.inbox
 	r.inbox, r.inboxBytes = nil, 0
+	// 它们改由会话队列按普通消息处理：日志里记成 requeued，重启后不能再恢复进收件箱
+	ids := make([]string, 0, len(batch))
+	for _, it := range batch {
+		ids = append(ids, it.id)
+	}
+	a.settleInterjections(s.sid, ids, outcomeRequeued, "放回会话队列，按普通消息处理")
+	r.journalIDs = append(r.journalIDs, ids...)
 	pending := make([]queued, 0, len(batch))
 	for _, it := range batch {
 		pending = append(pending, queued{m: it.msg, ep: it.ep, who: it.who})
@@ -211,7 +238,7 @@ func (a *App) yieldToInterjection(s *sess, r *run, res *llm.Result, u llm.Usage)
 	// 注意不带 ToolCalls —— 这批调用没有派发，写进去就没有配对结果了。
 	if strings.TrimSpace(res.Content) != "" || res.Reasoning != "" {
 		msg := session.Msg{Role: "assistant", Content: res.Content, Reasoning: res.Reasoning,
-			Usage: &u, Agent: a.execAgentID(s.sid), TS: a.now().UnixMilli()}
+			Usage: &u, Agent: a.execAgentID(s.sid), TS: a.now().Unix()} // 历史统一用秒
 		if err := a.store.Append(s.sid, msg); err != nil {
 			a.log.Warn("保存生成结果失败", "sid", s.sid, "err", err)
 		}

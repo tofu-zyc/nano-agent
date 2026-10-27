@@ -45,6 +45,10 @@ type Msg struct {
 	ParentRun string `json:"parent_run_id,omitempty"`
 	SourceID  string `json:"source_id,omitempty"`
 	Sender    string `json:"sender,omitempty"`
+	// ID 是这条消息的稳定标识（插话批量注入时用它和历史对账，位置/Base 只作辅助）。
+	ID string `json:"id,omitempty"`
+	// SourceIDs 是这条消息由哪些插话合并而来（按接收顺序）。
+	SourceIDs []string `json:"source_ids,omitempty"`
 }
 
 type Store struct {
@@ -117,13 +121,16 @@ func readMsgs(path string, skip int) []Msg {
 	return h
 }
 
-// Append 追加一条消息，同时写入磁盘。
+// Append 追加一条消息：先落盘并 fsync，成功之后才进内存。
+//
+// 顺序很重要：以前是先改内存再写盘，写失败时内存里看起来已经成功了，
+// 重试就会把同一条消息写两遍，恢复时也没法和磁盘对账。
 func (s *Store) Append(sid string, m Msg) error {
 	if m.TS == 0 {
 		m.TS = time.Now().Unix()
 	}
-	s.hist[sid] = append(s.History(sid), m)
-
+	// 先把内存视图定下来：写盘之后再调 History 会把刚写进去的那条也读出来，重复一次
+	prev := s.History(sid)
 	line, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -132,9 +139,56 @@ func (s *Store) Append(sid string, m Msg) error {
 	if err != nil {
 		return fmt.Errorf("保存会话历史：%w", err)
 	}
-	defer f.Close()
-	_, err = f.Write(append(line, '\n'))
-	return err
+	if _, err = f.Write(append(line, '\n')); err == nil {
+		err = f.Sync()
+	}
+	cerr := f.Close()
+	if err != nil {
+		return fmt.Errorf("保存会话历史：%w", err)
+	}
+	if cerr != nil {
+		return fmt.Errorf("保存会话历史：%w", cerr)
+	}
+	s.hist[sid] = append(append([]Msg(nil), prev...), m)
+	return nil
+}
+
+// FindMessage 在会话历史里按稳定 ID 找消息（最近的 limit 条里找，够用而且有界）。
+func (s *Store) FindMessage(sid, id string, limit int) (Msg, bool) {
+	if id == "" {
+		return Msg{}, false
+	}
+	h := s.History(sid)
+	start := len(h) - limit
+	if start < 0 {
+		start = 0
+	}
+	for i := len(h) - 1; i >= start; i-- {
+		if h[i].ID == id {
+			return h[i], true
+		}
+	}
+	return Msg{}, false
+}
+
+// FindMessageBySource 找包含某条插话 ID 的历史消息（补记 injected 时用）。
+func (s *Store) FindMessageBySource(sid, sourceID string, limit int) (Msg, bool) {
+	if sourceID == "" {
+		return Msg{}, false
+	}
+	h := s.History(sid)
+	start := len(h) - limit
+	if start < 0 {
+		start = 0
+	}
+	for i := len(h) - 1; i >= start; i-- {
+		for _, id := range h[i].SourceIDs {
+			if id == sourceID {
+				return h[i], true
+			}
+		}
+	}
+	return Msg{}, false
 }
 
 // Compact 在历史估算超过 high 时，一次性丢掉开头的一段，让剩下的不超过 low。

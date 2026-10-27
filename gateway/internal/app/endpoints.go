@@ -383,6 +383,7 @@ func (a *App) DeleteSession(sid string) error {
 	if err := a.store.Delete(sid); err != nil {
 		return err
 	}
+	a.dropJournal(sid) // 会话没了，它的插话日志也不能留着复活
 	a.endDesktopSession(sid)
 	delete(a.sessions, sid)
 	changed := false

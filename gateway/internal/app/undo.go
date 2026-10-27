@@ -178,6 +178,7 @@ func (a *App) recall(c in, msgID string) {
 			}
 			s.run.inbox = append(s.run.inbox[:i:i], s.run.inbox[i+1:]...)
 			s.run.inboxBytes -= len(it.text)
+			a.withdrawInterjections(s.sid, []interjection{it}, "user_recall", "用户撤回")
 			a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "withdrawn", ID: msgID, Text: it.text})
 			a.answer(c, "已撤回还没处理的消息："+quoteText(it.text))
 			return
@@ -198,7 +199,10 @@ func (a *App) recall(c in, msgID string) {
 			if h[i].Kind != "user_interjection" || h[i].SourceID == "" {
 				continue
 			}
-			if !strings.Contains(","+h[i].SourceID+",", ","+msgID+",") {
+			// 历史里记的是稳定 interjection_id；老数据里可能是平台消息 ID，两种都认
+			ijID := interjectionID(dedupKey(s.sid, c.ep.ch, c.ep.chat, msgID))
+			if !strings.Contains(","+h[i].SourceID+",", ","+ijID+",") &&
+				!strings.Contains(","+h[i].SourceID+",", ","+msgID+",") {
 				continue
 			}
 			a.answer(c, "这条补充已经插进正在进行的任务，撤回不会撤销它；要停下请发 /stop。")

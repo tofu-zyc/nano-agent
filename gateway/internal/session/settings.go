@@ -61,6 +61,9 @@ type Settings struct {
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。
 	EnvNote string `json:"env_note,omitempty"`
+	// SessionGeneration 是会话的“世代”：/reset、删除之后加一。插话日志用它作废旧记录，
+	// 重启后不能把重置前的补充放回来。
+	SessionGeneration int64 `json:"session_generation,omitempty"`
 
 	// MemNote 是上一次放进对话的记忆说明的哈希（app/memory.go）：记忆变了才在下一条用户消息前再放一次。
 	// Recalled 是这段上下文里已经“想起来”过的记忆，同一条不重复放。压缩、清空上下文后都清掉。

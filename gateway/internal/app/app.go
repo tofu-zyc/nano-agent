@@ -179,6 +179,7 @@ type App struct {
 	mcpRef         atomic.Pointer[mcp.Manager]
 	mcpStoreRef    atomic.Pointer[mcp.Store]
 	rnd            func() float64 // 随机数，测试里换成固定的
+	journals       map[string]*interjectionJournal // 插话日志句柄（interject_journal.go）
 	approvals      map[int]*approval
 	nextAppr       int
 	runSeq         uint64
@@ -198,6 +199,9 @@ type sess struct {
 	resetAfter          bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
 	undoAfter           bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
 	recent              []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
+	interjectSeq        int64          // 插话接收序号（单调递增，落进日志）
+	restored            bool           // 已经从日志恢复过插话
+	pending             []interjection // 从日志恢复的补充：等这一轮开始时装进收件箱
 
 	// 群聊（group.go）：记进历史的最新一条、要不要插话、主动发言的额度
 	groupEp        endpoint
@@ -287,13 +291,17 @@ type run struct {
 	turnID     int
 	modelReq   int
 	sandboxMode string // 这一轮请求的沙箱模式（auto / on / off），远程执行时要转给那台机器
-	// 用户插话（interject.go）：本 run 进行中收到的补充，在安全边界插入
+	// 用户插话（interject.go / interject_journal.go）：本 run 进行中收到的补充，在安全边界插入
 	inbox        []interjection
 	inboxBytes   int
 	interjectSeq int
 	notified     bool             // 这一批补充已经回执过“已收到”
 	injected     int              // 已经插入历史的条数
 	readRevision int              // 最近一次模型请求实际读到的条数（injected 的快照）
+	// 持久日志用：还没进过模型请求快照的、这一轮处理过的插话 ID
+	pendingInclude []string
+	journalIDs     []string
+	outcome        string // 这一轮的终态（结束前由 finish 填）
 	dropped      int              // 因为插话而没有派发的工具调用数
 	seenIDs      map[string]bool  // 最近受理过的平台消息 ID（去重）
 	dropInbox    bool             // 用户明确停止/清空：剩下的补充不再交给下一轮
@@ -734,6 +742,8 @@ func (a *App) sessOf(sid string) *sess {
 	if s == nil {
 		s = &sess{sid: sid}
 		a.sessions[sid] = s
+		// 第一次访问这个会话：把上次没处理完的插话从日志里恢复出来
+		a.restoreInterjections(s)
 	}
 	return s
 }
@@ -965,6 +975,14 @@ func (a *App) startRun(s *sess) {
 		rt:    rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
+	// 上次进程退出时没处理完的补充：装进这一轮的收件箱，到了安全边界再插入
+	if len(s.pending) > 0 {
+		r.inbox = append(r.inbox, s.pending...)
+		s.pending = nil
+		a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "resumed",
+			Data: map[string]any{"count": len(r.inbox)}})
+		a.deliver(head.ep, fmt.Sprintf("上次中断时还有 %d 条补充没有处理完，已经放回这一轮一起处理。", len(r.inbox)), "")
+	}
 	// 拟人型的私聊不流式显示：像人一样打完字再发（纯聊天的回复还会拆成几条）
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil && !group && !a.agentOf(s.sid).Life() {
 		r.outs[0].view = a.filterView(head.ep, st.OpenRun(head.ep.chat, ""))
@@ -1151,7 +1169,12 @@ func (a *App) stop(c in) {
 	}
 	s.run.addOut(c.ep)
 	s.run.dropInbox = true // 用户明确停止：还在等边界的那几条补充不再自动开新一轮
-	a.cancelRun(s)        // 内核会回 done(cancelled)
+	// 停止是持久终态：这些补充重启后不能再复活
+	a.withdrawInterjections(s.sid, s.run.inbox, "stop", "用户停止任务")
+	s.run.inbox, s.run.inboxBytes = nil, 0
+	a.withdrawInterjections(s.sid, s.pending, "stop", "用户停止任务")
+	s.pending = nil
+	a.cancelRun(s) // 内核会回 done(cancelled)
 }
 
 func (a *App) reset(c in) {
@@ -1161,9 +1184,14 @@ func (a *App) reset(c in) {
 		s.resetAfter = true
 		s.run.addOut(c.ep)
 		s.run.dropInbox = true
+		a.withdrawInterjections(s.sid, s.run.inbox, "reset", "用户清空上下文")
+		s.run.inbox, s.run.inboxBytes = nil, 0
 		a.cancelRun(s)
 		return
 	}
+	a.newGeneration(s) // 重置之后，之前受理的补充全部作废（重启也不会复活）
+	a.withdrawInterjections(s.sid, s.pending, "reset", "用户清空上下文")
+	s.pending = nil
 	if err := a.resetHistory(s); err != nil {
 		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 	}
@@ -1396,6 +1424,10 @@ func (a *App) finish(s *sess, status, detail string) {
 			note = more
 		}
 	}
+	// 这一轮的终态：结束时给处理过的补充记上明确结局（不是"读过"就算完）
+	r.outcome = status
+	a.settleInterjections(s.sid, r.journalIDs, interjectionOutcome(status), detail)
+	r.journalIDs = nil
 	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
 		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)
 	if r.calls > 0 {
@@ -1517,6 +1549,18 @@ func (a *App) generateModel(s *sess) {
 	// 这次请求的快照包含到哪一条补充：结束时用它判断“已注入但模型没读到”的补充
 	r.readRevision = r.injected
 	r.modelReq++
+	// 记进日志：这些补充已经被某个模型请求的快照包含（不等于请求已经成功）
+	if len(r.pendingInclude) > 0 {
+		reqID := fmt.Sprintf("%s-t%d", r.runID, r.calls+1)
+		for _, id := range r.pendingInclude {
+			if err := a.journalAppend(s.sid, journalRec{Kind: jrecIncluded, ID: id, RequestID: reqID,
+				Revision: r.injected, RunID: r.runID}); err != nil {
+				a.log.Warn("记录插话已进入请求失败", "sid", s.sid, "id", id, "err", err)
+			}
+		}
+		r.journalIDs = append(r.journalIDs, r.pendingInclude...)
+		r.pendingInclude = nil
+	}
 	reqID := fmt.Sprintf("%s-m%d", r.runID, r.modelReq)
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
