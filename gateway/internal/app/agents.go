@@ -428,6 +428,26 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 			Global:    "",
 			Value:     ptrAny(ag.DreamModel),
 			Effective: pickString(ag.DreamModel, "")},
+		{Key: "life_max_wakes", Group: "life", Label: "每天最多自己探索几次", Type: "int",
+			Help:      "自选探索（不含约定、对话、Hook）。不填跟随活跃度档位（low 4 / normal 8 / high 16）；0 表示不限，正整数是上限。不限次数不等于没有间隔，仍然受唤醒间隔、预算和并发上限约束",
+			Global:    lifeLevelOf(agents.Agent{LifeLevel: ag.LifeLevel}).wakes,
+			Value:     ptrAny(ag.LifeMaxWakes),
+			Effective: effectiveLifePolicy(ag).MaxWakes},
+		{Key: "life_max_reaches", Group: "life", Label: "每天最多主动找几次人", Type: "int",
+			Help:      "不填跟随活跃度档位；0 表示不限。彻底不主动找人用「主动联系范围 = 关闭」",
+			Global:    lifeLevelOf(agents.Agent{LifeLevel: ag.LifeLevel}).reaches,
+			Value:     ptrAny(ag.LifeMaxReaches),
+			Effective: effectiveLifePolicy(ag).MaxReaches},
+		{Key: "life_wake_min", Group: "life", Label: "醒来最短间隔", Type: "string",
+			Help:      "例如 1h、90m。不填跟随活跃度档位；间隔和次数各自独立",
+			Global:    durText(lifeLevelOf(agents.Agent{LifeLevel: ag.LifeLevel}).min),
+			Value:     ptrAny(ag.LifeWakeMin),
+			Effective: durText(effectiveLifePolicy(ag).Min)},
+		{Key: "life_wake_max", Group: "life", Label: "醒来最长间隔", Type: "string",
+			Help:      "例如 2h。要大于等于最短间隔",
+			Global:    durText(lifeLevelOf(agents.Agent{LifeLevel: ag.LifeLevel}).max),
+			Value:     ptrAny(ag.LifeWakeMax),
+			Effective: durText(effectiveLifePolicy(ag).Max)},
 	}
 	return out
 }
@@ -667,9 +687,11 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 	strs := map[string]**string{"run_timeout": &ag.RunTimeout, "approval_timeout": &ag.ApprovalTimeout, "idle_compact": &ag.IdleCompact,
 		"mode": &ag.Mode, "group_eagerness": &ag.GroupEagerness, "group_quiet": &ag.GroupQuiet, "group_min_gap": &ag.GroupMinGap,
 		"life_awake": &ag.LifeAwake, "life_level": &ag.LifeLevel, "life_reach": &ag.LifeReach, "memory": &ag.Memory,
+		"life_wake_min": &ag.LifeWakeMin, "life_wake_max": &ag.LifeWakeMax,
 		"dream_when": &ag.DreamWhen, "dream_at": &ag.DreamAt, "dream_idle": &ag.DreamIdle, "dream_model": &ag.DreamModel}
 	ints := map[string]**int{"max_steps": &ag.MaxSteps, "keep_turns": &ag.KeepTurns, "max_output_kb": &ag.MaxOutputKB,
-		"group_max_len": &ag.GroupMaxLen, "group_parts": &ag.GroupParts, "life_budget": &ag.LifeBudget, "dream_max": &ag.DreamMax}
+		"group_max_len": &ag.GroupMaxLen, "group_parts": &ag.GroupParts, "life_budget": &ag.LifeBudget, "dream_max": &ag.DreamMax,
+		"life_max_wakes": &ag.LifeMaxWakes, "life_max_reaches": &ag.LifeMaxReaches}
 	floats := map[string]**float64{"compact_at": &ag.CompactAt, "compact_to": &ag.CompactTo, "idle_compact_min": &ag.IdleCompactMin}
 	if p, ok := strs[key]; ok {
 		if v == nil {
@@ -688,6 +710,12 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 		case enums[key] != nil:
 			if !slices.Contains(enums[key], s) {
 				return fmt.Errorf("%s 只能是 %s", key, strings.Join(enums[key], "、"))
+			}
+		case key == "life_wake_min" || key == "life_wake_max":
+			if s != "" {
+				if d, err := time.ParseDuration(s); err != nil || d <= 0 {
+					return fmt.Errorf("%s 的写法不对，要写成 1h、90m 这样的正数时长", key)
+				}
 			}
 		case key == "group_quiet" || key == "group_min_gap":
 			if _, err := time.ParseDuration(s); err != nil {
@@ -774,6 +802,9 @@ func (a *App) CreateAgent(p AgentPatch) (AgentInfo, error) {
 	if err := applyAgentPatch(&ag, p); err != nil {
 		return AgentInfo{}, err
 	}
+	if err := validateLifePolicy(ag); err != nil {
+		return AgentInfo{}, err
+	}
 	if strings.TrimSpace(ag.Name) == "" {
 		return AgentInfo{}, errors.New("要给 agent 起个名字")
 	}
@@ -853,6 +884,9 @@ func (a *App) UpdateAgent(id string, p AgentPatch) (AgentInfo, error) {
 		return AgentInfo{}, errors.New("没有这个 agent")
 	}
 	if err := applyAgentPatch(&ag, p); err != nil {
+		return AgentInfo{}, err
+	}
+	if err := validateLifePolicy(ag); err != nil {
 		return AgentInfo{}, err
 	}
 	if other, ok := a.agentByName(ag.Name); ok && other.ID != id {

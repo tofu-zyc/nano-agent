@@ -77,7 +77,7 @@ func TestLifeWake(t *testing.T) {
 	e.k.expect(proto.TTurn)
 	wake := e.llm.lastReq().Messages
 	note := wake[len(wake)-1].Content
-	if !strings.Contains(note, "自主活动") || !strings.Contains(note, "主人（chat:main）") || !strings.Contains(note, "今天自己醒了 1/8 次") {
+	if !strings.Contains(note, "自主活动") || !strings.Contains(note, "主人（chat:main）") || !strings.Contains(note, "今天探索 1 次 / 8 次") || !strings.Contains(note, "今天主动联系 0 次 / 2 次") {
 		t.Fatalf("醒来时看到的：%q", note)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})

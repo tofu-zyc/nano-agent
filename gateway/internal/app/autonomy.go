@@ -273,7 +273,7 @@ func (a *App) lifeBlocked(ag agents.Agent, ls *lifeState, now time.Time) string 
 	if s := a.sessions[lifeSID(ag.ID)]; s != nil && (s.run != nil || len(s.queue) > 0 || s.compacting) {
 		return "正在想事情"
 	}
-	if ls.Wakes >= lifeLevelOf(ag).wakes {
+	if p := effectiveLifePolicy(ag); !p.WakesUnlimited() && ls.Wakes >= p.MaxWakes {
 		return "今天醒够了"
 	}
 	return ""
@@ -347,7 +347,7 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 		return
 	}
 	opts := autonomy.StartOptions{Paused: st.Paused, Awake: a.awakeOf(ag).contains(now), BudgetLeft: st.BudgetLeft(limit),
-		Wakes: ls.Wakes, MaxWakes: lifeLevelOf(ag).wakes}
+		Wakes: ls.Wakes, MaxWakes: effectiveLifePolicy(ag).MaxWakes}
 	if ok, why := trig.CanStart(opts); !ok {
 		next := now.Add(15 * time.Minute)
 		switch {
@@ -414,7 +414,8 @@ func (a *App) startLife(agentID string, manual bool) error {
 		return errors.New("没有在线的内核")
 	}
 	opts := autonomy.StartOptions{Paused: st.Paused, Awake: a.awakeOf(ag).contains(now),
-		BudgetLeft: st.BudgetLeft(pickInt(ag.LifeBudget, 0)), Wakes: a.lifeOf(agentID).Wakes, MaxWakes: lifeLevelOf(ag).wakes}
+		BudgetLeft: st.BudgetLeft(pickInt(ag.LifeBudget, 0)), Wakes: a.lifeOf(agentID).Wakes,
+		MaxWakes: effectiveLifePolicy(ag).MaxWakes}
 	if manual {
 		opts.Paused, opts.Awake, opts.BudgetLeft = false, true, -1
 	}
@@ -512,8 +513,8 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 		b.WriteString("这是你平常睡觉的时间，只有明确的约定才现在做。")
 	}
 	ls := a.lifeOf(ag.ID)
-	lvl := lifeLevelOf(ag)
-	fmt.Fprintf(&b, "今天自己醒了 %d/%d 次，主动找了 %d 次人。\n", ls.Wakes, lvl.wakes, ls.Reaches)
+	p := effectiveLifePolicy(ag)
+	fmt.Fprintf(&b, "%s；%s。\n", p.wakeText(ls.Wakes), p.reachText(ls.Reaches))
 	b.WriteString(st.BriefForModel(now, a.loc))
 	if targets := a.lifeTargets(ag); len(targets) > 0 {
 		b.WriteString("\n可以找的聊天（Message 的 to 写括号里的）：\n")

@@ -208,7 +208,7 @@
           </span>
         </div>
         <div class="p-note p-small">
-          今天自己醒了 {L.wakes}/{L.max_wakes} 次 · 主动找了 {L.reaches} 次人 · 用了 {L.tokens.toLocaleString()} token{#if auto?.budget?.limit}（预算上限 {auto.budget.limit.toLocaleString()}）{/if}{#if auto?.next_check} · 下次自己看 {when(auto.next_check)}{/if}{#if auto} · 今天日程 {auto.today_done}/{auto.today_planned} 件{/if}{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}
+          今天探索 {L.wakes} 次{L.wakes_unlimited ? ' / 不限' : ` / ${L.max_wakes} 次`} · 主动联系 {L.reaches} 次{L.reaches_unlimited ? ' / 不限' : ` / ${L.max_reaches} 次`} · 用了 {L.tokens.toLocaleString()} token{#if auto?.budget?.limit}（预算上限 {auto.budget.limit.toLocaleString()}）{/if}{#if auto?.next_check} · 下次自己看 {when(auto.next_check)}{/if}{#if auto} · 今天日程 {auto.today_done}/{auto.today_planned} 件{/if}{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}
         </div>
         {#if L.recent.length}
           <ul class="recent">

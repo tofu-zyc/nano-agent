@@ -187,7 +187,8 @@ func (a *App) cmdState(c in) {
 			b.WriteString("\n近况：" + ls.Recent[n-1].Text)
 		}
 		if ls.Day == a.now().In(a.loc).Format("2006-01-02") {
-			fmt.Fprintf(&b, "\n今天自己醒了 %d 次，主动找了 %d 次人", ls.Wakes, ls.Reaches)
+			p := effectiveLifePolicy(ag)
+			fmt.Fprintf(&b, "\n%s；%s", p.wakeText(ls.Wakes), p.reachText(ls.Reaches))
 		}
 		var waiting []string
 		for s := range ls.Awaiting {

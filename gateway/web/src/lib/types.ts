@@ -354,6 +354,10 @@ export type LifeBrief = {
   reaches: number;
   tokens: number;
   max_wakes: number;
+  // 0 表示不限：界面按 wakes_unlimited / reaches_unlimited 显示“不限”，不能写 8/0
+  max_reaches?: number;
+  wakes_unlimited?: boolean;
+  reaches_unlimited?: boolean;
   recent: { at: number; text: string }[];
   waiting?: string[];
 };

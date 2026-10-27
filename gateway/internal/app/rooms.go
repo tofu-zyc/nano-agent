@@ -824,7 +824,7 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		if at, waiting := ls.Awaiting[target]; waiting {
 			return "", fmt.Errorf("你 %s 主动找过他，他还没回；等他回了再说", agoText(now, at))
 		}
-		if ls.Reaches >= lifeLevelOf(ag).reaches {
+		if p := effectiveLifePolicy(ag); !p.ReachesUnlimited() && ls.Reaches >= p.MaxReaches {
 			return "", errors.New("今天主动找人的次数用完了")
 		}
 		if !a.awakeOf(ag).contains(now) {

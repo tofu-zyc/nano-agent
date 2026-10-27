@@ -95,6 +95,127 @@ func lifeLevelOf(ag agents.Agent) lifeLevel {
 	return lifeLevels["normal"]
 }
 
+// lifePolicy 是“实际生效”的拟人活动策略（设计文档 §7.1）。次数、间隔、主动联系次数
+// 各自由 agent 的字段覆盖档位默认值；全项目统一从这里取，不散落着读档位。
+type lifePolicy struct {
+	Min, Max         time.Duration // 醒来间隔范围
+	MaxWakes         int           // 每天最多自选探索几次；0 表示不限
+	MaxReaches       int           // 每天最多主动找几次人；0 表示不限
+	WakesFromLevel   bool          // 次数跟随档位（界面上说明用）
+	ReachesFromLevel bool
+	WakeFromLevel    bool
+}
+
+// WakesUnlimited 报告“每日探索次数不限”。
+func (p lifePolicy) WakesUnlimited() bool { return p.MaxWakes <= 0 }
+
+// ReachesUnlimited 报告“每日主动联系次数不限”；彻底关闭联系用 LifeReach=off。
+func (p lifePolicy) ReachesUnlimited() bool { return p.MaxReaches <= 0 }
+
+// wakeText 是界面上的写法：不限时写“不限”，不能出现 8/0 这种。
+func (p lifePolicy) wakeText(wakes int) string {
+	if p.WakesUnlimited() {
+		return fmt.Sprintf("今天探索 %d 次 / 不限", wakes)
+	}
+	return fmt.Sprintf("今天探索 %d 次 / %d 次", wakes, p.MaxWakes)
+}
+
+// reachText 同上。
+func (p lifePolicy) reachText(reaches int) string {
+	if p.ReachesUnlimited() {
+		return fmt.Sprintf("今天主动联系 %d 次 / 不限", reaches)
+	}
+	return fmt.Sprintf("今天主动联系 %d 次 / %d 次", reaches, p.MaxReaches)
+}
+
+// lifeDuration 解析 "1h"、"90m" 这类写法；空或非法时返回 ok=false。
+func lifeDuration(s string) (time.Duration, bool) {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// effectiveLifePolicy 是唯一的解析入口：档位给默认值，agent 的字段覆盖它。
+// 负数和不合法的时间写法按档位处理（保存时会被拒绝，这里只是防御）。
+func effectiveLifePolicy(ag agents.Agent) lifePolicy {
+	lvl := lifeLevelOf(ag)
+	p := lifePolicy{Min: lvl.min, Max: lvl.max, WakeFromLevel: true, WakesFromLevel: true, ReachesFromLevel: true}
+
+	if ag.LifeMaxWakes != nil && *ag.LifeMaxWakes >= 0 {
+		p.MaxWakes, p.WakesFromLevel = *ag.LifeMaxWakes, false
+	} else {
+		p.MaxWakes = lvl.wakes
+	}
+	if ag.LifeMaxReaches != nil && *ag.LifeMaxReaches >= 0 {
+		p.MaxReaches, p.ReachesFromLevel = *ag.LifeMaxReaches, false
+	} else {
+		p.MaxReaches = lvl.reaches
+	}
+
+	var min, max time.Duration
+	var okMin, okMax bool
+	if ag.LifeWakeMin != nil {
+		min, okMin = lifeDuration(*ag.LifeWakeMin)
+	}
+	if ag.LifeWakeMax != nil {
+		max, okMax = lifeDuration(*ag.LifeWakeMax)
+	}
+	if okMin && okMax && min > max {
+		min, max = max, min // 写反了按小的在前处理，保存时会提示
+	}
+	if okMin || okMax {
+		p.WakeFromLevel = false
+		if okMin {
+			p.Min = min
+		}
+		if okMax {
+			p.Max = max
+		}
+		if !okMax && p.Max < p.Min {
+			p.Max = p.Min
+		}
+		if !okMin && p.Min > p.Max {
+			p.Min = p.Max
+		}
+	}
+	if p.Max <= 0 {
+		p.Max = p.Min
+	}
+	return p
+}
+
+// validateLifePolicy 检查 agent 上的拟人配置是否合法，返回给用户看的说明。
+func validateLifePolicy(a agents.Agent) error {
+	if a.LifeMaxWakes != nil && *a.LifeMaxWakes < 0 {
+		return errors.New("life_max_wakes 不能是负数（0 表示不限，不填跟随档位）")
+	}
+	if a.LifeMaxReaches != nil && *a.LifeMaxReaches < 0 {
+		return errors.New("life_max_reaches 不能是负数（0 表示不限，不填跟随档位）")
+	}
+	var lo, hi time.Duration
+	var hasLo, hasHi bool
+	if a.LifeWakeMin != nil && strings.TrimSpace(*a.LifeWakeMin) != "" {
+		d, ok := lifeDuration(*a.LifeWakeMin)
+		if !ok {
+			return errors.New("life_wake_min 要写成 1h、90m 这样的正数时长")
+		}
+		lo, hasLo = d, true
+	}
+	if a.LifeWakeMax != nil && strings.TrimSpace(*a.LifeWakeMax) != "" {
+		d, ok := lifeDuration(*a.LifeWakeMax)
+		if !ok {
+			return errors.New("life_wake_max 要写成 1h、90m 这样的正数时长")
+		}
+		hi, hasHi = d, true
+	}
+	if hasLo && hasHi && lo > hi {
+		return errors.New("life_wake_min 不能大于 life_wake_max")
+	}
+	return nil
+}
+
 // lifeState 是 data/life.json 里一个 agent 的状态。
 type lifeState struct {
 	Next      int64               `json:"next,omitempty"` // 下次醒来
@@ -166,8 +287,8 @@ func (a *App) random() float64 {
 
 // lifeInterval 是这次醒来以后，隔多久再醒：活跃度范围里随机，太久没人找它就减半。
 func (a *App) lifeInterval(ag agents.Agent, now time.Time) time.Duration {
-	l := lifeLevelOf(ag)
-	d := l.min + time.Duration(a.random()*float64(l.max-l.min))
+	p := effectiveLifePolicy(ag)
+	d := p.Min + time.Duration(a.random()*float64(p.Max-p.Min))
 	if now.Sub(a.agentLastActivity(ag.ID)) > lifeBored {
 		d /= 2
 	}
@@ -303,12 +424,14 @@ func (a *App) wakeNote(ag agents.Agent, ls *lifeState, now time.Time, manual boo
 	} else {
 		b.WriteString("这段时间还没人找过你。")
 	}
-	lvl := lifeLevelOf(ag)
+	p := effectiveLifePolicy(ag)
 	fmt.Fprintf(&b, "今天第 %d 次醒来", ls.Wakes+1)
 	if pickString(ag.LifeReach, "owner") == "off" {
 		b.WriteString("；你设成了不主动找人。")
+	} else if p.ReachesUnlimited() {
+		b.WriteString("；主动找人的次数不限。")
 	} else {
-		fmt.Fprintf(&b, "，今天还能主动找人 %d 次。", max(0, lvl.reaches-ls.Reaches))
+		fmt.Fprintf(&b, "，今天还能主动找人 %d 次。", max(0, p.MaxReaches-ls.Reaches))
 	}
 	if targets := a.lifeTargets(ag); len(targets) > 0 {
 		b.WriteString("\n最近的聊天（Message 的 to 写括号里的）：")
@@ -434,6 +557,11 @@ type LifeBrief struct {
 	WakeAt  int64      `json:"wake_at,omitempty"` // 睡着时：几点醒（毫秒）
 	Wakes   int        `json:"wakes"`
 	Reaches int        `json:"reaches"`
+	// 次数上限：0 表示不限（界面上不能写成 8/0）
+	MaxWakes    int  `json:"max_wakes"`
+	MaxReaches  int  `json:"max_reaches"`
+	WakesFree   bool `json:"wakes_unlimited,omitempty"`
+	ReachesFree bool `json:"reaches_unlimited,omitempty"`
 	Tokens  int        `json:"tokens"`
 	MaxWake int        `json:"max_wakes"`
 	Recent  []lifeNote `json:"recent"`
@@ -447,7 +575,9 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	}
 	now := a.now().In(a.loc)
 	ls := a.lifeOf(ag.ID)
+	p := effectiveLifePolicy(ag)
 	b := &LifeBrief{State: "awake", Next: ls.Next * 1000, Wakes: ls.Wakes, Reaches: ls.Reaches, Tokens: ls.Tokens,
+		MaxWakes: p.MaxWakes, MaxReaches: p.MaxReaches, WakesFree: p.WakesUnlimited(), ReachesFree: p.ReachesUnlimited(),
 		MaxWake: lifeLevelOf(ag).wakes, Recent: []lifeNote{}}
 	w := a.awakeOf(ag)
 	if !w.contains(now) {

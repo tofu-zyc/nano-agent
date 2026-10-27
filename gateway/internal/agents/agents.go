@@ -62,6 +62,12 @@ type Agent struct {
 	LifeLevel  *string `json:"life_level,omitempty"`  // low | normal | high
 	LifeReach  *string `json:"life_reach,omitempty"`  // owner | all | off
 	LifeBudget *int    `json:"life_budget,omitempty"` // 内心活动每天最多用多少 token，0 不限
+	// 每日唤醒次数与间隔独立配置（v0.9）：nil 跟随档位，0 表示不限，正整数是上限。
+	// 次数、间隔和主动联系次数互不影响；不限次数不等于没有间隔。
+	LifeMaxWakes   *int    `json:"life_max_wakes,omitempty"`
+	LifeMaxReaches *int    `json:"life_max_reaches,omitempty"`
+	LifeWakeMin    *string `json:"life_wake_min,omitempty"` // 如 1h
+	LifeWakeMax    *string `json:"life_wake_max,omitempty"` // 如 2h
 	Memory     *string `json:"memory,omitempty"`      // on | off
 	DreamWhen  *string `json:"dream_when,omitempty"`  // idle | nightly | sleep | off
 	DreamAt    *string `json:"dream_at,omitempty"`    // nightly 时几点，如 03:00
