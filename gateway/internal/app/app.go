@@ -1185,11 +1185,9 @@ func (a *App) stop(c in) {
 	inbox := append([]interjection(nil), s.run.inbox...)
 	a.cancelRun(s) // 内核会回 done(cancelled)
 	if err := a.discardPending(s, inbox, "stop", "用户停止任务"); err != nil {
+		// 收件箱本来就没动（discardPending 失败时不清任何内存状态），不要回填，
+		// 否则重试几次就翻倍。只如实说明持久化没成功。
 		a.log.Warn("停止时丢弃补充失败", "sid", s.sid, "err", err)
-		for _, it := range inbox {
-			s.run.inboxBytes += len(it.text)
-		}
-		s.run.inbox = append(inbox, s.run.inbox...)
 		a.deliver(c.ep, fmt.Sprintf("已停止任务；但补充的失效没能保存下来（%v），重启后可能还会出现。", err), "")
 		return
 	}

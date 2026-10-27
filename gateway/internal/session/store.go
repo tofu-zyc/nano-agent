@@ -208,19 +208,31 @@ func (s *Store) FindMessageBySource(sid, sourceID string, limit int) (Msg, bool)
 	})
 }
 
-// findInArchive 在正式文件里查（含已经被压缩掉的 Base 之前的部分）。
-// 只有 Base>0 时才读文件，正常情况下走内存里的 History 就够了。
+// findInArchive 在正式文件里流式查（含已经被压缩掉的 Base 之前的部分），
+// 只保留最后一条匹配：不把整份历史读进内存。只有 Base>0 时才需要，平时走内存里的 History。
 func (s *Store) findInArchive(sid string, match func(Msg) bool) (Msg, bool) {
 	if s.Settings(sid).Base <= 0 {
 		return Msg{}, false
 	}
-	all := s.loadFrom(sid, 0)
-	for i := len(all) - 1; i >= 0; i-- {
-		if match(all[i]) {
-			return all[i], true
+	f, err := os.Open(s.file(sid))
+	if err != nil {
+		return Msg{}, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 64<<20)
+	var found Msg
+	ok := false
+	for sc.Scan() {
+		var m Msg
+		if json.Unmarshal(sc.Bytes(), &m) != nil || m.Role == "" {
+			continue
+		}
+		if match(m) {
+			found, ok = m, true // 继续扫，取最后一条
 		}
 	}
-	return Msg{}, false
+	return found, ok
 }
 
 // Compact 在历史估算超过 high 时，一次性丢掉开头的一段，让剩下的不超过 low。

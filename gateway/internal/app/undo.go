@@ -171,6 +171,8 @@ func (a *App) afterRun(s *sess) (string, bool) {
 		s.resetAfter, s.undoAfter = false, false
 		if err := a.resetHistory(s); err != nil {
 			a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
+			// 没清掉就别说清掉了：上下文还在
+			return "清空上下文失败：" + err.Error(), true
 		}
 		return "上下文已清空", true
 	case s.undoAfter:

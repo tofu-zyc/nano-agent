@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"net/url"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -838,5 +840,101 @@ func TestPlatformRecallWriteFailurePreservesInboxAndCanRetry(t *testing.T) {
 	a2 := reopen(t, e)
 	if got := len(a2.sessOf(e.sid).pending); got != 0 {
 		t.Fatalf("撤回后重启又复活：%d", got)
+	}
+}
+
+// 停止时写失败后反复重试，不能把收件箱越堆越多。
+func TestStopFailureDoesNotDuplicateInbox(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	// 让日志写不进去
+	if j := e.a.journals[e.sid]; j != nil {
+		j.close()
+		delete(e.a.journals, e.sid)
+	}
+	_ = os.Remove(e.a.journalPath(e.sid))
+	if err := os.MkdirAll(e.a.journalPath(e.sid), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ch := &fakeCh{sent: make(chan string, 20)}
+	e.a.AddChannel(ch)
+	in := in{s: e.a.sessOf(e.sid), ep: endpoint{ch: "fake", chat: "c1"}, who: "fake:u1"}
+	for i := 0; i < 3; i++ {
+		e.a.mu.Lock()
+		e.a.stop(in)
+		e.a.mu.Unlock()
+		n := len(in.s.run.inbox)
+		if n != 1 {
+			t.Fatalf("第 %d 次失败后收件箱变成 %d 条", i+1, n)
+		}
+	}
+	if got := in.s.run.inboxBytes; got != len("补充") {
+		t.Fatalf("字节数翻了：%d", got)
+	}
+	ch.wait(t, "没能保存下来")
+}
+
+// 归档失败时不能回"上下文已清空"。
+func TestResetFailureReportsError(t *testing.T) {
+	e := setup(t)
+	e.say("第一问", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: 1})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
+	e.ch.wait(t, "收到：第一问")
+	// 用文件占住归档目录的位置，让归档必然失败
+	arch := filepath.Join(e.dir, "data", "archive", url.PathEscape(e.sid))
+	if err := os.MkdirAll(filepath.Dir(arch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.RemoveAll(arch)
+	if err := os.WriteFile(arch, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.say("/reset", msgID("m2"))
+	msg := e.ch.wait(t, "清空上下文")
+	if strings.Contains(msg, "已清空") && !strings.Contains(msg, "失败") && !strings.Contains(msg, "出错") {
+		t.Fatalf("归档失败却报成功：%q", msg)
+	}
+	if got := len(e.a.store.History(e.sid)); got == 0 {
+		t.Fatal("报失败但历史真的被清了（状态不一致）")
+	}
+}
+
+// 历史回查要流式：压缩过的长历史里查一条，不能把整份文件装进内存。
+func TestArchiveLookupDoesNotLoadWholeHistory(t *testing.T) {
+	e := setup(t)
+	big := strings.Repeat("很长的历史内容", 200) // 每个约 4.2 KB
+	for i := 0; i < 4000; i++ {                 // ~16 MiB
+		if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: big}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	histID := interjectionHistoryID([]string{"ij-big"})
+	if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "正文", Kind: "user_interjection",
+		ID: histID, SourceIDs: []string{"ij-big"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.store.Compact(e.sid, 1, 40, "摘要"); err != nil {
+		t.Fatal(err)
+	}
+	if e.a.store.Settings(e.sid).Base == 0 {
+		t.Fatal("没有真的压缩")
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, ok := e.a.store.FindMessageBySource(e.sid, "ij-big", 0); !ok {
+		t.Fatal("查不到")
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	// 流式扫描：保留的活跃堆不该跟着文件大小走
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > 4<<20 {
+		t.Fatalf("回查把整份历史装进了内存：%+d 字节", grew)
 	}
 }

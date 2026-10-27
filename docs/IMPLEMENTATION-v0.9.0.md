@@ -218,6 +218,18 @@
 `TestCompactedHistoryInterjectionIsNotReplayedAfterRestart`、`TestPlatformRecallWriteFailurePreservesInboxAndCanRetry`。
 停止 / 重置现在各覆盖有 run、无 run 两条分支；历史对账覆盖未压缩长历史与 Base 已推进两种情况。
 
+### 六轮验收修复（第 10 节）
+
+| 问题 | 修法 |
+| --- | --- |
+| 停止写失败后重试把收件箱翻倍 | 失败分支不再回填（收件箱本来就没被清），只如实报告；重试幂等 |
+| 重置归档失败仍报"上下文已清空" | `afterRun` 与空闲分支都把 `resetHistory` 的真实错误报告出来，不再吞掉；失败时上下文确实还在，说法与状态一致 |
+| 历史回查整份加载 | `findInArchive` 改流式扫描（`bufio.Scanner`，只保留最后一条匹配），峰值内存不再随文件大小增长 |
+
+回归：`TestStopFailureDoesNotDuplicateInbox`（连续三次失败条数不变）、
+`TestResetFailureReportsError`（归档失败必须报错且历史仍在）、
+`TestArchiveLookupDoesNotLoadWholeHistory`（16 MiB 前缀下回查的活跃堆增量 < 4 MiB）。
+
 ## 还没做（按设计文档的阶段）
 
 | 阶段 | 内容 | 说明 |
