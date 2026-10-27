@@ -99,6 +99,18 @@ func (s *Store) isDead(sid string) bool {
 	return err == nil
 }
 
+// deadLegacyMarker 记下“这个 sid 已经开过新一代”：旧根里的备份元数据永久失效，
+// 同 sid 新代激活也不会把旧分支关系带回来。
+func (s *Store) deadLegacyMarker(sid string) string {
+	return filepath.Join(s.dirV1(), "gen", Key(sid))
+}
+
+// legacyDead 报告这个 sid 的旧根备份是不是已经永久失效。
+func (s *Store) legacyDead(sid string) bool {
+	_, err := os.Stat(s.deadLegacyMarker(sid))
+	return err == nil
+}
+
 // deletedMarker 是“这个会话被明确删除过”的墓碑：旧备份保留，但不再自动复活。
 func (s *Store) deletedMarker(sid string) string {
 	return filepath.Join(s.dirV1(), "deleted", Key(sid))

@@ -70,6 +70,11 @@ func New(dir string) (*Store, error) {
 		filepath.Join(dir, "v1", "sessions"),
 		filepath.Join(dir, "v1", "sessions", "keys"),
 		filepath.Join(dir, "v1", "active"),
+		filepath.Join(dir, "v1", "deleted"),
+		filepath.Join(dir, "v1", "gen"),
+		filepath.Join(dir, "v1", "renames"),
+		filepath.Join(dir, "v1", "staging"),
+		filepath.Join(dir, "v1", "orphan"),
 		filepath.Join(dir, "v1", "archive"),
 	} {
 		if err := os.MkdirAll(sub, 0o700); err != nil {
@@ -78,6 +83,32 @@ func New(dir string) (*Store, error) {
 	}
 	return &Store{dir: dir, hist: map[string][]Msg{}, settings: map[string]Settings{},
 		promoted: map[string]bool{}, snapBudget: 8 << 20}, nil
+}
+
+// renameStagingDir 是这笔改名私有的暂存目录：没提交之前普通定位看不到它。
+func (s *Store) renameStagingDir(from, to string) string {
+	return filepath.Join(s.dirV1(), "staging", Key(from)+"-"+Key(to))
+}
+
+// ResumeRenames 在启动时把没做完的改名按阶段继续（启动入口和测试共用）。
+func (s *Store) ResumeRenames() error {
+	for _, e := range mustReadDir(filepath.Join(s.dirV1(), "renames")) {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(s.dirV1(), "renames", e.Name()))
+		if err != nil {
+			continue
+		}
+		var op renameOp
+		if json.Unmarshal(b, &op) != nil || op.From == "" || op.To == "" {
+			return fmt.Errorf("改名操作记录损坏：%s", e.Name())
+		}
+		if err := s.Rename(op.From, op.To); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renameOp 是一次改名的持久操作记录：失败后按它继续，不用盯着文件存在性猜。
@@ -108,9 +139,44 @@ func (s *Store) ensureActive(sid string) error {
 			return err
 		}
 	}
-	// 显式重建的新代：墓碑作废（旧备份仍然不会被自动读取，因为 active 已经是权威）
-	_ = os.Remove(s.deletedMarker(sid))
+	// 新代的激活提交点：墓碑必须真的删掉，删不掉就不能回执成功
+	if err := os.Remove(s.deletedMarker(sid)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("清除删除标记失败：%w", err)
+	}
 	return nil
+}
+
+// startNewGeneration 显式创建同 sid 的新一代：先把旧代残留整体挪进 orphan 目录隔离，
+// 再清墓碑、写激活标记。任何一步失败都返回错误，绝不先追加到残留文件上。
+func (s *Store) startNewGeneration(sid string) error {
+	if !s.isDead(sid) {
+		return nil
+	}
+	stamp := fmt.Sprintf("%d", time.Now().UnixNano())
+	dst := filepath.Join(s.dirV1(), "orphan", Key(sid)+"-"+stamp)
+	moved := false
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		src := s.newPath(sid, suffix)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.MkdirAll(dst, 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(src, filepath.Join(dst, strings.TrimPrefix(suffix, "."))); err != nil {
+			return fmt.Errorf("隔离旧代文件失败：%w", err)
+		}
+		moved = true
+	}
+	_ = moved
+	// 旧根备份从此永久失效：即使以后清掉墓碑，旧分支元数据也不会重新授权
+	if err := os.MkdirAll(filepath.Dir(s.deadLegacyMarker(sid)), 0o700); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.deadLegacyMarker(sid), []byte(Key(sid))); err != nil {
+		return err
+	}
+	return s.ensureActive(sid)
 }
 
 // legacyPath 是旧布局里某一类文件的位置（只读兼容与迁移来源）。
@@ -202,6 +268,10 @@ func readMsgs(path string, skip int) []Msg {
 func (s *Store) Append(sid string, m Msg) error {
 	if m.TS == 0 {
 		m.TS = time.Now().Unix()
+	}
+	// 已删除的会话：同 sid 写入属于显式重建新代，先把旧代残留隔离开
+	if err := s.startNewGeneration(sid); err != nil {
+		return err
 	}
 	path, _, err := s.locate(sid, ".jsonl")
 	if err != nil {
@@ -470,78 +540,112 @@ func (s *Store) Rename(from, to string) error {
 	if from == to {
 		return nil
 	}
-	if s.isDead(from) {
-		return fmt.Errorf("会话 %s 已经被删除", from)
-	}
 	opPath := s.renameOpFile(from, to)
-	resuming := false
-	if _, err := os.Stat(opPath); err == nil {
-		resuming = true // 上次没做完的同一笔改名：继续，不要当成“目标已存在”
-	}
-	writeOp := func(stage string) error {
-		b, _ := json.MarshalIndent(renameOp{From: from, To: to, Stage: stage}, "", "  ")
-		return writeFileAtomic(opPath, b)
-	}
-	if !resuming && s.Exists(to) {
-		return fmt.Errorf("会话 %s 已经存在", to)
-	}
-	// 1) 先校验目标身份与长键映射：失败时源原样未动
-	if err := s.rememberLongKey(to); err != nil {
+	stage := ""
+	if b, err := os.ReadFile(opPath); err == nil {
+		var op renameOp
+		if json.Unmarshal(b, &op) != nil || op.From != from || op.To != to {
+			return fmt.Errorf("改名操作记录损坏或不匹配：%s", opPath)
+		}
+		stage = op.Stage
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if !resuming {
+	writeOp := func(st string) error {
+		b, _ := json.MarshalIndent(renameOp{From: from, To: to, Stage: st}, "", "  ")
+		return writeFileAtomic(opPath, b)
+	}
+	staging := s.renameStagingDir(from, to)
+	if stage == "" {
+		// 全新的一笔：先校验身份与映射，失败时源原样未动
+		if s.isDead(from) {
+			return fmt.Errorf("会话 %s 已经被删除", from)
+		}
+		if s.Exists(to) {
+			return fmt.Errorf("会话 %s 已经存在", to)
+		}
+		if err := s.rememberLongKey(to); err != nil {
+			return err
+		}
 		if err := writeOp("started"); err != nil {
 			return err
 		}
+		stage = "started"
 	}
-	// 2) 复制（不是移动）到目标：任何一步失败都还能从头再来
+	if stage == "started" {
+		// 复制进操作私有的 staging：未提交副本对普通定位不可见
+		if err := os.MkdirAll(staging, 0o700); err != nil {
+			return err
+		}
+		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+			src, ok, err := s.locate(from, suffix)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			data, err := os.ReadFile(src)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(staging, strings.TrimPrefix(suffix, ".")), data, 0o600); err != nil {
+				return err
+			}
+		}
+		if err := writeOp("copied"); err != nil {
+			return err
+		}
+		stage = "copied"
+	}
+	if stage == "copied" {
+		// 发布目标：只搬运目标上还不存在的文件，绝不覆盖已经被接受的新内容
+		if err := s.ensureActive(to); err != nil {
+			return err
+		}
+		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+			staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
+			data, err := os.ReadFile(staged)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return err
+			}
+			dst := s.newPath(to, suffix)
+			if _, err := os.Stat(dst); err == nil {
+				continue // 目标已经有这一份（恢复重入或已经被写过）：保留目标
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(dst, data, 0o600); err != nil {
+				return err
+			}
+		}
+		// 提交点：源墓碑
+		if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(s.deletedMarker(from), []byte(Key(from))); err != nil {
+			return err
+		}
+		_ = os.Remove(s.activeMarker(from))
+		if err := writeOp("committed"); err != nil {
+			return err
+		}
+		stage = "committed"
+	}
+	// committed：只做清理，绝不再碰目标内容
 	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
-		src, ok, err := s.locate(from, suffix)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return err
-		}
-		dst := s.newPath(to, suffix)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, data, 0o600); err != nil {
-			return err
-		}
-		if back, err := os.ReadFile(dst); err != nil || string(back) != string(data) {
-			return fmt.Errorf("复制到目标后回读不一致：%s", dst)
+		if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("改名已提交，清理源文件失败（可以重试）：%w", err)
 		}
 	}
-	if err := writeOp("copied"); err != nil {
-		return err
+	_ = os.RemoveAll(staging)
+	if err := os.Remove(opPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("改名已提交，清理操作记录失败（可以重试）：%w", err)
 	}
-	// 3) 提交点：目标激活 + 源墓碑
-	if err := s.ensureActive(to); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(s.deletedMarker(from), []byte(Key(from))); err != nil {
-		return err
-	}
-	_ = os.Remove(s.activeMarker(from))
-	if err := writeOp("committed"); err != nil {
-		return err
-	}
-	// 4) 清理源文件：失败也只影响磁盘残留，源已经被墓碑挡住
-	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
-		if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("改名已提交，清理源文件失败（可重试）：%w", err)
-		}
-	}
-	_ = os.Remove(opPath)
 	delete(s.hist, from)
 	delete(s.settings, from)
 	delete(s.hist, to)

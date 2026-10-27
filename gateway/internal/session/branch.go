@@ -489,14 +489,17 @@ func (s *Store) saveBranch(meta BranchMeta) error {
 
 // Branch 查一个会话是不是分支。
 func (s *Store) Branch(sid string) (BranchMeta, bool) {
-	if sid == "" {
-		return BranchMeta{}, false
+	if sid == "" || s.isDead(sid) {
+		return BranchMeta{}, false // 删除墓碑：旧元数据不再自动授权
 	}
 	if s.branches == nil {
 		s.loadBranches()
 	}
 	m, ok := s.branches[sid]
-	return m, ok
+	if !ok || s.isDead(m.SID) {
+		return BranchMeta{}, false
+	}
+	return m, true
 }
 
 // Branches 是所有分支，按创建时间排序。
@@ -625,6 +628,9 @@ func (s *Store) loadBranches() {
 			}
 			if m.SID == "" {
 				m.SID = sid
+			}
+			if s.isDead(m.SID) || (side.dir == s.dirLegacySessions() && s.legacyDead(m.SID)) {
+				continue // 删除墓碑 / 已开新一代：旧根备份永久失去自动授权
 			}
 			if _, dup := s.branches[m.SID]; dup {
 				continue // 新布局优先
