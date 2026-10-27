@@ -205,6 +205,19 @@
 `TestRecoveredHistoryWithoutInjectedIsImmediatelyContinuable`、`TestStopRestoredPendingWithoutRun`、
 `TestStopReportsJournalFailureAndDoesNotClaimDurableDiscard`、`TestResetClearsInterruptedAndPendingBytesImmediately`。
 
+### 五轮验收修复（第 9 节）
+
+| 路径 | 问题 | 修法 |
+| --- | --- | --- |
+| 运行中的 /stop | 清空 inbox 却没写失效记录 | `discardPending` 接收收件箱快照，连同待处理/中断一起作废；先停进程，再报告结果，写失败时把条目放回并如实说明 |
+| 运行中的 /reset | 没有切世代 | 活动/空闲两条路径汇入同一个 `commitReset`：换世代、作废收件箱与待处理、清内存状态，历史清理由 `afterRun` 或当次完成；世代只换一次 |
+| 压缩后的历史对账 | `limit=0` 只查 Base 之后的有效窗口 | `FindMessage` / `FindMessageBySource` 在 `Base>0` 时追加查正式文件（含已压缩前缀），模型上下文仍遵守 Base / Summary |
+| 平台撤回 | 先删内存再检查写盘 | 改成与撤回命令同一顺序：先落盘失效，成功后移除内存项与字节计数，失败保留可重试 |
+
+回归：`TestActiveStopDiscardsInterjectionAcrossRestart`、`TestActiveResetAdvancesGenerationAndDoesNotRestoreInterjections`、
+`TestCompactedHistoryInterjectionIsNotReplayedAfterRestart`、`TestPlatformRecallWriteFailurePreservesInboxAndCanRetry`。
+停止 / 重置现在各覆盖有 run、无 run 两条分支；历史对账覆盖未压缩长历史与 Base 已推进两种情况。
+
 ## 还没做（按设计文档的阶段）
 
 | 阶段 | 内容 | 说明 |

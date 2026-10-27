@@ -172,7 +172,9 @@ func (s *Store) FindMessage(sid, id string, limit int) (Msg, bool) {
 			return h[i], true
 		}
 	}
-	return Msg{}, false
+	// 压缩过的会话：已提交的前缀还在正式文件里，但不在 History 里。
+	// "历史有多长/压缩过没有"不能改变"这条消息是否已经提交"的事实。
+	return s.findInArchive(sid, func(m Msg) bool { return m.ID == id })
 }
 
 // FindMessageBySource 找包含某条插话 ID 的历史消息（补记 injected 时用）。
@@ -194,6 +196,28 @@ func (s *Store) FindMessageBySource(sid, sourceID string, limit int) (Msg, bool)
 			if id == sourceID {
 				return h[i], true
 			}
+		}
+	}
+	return s.findInArchive(sid, func(m Msg) bool {
+		for _, id := range m.SourceIDs {
+			if id == sourceID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// findInArchive 在正式文件里查（含已经被压缩掉的 Base 之前的部分）。
+// 只有 Base>0 时才读文件，正常情况下走内存里的 History 就够了。
+func (s *Store) findInArchive(sid string, match func(Msg) bool) (Msg, bool) {
+	if s.Settings(sid).Base <= 0 {
+		return Msg{}, false
+	}
+	all := s.loadFrom(sid, 0)
+	for i := len(all) - 1; i >= 0; i-- {
+		if match(all[i]) {
+			return all[i], true
 		}
 	}
 	return Msg{}, false

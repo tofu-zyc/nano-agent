@@ -709,3 +709,134 @@ func TestResetClearsInterruptedAndPendingBytesImmediately(t *testing.T) {
 
 // drainPending 是测试里把恢复的待处理拿出来看的辅助。
 func drainPending(s *sess) []interjection { return s.pending }
+
+// B10：运行中的 /stop 必须把收件箱里的补充也持久作废。
+func TestActiveStopDiscardsInterjectionAcrossRestart(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	e.say("/stop", msgID("m3"))
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
+	e.ch.wait(t, "已停止")
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("停止后重启又活了：%d", got)
+	}
+}
+
+// B10：运行中的 /reset 必须换世代，重启不能恢复旧补充。
+func TestActiveResetAdvancesGenerationAndDoesNotRestoreInterjections(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	e.say("/reset", msgID("m3"))
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusCancelled})
+	e.ch.wait(t, "上下文已清空")
+	if gen := e.a.store.Settings(e.sid).SessionGeneration; gen == 0 {
+		t.Fatalf("重置没有换世代：%d", gen)
+	}
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.pending) != 0 {
+		t.Fatalf("重置后重启又恢复：%d", len(s2.pending))
+	}
+	if got := len(a2.store.History(e.sid)); got != 0 {
+		t.Fatalf("重置后历史还在：%d 条", got)
+	}
+}
+
+// B9：压缩（Base 推进）之后，已经提交过的插入仍然要能按 ID 查到，不能重复注入。
+func TestCompactedHistoryInterjectionIsNotReplayedAfterRestart(t *testing.T) {
+	e := setup(t)
+	id := "ij-compact"
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: id, Seq: 1, Text: "补充"}); err != nil {
+		t.Fatal(err)
+	}
+	histID := interjectionHistoryID([]string{id})
+	if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "第一问"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "正文", Kind: "user_interjection",
+		ID: histID, SourceIDs: []string{id}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: strings.Repeat("后面的话", 40)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.a.store.Append(e.sid, session.Msg{Role: "assistant", Content: "嗯"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.a.store.Settings(e.sid)
+	if _, err := e.a.store.Compact(e.sid, 1, 40, "摘要"); err != nil {
+		t.Fatal(err)
+	}
+	if base := e.a.store.Settings(e.sid).Base; base == 0 {
+		t.Fatalf("没有真的压缩")
+	}
+	// 压缩之后，那条历史消息不在有效窗口里了，但仍然是已提交的
+	if _, ok := e.a.store.FindMessageBySource(e.sid, id, 0); !ok {
+		t.Fatal("压缩后查不到已提交的历史")
+	}
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("压缩后把已提交的补充当成待处理：%d", got)
+	}
+	// 原始记录（含 Base 之前）里这条历史只出现一次
+	var times int
+	for _, m := range a2.store.Archive(e.sid) {
+		if m.ID == histID {
+			times++
+		}
+	}
+	if times != 1 {
+		t.Fatalf("历史 ID 出现 %d 次", times)
+	}
+}
+
+// B10：平台撤回写失败时要保留待处理与字节数，修好之后能直接重试。
+func TestPlatformRecallWriteFailurePreservesInboxAndCanRetry(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	// 让日志写不进去
+	if j := e.a.journals[e.sid]; j != nil {
+		j.close()
+		delete(e.a.journals, e.sid)
+	}
+	_ = os.Remove(e.a.journalPath(e.sid))
+	if err := os.MkdirAll(e.a.journalPath(e.sid), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := len(e.a.sessions[e.sid].run.inbox)
+	beforeBytes := e.a.sessions[e.sid].run.inboxBytes
+	e.say("", func(m *channel.Message) {
+		m.Text, m.MsgID, m.SenderID, m.Action = "", "m2", "", channel.ActionRecall
+	})
+	e.ch.wait(t, "还在队列里")
+	if got := len(e.a.sessions[e.sid].run.inbox); got != before {
+		t.Fatalf("写失败后收件箱被改了：%d → %d", before, got)
+	}
+	if got := e.a.sessions[e.sid].run.inboxBytes; got != beforeBytes {
+		t.Fatalf("字节数没还原：%d → %d", beforeBytes, got)
+	}
+	// 修好日志，同进程直接重试
+	if err := os.RemoveAll(e.a.journalPath(e.sid)); err != nil {
+		t.Fatal(err)
+	}
+	e.say("", func(m *channel.Message) {
+		m.Text, m.MsgID, m.SenderID, m.Action = "", "m2", "", channel.ActionRecall
+	})
+	e.ch.wait(t, "已撤回还没处理的消息")
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("撤回后重启又复活：%d", got)
+	}
+}

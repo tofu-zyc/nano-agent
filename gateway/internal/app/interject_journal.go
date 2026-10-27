@@ -507,14 +507,15 @@ func (a *App) checkpointJournal(sid string) error {
 }
 
 // newGeneration 把会话世代加一：重置前后的插话不能混在一起。
-func (a *App) newGeneration(s *sess) {
+func (a *App) newGeneration(s *sess) error {
 	st := a.store.Settings(s.sid)
 	st.SessionGeneration++
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		a.log.Warn("保存会话世代失败", "sid", s.sid, "err", err)
+		return fmt.Errorf("保存会话世代失败：%w", err)
 	}
 	// 留一条 discard 记录，日志重写和排障时能看出这里清过一次
-	_ = a.journalAppend(s.sid, journalRec{Kind: jrecDiscard, Note: "reset"})
+	return a.journalAppend(s.sid, journalRec{Kind: jrecDiscard, Note: "reset"})
 }
 
 // dropJournal 删除会话时把日志一起清掉。
@@ -557,8 +558,15 @@ func (a *App) withdrawInterjections(sid string, items []interjection, reason, no
 
 // discardPending 把"待处理"和"中断未完成"的补充统一作废：停止、重置共用。
 // 写失败时内存状态保持不动——不能一边说已停止、一边假装已经清干净。
-func (a *App) discardPending(s *sess, reason, note string) error {
-	firstErr := a.withdrawInterjections(s.sid, s.pending, reason, note)
+func (a *App) discardPending(s *sess, inbox []interjection, reason, note string) error {
+	var firstErr error
+	// 收件箱里这几条也要一起作废：只清内存就会在重启后复活
+	if len(inbox) > 0 {
+		firstErr = a.withdrawInterjections(s.sid, inbox, reason, note)
+	}
+	if err := a.withdrawInterjections(s.sid, s.pending, reason, note); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	for _, it := range s.interrupted {
 		if it.id == "" {
 			continue

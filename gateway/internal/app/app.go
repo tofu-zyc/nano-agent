@@ -1171,7 +1171,7 @@ func (a *App) stop(c in) {
 	s.queue = nil
 	if s.run == nil {
 		// 没有 run 不代表没有待处理责任：恢复出来的补充、重新排队过的补充也要一起作废
-		if err := a.discardPending(s, "stop", "用户停止任务"); err != nil {
+		if err := a.discardPending(s, nil, "stop", "用户停止任务"); err != nil {
 			a.answer(c, fmt.Sprintf("当前没有进行中的任务。补充的丢弃没能保存下来（%v），重启后可能还会出现", err))
 			return
 		}
@@ -1180,16 +1180,20 @@ func (a *App) stop(c in) {
 	}
 	s.run.addOut(c.ep)
 	s.run.dropInbox = true // 用户明确停止：还在等边界的那几条补充不再自动开新一轮
-	// 停止是持久终态：这些补充重启后不能再复活。先杀进程，再报告丢弃结果——
-	// 用户要求停止就得停下来，不能为了写日志继续跑工具。
-	inbox := s.run.inbox
-	s.run.inbox, s.run.inboxBytes = nil, 0
+	// 停止是持久终态：收件箱里这几条也必须跟着作废，不能只清内存。
+	// 先杀进程（用户要求停止就得停下来），再做失效转换；失败时把条目放回去并如实报告。
+	inbox := append([]interjection(nil), s.run.inbox...)
 	a.cancelRun(s) // 内核会回 done(cancelled)
-	if err := a.discardPending(s, "stop", "用户停止任务"); err != nil {
+	if err := a.discardPending(s, inbox, "stop", "用户停止任务"); err != nil {
 		a.log.Warn("停止时丢弃补充失败", "sid", s.sid, "err", err)
-		a.deliver(c.ep, fmt.Sprintf("已停止任务；补充的丢弃没能保存下来（%v），重启后可能还会出现。", err), "")
+		for _, it := range inbox {
+			s.run.inboxBytes += len(it.text)
+		}
+		s.run.inbox = append(inbox, s.run.inbox...)
+		a.deliver(c.ep, fmt.Sprintf("已停止任务；但补充的失效没能保存下来（%v），重启后可能还会出现。", err), "")
+		return
 	}
-	_ = inbox
+	s.run.inbox, s.run.inboxBytes = nil, 0
 }
 
 func (a *App) reset(c in) {
@@ -1199,18 +1203,41 @@ func (a *App) reset(c in) {
 		s.resetAfter = true
 		s.run.addOut(c.ep)
 		s.run.dropInbox = true
-		s.run.inbox, s.run.inboxBytes = nil, 0
+		inbox := append([]interjection(nil), s.run.inbox...)
 		a.cancelRun(s)
-		a.discardPending(s, "reset", "用户清空上下文")
-	s.pending, s.pendingBytes, s.interrupted = nil, 0, nil // 世代已经换了，内存里的旧状态一律清掉 // 重置也要清干净，别等到重启
+		// 活动分支和空闲分支走同一个提交点：世代一定要换，只换一次
+		if err := a.commitReset(s, inbox); err != nil {
+			a.answer(c, fmt.Sprintf("已停止并清空上下文；但作废补充或保存世代时出错（%v），重启后可能还有旧补充", err))
+			return
+		}
 		return
 	}
-	a.newGeneration(s) // 重置之后，之前受理的补充全部作废（重启也不会复活）
-	a.discardPending(s, "reset", "用户清空上下文")
-	if err := a.resetHistory(s); err != nil {
-		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
+	if err := a.commitReset(s, nil); err != nil {
+		a.answer(c, fmt.Sprintf("清空上下文时出错（%v）", err))
+		return
 	}
 	a.answer(c, "上下文已清空")
+}
+
+// commitReset 是重置的唯一提交点：换世代、作废收件箱/待处理/中断未完成的补充，
+// 再清历史（活动分支由 afterRun 在 run 结束后清）。返回第一个真实错误。
+func (a *App) commitReset(s *sess, inbox []interjection) error {
+	genErr := a.newGeneration(s)
+	if err := a.discardPending(s, inbox, "reset", "用户清空上下文"); err != nil && genErr == nil {
+		genErr = err
+	}
+	// 世代已经换了：内存里的旧状态一律清掉，不能等到重启
+	s.pending, s.pendingBytes, s.interrupted = nil, 0, nil
+	if s.run != nil {
+		s.run.inbox, s.run.inboxBytes = nil, 0
+	}
+	if s.resetAfter {
+		return genErr // 活动分支：历史由 afterRun → resetHistory 清
+	}
+	if err := a.resetHistory(s); err != nil && genErr == nil {
+		genErr = err
+	}
+	return genErr
 }
 
 func (a *App) decide(c in, arg string, ok bool) {

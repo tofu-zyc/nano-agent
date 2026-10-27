@@ -194,12 +194,13 @@ func (a *App) recall(c in, msgID string) {
 			if it.msg.MsgID != msgID {
 				continue
 			}
-			s.run.inbox = append(s.run.inbox[:i:i], s.run.inbox[i+1:]...)
-			s.run.inboxBytes -= len(it.text)
+			// 先落盘失效，再从内存里拿掉：写失败时状态和提示要一致，能直接重试
 			if err := a.withdrawInterjections(s.sid, []interjection{it}, "user_recall", "用户撤回"); err != nil {
 				a.answer(c, fmt.Sprintf("撤回没能保存下来（%v），这条补充还在队列里，稍后再试", err))
 				return
 			}
+			s.run.inbox = append(s.run.inbox[:i:i], s.run.inbox[i+1:]...)
+			s.run.inboxBytes -= len(it.text)
 			a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "withdrawn", ID: msgID, Text: it.text})
 			a.answer(c, "已撤回还没处理的消息："+quoteText(it.text))
 			return

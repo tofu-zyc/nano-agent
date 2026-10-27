@@ -1,8 +1,8 @@
 # v0.9.0 二轮验收与下一步执行清单
 
-日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；最新复验：`5d8bc9a`。
+日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；上轮复验：`5d8bc9a`；最新复验：`cbdadac`。
 
-**最新结论：`5d8bc9a` 已通过第 7 节七个直接反例的独立复验，但第 8 节仍有四类持久化问题，B 暂不通过，先修复再推进 Fork。** 第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
+**最新结论：`cbdadac` 通过了第 8 节的检查点、部分写入重试、未压缩长历史对账及空闲会话控制反例，但 B9 的压缩历史与 B10 的运行中停止 / 重置尚未闭环，B 暂不通过。** 当前剩余项见第 9 节。第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
 
 ## 1. 已验证通过的部分
 
@@ -333,7 +333,9 @@ Fork 稳定后推进 P2 → P3：C JobManager、流式输出、原地后台化�
 本轮仍只验收 B，先不开始后台 Job、完整 Hook 或 Fork。B 通过后沿第 4 节 C 做安静的持久 Fork，保持用户最关心的“保存原上下文，自主活动不打扰主聊天”要求；agent 循环继续由 C 内核承担。
 
 
-## 8. `5d8bc9a` 复验：直接反例通过，四类交叉场景仍需修复
+## 8. `5d8bc9a` 复验记录
+
+本节记录上轮问题；`cbdadac` 的已通过范围与剩余项见第 9 节。
 
 ### 8.1 已通过的验证
 
@@ -406,3 +408,78 @@ Fork 稳定后推进 P2 → P3：C JobManager、流式输出、原地后台化�
 先修 B7 和 B8，再修 B9 的可靠历史对账及 B10 的失效转换；同批补齐 B9 / B10 的 P2 可见状态问题。把以上组合场景加入永久回归，覆盖原进程继续运行与再次重启两个方向。检查点替换的目录更新持久化、Sync 失败和跨文件提交仍按第 6 节的约束检查，不能只检查正常 Write 后的文件内容。
 
 这些完成后再复验 B，通过后按第 4 节 C 开始安静的持久 Fork。此次仍只更新验收文档，没有修改产品源码，没有开始 Fork、后台 Job 或完整 Hook。
+
+
+## 9. `cbdadac` 复验：B9 / B10 仍有四个遗漏路径
+
+### 9.1 已通过的范围
+
+本轮重新运行 `go vet ./...`、`go test ./... -count=1`，均通过（app 包约 23.8 秒）；C core 205 checks / 0 failures。本次没有 C 源码改动，未重复执行执行器 / 宿主 ASan 套件。
+
+临时 Go overlay 通过七组独立复验：
+
+| 路径 | 实测结果 |
+| --- | --- |
+| 真实阈值触发自动检查点后，同进程平台重发 | inbox 仍只有 1 条 |
+| 所有旧补充已完成，检查点后重启接收另一条无 ID 补充 | ID 不同，实际 drain 后新正文存在 |
+| Linux RLIMIT_FSIZE 使真实 Write 部分写入失败，然后同进程重试 | 尾部回退后再次追加成功，日志只保留新的完整记录 |
+| 历史追加 401 条后恢复，以及首次补记 injected | 不再重复注入，首次恢复即有 interrupted 入口 |
+| 无活跃 run 时停止恢复 pending | 重启后 pending 为 0 |
+| 无活跃 run 时停止，但终态写失败 | 有失败说明，内存 pending 保留 |
+| 无活跃 run 时重置 interrupted | 中断计数和待处理字节数当场清空 |
+
+以下四个补充反例均已运行并失败，属于 B9 / B10 原有要求的遗漏分支。overlay 仅增加测试，没有替换产品实现；测试用真实 App、Store、日志及跨实例重启。没有把这些临时测试写入产品源码。
+
+### 9.2 [P1，B10]：运行中的 /stop 丢掉 inbox，却没有写入失效记录
+
+位置：`gateway/internal/app/app.go:1185`；`gateway/internal/app/interject_journal.go:560`。
+
+stop 保存 `inbox := s.run.inbox` 后立即清空 run.inbox；cancelRun 之后只调用 discardPending。该辅助函数实际上只处理 s.pending 和 s.interrupted，根本没有处理这份 inbox 快照；函数末尾的 `_ = inbox` 直接丢掉了引用。
+
+真实流程复现：开始任务 → 受理一条补充 → 从普通聊天入口发送 `/stop` → 确认发出内核 cancel → 收取 done(cancelled) 和“已停止” → 新建 Store / App。实际 pending=1。**没有注入任何磁盘故障，正常停止就会使补充重启复活。**
+
+修复：取消执行可以先进行，但 inbox 的稳定 ID 必须交给统一失效转换；成功持久记录后才清理相应状态。失败时保留可对账责任并报告具体失败。不能只把 inbox 清空后让辅助函数重新从已经清空的字段取值。
+
+建议永久回归：`TestActiveStopDiscardsInterjectionAcrossRestart`，必须通过普通 `/stop` 入口和内核 cancelled 收尾，再真实重启；另覆盖取消生成和终态写失败。当前新增的停止测试只覆盖无 run 的恢复 pending，不能覆盖这一分支。
+
+### 9.3 [P1，B10]：运行中的 /reset 没有切换世代，清空成功后补充复活
+
+位置：`gateway/internal/app/app.go:1198`；`gateway/internal/app/undo.go:170`。
+
+活动分支直接清空 run.inbox，再调用只处理 pending / interrupted 的 discardPending，同样遗漏 inbox；而 newGeneration 只存在于空闲分支。内核取消后 afterRun 仅调用 resetHistory，没有增加世代。注释“世代已经换了”与实际执行不符。
+
+真实流程复现：开始任务 → 受理补充 → 从聊天入口发送 `/reset` → 内核取消 → 收到“上下文已清空” → 重建 Store / App。实际 generation 从 0 到 0，pending=1。旧补充重新进入已经清空过的会话。
+
+修复：将活动、空闲两条路径汇入同一份明确的 reset 提交逻辑，确保成功重置一定完成持久世代转换，且只转换一次。统一失效 inbox / pending / interrupted，处理保存世代、失效记录和历史清理的错误；成功说明必须与真实提交结果一致。不能仅在活动分支补一个清空内存语句。
+
+建议永久回归：`TestActiveResetAdvancesGenerationAndDoesNotRestoreInterjections`。验证取消前后、重置完成后再重启的状态，检查 generation、正式历史和 pending；并加入保存世代失败场景。
+
+### 9.4 [P1，B9]：limit=0 只扫描 Base 之后的有效历史，压缩前已提交的正文仍会重复
+
+位置：`gateway/internal/session/store.go:84`、`:162`、`:184`；`gateway/internal/app/interject_journal.go:674` 附近的恢复对账。
+
+FindMessage 和 FindMessageBySource 改为扫描全部 s.History(sid)，解决了最近 400 条限制。但 History 在首次加载时从 Settings.Base 开始读，已压缩前缀仍在正式文件中，却不在这个切片里；因此 limit=0 并不是完整的持久提交查询。
+
+真实流程复现：received 已提交 → 正式历史写成功，但不写 injected → 增加后续消息 → 使用真实 Store.CommitCompact 将前两条压缩，Base=2 → 重启 → 将错误恢复出的 pending 实际 drain。读取完整原始记录后，同一个稳定 history_message_id 出现 **2 次**。
+
+修复：持久 ID / SourceIDs 对账应覆盖当前世代内完整已提交历史，包括 Base 之前的原始记录；模型上下文仍遵守原有 Base / Summary。对有限未决 ID 使用流式检索或持久索引，保持低内存；重置后不要把上一世代的归档当成本世代的提交。
+
+建议永久回归：`TestCompactedHistoryInterjectionIsNotReplayedAfterRestart`，通过真实 CommitCompact 和实际 drain 验证原始历史 ID 只出现一次，并核对首次继续入口。不能只再增加更多未压缩消息。
+
+### 9.5 [P2，B10]：平台撤回先删除 inbox，再检查写盘失败，错误提示与状态不符
+
+位置：`gateway/internal/app/undo.go:197`。
+
+平台 recall 已增加错误提示，但删除 inbox 和减少 inboxBytes 仍发生在 withdrawInterjections 之前。写失败后返回“这条补充还在队列里，稍后再试”，实际已经没有这条待处理项；同进程再次撤回也找不到它。
+
+独立复现：正常受理 → 让日志写返回错误 → 调用真实 recall 分支 → 收到“还在队列里” → 检查 inbox。实际长度为 0，而日志里 received 尚未失效。
+
+修复：与已经修好的 undoLatest 保持同一提交顺序：持久失效成功后再移除内存项和字节计数，失败保留状态与稳定 ID。不能仅增加错误提示。
+
+建议永久回归：`TestPlatformRecallWriteFailurePreservesInboxAndCanRetry`；断言失败后的 ID、字节数、同进程重试，以及后续重启结果。
+
+### 9.6 本轮交付要求
+
+先修上述三个 P1，并在同批修复撤回顺序的 P2；保持已经通过的检查点、高水位和写入回退场景持续通过。停止 / 重置测试明确同时覆盖 **有 run / 无 run**；历史对账同时覆盖 **未压缩 / Base 已推进**。这些维度必须在同一实现上一起成立，不能用空闲分支通过替代运行中分支，也不能用未压缩长历史通过替代持久历史查询。
+
+本轮证明了进程重启与真实部分写入回退的上述行为；未进行断电、真实 Sync 失败或检查点目录持久化的故障注入，不扩大为这些场景已验收。B 验收通过后，仍按第 4 节 C 开始安静的持久 Fork，agent 循环继续使用 C 内核。
