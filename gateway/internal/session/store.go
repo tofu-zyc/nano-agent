@@ -153,15 +153,19 @@ func (s *Store) Append(sid string, m Msg) error {
 	return nil
 }
 
-// FindMessage 在会话历史里按稳定 ID 找消息（最近的 limit 条里找，够用而且有界）。
+// FindMessage 在会话历史里按稳定 ID 找消息。limit<=0 表示查全部：
+// "历史有多长"不能改变"这条消息是否已经提交"这个事实。
 func (s *Store) FindMessage(sid, id string, limit int) (Msg, bool) {
 	if id == "" {
 		return Msg{}, false
 	}
 	h := s.History(sid)
-	start := len(h) - limit
-	if start < 0 {
-		start = 0
+	start := 0
+	if limit > 0 {
+		start = len(h) - limit
+		if start < 0 {
+			start = 0
+		}
 	}
 	for i := len(h) - 1; i >= start; i-- {
 		if h[i].ID == id {
@@ -172,14 +176,18 @@ func (s *Store) FindMessage(sid, id string, limit int) (Msg, bool) {
 }
 
 // FindMessageBySource 找包含某条插话 ID 的历史消息（补记 injected 时用）。
+// limit<=0 表示查全部。
 func (s *Store) FindMessageBySource(sid, sourceID string, limit int) (Msg, bool) {
 	if sourceID == "" {
 		return Msg{}, false
 	}
 	h := s.History(sid)
-	start := len(h) - limit
-	if start < 0 {
-		start = 0
+	start := 0
+	if limit > 0 {
+		start = len(h) - limit
+		if start < 0 {
+			start = 0
+		}
 	}
 	for i := len(h) - 1; i >= start; i-- {
 		for _, id := range h[i].SourceIDs {

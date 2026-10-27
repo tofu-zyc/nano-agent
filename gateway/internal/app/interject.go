@@ -129,7 +129,7 @@ func (a *App) drainInterjections(s *sess, r *run) bool {
 		TS:        a.now().Unix(),   // 和其他历史消息一样用秒；毫秒是接收时间，另记在事件里
 	}
 	// 历史里已经有一条（上次写完历史、日志没记 injected 就崩了）：补记，不再追加正文
-	if _, ok := a.store.FindMessage(s.sid, histID, 50); !ok {
+	if _, ok := a.store.FindMessage(s.sid, histID, 0); !ok {
 		if err := a.store.Append(s.sid, msg); err != nil {
 			// 写历史失败：消息留着，下一个边界再试（仍受 run 总时限约束）
 			a.log.Warn("写入用户插话失败，等下一个边界重试", "sid", s.sid, "err", err)

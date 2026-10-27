@@ -1,8 +1,8 @@
 # v0.9.0 二轮验收与下一步执行清单
 
-日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱验收：`33673fd`（含 `7f48078`）。
+日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；最新复验：`5d8bc9a`。
 
-**最新结论：`33673fd` 的 B（持久收件箱）尚未通过验收，先修复第 7 节的六项问题，再推进 Fork。** 第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
+**最新结论：`5d8bc9a` 已通过第 7 节七个直接反例的独立复验，但第 8 节仍有四类持久化问题，B 暂不通过，先修复再推进 Fork。** 第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
 
 ## 1. 已验证通过的部分
 
@@ -247,7 +247,9 @@ Fork 稳定后推进 P2 → P3：C JobManager、流式输出、原地后台化�
 只承诺本地消息与历史按 ID 对账，不将其表述为任意外部副作用“恰好一次”。通过这一步后，沿第 4 节 C 继续交付安静的持久 Fork。
 
 
-## 7. `33673fd` 持久收件箱验收：六项问题仍阻塞
+## 7. `33673fd` 持久收件箱验收记录
+
+以下为当时的六项阻塞及原始复现；其七个直接反例已在 `5d8bc9a` 复验通过。当前结论和剩余交叉场景见第 8 节。
 
 本轮重新运行 `go vet ./...`、`go test ./... -count=1`，均通过；C core 205 checks / 0 failures。本次 B 的两个提交没有修改 C 源码，未重复执行 ASan 执行器 / 宿主套件。`Store.Append` 先持久写入、成功后更新内存，以及在写入前加载旧历史的改动方向正确，原有相关回归通过。
 
@@ -329,3 +331,78 @@ Fork 稳定后推进 P2 → P3：C JobManager、流式输出、原地后台化�
 先修日志追加 / 损坏处理与稳定 ID，再修重新排队、撤回、检查点和 interrupted 状态。每项修复都将上述独立反例变成永久回归，验证“受理 → 中断 → 恢复 → 处理或失效 → 再重启”的完整闭环。补充 Store / Journal 在 Write、Sync 和检查点替换失败时的故障注入，避免只有 OpenFile 失败测试。
 
 本轮仍只验收 B，先不开始后台 Job、完整 Hook 或 Fork。B 通过后沿第 4 节 C 做安静的持久 Fork，保持用户最关心的“保存原上下文，自主活动不打扰主聊天”要求；agent 循环继续由 C 内核承担。
+
+
+## 8. `5d8bc9a` 复验：直接反例通过，四类交叉场景仍需修复
+
+### 8.1 已通过的验证
+
+- 重新运行 `go vet ./...`、`go test ./... -count=1`，全部通过，app 包约 23.8 秒。
+- 重新运行 C core：205 checks / 0 failures。本次没有 C 源码改动，未重复运行执行器 / 宿主 ASan 套件。
+- 用临时 Go overlay 独立重跑上轮七个反例：恢复后实际 drain、完成后再重启；普通撤回后重启；残尾后追加并再重启；重新排队后崩溃；检查点跨重启保留身份和去重；interrupted 跨检查点保留；中间损坏后拒绝追加。七个场景均通过。
+- 上述恢复验证实际调用了 drainInterjections，再用原稳定 ID 记录结局；没有仅靠手工构造 injected / outcome 代替 drain。
+
+以下仍是第 6 节既有的 ID、持久提交、历史对账及失效语义在组合场景下的验证。所有运行反例使用真实 App / Store 和临时数据文件；只用 overlay 增加测试，没有修改产品实现。新增测试尚未作为永久测试写入仓库。
+
+### B7 [P1]：检查点没有保持运行中的去重索引与最高接收序号
+
+位置：`gateway/internal/app/interject_journal.go:360`（空 nj.dedup）、`:366`（head 不保存最高序号）、`:415`（以空索引替换 j.dedup）、`:517`（只从保留的状态恢复序号）。
+
+两个独立实测：
+
+1. **不重启的重发。** 受理一条带平台 ID 的补充，追加记录达到真实 512 阈值触发自动检查点，原进程再收到同一平台消息。实际 inbox 从 1 条变成 2 条。原因是 nj.append 不更新 nj.dedup，检查点完成时把原索引替换成空 map；跨重启测试会重建索引，所以发现不了这个问题。
+2. **所有旧补充已完成后的无 ID 新消息。** 受理无平台 ID 补充 → 实际 drain 并记 ok → 检查点回收已完成状态 → 重启 → 受理另一条无平台 ID 补充 → 实际 drain。实际新旧 interjection_id 相同，新正文没有进入历史；历史 ID 查重误把新消息当成旧消息。恢复时扫描剩余 received 的最大 Seq 无法保住已经被压缩掉的最高序号。
+
+修复要求：
+
+- 检查点必须保留独立的接收序号高水位，即使没有任何未完成条目；恢复时读取该高水位，不能只遍历 fold 后的未完成状态。
+- 检查点成功后，内存去重索引必须与新文件一致。对已完成 / 撤回消息定义有界去重保留窗口，并一并持久化；不能在任意一次检查点时意外清空去重责任。
+- 验证无 ID 消息经过多次检查点、重启和失效操作后仍分配不同 ID，且正文确实进入模型请求；仅比较两个手写 ID 的 hash 不足以验证分配器。
+
+建议永久回归：`TestAutomaticCheckpointPreservesDedupWithoutRestart`、`TestCheckpointPreservesReceiveHighWaterAfterAllSettled`。前者必须在原进程中重发；后者必须通过真实受理与 drain 检查新正文。
+
+### B8 [P1]：部分写入失败后，同进程重试仍会拼坏日志
+
+位置：`gateway/internal/app/interject_journal.go:172`。错误分支只返回错误，既不截去已经写出的部分，也不将当前句柄标为 broken；尾部修复只有下一次 openJournal 才执行，但当前句柄仍缓存在 a.journals。
+
+独立实测：在临时 Go 测试进程中使用 Linux RLIMIT_FSIZE 让一次真实 Write 只写出 20 字节，然后返回 EFBIG；立即恢复原限制，在同一 App 上再次 journalAppend。第二次追加返回 nil，但 readJournal 报第一行损坏。平台此时可收到“已受理”，重启却无法恢复该记录。测试进程已恢复原限制，没有更改宿主或生产进程的限制。
+
+修复要求：记录追加前的有效偏移；Write / Sync 失败后，只有确认旧提交边界已安全恢复，才能继续追加。若无法确认，立即冻结该日志的受理并保留现场，向用户返回未受理；不能等一次未来重启才修。对 Sync 失败应区分“提交结果未知”与“确定没有写入”，保留按稳定 ID 对账的能力。Store.Append 的失败恢复也应遵守对应规则。
+
+建议永久回归：`TestPartialJournalWriteThenRetryWithoutRestart`，必须注入真实部分写入而非仅让 OpenFile 失败；再覆盖 Sync 失败后的继续受理与重启对账。
+
+### B9 [P1 / P2]：历史对账受最近 400 条限制，且首次补记 injected 后没有继续状态
+
+位置：`gateway/internal/app/interject_journal.go:551`；`gateway/internal/session/store.go:157`、`:175`。
+
+两个独立实测：
+
+1. **[P1] 旧历史再次追加。** received 已提交，正式历史也已提交，但 injected 未提交；其后历史增加 401 条短消息。重启后，FindMessageBySource(..., 400) 找不到原消息，于是将其恢复为 pending。实际调用 drain 后，正式历史中同一个稳定 history_message_id 出现 **2 次**。drain 的最近 50 条查重同样没能兜底。历史达到 400 条不能改变消息是否已经提交的事实；压缩 / Base 变化也需要同等保证。
+2. **[P2] 首次恢复不可见。** 不增加后续消息，直接恢复“历史成功、injected 未提交”的状态：代码找到历史并补记 injected 后直接 continue。当前进程的 pending=0、interrupted=0；只有再重启一次，才会识别刚刚补记的 injected 为 interrupted。当前恢复应当完成全部状态转换，不应要求用户额外重启。
+
+修复要求：
+
+- 对当前世代内尚待对账的有限 ID，使用持久索引或流式检索可靠确认；不能把最近 N 条当成正确性的边界，也不需要将全部历史永久加载进内存。检查点、历史压缩、撤回、重置应有一致的 ID 生命周期。
+- 找到既有历史后，在同一次恢复中补齐 injected、未完成结局以及内存 interrupted / 可见计数；重建状态不应依赖恢复函数跑第二遍。
+
+建议永久回归：`TestHistoryReconciliationBeyondRecentWindow`（检查真实 drain 后正文仍只有一次）、`TestRecoveredHistoryWithoutInjectedIsImmediatelyContinuable`；另测 Base / 摘要压缩后的同一边界。
+
+### B10 [P1 / P2]：停止与重置未统一清理恢复状态，也未统一检查终态写入错误
+
+位置：`gateway/internal/app/app.go:1172`（无 run 直接返回）、`:1179`（忽略 withdrawInterjections 错误）、`:1198`（重置不清 interrupted / pendingBytes）。平台 recall 入口也仍然忽略 withdrawInterjections 返回值。
+
+三个独立实测：
+
+1. **[P1] 停止恢复的待处理。** 正常受理 → 重启恢复 pending，但尚无新 run → 调用 stop → 再重启。实际 pending 仍为 1，后续普通消息会再次自动带入该补充。用户明确停止后的待处理责任没有终止。
+2. **[P1] 撤回终态写失败。** 正常受理 → 注入日志句柄写入失败 → 通过真实 `/stop` 入口停止并收取 cancelled 终态 → 重启。用户已收到“已停止”，补充却再次恢复为 pending=1。当前实现没有使用 withdrawInterjections 的错误结果，仍清空内存并继续正常停止回执。当前“停止执行”和“补充已持久丢弃”的结果必须分别报告清楚。
+3. **[P2] 重置留下旧中断提示。** 用真实历史和 included 记录恢复 interrupted=1 → 调用 reset。历史和世代已重置，但当前进程 interruptedCount 仍为 1，下一轮会继续提示旧上下文中还有补充没有处理完；再重启才消失。pendingBytes 也应随 pending 一起清理。
+
+修复要求：stop、reset、普通撤回、平台撤回、删除和身份切换共用明确的失效转换，涵盖 run.inbox、恢复 pending、interrupted、队列和字节计数。没有活跃 run 不等于没有待处理责任。持久终态写失败时保留可对账状态并报告实际失败；停止进程本身仍应及时执行，不能为了写日志继续运行用户已要求停止的工具。
+
+建议永久回归：`TestStopRestoredPendingWithoutRun`、`TestStopReportsJournalFailureAndDoesNotClaimDurableDiscard`、`TestResetClearsInterruptedAndPendingBytesImmediately`；平台撤回和恢复消息也应覆盖写失败。
+
+### 8.2 交付顺序与复验边界
+
+先修 B7 和 B8，再修 B9 的可靠历史对账及 B10 的失效转换；同批补齐 B9 / B10 的 P2 可见状态问题。把以上组合场景加入永久回归，覆盖原进程继续运行与再次重启两个方向。检查点替换的目录更新持久化、Sync 失败和跨文件提交仍按第 6 节的约束检查，不能只检查正常 Write 后的文件内容。
+
+这些完成后再复验 B，通过后按第 4 节 C 开始安静的持久 Fork。此次仍只更新验收文档，没有修改产品源码，没有开始 Fork、后台 Job 或完整 Hook。

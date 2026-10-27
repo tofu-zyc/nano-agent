@@ -191,6 +191,20 @@
 `TestRequeuedInterjectionSurvivesCrashBeforeNextRun`、`TestCheckpointPreservesAgentAndDedupAcrossRestart`、
 `TestUndoInterjectionDoesNotReturnAfterRestart`、`TestInterruptedInterjectionRemainsVisibleAfterCheckpointAndRestart`。
 
+### 四轮验收修复（B7–B10）
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| B7 | 检查点破坏去重与序号分配 | 检查点额外保存**接收序号高水位**（`head.seq`）和**有界的去重窗口**（最近 256 个 `dedup` 记录）；替换完成后内存索引与高水位与新文件一致。重启后接收序号接着高水位往上走，无平台 ID 的消息不会分到旧 ID |
+| B8 | 部分写入失败后同进程重试拼坏日志 | 记录每条成功记录之后的文件偏移；Write / Sync 失败时先把文件截回上一个完整提交位置并确认成功，再返回错误（调用方不回执）；截不回去就冻结该日志并保留现场 |
+| B9 | 历史对账只看最近 400 条；补记 injected 后首次恢复不可见 | `FindMessage` / `FindMessageBySource` 支持 `limit<=0` 查全部（历史本来就在内存里），恢复与 drain 查重都改成查全部；补记 injected 的同一次恢复里就判成 interrupted 并计入可见状态，不再要求重启第二次 |
+| B10 | 停止 / 重置的失效转换 | 新增 `discardPending`：停止、重置统一处理待处理、中断未完成与字节计数；**没有活跃 run 的 /stop 也清**；终态写失败时保留可对账状态并明确报告（先停进程，再报告丢弃结果）；重置当场清内存里的 interrupted / pendingBytes；平台撤回同样检查写错误 |
+
+回归：`TestAutomaticCheckpointPreservesDedupWithoutRestart`、`TestCheckpointPreservesReceiveHighWaterAfterAllSettled`、
+`TestPartialJournalWriteThenRetryWithoutRestart`、`TestHistoryReconciliationBeyondRecentWindow`、
+`TestRecoveredHistoryWithoutInjectedIsImmediatelyContinuable`、`TestStopRestoredPendingWithoutRun`、
+`TestStopReportsJournalFailureAndDoesNotClaimDurableDiscard`、`TestResetClearsInterruptedAndPendingBytesImmediately`。
+
 ## 还没做（按设计文档的阶段）
 
 | 阶段 | 内容 | 说明 |

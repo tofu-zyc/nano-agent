@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -48,7 +50,12 @@ func TestInterjectionReceiptNeedsDurableWrite(t *testing.T) {
 	e := setup(t)
 	e.say("任务", msgID("m1"))
 	e.k.expect(proto.TInput)
-	// 用目录占住日志文件的位置，让写入必然失败
+	// 用目录占住日志文件的位置，让写入必然失败（先丢掉缓存的句柄，否则还在写旧文件）
+	if j := e.a.journals[e.sid]; j != nil {
+		j.close()
+		delete(e.a.journals, e.sid)
+	}
+	_ = os.Remove(e.a.journalPath(e.sid))
 	if err := os.MkdirAll(e.a.journalPath(e.sid), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -461,3 +468,244 @@ func TestInterruptedInterjectionRemainsVisibleAfterCheckpointAndRestart(t *testi
 		t.Fatalf("已经进历史的不能回到待处理：%d", len(s3.pending))
 	}
 }
+
+// B7：检查点之后，原进程重发同一条平台消息不能再次受理。
+func TestAutomaticCheckpointPreservesDedupWithoutRestart(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	e.a.mu.Lock()
+	if err := e.a.checkpointJournal(e.sid); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	// 同一进程内重发
+	e.say("补充", msgID("m2"))
+	time.Sleep(30 * time.Millisecond)
+	e.a.mu.Lock()
+	n := len(e.a.sessions[e.sid].run.inbox)
+	e.a.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("检查点之后重发又被受理了：收件箱 %d 条", n)
+	}
+	if _, ok := e.a.journalByDedup(e.sid, dedupKey(e.sid, "fake", "c1", "m2")); !ok {
+		t.Fatal("检查点之后内存去重索引丢了")
+	}
+}
+
+// B7：所有旧补充都完成、被检查点回收之后，接收序号高水位仍要保住。
+func TestCheckpointPreservesReceiveHighWaterAfterAllSettled(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	// 无平台 ID 的补充：ID 由会话内序号分配
+	e.say("补充甲", func(m *channel.Message) { m.MsgID = "" })
+	e.ch.wait(t, "已收到插话")
+	e.a.mu.Lock()
+	s := e.a.sessions[e.sid]
+	first := s.run.inbox[0]
+	// 真实 drain + 结局
+	if !e.a.drainInterjections(s, s.run) {
+		e.a.mu.Unlock()
+		t.Fatal("drain 失败")
+	}
+	e.a.settleInterjections(e.sid, []string{first.id}, outcomeOK, "测试")
+	if err := e.a.checkpointJournal(e.sid); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if s2.interjectSeq < int64(first.seq) {
+		t.Fatalf("接收序号倒退：%d < %d", s2.interjectSeq, first.seq)
+	}
+	// 新的一条无 ID 补充不能拿到旧 ID
+	newID := interjectionID(fmt.Sprintf("%s|seq-%d", e.sid, s2.interjectSeq+1))
+	if newID == first.id {
+		t.Fatal("新消息拿到了旧的 interjection_id")
+	}
+}
+
+// B8：写了一半失败后，同进程重试不能拼坏日志。
+func TestPartialJournalWriteThenRetryWithoutRestart(t *testing.T) {
+	e := setup(t)
+	j, err := e.a.openJournal(e.sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟写出 20 字节后失败（EFBIG 之类）
+	if _, err := j.file.WriteString(`{"v":1,"kind":"rece`); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.afterWriteError(errors.New("EFBIG")); err == nil {
+		t.Fatal("部分写入失败却返回成功")
+	}
+	// 同进程继续追加：必须能成功，而且日志整体可读
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: "ij-a", Seq: 1, Text: "补充"}); err != nil {
+		t.Fatalf("修复尾部后还写不进去：%v", err)
+	}
+	recs, _, err := readJournal(e.a.journalPath(e.sid))
+	if err != nil {
+		t.Fatalf("日志被拼坏了：%v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != "ij-a" {
+		t.Fatalf("记录：%+v", recs)
+	}
+}
+
+// B9：历史变长之后对账仍然成立（不能只看最近 N 条）。
+func TestHistoryReconciliationBeyondRecentWindow(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	id := interjectionID(dedupKey(e.sid, "fake", "c1", "m2"))
+	histID := interjectionHistoryID([]string{id})
+	if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "合并后的正文",
+		Kind: "user_interjection", ID: histID, SourceIDs: []string{id}}); err != nil {
+		t.Fatal(err)
+	}
+	// 后面再接 401 条短消息，把那条挤出"最近 400 条"
+	for i := 0; i < 401; i++ {
+		if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "闲聊"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(e.a.store.History(e.sid))
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.pending) != 0 {
+		t.Fatalf("历史里的补充被当成待处理了：%d", len(s2.pending))
+	}
+	if got := len(a2.store.History(e.sid)); got != before {
+		t.Fatalf("历史被重复写：%d → %d", before, got)
+	}
+}
+
+// B9：补记 injected 的同一次恢复里，就要能看到"可以继续"。
+func TestRecoveredHistoryWithoutInjectedIsImmediatelyContinuable(t *testing.T) {
+	e := setup(t)
+	id := "ij-hist-first"
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: id, Seq: 1, Text: "补充"}); err != nil {
+		t.Fatal(err)
+	}
+	histID := interjectionHistoryID([]string{id})
+	if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "正文", Kind: "user_interjection",
+		ID: histID, SourceIDs: []string{id}}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.interrupted) != 1 {
+		t.Fatalf("第一次恢复就应该能看到中断状态：%d", len(s2.interrupted))
+	}
+	if len(s2.pending) != 0 {
+		t.Fatalf("已经写进历史的不该回到待处理：%d", len(s2.pending))
+	}
+	if got := a2.interruptedCount(e.sid); got != 1 {
+		t.Fatalf("可见计数：%d", got)
+	}
+}
+
+// B10：没有活跃 run 时，/stop 也要清掉恢复的待处理。
+func TestStopRestoredPendingWithoutRun(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	a2 := reopen(t, e)
+	a2.AddChannel(&fakeCh{sent: make(chan string, 10)})
+	s2 := a2.sessOf(e.sid)
+	if len(s2.pending) != 1 {
+		t.Fatalf("恢复：%d", len(s2.pending))
+	}
+	a2.mu.Lock()
+	a2.stop(in{s: s2, ep: endpoint{ch: "fake", chat: "c1"}, who: "fake:u1"})
+	a2.mu.Unlock()
+	if len(s2.pending) != 0 {
+		t.Fatalf("停止之后还有待处理：%d", len(s2.pending))
+	}
+	a3 := reopen(t, e)
+	if got := len(drainPending(a3.sessOf(e.sid))); got != 0 {
+		t.Fatalf("重启后又活了：%d", got)
+	}
+}
+
+// B10：终态写失败时必须说清楚，不能回"已经停干净了"。
+func TestStopReportsJournalFailureAndDoesNotClaimDurableDiscard(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	a2 := reopen(t, e)
+	ch := &fakeCh{sent: make(chan string, 10)}
+	a2.AddChannel(ch)
+	s2 := a2.sessOf(e.sid)
+	// 让日志写不进去：丢掉句柄，用目录占位
+	if j := a2.journals[e.sid]; j != nil {
+		j.close()
+		delete(a2.journals, e.sid)
+	}
+	_ = os.Remove(a2.journalPath(e.sid))
+	if err := os.MkdirAll(a2.journalPath(e.sid), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a2.mu.Lock()
+	a2.stop(in{s: s2, ep: endpoint{ch: "fake", chat: "c1"}, who: "fake:u1"})
+	a2.mu.Unlock()
+	ch.wait(t, "没能保存下来")
+	if len(s2.pending) != 1 {
+		t.Fatalf("写失败却把待处理清了：%d", len(s2.pending))
+	}
+}
+
+// B10：重置之后，中断提示和字节计数要立刻消失，不用等重启。
+func TestResetClearsInterruptedAndPendingBytesImmediately(t *testing.T) {
+	e := setup(t)
+	id := "ij-reset-int"
+	for _, rec := range []journalRec{
+		{Kind: jrecReceived, ID: id, Seq: 1, Text: "补充"},
+		{Kind: jrecInjected, ID: id, HistoryID: "h1"},
+		{Kind: jrecIncluded, ID: id, RequestID: "r1-t1", Revision: 1},
+	} {
+		if err := e.a.journalAppend(e.sid, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: "ij-reset-pending", Seq: 2, Text: "待处理"}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := reopen(t, e)
+	ch := &fakeCh{sent: make(chan string, 10)}
+	a2.AddChannel(ch)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.interrupted) != 1 || len(s2.pending) != 1 {
+		t.Fatalf("恢复：interrupted=%d pending=%d", len(s2.interrupted), len(s2.pending))
+	}
+	before := s2.pendingBytes
+	if before == 0 {
+		t.Fatal("字节计数没恢复")
+	}
+	a2.mu.Lock()
+	a2.reset(in{s: s2, ep: endpoint{ch: "fake", chat: "c1"}, who: "fake:u1"})
+	a2.mu.Unlock()
+	if len(s2.interrupted) != 0 || s2.pendingBytes != 0 || len(s2.pending) != 0 {
+		t.Fatalf("重置后没清干净：interrupted=%d bytes=%d pending=%d",
+			len(s2.interrupted), s2.pendingBytes, len(s2.pending))
+	}
+	if got := a2.interruptedCount(e.sid); got != 0 {
+		t.Fatalf("可见计数没清：%d", got)
+	}
+}
+
+// drainPending 是测试里把恢复的待处理拿出来看的辅助。
+func drainPending(s *sess) []interjection { return s.pending }

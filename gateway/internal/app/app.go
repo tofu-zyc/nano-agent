@@ -1170,17 +1170,26 @@ func (a *App) stop(c in) {
 	s := c.s
 	s.queue = nil
 	if s.run == nil {
+		// 没有 run 不代表没有待处理责任：恢复出来的补充、重新排队过的补充也要一起作废
+		if err := a.discardPending(s, "stop", "用户停止任务"); err != nil {
+			a.answer(c, fmt.Sprintf("当前没有进行中的任务。补充的丢弃没能保存下来（%v），重启后可能还会出现", err))
+			return
+		}
 		a.answer(c, "当前没有进行中的任务")
 		return
 	}
 	s.run.addOut(c.ep)
 	s.run.dropInbox = true // 用户明确停止：还在等边界的那几条补充不再自动开新一轮
-	// 停止是持久终态：这些补充重启后不能再复活
-	a.withdrawInterjections(s.sid, s.run.inbox, "stop", "用户停止任务")
+	// 停止是持久终态：这些补充重启后不能再复活。先杀进程，再报告丢弃结果——
+	// 用户要求停止就得停下来，不能为了写日志继续跑工具。
+	inbox := s.run.inbox
 	s.run.inbox, s.run.inboxBytes = nil, 0
-	a.withdrawInterjections(s.sid, s.pending, "stop", "用户停止任务")
-	s.pending = nil
 	a.cancelRun(s) // 内核会回 done(cancelled)
+	if err := a.discardPending(s, "stop", "用户停止任务"); err != nil {
+		a.log.Warn("停止时丢弃补充失败", "sid", s.sid, "err", err)
+		a.deliver(c.ep, fmt.Sprintf("已停止任务；补充的丢弃没能保存下来（%v），重启后可能还会出现。", err), "")
+	}
+	_ = inbox
 }
 
 func (a *App) reset(c in) {
@@ -1190,14 +1199,14 @@ func (a *App) reset(c in) {
 		s.resetAfter = true
 		s.run.addOut(c.ep)
 		s.run.dropInbox = true
-		a.withdrawInterjections(s.sid, s.run.inbox, "reset", "用户清空上下文")
 		s.run.inbox, s.run.inboxBytes = nil, 0
 		a.cancelRun(s)
+		a.discardPending(s, "reset", "用户清空上下文")
+	s.pending, s.pendingBytes, s.interrupted = nil, 0, nil // 世代已经换了，内存里的旧状态一律清掉 // 重置也要清干净，别等到重启
 		return
 	}
 	a.newGeneration(s) // 重置之后，之前受理的补充全部作废（重启也不会复活）
-	a.withdrawInterjections(s.sid, s.pending, "reset", "用户清空上下文")
-	s.pending = nil
+	a.discardPending(s, "reset", "用户清空上下文")
 	if err := a.resetHistory(s); err != nil {
 		a.log.Warn("清空上下文失败", "sid", s.sid, "err", err)
 	}

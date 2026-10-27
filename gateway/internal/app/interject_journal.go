@@ -36,14 +36,17 @@ import (
 //	                    interrupted 是"没有结局、还需要人处理"。
 //	withdrawn           用户撤回、停止、重置、删除导致这条补充失效：重启后不能复活
 //
-// 恢复时按 ID 和历史对账：写进历史但没记 injected 的补记一笔，不会重复追加正文；
-// 已经 included 但没有结局的标成 interrupted，并作为"可继续"的状态一直保留。
+// 检查点除了未完成条目，还要保留两个"跨压缩必须活着"的东西：
+//   - 接收序号高水位（head.seq）：没有它，重启后无平台 ID 的新消息会分到旧 ID；
+//   - 有界的去重窗口（dedup 记录）：已完成/撤回的消息在一段时间内仍要能挡住渠道重发。
 
 const (
 	journalVersion      = 1
 	journalCheckpointAt = 512 // 记录数超过这个就重写成检查点
+	journalDedupKeep    = 256 // 去重窗口：最近这么多个去重键跨检查点保留
 
 	jrecHead      = "head"
+	jrecDedup     = "dedup"
 	jrecReceived  = "received"
 	jrecInjected  = "injected"
 	jrecIncluded  = "included"
@@ -73,7 +76,7 @@ func definitiveOutcome(outcome string) bool {
 type journalRec struct {
 	V          int                `json:"v"`
 	Kind       string             `json:"kind"`
-	Seq        int64              `json:"seq,omitempty"`   // 会话内单调递增的接收序号
+	Seq        int64              `json:"seq,omitempty"`   // 接收序号（head 里是高水位）
 	ID         string             `json:"id,omitempty"`    // 稳定 interjection_id
 	MsgID      string             `json:"msg_id,omitempty"` // 平台原始消息 ID（和内部 ID 分开）
 	Dedup      string             `json:"dedup,omitempty"`
@@ -97,10 +100,15 @@ type journalRec struct {
 type interjectionJournal struct {
 	path  string
 	file  *os.File
-	count int               // 已经写进去多少条记录（用来决定什么时候重写检查点）
-	dedup map[string]string // 去重键 → interjection_id（打开时从日志建好）
-	// broken 非空表示这份日志有中间损坏 / 版本不认识 / 读不出来：保留现场，
-	// 不能再往里追加并回执"已收到"。
+	count int   // 已经写进去多少条记录（用来决定什么时候重写检查点）
+	good  int64 // 最后一个完整提交的记录之后的文件偏移
+	// highSeq 是接收序号高水位：检查点把它写进 head，重启后接着往上分配
+	highSeq int64
+	// dedup 是去重索引（去重键 → interjection_id），dedupOrder 记插入顺序用于有界裁剪
+	dedup      map[string]string
+	dedupOrder []string
+	// broken 非空表示这份日志有中间损坏 / 版本不认识 / 写坏过又修不好：
+	// 保留现场，不能再往里追加并回执"已收到"。
 	broken error
 }
 
@@ -131,12 +139,22 @@ func (a *App) openJournal(sid string) (*interjectionJournal, error) {
 		j.broken = err
 		a.log.Error("插话日志损坏，保留现场并停止受理", "sid", sid, "err", err)
 	} else {
-		j.count = len(recs)
+		j.count, j.good = len(recs), good
 		for _, rec := range recs {
-			if rec.Kind == jrecReceived && rec.Dedup != "" {
+			if rec.Kind == jrecHead && rec.Seq > j.highSeq {
+				j.highSeq = rec.Seq
+			}
+			if rec.Seq > j.highSeq {
+				j.highSeq = rec.Seq
+			}
+			if rec.Dedup != "" && rec.ID != "" && (rec.Kind == jrecReceived || rec.Kind == jrecDedup) {
+				if _, seen := j.dedup[rec.Dedup]; !seen {
+					j.dedupOrder = append(j.dedupOrder, rec.Dedup)
+				}
 				j.dedup[rec.Dedup] = rec.ID
 			}
 		}
+		j.trimDedup()
 		// 截掉没提交的尾部
 		if st, serr := os.Stat(p); serr == nil && st.Size() > good {
 			if terr := os.Truncate(p, good); terr != nil {
@@ -159,6 +177,15 @@ func (a *App) openJournal(sid string) (*interjectionJournal, error) {
 	return j, nil
 }
 
+// trimDedup 只保留最近 journalDedupKeep 个去重键。
+func (j *interjectionJournal) trimDedup() {
+	for len(j.dedupOrder) > journalDedupKeep {
+		old := j.dedupOrder[0]
+		j.dedupOrder = j.dedupOrder[1:]
+		delete(j.dedup, old)
+	}
+}
+
 // append 写一条记录并 fsync：返回 nil 之前，这条记录已经在磁盘上。
 func (j *interjectionJournal) append(rec journalRec) error {
 	if j.broken != nil {
@@ -169,15 +196,37 @@ func (j *interjectionJournal) append(rec journalRec) error {
 	if err != nil {
 		return err
 	}
-	if _, err := j.file.Write(append(line, '\n')); err != nil {
-		// 写失败可能已经写出了一部分字节：这条尾部在下一次打开时会被截掉
-		return err
+	buf := append(line, '\n')
+	if _, err := j.file.Write(buf); err != nil {
+		return j.afterWriteError(err)
 	}
 	if err := j.file.Sync(); err != nil {
-		return err
+		return j.afterWriteError(err)
 	}
 	j.count++
+	j.good += int64(len(buf))
 	return nil
+}
+
+// afterWriteError 处理"写了一半或不知道写没写进去"的情况。
+//
+// 关键：这条记录没有提交，但文件尾部可能已经被写坏了。先把文件截回上一个
+// 完整提交的偏移并确认成功，之后还能继续受理；截不回去就冻结这份日志，
+// 让调用方向用户回"没有受理"，不能等下一次重启才修。
+func (j *interjectionJournal) afterWriteError(cause error) error {
+	j.close()
+	if err := os.Truncate(j.path, j.good); err != nil {
+		j.broken = fmt.Errorf("插话日志尾部修不回去（%v），已停止受理：%w", cause, err)
+		return j.broken
+	}
+	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		j.broken = fmt.Errorf("插话日志重新打开失败（%v）：%w", cause, err)
+		return j.broken
+	}
+	j.file = f
+	// 尾部已经回到上一次完整提交的位置：这次仍然算失败（记录没落地），但日志可用
+	return cause
 }
 
 func (j *interjectionJournal) close() {
@@ -272,7 +321,7 @@ func foldJournal(recs []journalRec, generation int64) []*interjState {
 		return s
 	}
 	for _, rec := range recs {
-		if rec.Kind == jrecHead || rec.ID == "" || rec.Kind == jrecDiscard {
+		if rec.Kind == jrecHead || rec.Kind == jrecDedup || rec.ID == "" || rec.Kind == jrecDiscard {
 			continue
 		}
 		if rec.Generation != generation {
@@ -327,8 +376,15 @@ func (a *App) journalAppend(sid string, rec journalRec) error {
 	if err := j.append(rec); err != nil {
 		return err
 	}
-	if rec.Kind == jrecReceived && rec.Dedup != "" {
+	if rec.Seq > j.highSeq {
+		j.highSeq = rec.Seq
+	}
+	if rec.Dedup != "" && rec.ID != "" && rec.Kind == jrecReceived {
+		if _, seen := j.dedup[rec.Dedup]; !seen {
+			j.dedupOrder = append(j.dedupOrder, rec.Dedup)
+		}
 		j.dedup[rec.Dedup] = rec.ID
+		j.trimDedup()
 	}
 	if j.count > journalCheckpointAt {
 		if err := a.checkpointJournal(sid); err != nil {
@@ -339,7 +395,8 @@ func (a *App) journalAppend(sid string, rec journalRec) error {
 }
 
 // checkpointJournal 把日志重写成小检查点：保留所有还没有明确结束的条目，
-// 连身份、去重键、稳定 ID、世代、请求与 revision 一起原样带过去。
+// 连身份、去重键、稳定 ID、世代、请求与 revision 一起原样带过去；
+// 另外单独保存接收序号高水位和一小段去重窗口，避免"压缩之后重发又被受理"。
 // 先写临时文件、逐条检查错误、再 rename：任何一步失败都保留旧日志。
 func (a *App) checkpointJournal(sid string) error {
 	j := a.journals[sid]
@@ -352,19 +409,41 @@ func (a *App) checkpointJournal(sid string) error {
 		return err // 损坏的日志保留现场，不覆盖
 	}
 	states := foldJournal(recs, gen)
+	high := j.highSeq
+	for _, s := range states {
+		if s.Seq > high {
+			high = s.Seq
+		}
+	}
 	tmp := j.path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	nj := &interjectionJournal{path: tmp, file: f, dedup: map[string]string{}}
+	nj := &interjectionJournal{path: tmp, file: f, highSeq: high, dedup: map[string]string{}}
 	fail := func(err error) error {
 		f.Close()
 		os.Remove(tmp)
 		return err
 	}
-	if err := nj.append(journalRec{Kind: jrecHead, Generation: gen, Note: "checkpoint"}); err != nil {
+	if err := nj.append(journalRec{Kind: jrecHead, Seq: high, Generation: gen, Note: "checkpoint"}); err != nil {
 		return fail(err)
+	}
+	// 去重窗口：最近 journalDedupKeep 个键（不管条目是否已经结束）
+	keep := j.dedupOrder
+	if len(keep) > journalDedupKeep {
+		keep = keep[len(keep)-journalDedupKeep:]
+	}
+	for _, key := range keep {
+		id := j.dedup[key]
+		if id == "" {
+			continue
+		}
+		if err := nj.append(journalRec{Kind: jrecDedup, ID: id, Dedup: key, Generation: gen}); err != nil {
+			return fail(err)
+		}
+		nj.dedup[key] = id
+		nj.dedupOrder = append(nj.dedupOrder, key)
 	}
 	for _, s := range states {
 		if s.withdrawn || s.settled {
@@ -374,6 +453,12 @@ func (a *App) checkpointJournal(sid string) error {
 			Text: s.Text, Images: s.Images, Who: s.Who, Agent: s.Agent, Channel: s.Channel, Chat: s.Chat,
 			At: s.At, Generation: s.Generation}); err != nil {
 			return fail(err)
+		}
+		if s.Dedup != "" {
+			if _, seen := nj.dedup[s.Dedup]; !seen {
+				nj.dedup[s.Dedup] = s.ID
+				nj.dedupOrder = append(nj.dedupOrder, s.Dedup)
+			}
 		}
 		if s.injected {
 			if err := nj.append(journalRec{Kind: jrecInjected, ID: s.ID, HistoryID: s.HistoryID, RunID: s.RunID,
@@ -412,7 +497,12 @@ func (a *App) checkpointJournal(sid string) error {
 		j.broken = err // 替换后打不开：停止受理，别把状态当成正常
 		return err
 	}
-	j.file, j.count, j.dedup = f2, nj.count, nj.dedup
+	// 内存索引必须和新文件一致：去重窗口与高水位都跟着走
+	j.file, j.count, j.dedup, j.dedupOrder = f2, nj.count, nj.dedup, nj.dedupOrder
+	j.highSeq = high
+	if st, err := os.Stat(j.path); err == nil {
+		j.good = st.Size()
+	}
 	return nil
 }
 
@@ -465,6 +555,26 @@ func (a *App) withdrawInterjections(sid string, items []interjection, reason, no
 	return firstErr
 }
 
+// discardPending 把"待处理"和"中断未完成"的补充统一作废：停止、重置共用。
+// 写失败时内存状态保持不动——不能一边说已停止、一边假装已经清干净。
+func (a *App) discardPending(s *sess, reason, note string) error {
+	firstErr := a.withdrawInterjections(s.sid, s.pending, reason, note)
+	for _, it := range s.interrupted {
+		if it.id == "" {
+			continue
+		}
+		if err := a.journalAppend(s.sid, journalRec{Kind: jrecOutcome, ID: it.id,
+			Outcome: outcomeCancelled, Note: note}); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		s.pending, s.pendingBytes = nil, 0
+		s.interrupted = nil
+	}
+	return firstErr
+}
+
 // settleInterjections 给这一轮处理过的补充记上结局。
 func (a *App) settleInterjections(sid string, ids []string, outcome, note string) {
 	for _, id := range ids {
@@ -497,15 +607,27 @@ func interjectionOutcome(status string) string {
 
 // restoreInterjections 在会话第一次被访问时，把日志里还没处理完的补充恢复出来。
 // 调用方持有锁；重复调用是幂等的。
+//
+// 必须一次跑完所有状态转换：补记 injected 的同一次里也要判成 interrupted，
+// 不能要求用户再重启一次才看得到"可以继续"。
 func (a *App) restoreInterjections(s *sess) {
 	if s == nil || s.sid == "" || s.restored || a.store == nil {
 		return
 	}
 	s.restored = true
+	j, jerr := a.openJournal(s.sid)
+	if jerr != nil {
+		a.log.Error("插话日志打不开，保留现场等人工处理", "sid", s.sid, "err", jerr)
+		return
+	}
 	recs, _, err := readJournal(a.journalPath(s.sid))
 	if err != nil {
 		a.log.Error("插话日志读不出来，保留现场等人工处理", "sid", s.sid, "err", err)
 		return
+	}
+	// 接收序号高水位：重启后接着往上分配，无平台 ID 的消息不会撞旧 ID
+	if j.highSeq > s.interjectSeq {
+		s.interjectSeq = j.highSeq
 	}
 	if len(recs) == 0 {
 		return
@@ -514,8 +636,15 @@ func (a *App) restoreInterjections(s *sess) {
 	states := foldJournal(recs, gen)
 	var pending []*interjState
 	var interrupted []*interjState
+	markInterrupted := func(st *interjState, note string) {
+		if err := a.journalAppend(s.sid, journalRec{Kind: jrecOutcome, ID: st.ID,
+			Outcome: outcomeInterrupted, Note: note}); err != nil {
+			a.log.Warn("补记插话结局失败", "sid", s.sid, "err", err)
+		}
+		st.Outcome = outcomeInterrupted
+		interrupted = append(interrupted, st)
+	}
 	for _, st := range states {
-		// 受理序号在重启后必须继续往上走，否则无平台 ID 的消息会撞 ID
 		if st.Seq > s.interjectSeq {
 			s.interjectSeq = st.Seq
 		}
@@ -528,7 +657,6 @@ func (a *App) restoreInterjections(s *sess) {
 			continue
 		}
 		if st.injected || st.included {
-			// 已经写进历史：不再追加正文。
 			if !st.settled {
 				if st.Outcome == outcomeInterrupted {
 					interrupted = append(interrupted, st) // 已经是 interrupted：保持可见
@@ -538,18 +666,19 @@ func (a *App) restoreInterjections(s *sess) {
 				if st.included {
 					note = "进程重启前已经进入模型请求，但没有拿到结局（请求 " + st.RequestID + "）"
 				}
-				if err := a.journalAppend(s.sid, journalRec{Kind: jrecOutcome, ID: st.ID,
-					Outcome: outcomeInterrupted, Note: note}); err != nil {
-					a.log.Warn("补记插话结局失败", "sid", s.sid, "err", err)
-				}
-				st.Outcome = outcomeInterrupted
-				interrupted = append(interrupted, st)
+				markInterrupted(st, note)
 			}
 			continue
 		}
-		// 写进历史了但没记 injected（历史成功、日志失败就崩了）：按历史对账补记
-		if msg, ok := a.store.FindMessageBySource(s.sid, st.ID, 400); ok {
-			_ = a.journalAppend(s.sid, journalRec{Kind: jrecInjected, ID: st.ID, HistoryID: msg.ID})
+		// 写进历史了但没记 injected（历史成功、日志失败就崩了）：按历史对账补记。
+		// 历史可能很长，不能用"最近 N 条"当边界：这里查全部（历史本来就在内存里）。
+		if msg, ok := a.store.FindMessageBySource(s.sid, st.ID, 0); ok {
+			if err := a.journalAppend(s.sid, journalRec{Kind: jrecInjected, ID: st.ID, HistoryID: msg.ID}); err != nil {
+				a.log.Warn("补记 injected 失败", "sid", s.sid, "id", st.ID, "err", err)
+				continue
+			}
+			// 同一次恢复里就要判成 interrupted：请求有没有完成是未知的
+			markInterrupted(st, "进程重启前已写入历史，但没有发起模型请求")
 			continue
 		}
 		if st.settled || st.included {
