@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
@@ -99,17 +100,39 @@ func (s *Store) isDead(sid string) bool {
 	return err == nil
 }
 
-// deadLegacyMarker 记下“这个 sid 已经开过新一代”：旧根里的备份元数据永久失效，
-// 同 sid 新代激活也不会把旧分支关系带回来。
-func (s *Store) deadLegacyMarker(sid string) string {
+// deadLegacyMarker 是会话的世代号文件：每开一次新一代就加一。旧根备份的授权只在
+// 第 0 代（从没删除重建过）有效；改名等操作也用它绑定“自己处理的是哪一代”。
+func (s *Store) genFile(sid string) string {
 	return filepath.Join(s.dirV1(), "gen", Key(sid))
 }
 
-// legacyDead 报告这个 sid 的旧根备份是不是已经永久失效。
-func (s *Store) legacyDead(sid string) bool {
-	_, err := os.Stat(s.deadLegacyMarker(sid))
-	return err == nil
+// readGen 读当前世代号（没有文件是第 0 代）。
+func (s *Store) readGen(sid string) int64 {
+	b, err := os.ReadFile(s.genFile(sid))
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
+
+// bumpGen 把世代号加一并持久化，返回新值。
+func (s *Store) bumpGen(sid string) (int64, error) {
+	next := s.readGen(sid) + 1
+	if err := os.MkdirAll(filepath.Dir(s.genFile(sid)), 0o700); err != nil {
+		return 0, err
+	}
+	if err := writeFileAtomic(s.genFile(sid), []byte(strconv.FormatInt(next, 10))); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// legacyDead 报告这个 sid 的旧根备份是不是已经永久失效（开过新一代）。
+func (s *Store) legacyDead(sid string) bool { return s.readGen(sid) > 0 }
 
 // deletedMarker 是“这个会话被明确删除过”的墓碑：旧备份保留，但不再自动复活。
 func (s *Store) deletedMarker(sid string) string {

@@ -8,7 +8,9 @@ package session
 
 import (
 	"bufio"
-	"sync"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"nano-agent/gateway/internal/llm"
@@ -59,7 +62,7 @@ type Store struct {
 	promoted map[string]bool       // 已经升级到新布局的会话（W1）
 
 	snapCacheMu sync.Mutex
-	snapCache   map[string][]Msg  // 快照只读缓存（有上限，空闲分支不各留一份）
+	snapCache   map[string][]Msg // 快照只读缓存（有上限，空闲分支不各留一份）
 	snapBytes   map[string]int64
 	snapBudget  int64
 }
@@ -111,11 +114,24 @@ func (s *Store) ResumeRenames() error {
 	return nil
 }
 
-// renameOp 是一次改名的持久操作记录：失败后按它继续，不用盯着文件存在性猜。
+// renameOp 是一次改名的持久操作记录：绑定源的目标身份、世代与每个文件的内容版本。
 type renameOp struct {
-	From  string `json:"from"`
-	To    string `json:"to"`
-	Stage string `json:"stage"` // started | copied | committed
+	From    string                `json:"from"`
+	To      string                `json:"to"`
+	Stage   string                `json:"stage"` // started | copied | committed
+	FromGen int64                 `json:"from_gen"`
+	Files   map[string]renameFile `json:"files,omitempty"`
+}
+
+// renameFile 是一个文件在复制时的内容版本（长度 + sha1）。
+type renameFile struct {
+	Len int64  `json:"len"`
+	Sum string `json:"sum"`
+}
+
+func sumOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) renameOpFile(from, to string) string {
@@ -169,11 +185,8 @@ func (s *Store) startNewGeneration(sid string) error {
 		moved = true
 	}
 	_ = moved
-	// 旧根备份从此永久失效：即使以后清掉墓碑，旧分支元数据也不会重新授权
-	if err := os.MkdirAll(filepath.Dir(s.deadLegacyMarker(sid)), 0o700); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(s.deadLegacyMarker(sid), []byte(Key(sid))); err != nil {
+	// 世代加一：旧根备份从此永久失效，正在进行的操作也靠它判断“这还是不是自己那一代”
+	if _, err := s.bumpGen(sid); err != nil {
 		return err
 	}
 	return s.ensureActive(sid)
@@ -541,23 +554,28 @@ func (s *Store) Rename(from, to string) error {
 		return nil
 	}
 	opPath := s.renameOpFile(from, to)
+	var op renameOp
 	stage := ""
 	if b, err := os.ReadFile(opPath); err == nil {
-		var op renameOp
-		if json.Unmarshal(b, &op) != nil || op.From != from || op.To != to {
+		if err := json.Unmarshal(b, &op); err != nil || op.From != from || op.To != to {
 			return fmt.Errorf("改名操作记录损坏或不匹配：%s", opPath)
 		}
 		stage = op.Stage
+		switch stage {
+		case "started", "copied", "committed":
+		default:
+			return fmt.Errorf("改名操作记录的阶段不认识：%q（保留现场，不执行清理）", stage)
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	writeOp := func(st string) error {
-		b, _ := json.MarshalIndent(renameOp{From: from, To: to, Stage: st}, "", "  ")
+	writeOp := func() error {
+		b, _ := json.MarshalIndent(op, "", "  ")
 		return writeFileAtomic(opPath, b)
 	}
 	staging := s.renameStagingDir(from, to)
+	suffixes := []string{".jsonl", ".settings.json", ".branch.json"}
 	if stage == "" {
-		// 全新的一笔：先校验身份与映射，失败时源原样未动
 		if s.isDead(from) {
 			return fmt.Errorf("会话 %s 已经被删除", from)
 		}
@@ -567,17 +585,17 @@ func (s *Store) Rename(from, to string) error {
 		if err := s.rememberLongKey(to); err != nil {
 			return err
 		}
-		if err := writeOp("started"); err != nil {
+		op = renameOp{From: from, To: to, Stage: "started", FromGen: s.readGen(from), Files: map[string]renameFile{}}
+		if err := writeOp(); err != nil {
 			return err
 		}
 		stage = "started"
 	}
 	if stage == "started" {
-		// 复制进操作私有的 staging：未提交副本对普通定位不可见
 		if err := os.MkdirAll(staging, 0o700); err != nil {
 			return err
 		}
-		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		for _, suffix := range suffixes {
 			src, ok, err := s.locate(from, suffix)
 			if err != nil {
 				return err
@@ -592,18 +610,40 @@ func (s *Store) Rename(from, to string) error {
 			if err := os.WriteFile(filepath.Join(staging, strings.TrimPrefix(suffix, ".")), data, 0o600); err != nil {
 				return err
 			}
+			op.Files[suffix] = renameFile{Len: int64(len(data)), Sum: sumOf(data)}
 		}
-		if err := writeOp("copied"); err != nil {
+		op.Stage = "copied"
+		if err := writeOp(); err != nil {
 			return err
 		}
 		stage = "copied"
 	}
 	if stage == "copied" {
-		// 发布目标：只搬运目标上还不存在的文件，绝不覆盖已经被接受的新内容
+		// 源在这一笔期间有没有被写新内容：变了就报冲突，绝不把新内容丢掉
+		for _, suffix := range suffixes {
+			meta, tracked := op.Files[suffix]
+			if !tracked {
+				continue
+			}
+			src, ok, err := s.locate(from, suffix)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("改名的源文件不见了（%s），保留现场等待人工核对", suffix)
+			}
+			data, err := os.ReadFile(src)
+			if err != nil {
+				return err
+			}
+			if int64(len(data)) != meta.Len || sumOf(data) != meta.Sum {
+				return fmt.Errorf("源在这一笔改名期间又被写了新内容（%s），保留双方等待人工核对", suffix)
+			}
+		}
 		if err := s.ensureActive(to); err != nil {
 			return err
 		}
-		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		for _, suffix := range suffixes {
 			staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
 			data, err := os.ReadFile(staged)
 			if err != nil {
@@ -613,8 +653,16 @@ func (s *Store) Rename(from, to string) error {
 				return err
 			}
 			dst := s.newPath(to, suffix)
-			if _, err := os.Stat(dst); err == nil {
-				continue // 目标已经有这一份（恢复重入或已经被写过）：保留目标
+			if old, err := os.ReadFile(dst); err == nil {
+				if sumOf(old) == sumOf(data) {
+					continue // 已经发布过
+				}
+				// 历史是追加写的：目标以我们的内容开头，说明发布已经发生、后面又追加了新消息，
+				// 这些新消息必须保留，不能覆盖也不能因此丢掉源。只有前缀成立才这么判。
+				if suffix == ".jsonl" && len(old) > len(data) && bytes.Equal(old[:len(data)], data) {
+					continue
+				}
+				return fmt.Errorf("目标已经有不同的内容（%s），保留双方等待人工核对", suffix)
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 				return err
@@ -623,7 +671,6 @@ func (s *Store) Rename(from, to string) error {
 				return err
 			}
 		}
-		// 提交点：源墓碑
 		if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
 			return err
 		}
@@ -631,15 +678,18 @@ func (s *Store) Rename(from, to string) error {
 			return err
 		}
 		_ = os.Remove(s.activeMarker(from))
-		if err := writeOp("committed"); err != nil {
+		op.Stage = "committed"
+		if err := writeOp(); err != nil {
 			return err
 		}
 		stage = "committed"
 	}
-	// committed：只做清理，绝不再碰目标内容
-	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
-		if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("改名已提交，清理源文件失败（可以重试）：%w", err)
+	// committed：只做清理。源如果已经开了新一代，这些路径属于新代，绝不能删。
+	if s.readGen(from) == op.FromGen {
+		for _, suffix := range suffixes {
+			if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("改名已提交，清理源文件失败（可以重试）：%w", err)
+			}
 		}
 	}
 	_ = os.RemoveAll(staging)
