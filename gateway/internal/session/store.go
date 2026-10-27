@@ -88,6 +88,29 @@ func New(dir string) (*Store, error) {
 		promoted: map[string]bool{}, snapBudget: 8 << 20}, nil
 }
 
+// targetHasOurContent 核对目标上确实已经有我们发布的内容（提交窗口恢复时用）。
+// 历史允许以我们的内容开头再追加（目标已经接受过新消息），其它文件要求完全一致。
+func (s *Store) targetHasOurContent(to string, op renameOp, suffixes []string) error {
+	for _, suffix := range suffixes {
+		meta, tracked := op.Files[suffix]
+		if !tracked {
+			continue
+		}
+		data, err := os.ReadFile(s.newPath(to, suffix))
+		if err != nil {
+			return fmt.Errorf("提交点已过但目标缺少内容（%s），保留现场等待人工核对", suffix)
+		}
+		if int64(len(data)) == meta.Len && sumOf(data) == meta.Sum {
+			continue
+		}
+		if suffix == ".jsonl" && int64(len(data)) > meta.Len && sumOf(data[:meta.Len]) == meta.Sum {
+			continue // 发布过之后又追加了新消息
+		}
+		return fmt.Errorf("提交点已过但目标内容与记录不一致（%s），保留双方等待人工核对", suffix)
+	}
+	return nil
+}
+
 // renameStagingDir 是这笔改名私有的暂存目录：没提交之前普通定位看不到它。
 func (s *Store) renameStagingDir(from, to string) string {
 	return filepath.Join(s.dirV1(), "staging", Key(from)+"-"+Key(to))
@@ -585,7 +608,11 @@ func (s *Store) Rename(from, to string) error {
 		if err := s.rememberLongKey(to); err != nil {
 			return err
 		}
-		op = renameOp{From: from, To: to, Stage: "started", FromGen: s.readGen(from), Files: map[string]renameFile{}}
+		gen, err := s.readGen(from)
+		if err != nil {
+			return err
+		}
+		op = renameOp{From: from, To: to, Stage: "started", FromGen: gen, Files: map[string]renameFile{}}
 		if err := writeOp(); err != nil {
 			return err
 		}
@@ -617,6 +644,20 @@ func (s *Store) Rename(from, to string) error {
 			return err
 		}
 		stage = "copied"
+	}
+	if stage == "copied" {
+		// 提交窗口：源墓碑已经写下去、committed 记录没写成就中断了。
+		// 这说明提交点已经过了，只需核对目标确实有我们的内容，然后补记录收尾。
+		if s.isDead(from) {
+			if err := s.targetHasOurContent(to, op, suffixes); err != nil {
+				return err
+			}
+			op.Stage = "committed"
+			if err := writeOp(); err != nil {
+				return err
+			}
+			stage = "committed"
+		}
 	}
 	if stage == "copied" {
 		// 源在这一笔期间有没有变：每次都要把**完整文件集合**核对一遍。
@@ -705,7 +746,11 @@ func (s *Store) Rename(from, to string) error {
 		stage = "committed"
 	}
 	// committed：只做清理。源如果已经开了新一代，这些路径属于新代，绝不能删。
-	if s.readGen(from) == op.FromGen {
+	gen, gerr := s.readGen(from)
+	if gerr != nil {
+		return fmt.Errorf("改名已提交，但读会话世代失败，暂不清理源文件（可以重试）：%w", gerr)
+	}
+	if gen == op.FromGen {
 		for _, suffix := range suffixes {
 			if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("改名已提交，清理源文件失败（可以重试）：%w", err)

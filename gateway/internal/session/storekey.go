@@ -107,27 +107,33 @@ func (s *Store) genFile(sid string) string {
 }
 
 // readGen 读当前世代号（没有文件是第 0 代）。
-func (s *Store) readGen(sid string) int64 {
+func (s *Store) readGen(sid string) (int64, error) {
 	b, err := os.ReadFile(s.genFile(sid))
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil // 从没开过新一代
+		}
+		return 0, fmt.Errorf("读会话世代失败（%s）：%w", sid, err)
 	}
 	txt := strings.TrimSpace(string(b))
 	if txt == "" {
-		return 0
+		return 0, nil
 	}
 	n, err := strconv.ParseInt(txt, 10, 64)
 	if err != nil {
-		// 上一版的标记写的是键本身（不是数字）：那也算“已经开过新一代”，
-		// 按第 1 代处理，旧根备份不会被重新授权。
-		return 1
+		// 上一版的标记写的是键本身（不是数字）：那也算“已经开过新一代”
+		return 1, nil
 	}
-	return n
+	return n, nil
 }
 
 // bumpGen 把世代号加一并持久化，返回新值。
 func (s *Store) bumpGen(sid string) (int64, error) {
-	next := s.readGen(sid) + 1
+	cur, err := s.readGen(sid)
+	if err != nil {
+		return 0, err
+	}
+	next := cur + 1
 	if err := os.MkdirAll(filepath.Dir(s.genFile(sid)), 0o700); err != nil {
 		return 0, err
 	}
@@ -138,14 +144,20 @@ func (s *Store) bumpGen(sid string) (int64, error) {
 }
 
 // legacyDead 报告这个 sid 的旧根备份是不是已经永久失效（开过新一代）。
-func (s *Store) legacyDead(sid string) bool { return s.readGen(sid) > 0 }
+func (s *Store) legacyDead(sid string) bool {
+	n, err := s.readGen(sid)
+	if err != nil {
+		return true // 读不出来就按“已经失效”处理，绝不把旧备份当活动数据
+	}
+	return n > 0
+}
 
+// activeMarker 是“这个会话已经在新布局里激活”的标记。
 // deletedMarker 是“这个会话被明确删除过”的墓碑：旧备份保留，但不再自动复活。
 func (s *Store) deletedMarker(sid string) string {
 	return filepath.Join(s.dirV1(), "deleted", Key(sid))
 }
 
-// activeMarker 是“这个会话已经在新布局里激活”的标记。
 func (s *Store) activeMarker(sid string) string {
 	return filepath.Join(s.dirV1(), "active", Key(sid))
 }

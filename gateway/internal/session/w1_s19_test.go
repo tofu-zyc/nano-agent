@@ -153,7 +153,7 @@ func TestLegacyGenMarkerStillInvalidatesBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2, _ := New(dir)
-	if s2.readGen(sid) == 0 {
+	if n, err := s2.readGen(sid); err != nil || n == 0 {
 		t.Fatal("旧格式的世代标记被当成第 0 代")
 	}
 	if _, ok := s2.Branch(sid); ok {
