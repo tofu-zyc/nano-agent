@@ -202,6 +202,8 @@ type sess struct {
 	interjectSeq        int64          // 插话接收序号（单调递增，落进日志）
 	restored            bool           // 已经从日志恢复过插话
 	pending             []interjection // 从日志恢复的补充：等这一轮开始时装进收件箱
+	pendingBytes        int
+	interrupted         []interjection // 上次中断、还没有结局的补充（已进历史，等用户继续）
 
 	// 群聊（group.go）：记进历史的最新一条、要不要插话、主动发言的额度
 	groupEp        endpoint
@@ -978,10 +980,16 @@ func (a *App) startRun(s *sess) {
 	// 上次进程退出时没处理完的补充：装进这一轮的收件箱，到了安全边界再插入
 	if len(s.pending) > 0 {
 		r.inbox = append(r.inbox, s.pending...)
-		s.pending = nil
+		r.inboxBytes += s.pendingBytes
+		n := len(s.pending)
+		s.pending, s.pendingBytes = nil, 0
 		a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "resumed",
-			Data: map[string]any{"count": len(r.inbox)}})
-		a.deliver(head.ep, fmt.Sprintf("上次中断时还有 %d 条补充没有处理完，已经放回这一轮一起处理。", len(r.inbox)), "")
+			Data: map[string]any{"count": n}})
+		a.deliver(head.ep, fmt.Sprintf("上次中断时还有 %d 条补充没有处理完，已经放回这一轮一起处理。", n), "")
+	}
+	// 上次中断、已经写进上下文但没拿到结局的补充：说明一下，用户发「继续」就能接着做
+	if len(s.interrupted) > 0 {
+		a.deliver(head.ep, fmt.Sprintf("另外有 %d 条补充上次已经写进上下文，但没有处理完；需要接着做就发「继续」。", len(s.interrupted)), "")
 	}
 	// 拟人型的私聊不流式显示：像人一样打完字再发（纯聊天的回复还会拆成几条）
 	if st, ok := a.chans[head.ep.ch].(channel.Streamer); ok && r.scheduled == nil && !group && !a.agentOf(s.sid).Life() {
@@ -1104,9 +1112,7 @@ func (a *App) endRun(s *sess, note string) {
 	}
 	// 这一轮没来得及插入的补充不能悄悄丢掉：放回会话队列，交给后续 run
 	if !r.dropInbox {
-		if left := a.requeueInterjections(s, r); len(left) > 0 {
-			s.queue = append(left, s.queue...)
-		}
+		a.resumeAfterRequeue(s, a.requeueInterjections(s, r))
 	}
 	// 自主活动的一轮没有正常收尾（内核断线等）：记成没做成，稍后重新确认，不能当成正常休息
 	if r.inner && s.mind != nil {
@@ -1428,6 +1434,15 @@ func (a *App) finish(s *sess, status, detail string) {
 	r.outcome = status
 	a.settleInterjections(s.sid, r.journalIDs, interjectionOutcome(status), detail)
 	r.journalIDs = nil
+	// 上次中断的补充：这一轮模型读过上下文、正常结束，就算处理过了
+	if status == proto.StatusOK && len(s.interrupted) > 0 {
+		ids := make([]string, 0, len(s.interrupted))
+		for _, it := range s.interrupted {
+			ids = append(ids, it.id)
+		}
+		a.settleInterjections(s.sid, ids, outcomeOK, "用户继续后已处理")
+		s.interrupted = nil
+	}
 	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
 		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)
 	if r.calls > 0 {

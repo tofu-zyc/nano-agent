@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func reopen(t *testing.T, e *env) *App {
 
 func journalRecs(t *testing.T, a *App, sid string) []journalRec {
 	t.Helper()
-	recs, err := readJournal(a.journalPath(sid))
+	recs, _, err := readJournal(a.journalPath(sid))
 	if err != nil {
 		t.Fatalf("读日志：%v", err)
 	}
@@ -145,7 +146,8 @@ func TestJournalIncludedWithoutOutcomeIsInterrupted(t *testing.T) {
 	if states[0].Outcome != outcomeInterrupted {
 		t.Fatalf("没有标成 interrupted：%+v", states[0])
 	}
-	if !states[0].included || states[0].settled == false {
+	// interrupted 不是"结束"：settled 必须为 false，才能跨检查点保留
+	if !states[0].included || states[0].settled {
 		t.Fatalf("状态字段：%+v", states[0])
 	}
 }
@@ -229,7 +231,7 @@ func TestJournalIgnoresTruncatedTail(t *testing.T) {
 	}
 	f.WriteString(`{"v":1,"kind":"received","id":"half"`) // 没有换行
 	f.Close()
-	recs, err := readJournal(e.a.journalPath(e.sid))
+	recs, _, err := readJournal(e.a.journalPath(e.sid))
 	if err != nil {
 		t.Fatalf("尾部半条不该报错：%v", err)
 	}
@@ -252,5 +254,210 @@ func TestJournalAgentSwitchDiscards(t *testing.T) {
 	a2 := reopen(t, e)
 	if got := len(a2.sessOf(e.sid).pending); got != 0 {
 		t.Fatalf("换了 agent 还恢复：%d", got)
+	}
+}
+
+// B1：恢复出来的补充必须带着稳定 ID；处理完成再重启不会再次出现。
+func TestRecoveredInterjectionProcessedThenRestartDoesNotReturn(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.pending) != 1 {
+		t.Fatalf("恢复：%d", len(s2.pending))
+	}
+	it := s2.pending[0]
+	if it.id == "" {
+		t.Fatal("恢复出来的补充丢了稳定 ID")
+	}
+	// 按正常 drain 的步骤：写历史（带稳定 ID）→ 记 injected → 记结局
+	histID := interjectionHistoryID([]string{it.id})
+	if err := a2.store.Append(e.sid, session.Msg{Role: "user", Content: "合并后的正文", Kind: "user_interjection",
+		ID: histID, SourceIDs: []string{it.id}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a2.journalAppend(e.sid, journalRec{Kind: jrecInjected, ID: it.id, HistoryID: histID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a2.journalAppend(e.sid, journalRec{Kind: jrecOutcome, ID: it.id, Outcome: outcomeOK}); err != nil {
+		t.Fatal(err)
+	}
+	a3 := reopen(t, e)
+	if got := len(a3.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("处理完的补充又回来了：%d", got)
+	}
+	if got := len(a3.store.History(e.sid)); got != 2 {
+		t.Fatalf("历史条数：%d", got)
+	}
+}
+
+// B1：不同恢复批次不会算出同一个历史 ID。
+func TestRecoveredBatchesGetDistinctHistoryIDs(t *testing.T) {
+	if interjectionHistoryID([]string{"ij-a"}) == interjectionHistoryID([]string{"ij-b"}) {
+		t.Fatal("不同批次的历史 ID 撞了")
+	}
+}
+
+// B2：尾部半条要截掉，之后追加新记录并重启仍然可读。
+func TestTruncatedJournalThenAppendThenRestart(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	// 模拟写到一半崩了：追加半条没有换行的 JSON
+	f, err := os.OpenFile(e.a.journalPath(e.sid), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"v":1,"kind":"received","id":"half`)
+	f.Close()
+
+	// 重启：截掉半条，恢复出原来的补充
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 1 {
+		t.Fatalf("恢复：%d", got)
+	}
+	// 再受理一条新的
+	if err := a2.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: "ij-new", Seq: 99, Text: "新补充"}); err != nil {
+		t.Fatalf("截尾后还写不进去：%v", err)
+	}
+	// 再重启：两条都在，而且文件能正常解析
+	a3 := reopen(t, e)
+	if got := len(a3.sessOf(e.sid).pending); got != 2 {
+		t.Fatalf("重启后待处理：%d", got)
+	}
+	if _, _, err := readJournal(a3.journalPath(e.sid)); err != nil {
+		t.Fatalf("日志还是坏的：%v", err)
+	}
+}
+
+// B2：中间损坏时不能再假装受理成功。
+func TestCorruptJournalRefusesNewReceipt(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	// 在中间插一条坏 JSON（带换行）
+	f, err := os.OpenFile(e.a.journalPath(e.sid), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("{这不是 JSON}\n")
+	f.Close()
+
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.pending) != 0 {
+		t.Fatalf("损坏的日志不该恢复出待处理：%d", len(s2.pending))
+	}
+	if err := a2.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: "ij-x", Seq: 5, Text: "x"}); err == nil {
+		t.Fatal("日志损坏还允许追加并返回成功")
+	}
+}
+
+// B3：重新排队后、下一轮写历史之前崩溃，补充不能丢。
+func TestRequeuedInterjectionSurvivesCrashBeforeNextRun(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	e.a.mu.Lock()
+	s := e.a.sessions[e.sid]
+	left := e.a.requeueInterjections(s, s.run)
+	e.a.mu.Unlock()
+	if len(left) != 1 {
+		t.Fatalf("重新排队：%d", len(left))
+	}
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 1 {
+		t.Fatalf("崩溃后待处理：%d（应该还在）", got)
+	}
+}
+
+// B4：检查点必须保留身份与去重信息。
+func TestCheckpointPreservesAgentAndDedupAcrossRestart(t *testing.T) {
+	e := setup(t)
+	key := dedupKey(e.sid, "fake", "c1", "m-checkpoint")
+	if err := e.a.journalAppend(e.sid, journalRec{Kind: jrecReceived, ID: "ij-cp", Seq: 1, MsgID: "m-checkpoint",
+		Dedup: key, Text: "补充", Agent: "other-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	if err := e.a.checkpointJournal(e.sid); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	a2 := reopen(t, e)
+	if _, ok := a2.journalByDedup(e.sid, key); !ok {
+		t.Fatal("检查点丢了去重键")
+	}
+	// 身份是 other-agent：不能交给现在的 agent
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("换了 agent 还恢复：%d", got)
+	}
+}
+
+// B5：普通撤回 / 网页撤回要写持久终态，重启不复活。
+func TestUndoInterjectionDoesNotReturnAfterRestart(t *testing.T) {
+	e := setup(t)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+
+	e.a.mu.Lock()
+	_, note, _, err := e.a.undoLatest(e.a.sessOf(e.sid))
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "已撤回") {
+		t.Fatalf("说明：%q", note)
+	}
+	a2 := reopen(t, e)
+	if got := len(a2.sessOf(e.sid).pending); got != 0 {
+		t.Fatalf("撤回的补充又回来了：%d", got)
+	}
+}
+
+// B6：interrupted 跨检查点和重启仍然可见，不被回收。
+func TestInterruptedInterjectionRemainsVisibleAfterCheckpointAndRestart(t *testing.T) {
+	e := setup(t)
+	id := "ij-int"
+	for _, rec := range []journalRec{
+		{Kind: jrecReceived, ID: id, Seq: 1, Text: "补充"},
+		{Kind: jrecInjected, ID: id, HistoryID: "h1"},
+		{Kind: jrecIncluded, ID: id, RequestID: "r1-t1", Revision: 1},
+	} {
+		if err := e.a.journalAppend(e.sid, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a2 := reopen(t, e)
+	s2 := a2.sessOf(e.sid)
+	if len(s2.interrupted) != 1 {
+		t.Fatalf("没有可见的中断状态：%d", len(s2.interrupted))
+	}
+	a2.mu.Lock()
+	if err := a2.checkpointJournal(e.sid); err != nil {
+		t.Fatal(err)
+	}
+	a2.mu.Unlock()
+	a3 := reopen(t, e)
+	s3 := a3.sessOf(e.sid)
+	if len(s3.interrupted) != 1 {
+		t.Fatalf("检查点把中断状态回收了：%d", len(s3.interrupted))
+	}
+	if len(s3.pending) != 0 {
+		t.Fatalf("已经进历史的不能回到待处理：%d", len(s3.pending))
 	}
 }

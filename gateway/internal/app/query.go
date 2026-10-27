@@ -67,6 +67,8 @@ type SessionInfo struct {
 	Usage       llm.Usage           `json:"usage"`        // 历史里记下的累计用量
 	Context     session.ContextInfo `json:"context"`
 	Compacted   int                 `json:"compacted"`
+	// Interrupted 是"上次中断、还没处理完"的用户补充条数（持久状态，重启后仍然算得到）
+	Interrupted int `json:"interrupted,omitempty"`
 }
 
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
@@ -138,6 +140,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	info := SessionInfo{SID: sid, Agent: a.execAgentID(sid), RouteAgent: a.routeAgentID(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
 		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
+	info.Interrupted = a.interruptedCount(sid)
 	info.AgentFixed = fixedAgentSID(sid)
 	info.SwitchBlocked = a.agentSwitchBlocked(sid)
 	info.CanSwitchAgent = info.SwitchBlocked == "" && a.agentStore != nil
@@ -467,4 +470,24 @@ func (a *App) FullHistory(sid string) []session.Msg {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return slices.Clone(a.store.Archive(sid))
+}
+
+// interruptedCount 是"上次中断、还没处理完"的补充条数：从会话状态或日志里算，给界面看。
+func (a *App) interruptedCount(sid string) int {
+	if s := a.sessions[sid]; s != nil {
+		return len(s.interrupted)
+	}
+	// 会话还没被访问过：直接折叠日志（有界，只读）
+	recs, _, err := readJournal(a.journalPath(sid))
+	if err != nil {
+		return 0
+	}
+	gen := a.store.Settings(sid).SessionGeneration
+	n := 0
+	for _, st := range foldJournal(recs, gen) {
+		if st.Outcome == outcomeInterrupted && !st.settled && !st.withdrawn {
+			n++
+		}
+	}
+	return n
 }

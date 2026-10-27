@@ -1,8 +1,8 @@
 # v0.9.0 二轮验收与下一步执行清单
 
-日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；本次复验：`8093f20`。
+日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱验收：`33673fd`（含 `7f48078`）。
 
-**最新结论：第 2 节的 R1–R4 已在 `8093f20` 复验通过，可以进入 B（持久收件箱）。** 该节保留原始问题与复现用于追踪，不再表示四项仍未修复。第 3 节的其他衔接项继续按实际范围跟踪，不能据此宣称所有设计目标已完成。B 的日志方案与恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
+**最新结论：`33673fd` 的 B（持久收件箱）尚未通过验收，先修复第 7 节的六项问题，再推进 Fork。** 第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
 
 ## 1. 已验证通过的部分
 
@@ -245,3 +245,87 @@ Fork 稳定后推进 P2 → P3：C JobManager、流式输出、原地后台化�
 6. 写入 / Sync 失败、日志尾部截断、容量已满、批量插话、附件与长文本；回执和实际受理状态一致。
 
 只承诺本地消息与历史按 ID 对账，不将其表述为任意外部副作用“恰好一次”。通过这一步后，沿第 4 节 C 继续交付安静的持久 Fork。
+
+
+## 7. `33673fd` 持久收件箱验收：六项问题仍阻塞
+
+本轮重新运行 `go vet ./...`、`go test ./... -count=1`，均通过；C core 205 checks / 0 failures。本次 B 的两个提交没有修改 C 源码，未重复执行 ASan 执行器 / 宿主套件。`Store.Append` 先持久写入、成功后更新内存，以及在写入前加载旧历史的改动方向正确，原有相关回归通过。
+
+此外，通过临时 Go overlay 向真实 app 测试包加入七个补充场景；七个场景均复现下述问题。overlay 只增加测试，未替换产品实现，运行后已清理，不是仓库已有测试失败。单次调用返回成功或第一次恢复出 pending，均不足以证明完整持久生命周期正确。
+
+### B1 [P1]：恢复对象丢失稳定 ID，处理完成后仍会再次恢复
+
+位置：`gateway/internal/app/interject_journal.go:492`（恢复 `interjection` 的初始化）；`gateway/internal/app/interject.go:116`（使用 `it.id` 构造历史 ID 和状态记录）。
+
+恢复构造函数只设置 seq、msg、ep、who、text、at，没有设置 `id: st.ID`；把 `st.ID` 放到 `msg.MsgID` 并不能替代 `it.id`。下一次 drain 得到 `source_ids=[""]`，写入 injected / outcome 的 ID 也是空字符串；fold 会忽略这些状态，原 received 永远未完成。同样条数的不同恢复批次还会算出相同 history_message_id。
+
+独立复现：正常受理一条补充 → 新建 Store / App → 将恢复 pending 按正常 drain 写入历史并记录 ok → 再建 Store / App。实际 pending 仍为 1，完成记录没有关联原 ID。
+
+修复：稳定 interjection_id 必须贯穿恢复、注入、请求和终态；原平台 message_id 与内部 ID 应分开保存。恢复收件箱时也应恢复字节数，继续满足 16 条 / 64 KiB 的准入限制。不能只增加“恢复后条数为 1”的测试。
+
+建议永久回归：`TestRecoveredInterjectionProcessedThenRestartDoesNotReturn`；至少再覆盖不同恢复批次不会互相误去重、恢复后的撤回及容量限制。
+
+### B2 [P1]：尾部残片没有截去，损坏日志仍允许新受理
+
+位置：`gateway/internal/app/interject_journal.go:110`（打开追加文件）、`:116`（忽略读取错误）、`:188`（只忽略半条尾部）。
+
+两个独立复现：
+
+1. 已提交 received 后追加半条 JSON，不带换行；重启可以读出旧 pending。随后 journalAppend 新 received 返回 nil，但实际把新 JSON 接到半条之后；再次读取报第二行损坏，新旧补充无法正常恢复。
+2. 已有日志中放入一条带换行的坏 JSON；restore 仅记录错误，openJournal 忽略 readJournal 的错误，仍允许追加新 received 并返回成功。下次恢复仍停在坏行，新增记录不会被恢复。
+
+修复：解析时返回最后有效提交的文件偏移；在追加前安全截去未提交尾部并确认修复持久化。对中间损坏、未知版本、不可读取文件，必须禁止继续按正常日志回执受理，保留现场并向当前发送方说明未受理。写入 / Sync 失败后的文件状态也要纳入同一恢复规则，不能假定报错就代表没有写出任何字节。
+
+建议永久回归：`TestTruncatedJournalThenAppendThenRestart`、`TestCorruptJournalRefusesNewReceipt`。前者必须包含“恢复后又接收新消息，再重启”，不能停在首次 readJournal 成功。
+
+### B3 [P1]：requeued 只转入内存，却已持久标成完成
+
+位置：`gateway/internal/app/interject.go:198`（先写 outcomeRequeued）、`:202`（只构造内存 queued）；`gateway/internal/app/interject_journal.go:475`（恢复时跳过 settled）。
+
+独立复现：正常受理 → requeueInterjections 并放入 s.queue → 在下一 run 写入正式历史之前重建 Store / App。实际 pending 为 0，历史也没有这条补充；已经回执的消息丢失。
+
+修复：将“需要重新排队”保留为可恢复的未完成责任，或者把目标队列可靠提交后，再记录可验证的移交终态。queued 必须保留 interjection_id，后续写正式历史和结果时仍可对账；不能靠内存 s.queue 证明持久移交完成。崩溃后按已有历史判断是否已经消费，避免从丢失变成重复。
+
+建议永久回归：`TestRequeuedInterjectionSurvivesCrashBeforeNextRun`，另测下一 run 已写历史后崩溃不会重复写入；旧节点回退也要走同一可靠路径。
+
+### B4 [P1]：检查点丢失 agent 与去重信息，重启后身份约束失效
+
+位置：`gateway/internal/app/interject_journal.go:195`（折叠状态没有保存 Dedup / Revision）、`:323`（重写 received 没有 Agent / Dedup）。
+
+独立复现：写一条带 Agent=other-agent 和 Dedup 的 received → checkpointJournal → 重建 Store / App。实际 journalByDedup 查不到原消息；原本不该交给当前 agent 的 pending 变成 1 条，因为检查点中的 Agent 已经为空。正常超过 512 条记录就会进入该路径。
+
+修复：为检查点定义完整、可往返的状态结构，保留身份、去重键、稳定 ID、世代、请求与 revision 等恢复依据；不能只复制部分展示字段。去重记录可以有明确的有界保留窗口，但压缩不能无意中清空仍需去重的记录。受理序号及无平台 ID 消息的 ID 分配也应在压缩 / 重启后保持唯一。
+
+检查点提交还需检查每次 append 的错误，不能 `_ = nj.append(...)` 后继续替换原日志；替换失败时应保留可用旧句柄或可恢复状态，成功替换的持久边界需覆盖目录更新。这些是源码检查发现的提交缺口，本轮没有对其逐个注入磁盘故障。
+
+建议永久回归：`TestCheckpointPreservesAgentAndDedupAcrossRestart`，使用真实阈值触发自动检查点；同时测试写检查点 / 替换失败时旧日志仍可继续安全使用。
+
+### B5 [P1]：普通撤回和网页撤回没有持久终态
+
+位置：`gateway/internal/app/undo.go:84`（undoLatest 收件箱分支）。
+
+平台撤回事件已写 withdrawn，但普通“撤回”、`/undo` 和网页 UndoSession 共用的 undoLatest 仍只删除内存 inbox 并发布 withdrawn 事件，没有写日志。
+
+独立复现：正常受理 → undoLatest 返回撤回成功 → 重建 Store / App。实际 pending 为 1，已撤回内容复活。
+
+修复：这些入口统一先可靠提交 withdrawn，再从待处理状态移除并回执；日志失败应保留可重试状态并明确说明失败。还应覆盖恢复 pending、重新排队的插话和已有历史来源，不能只修平台原生撤回事件。
+
+建议永久回归：`TestUndoInterjectionDoesNotReturnAfterRestart`，分别从普通命令、网页和平台事件进入，并覆盖终态写失败。
+
+### B6 [P1]：interrupted 仍按 settled 回收，没有可见继续入口
+
+位置：`gateway/internal/app/interject_journal.go:260`（任何 outcome 均设 settled=true）、`:463`（恢复补写 interrupted）、`:320`（检查点删除所有 settled）。
+
+独立复现：received → injected → included，无结局 → 重建 App，补写 interrupted → checkpointJournal。实际折叠后 states=0，未完成责任被整个清除。
+
+全文检索也没有找到该 interrupted 状态的查询接口、会话继续状态或恢复提示；现有测试只断言日志里出现 interrupted，不能证明用户可见或能够继续。历史中的正文依然存在，但它不能替代关于“上一请求中断、尚未完成”的可靠状态。
+
+修复：分开“请求已经结束”和“这条用户补充已解决 / 已明确丢弃”。interrupted 应保留为持久可查询、可继续的状态，跨检查点 / 重启仍可见；在用户进入该会话或开始下一轮时说明，并从既有历史继续规划。继续使用新的 run / 请求身份，不自动重放旧工具或旧外部发送。
+
+建议永久回归：`TestInterruptedInterjectionRemainsVisibleAfterCheckpointAndRestart`；验证实际用户可见的查询 / 提示及继续后的结局，不能只断言日志字符串。
+
+### 7.1 下一步交付要求
+
+先修日志追加 / 损坏处理与稳定 ID，再修重新排队、撤回、检查点和 interrupted 状态。每项修复都将上述独立反例变成永久回归，验证“受理 → 中断 → 恢复 → 处理或失效 → 再重启”的完整闭环。补充 Store / Journal 在 Write、Sync 和检查点替换失败时的故障注入，避免只有 OpenFile 失败测试。
+
+本轮仍只验收 B，先不开始后台 Job、完整 Hook 或 Fork。B 通过后沿第 4 节 C 做安静的持久 Fork，保持用户最关心的“保存原上下文，自主活动不打扰主聊天”要求；agent 循环继续由 C 内核承担。

@@ -175,6 +175,22 @@
 历史写了但 injected 没写时不重复追加正文、已进入请求但没结局标 interrupted、撤回后不复活、
 重置世代作废、渠道重发只受理一次；`internal/session/store_test.go` 覆盖写盘失败时内存不被污染。
 
+### 三轮验收修复（B1–B6）
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| B1 | 恢复丢失稳定 ID，处理完还会再出现 | 恢复时带上 `id`（贯穿受理/注入/请求/结局），平台消息 ID 单独存 `msg_id`；恢复同时恢复字节数；重启后接收序号取日志最大值继续递增 |
+| B2 | 尾部残片没截、损坏日志仍受理 | `readJournal` 返回最后完整提交的偏移，打开时截掉未提交尾部；中间损坏 / 版本过新 / 读不出来时把日志标成 `broken`，追加一律失败，受理方明确回"没有保存下来"并保留现场 |
+| B3 | requeued 只进内存却标成完成 | 重新排队回到**可恢复的待处理**（日志保持未完成），并立刻排一轮在下一个边界插入；崩溃只会恢复、不会重复 |
+| B4 | 检查点丢身份和去重 | 检查点按完整状态往返（稳定 ID、去重键、身份、世代、请求与 revision），每次追加都检查错误，替换失败保留旧句柄继续可用 |
+| B5 | 普通 / 网页撤回没持久化 | `undoLatest` 先可靠写 `withdrawn` 再移除，覆盖收件箱和恢复的待处理；写失败时不回执成功 |
+| B6 | interrupted 被当完成回收、没有继续入口 | `interrupted` 不算结束（`settled=false`），跨检查点与重启保留；恢复后在会话里可见（`SessionInfo.interrupted`）、开始下一轮时提示，用户发「继续」就按既有历史接着做，正常结束后才结算 |
+
+回归对应第 7 节给的场景名：`TestRecoveredInterjectionProcessedThenRestartDoesNotReturn`、
+`TestTruncatedJournalThenAppendThenRestart`、`TestCorruptJournalRefusesNewReceipt`、
+`TestRequeuedInterjectionSurvivesCrashBeforeNextRun`、`TestCheckpointPreservesAgentAndDedupAcrossRestart`、
+`TestUndoInterjectionDoesNotReturnAfterRestart`、`TestInterruptedInterjectionRemainsVisibleAfterCheckpointAndRestart`。
+
 ## 还没做（按设计文档的阶段）
 
 | 阶段 | 内容 | 说明 |
@@ -184,7 +200,7 @@
 | P5 | 可靠事件、后置 Hook、notify / command / agent、临时会话 | 未开始 |
 | P7 | 前置 Hook、C 文件观察、多平台 I/O 与性能收敛 | 未开始 |
 | — | 会话 Fork（设计文档 §8，2026-10-27 新增） | 未开始（下一步 C，优先于 P2/P5） |
-| — | 插话收件箱的持久恢复 | 已完成（见上） |
+| — | 插话收件箱的持久恢复 | 已完成（见上，含三轮验收修复 B1–B6） |
 | — | 心智数值配置、行为维度与阈值预设（设计文档 §7.2 / §7.3） | 未开始 |
 
 设计文档 §3.1 里还有几项**已知简化**：

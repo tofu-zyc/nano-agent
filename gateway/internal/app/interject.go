@@ -76,7 +76,7 @@ func (a *App) acceptInterjection(s *sess, r *run, ep endpoint, m channel.Message
 		id = interjectionID(fmt.Sprintf("%s|seq-%d", s.sid, s.interjectSeq))
 	}
 	// **先确认持久提交成功，再回执**：只进内存不算受理
-	rec := journalRec{Kind: jrecReceived, Seq: s.interjectSeq, ID: id, Dedup: dedup, Text: text,
+	rec := journalRec{Kind: jrecReceived, Seq: s.interjectSeq, ID: id, MsgID: m.MsgID, Dedup: dedup, Text: text,
 		Images: m.Images, Who: who, Agent: a.execAgentID(s.sid), Channel: ep.ch, Chat: ep.chat,
 		At: a.now().UnixMilli(), RunID: r.runID}
 	if err := a.journalAppend(s.sid, rec); err != nil {
@@ -182,30 +182,36 @@ func wrapInterjections(batch []interjection) string {
 	return b.String()
 }
 
-// requeueInterjections 把这一轮没来得及插入的补充放回会话队列，交给后续 run 处理，
+// requeueInterjections 把这一轮没来得及插入的补充放回**可恢复**的待处理，
 // 并明确告诉用户，不能悄悄丢掉。
-func (a *App) requeueInterjections(s *sess, r *run) []queued {
+func (a *App) requeueInterjections(s *sess, r *run) []interjection {
 	if len(r.inbox) == 0 {
 		return nil
 	}
 	batch := r.inbox
 	r.inbox, r.inboxBytes = nil, 0
-	// 它们改由会话队列按普通消息处理：日志里记成 requeued，重启后不能再恢复进收件箱
-	ids := make([]string, 0, len(batch))
+	// 只塞进内存队列不算移交完成：日志里的 received 保持未完成，进程一崩还能恢复。
+	// 下次写正式历史时会补记 injected，所以崩溃只会恢复，不会重复。
 	for _, it := range batch {
-		ids = append(ids, it.id)
+		s.pendingBytes += len(it.text)
 	}
-	a.settleInterjections(s.sid, ids, outcomeRequeued, "放回会话队列，按普通消息处理")
-	r.journalIDs = append(r.journalIDs, ids...)
-	pending := make([]queued, 0, len(batch))
-	for _, it := range batch {
-		pending = append(pending, queued{m: it.msg, ep: it.ep, who: it.who})
-	}
+	s.pending = append(s.pending, batch...)
 	a.deliver(batch[len(batch)-1].ep,
-		fmt.Sprintf("这一轮没有处理你后来的 %d 条补充，已经放在下一轮接着处理。", len(batch)), "")
+		fmt.Sprintf("这一轮没有处理你后来的 %d 条补充，已经放回待处理，下一轮开始时一起处理。", len(batch)), "")
 	a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "requeued",
 		Data: map[string]any{"count": len(batch)}})
-	return pending
+	return batch
+}
+
+// resumeAfterRequeue 立刻排一轮，把放回待处理的补充在下一个边界插入。
+// trigger 表示内容已经在待处理里，不再追加一条用户消息。
+func (a *App) resumeAfterRequeue(s *sess, items []interjection) {
+	if len(items) == 0 {
+		return
+	}
+	last := items[len(items)-1]
+	s.queue = append([]queued{{m: channel.Message{ChatID: last.ep.chat, SenderID: last.who},
+		ep: last.ep, who: last.who, trigger: true}}, s.queue...)
 }
 
 // pendingInterjections 是给界面和日志看的当前状态。
@@ -230,9 +236,7 @@ func (a *App) yieldToInterjection(s *sess, r *run, res *llm.Result, u llm.Usage)
 	// 旧节点不认识 model_yield：不能在这里自己重开一次模型请求（那样绕过了内核的步数预算）。
 	// 退回原来的行为：补充放回会话队列，这一轮按正常结果收尾，下一轮再处理。
 	if !a.interjectionReady(r.node) {
-		if left := a.requeueInterjections(s, r); len(left) > 0 {
-			s.queue = append(left, s.queue...)
-		}
+		a.resumeAfterRequeue(s, a.requeueInterjections(s, r))
 		return false
 	}
 	// 已经生成出来的正文照常保存：它确实说过了，保留它，不伪装成“已经考虑了后来的补充”。

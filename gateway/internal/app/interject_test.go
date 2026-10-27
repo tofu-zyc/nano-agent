@@ -319,7 +319,7 @@ func TestInterjectionOldNodeFallsBackToQueue(t *testing.T) {
 		t.Fatalf("turn: %+v", turn)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
-	e.ch.wait(t, "已经放在下一轮接着处理")
+	e.ch.wait(t, "已经放回待处理")
 	// 补充作为下一轮的用户消息重新开始（不丢）
 	in := e.k.expect(proto.TInput)
 	if in.SID != e.sid {

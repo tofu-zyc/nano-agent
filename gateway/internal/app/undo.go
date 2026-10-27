@@ -83,8 +83,26 @@ func (a *App) undoLatest(s *sess) (text, note string, pending bool, err error) {
 	// 还在收件箱里、没写进历史也没让模型看到的插话：直接拿掉，不影响正在跑的这一步
 	if s.run != nil && len(s.run.inbox) > 0 {
 		it := s.run.inbox[len(s.run.inbox)-1]
+		// 先可靠落盘撤回终态，再从待处理里拿掉：不然回执成功、重启又复活
+		if err := a.withdrawInterjections(s.sid, []interjection{it}, "user_recall", "用户撤回"); err != nil {
+			return "", "", false, fmt.Errorf("撤回没能保存下来（%v），这条补充还在待处理里", err)
+		}
 		s.run.inbox = s.run.inbox[:len(s.run.inbox)-1]
 		s.run.inboxBytes -= len(it.text)
+		what := it.text
+		if what == "" {
+			what = "（图片）"
+		}
+		a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "withdrawn", ID: it.msg.MsgID, Text: what})
+		return it.text, "已撤回还没处理的消息：" + quoteText(what), false, nil
+	}
+	if n := len(s.pending); n > 0 {
+		it := s.pending[n-1]
+		if err := a.withdrawInterjections(s.sid, []interjection{it}, "user_recall", "用户撤回"); err != nil {
+			return "", "", false, fmt.Errorf("撤回没能保存下来（%v），这条补充还在待处理里", err)
+		}
+		s.pending = s.pending[:n-1]
+		s.pendingBytes -= len(it.text)
 		what := it.text
 		if what == "" {
 			what = "（图片）"
