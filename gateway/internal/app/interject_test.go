@@ -216,3 +216,78 @@ func TestRecallInjectedInterjectionIsCorrection(t *testing.T) {
 	e.say("", func(m *channel.Message) { m.Text, m.MsgID, m.SenderID, m.Action = "", "m2", "", channel.ActionRecall })
 	e.ch.wait(t, "已经插进正在进行的任务")
 }
+
+// 内核认 model_yield 时，插话后的重新请求由内核发起（步数预算归内核管），网关不自己再开一次。
+func TestInterjectionYieldGoesThroughKernel(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.Features = map[string]int{"user_interjection": 1}
+	e.a.mu.Unlock()
+	g := newGatedLLM()
+	e.a.SetLLM(g)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: 1})
+	g.waitCalls(t, 1)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	g.release(t, &llm.Result{Reason: llm.ReasonFinal, Content: "第一次的结论"})
+	y := e.k.expect(proto.TModelYield)
+	if y.SID != e.sid || y.TurnID != 1 {
+		t.Fatalf("model_yield 的身份：%+v", y)
+	}
+	// 网关没有自己再请求一次模型：等内核决定
+	time.Sleep(100 * time.Millisecond)
+	g.mu.Lock()
+	n := len(g.reqs)
+	g.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("网关不该自己重新请求模型：%d 次", n)
+	}
+	// 内核按自己的预算再要一次模型
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: 2})
+	g.waitCalls(t, 2)
+	req := g.last()
+	if last := req.Messages[len(req.Messages)-1]; !strings.Contains(last.Content, "补充") {
+		t.Fatalf("第二次请求没有看到插话：%+v", last)
+	}
+	g.release(t, &llm.Result{Reason: llm.ReasonFinal, Content: "结合补充的结论"})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
+	e.ch.wait(t, "结合补充的结论")
+}
+
+// 完整调用身份：别的 run 的 done 不能结束当前 run，上一轮的迟到结果也不能写进历史。
+func TestStaleKernelMessagesIgnored(t *testing.T) {
+	e := setup(t)
+	e.say("第一轮", msgID("m1"))
+	in := e.k.expect(proto.TInput)
+	if in.RunID == "" {
+		t.Fatal("input 没有带 run_id")
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, RunID: in.RunID, TurnID: 1})
+	turn := e.k.expect(proto.TTurn)
+	if turn.RunID != in.RunID || turn.TurnID != 1 {
+		t.Fatalf("turn 没带完整身份：%+v", turn)
+	}
+	// 另一个 run 的 done：当前这一轮必须还活着
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, RunID: "another-run", Status: proto.StatusOK})
+	time.Sleep(80 * time.Millisecond)
+	e.a.mu.Lock()
+	alive := e.a.sessions[e.sid].run != nil
+	e.a.mu.Unlock()
+	if !alive {
+		t.Fatal("别的 run 的 done 结束了当前 run")
+	}
+	// 上一轮的迟到结果：不写进历史
+	e.k.send(proto.Msg{T: proto.TResult, SID: e.sid, RunID: in.RunID, TurnID: 7, ID: "late",
+		OK: proto.Bool(true), Content: "迟到的结果"})
+	time.Sleep(80 * time.Millisecond)
+	for _, m := range e.a.store.History(e.sid) {
+		if m.Role == "tool" && strings.Contains(m.Content, "迟到的结果") {
+			t.Fatalf("迟到的结果进了历史：%+v", m)
+		}
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, RunID: in.RunID, Status: proto.StatusOK})
+	e.ch.wait(t, "（mock）收到：第一轮")
+}

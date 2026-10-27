@@ -9,6 +9,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
+	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -216,6 +217,18 @@ func (a *App) yieldToInterjection(s *sess, r *run, res *llm.Result, u llm.Usage)
 	}
 	r.final = ""
 	a.drainInterjections(s, r)
-	a.callModel(s) // 按新历史重新请求；这次生成没有被中断，也没有并发开第二个请求
+	// 重新请求模型这件事交给内核决定：它要按自己的步数预算算这一次，插话不能绕过上限。
+	// 内核不认识 model_yield（旧节点）才退回网关自己请求。
+	if a.interjectionReady(r.node) {
+		a.hub.Send(r.node, proto.Msg{T: proto.TModelYield, SID: s.sid, RunID: r.runID, TurnID: r.turnID})
+	} else {
+		a.callModel(s)
+	}
 	return true
+}
+
+// interjectionReady 报告这个内核认不认识 model_yield（协议 v11 的能力集合）。
+func (a *App) interjectionReady(node string) bool {
+	n := a.nodes[node]
+	return n != nil && n.info.Features["user_interjection"] == 1
 }

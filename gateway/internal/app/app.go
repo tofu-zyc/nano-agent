@@ -283,9 +283,10 @@ type run struct {
 	execs map[string]context.CancelFunc // 网关正在执行的工具调用、正在放的技能文件
 
 	// 完整调用身份（协议 v11）：run_id 由网关生成，turn_id 是内核告诉我们的这一次模型轮次
-	runID   string
-	turnID  int
-	modelReq int
+	runID      string
+	turnID     int
+	modelReq   int
+	sandboxMode string // 这一轮请求的沙箱模式（auto / on / off），远程执行时要转给那台机器
 	// 用户插话（interject.go）：本 run 进行中收到的补充，在安全边界插入
 	inbox        []interjection
 	inboxBytes   int
@@ -1021,8 +1022,9 @@ func (a *App) startRun(s *sess) {
 		r.full, mode = true, proto.ModeAuto
 	}
 	r.mode = mode
+	r.sandboxMode = a.cfg.Sandbox.ModeOrDefault()
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
-		SandboxMode: a.cfg.Sandbox.ModeOrDefault()}
+		SandboxMode: r.sandboxMode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
 	in.MaxSteps = wireLimit(ag.Steps)
@@ -1251,12 +1253,23 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		return
 	}
-	s := a.sessions[m.SID]
+s := a.sessions[m.SID]
 	if s == nil || s.run == nil || s.run.node != node {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束
 			a.hub.Send(node, proto.Msg{T: proto.TTurn, SID: m.SID, Reason: proto.ReasonError, Detail: "网关没有这个会话在这个内核上的进行中任务"})
 		}
 		a.log.Debug("忽略没有对应 run 的内核消息", "node", node, "t", m.T, "sid", m.SID)
+		return
+	}
+	// 完整调用身份：上一个 run 的 done / 上一轮的迟到结果都不能改动当前 run
+	if m.RunID != "" && s.run.runID != "" && m.RunID != s.run.runID {
+		a.log.Warn("忽略别的 run 的迟到消息", "node", node, "t", m.T, "sid", m.SID,
+			"got_run", m.RunID, "run", s.run.runID)
+		return
+	}
+	if m.TurnID > 0 && s.run.turnID > 0 && m.TurnID != s.run.turnID && m.T != proto.TModel {
+		a.log.Debug("忽略上一轮的迟到消息", "node", node, "t", m.T, "sid", m.SID,
+			"got_turn", m.TurnID, "turn", s.run.turnID)
 		return
 	}
 	switch m.T {

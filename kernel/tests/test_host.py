@@ -62,7 +62,8 @@ class Gateway:
             self.send(t="pong")
             return self.recv(timeout)
         if self.send_started and msg.get("t") == "exec":
-            self.send(t="exec_started", sid=msg["sid"], id=msg["id"], run_id=msg.get("run_id", ""))
+            self.send(t="exec_started", sid=msg["sid"], id=msg["id"],
+                      run_id=msg.get("run_id", ""), turn_id=msg.get("turn_id", 0))
         if self.auto_approve and msg.get("t") == "approve_req":
             self.send(t="approve", sid=msg["sid"], id=msg["id"], ok=True, **{"from": "tg:admin"})
             self.approved.add(msg["sid"])
@@ -487,13 +488,17 @@ def t_gateway_nosandbox(gw):
     start_gateway_run(gw, "g2", landlock=0)
     call(gw, "g2", ("c1", "Shell", {"command": "ls"}), ("c2", "Read", {"path": "a"}))
     got = expect_all(gw, 2, "g2")
+    # Shell 要审批；同目录的读不占它的槽，可以先跑
     assert ("approve_req", "c1") in got and ("exec", "c2") in got, got
     gw.send(t="approve", sid="g2", id="c1", ok=True, **{"from": "tg:admin"})
     gw.expect("notice", sid="g2")
+    # 读还在跑，Shell 要独占这个工作目录：只能等它结束
+    gw.expect("tool_queued", sid="g2", id="c1")
+    gw.send(t="exec_result", sid="g2", id="c2", ok=True, content="b")
+    gw.expect("result", sid="g2", id="c2", ok=True, content="b")
     gw.expect("exec", sid="g2", id="c1")
     gw.send(t="exec_result", sid="g2", id="c1", ok=True, content="a")
-    gw.send(t="exec_result", sid="g2", id="c2", ok=True, content="b")
-    expect_all(gw, 2, "g2")
+    gw.expect("result", sid="g2", id="c1", ok=True)
     finish(gw, "g2")
 
 
@@ -569,6 +574,31 @@ def t_resource_locks(gw):
     finish(gw, "p3")
 
 
+@case("沙箱：网关请求 off 时执行器真的跳过隔离（节点是 auto）")
+def t_sandbox_off_via_kernel(gw):
+    if gw.landlock == 0:
+        print("    （本机没有 Landlock，跳过）")
+        return
+    other = os.path.join(T, "other")
+    os.makedirs(other, exist_ok=True)
+    # auto：工作目录外写不进去
+    start_run(gw, "sb1")
+    call(gw, "sb1", ("c1", "Shell", {"command": "echo x > ../other/kernel-auto.txt"}))
+    r = gw.expect("result", sid="sb1", id="c1", ok=False)
+    assert "Permission denied" in r["content"] or "权限" in r["content"], r
+    finish(gw, "sb1")
+    assert not os.path.exists(os.path.join(other, "kernel-auto.txt"))
+    # 这一轮明确请求 off：同一个操作成功——验证的是真的关掉了隔离，不只是配置字段
+    gw.send(t="input", sid="sb2", mode="auto", sandbox_mode="off", workspaces=[local_ws()], **{"from": "tg:user"})
+    gw.expect("model", sid="sb2")
+    call(gw, "sb2", ("c1", "Shell", {"command": "echo off-ok > ../other/kernel-off.txt && cat ../other/kernel-off.txt"}))
+    r = gw.expect("result", sid="sb2", id="c1", ok=True)
+    assert "off-ok" in r["content"], r
+    finish(gw, "sb2")
+    assert os.path.exists(os.path.join(other, "kernel-off.txt"))
+    os.unlink(os.path.join(other, "kernel-off.txt"))
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -602,6 +632,110 @@ def t_run_queue(gw):
     gw.expect("done", sid="q3", status="ok")
     gw.send(t="turn", sid="q2", reason="final")
     gw.expect("done", sid="q2", status="ok")
+
+
+@case("完整身份：上一轮的迟到结果不会被当成这一轮的结果")
+def t_stale_result(gw):
+    gw.send(t="input", sid="stale1", run_id="run-stale-1", mode="auto", workspaces=[box_ws(7)], **{"from": "tg:user"})
+    gw.expect("model", sid="stale1")
+    call(gw, "stale1", ("c1", "Read", {"path": "a"}))
+    ex = gw.expect("exec", sid="stale1", id="c1")
+    run_id, turn_id = ex.get("run_id", ""), ex.get("turn_id", 0)
+    assert run_id and turn_id, ex   # 派发时带上完整身份
+    gw.send(t="exec_result", sid="stale1", id="c1", run_id=run_id, turn_id=turn_id + 5, ok=True, content="迟到")
+    try:
+        m = gw.recv(timeout=1)
+        raise AssertionError(f"上一轮的迟到结果被接受了：{m}")
+    except TimeoutError:
+        pass
+    gw.send(t="exec_result", sid="stale1", id="c1", run_id=run_id, turn_id=turn_id, ok=True, content="对的结果")
+    gw.expect("result", sid="stale1", id="c1", ok=True, content="对的结果")
+    finish(gw, "stale1")
+
+
+@case("插话后的重新请求由内核数步数：model_yield 换来一次新 model，预算到顶就结束")
+def t_model_yield(gw):
+    gw.send(t="input", sid="y1", mode="none", workspaces=[], max_steps=1, **{"from": "tg:user"})
+    gw.expect("model", sid="y1")
+    gw.send(t="model_yield", sid="y1")
+    gw.expect("done", sid="y1", status="budget")
+    gw.send(t="input", sid="y2", mode="none", workspaces=[], max_steps=3, **{"from": "tg:user"})
+    first = gw.expect("model", sid="y2")
+    gw.send(t="model_yield", sid="y2")
+    m = gw.expect("model", sid="y2")
+    assert m.get("turn_id") == first.get("turn_id", 0) + 1, (first, m)
+    gw.send(t="turn", sid="y2", run_id=m.get("run_id", ""), turn_id=m["turn_id"], reason="final")
+    gw.expect("done", sid="y2", status="ok")
+    # 上一轮的迟到 turn 不会结束当前 run
+    gw.send(t="input", sid="y3", mode="none", workspaces=[], max_steps=3, **{"from": "tg:user"})
+    m = gw.expect("model", sid="y3")
+    gw.send(t="turn", sid="y3", run_id=m.get("run_id", ""), turn_id=m["turn_id"] + 7, reason="final")
+    try:
+        got = gw.recv(timeout=1)
+        raise AssertionError(f"上一轮的 turn 结束了当前 run：{got}")
+    except TimeoutError:
+        pass
+    gw.send(t="turn", sid="y3", run_id=m.get("run_id", ""), turn_id=m["turn_id"], reason="final")
+    gw.expect("done", sid="y3", status="ok")
+
+
+def slot_tests(T):
+    """机器级执行槽：代执行（run）和工具调用共用同一套限额，谁都不能绕过"""
+    U = os.path.join(T, "slots")
+    os.makedirs(os.path.join(U, "home"))
+    sock = os.path.join(U, "gw.sock")
+    conf = os.path.join(U, "kernel.conf")
+    with open(conf, "w") as f:
+        f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nmax_execs = 1\nmax_parallel_shells = 1\n")
+    gw = Gateway(sock)
+    log = open(os.path.join(U, "kernel.log"), "w")
+    env = dict(os.environ, HOME=os.path.join(U, "home"), NANO_HOME=os.path.join(U, "home", ".nano-agent"))
+    proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log, env=env)
+
+    def check(name, fn):
+        t0 = time.time()
+        try:
+            fn()
+            print(f"  ok   {name} ({time.time() - t0:.1f}s)")
+        except Exception as e:  # noqa: BLE001
+            FAILS.append(name)
+            print(f"  FAIL {name}：{e}")
+            log.flush()
+            print(open(os.path.join(U, "kernel.log"), errors="replace").read()[-1200:])
+
+    try:
+        gw.accept()
+        gw.expect("hello")
+        gw.send(t="welcome", v=11)
+
+        def host_job_takes_slot():
+            # 代执行先占住唯一的执行槽
+            gw.send(t="run", id="h1", req={"tool": "Shell", "args": {"command": "sleep 1; echo host-done"},
+                                           "dirs": [WORK], "write": True, "max_output": 4096, "sandbox": "auto"})
+            time.sleep(0.2)
+            start_run(gw, "sl1")
+            call(gw, "sl1", ("c1", "Shell", {"command": "echo tool-done"}))
+            # 工具调用必须等代执行结束：先看到排队，再看到结果
+            gw.expect("tool_queued", sid="sl1", id="c1", timeout=5)
+            got = {}
+            while len(got) < 2:
+                m = gw.recv(10)
+                key = m.get("t") + ":" + str(m.get("id"))
+                if m.get("t") == "tool_queued":
+                    continue
+                got[key] = m
+            assert got["run_result:h1"]["content"] == "host-done\n", got
+            assert got["result:c1"]["content"] == "tool-done\n", got
+            finish(gw, "sl1")
+
+        check("代执行和工具调用共用执行槽（max_execs = 1）", host_job_takes_slot)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
 
 
 def old_ssh_config():
@@ -689,7 +823,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理
@@ -712,6 +846,7 @@ def main():
             subprocess.run(["pkill", "-f", "sleep 4646"])
         else:
             print("  ok   内核退出时清理正在执行的命令")
+        slot_tests(T)
         update_tests(T)
         kernel_log = open(os.path.join(T, "kernel.log"), errors="replace").read()
         if "Sanitizer" in kernel_log:

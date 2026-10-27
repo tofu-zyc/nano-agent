@@ -191,9 +191,17 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
+	sandbox := m.SandboxMode
+	if sandbox == "" {
+		sandbox = r.sandboxMode
+	}
+	if sandbox == "" {
+		sandbox = "auto"
+	}
 	req, _ := json.Marshal(map[string]any{
 		"tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
 		"tmp_key": s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,
+		"sandbox": sandbox,   // 在别的机器上执行时，那台机器按这个模式准备执行器
 	})
 	timeout := time.Duration(m.TimeoutMs) * time.Millisecond
 	if timeout <= 0 || timeout > time.Hour {

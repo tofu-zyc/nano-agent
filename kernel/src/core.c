@@ -18,10 +18,10 @@ typedef enum {
 } call_state;
 
 typedef struct {
-    char *id, *name, *args, *res_keys;
+    char *id, *name, *args, *res_keys, *res_xkeys;
     const na_tool_policy *tool;
     bool elevated;
-    bool res_exclusive;
+    bool sent;           /* EXEC 已经发给宿主了：它占着宿主那边的槽位 */
     int  turn_id;        /* 产生这个调用的模型轮次 */
     call_state st;
     int64_t deadline;    /* -1 表示不限（一直等审批 / 一直排队） */
@@ -250,10 +250,10 @@ static decision decide(bool sandbox, bool sandbox_off, na_mode mode, na_tool_kin
  * 资源键、且其中至少一方是独占的，就不能同时跑。空键表示不和别人抢东西（比如
  * 纯网络查询），两边都是共享锁时可以并行。 */
 
-static bool keys_conflict(const char *a, bool a_excl, const char *b, bool b_excl)
+/* 两组键有没有交集（都是逗号分隔的资源键） */
+static bool keys_share(const char *a, const char *b)
 {
     if (!a || !*a || !b || !*b) return false;
-    if (!a_excl && !b_excl) return false;
     for (const char *p = a; *p;) {
         const char *e = strchr(p, ',');
         size_t n = e ? (size_t)(e - p) : strlen(p);
@@ -270,16 +270,28 @@ static bool keys_conflict(const char *a, bool a_excl, const char *b, bool b_excl
     return false;
 }
 
-static bool call_holds_slot(call_state st)
+/* 两个调用能不能同时跑：任何一方的独占键和对方的任何键相交就冲突。
+ * 文件操作在父目录上取共享锁、Shell 在目录上取独占锁，于是“Shell vs 同目录的写”
+ * 一定会冲突，而“不同文件的写”可以并行。 */
+static bool calls_conflict(const call_t *a, const call_t *b)
 {
-    return st == CALL_DISPATCHED || st == CALL_RUNNING;
+    if (a->res_xkeys && *a->res_xkeys &&
+        (keys_share(a->res_xkeys, b->res_xkeys) || keys_share(a->res_xkeys, b->res_keys))) return true;
+    if (b->res_xkeys && *b->res_xkeys && keys_share(b->res_xkeys, a->res_keys)) return true;
+    return false;
+}
+
+/* 已经发给宿主的调用占着执行槽（包括宿主那边还在排队等资源的），没发出去的不占 */
+static bool call_holds_slot(const call_t *k)
+{
+    return k->sent && k->st != CALL_DONE;
 }
 
 static int run_slots_used(const run_t *r)
 {
     int n = 0;
     for (size_t i = 0; i < r->ncalls; i++)
-        if (call_holds_slot(r->calls[i].st)) n++;
+        if (call_holds_slot(&r->calls[i])) n++;
     return n;
 }
 
@@ -302,8 +314,8 @@ static bool can_start(const run_t *r, const call_t *k)
 {
     for (size_t i = 0; i < r->ncalls; i++) {
         const call_t *o = &r->calls[i];
-        if (o == k || !call_holds_slot(o->st)) continue;
-        if (keys_conflict(o->res_keys, o->res_exclusive, k->res_keys, k->res_exclusive)) return false;
+        if (o == k || !call_holds_slot(o)) continue;
+        if (calls_conflict(o, k)) return false;
     }
     return true;
 }
@@ -314,7 +326,7 @@ static void free_calls(run_t *r)
 {
     for (size_t i = 0; i < r->ncalls; i++) {
         free(r->calls[i].id); free(r->calls[i].name); free(r->calls[i].args);
-        free(r->calls[i].res_keys);
+        free(r->calls[i].res_keys); free(r->calls[i].res_xkeys);
     }
     free(r->calls);
     r->calls = NULL;
@@ -401,6 +413,7 @@ static void exec_call(na_core *c, int64_t now, run_t *r, call_t *k)
     m->timeout_ms = k->tool->timeout_ms;
     m->elevated = k->elevated;
     k->st = CALL_DISPATCHED;
+    k->sent = true;
     k->deadline = r->dispatch_timeout_ms > 0 ? now + r->dispatch_timeout_ms : -1;
 }
 
@@ -447,7 +460,7 @@ static void abort_calls(na_core *c, run_t *r, const char *why)
     for (size_t i = 0; i < r->ncalls; i++) {
         call_t *k = &r->calls[i];
         if (k->st == CALL_DONE) continue;
-        if (call_holds_slot(k->st)) kill_call(c, r, k);
+        if (k->sent) kill_call(c, r, k);
         result(c, r, k, false, why);
     }
 }
@@ -531,7 +544,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         k->name = dupstr(in->name ? in->name : "");
         k->args = dupstr(in->args ? in->args : "{}");
         k->res_keys = dupstr(in->res_keys ? in->res_keys : "");
-        k->res_exclusive = in->res_exclusive;
+        k->res_xkeys = dupstr(in->res_xkeys ? in->res_xkeys : "");
         k->turn_id = r->turn_id;
         k->tool = find_tool(c, k->name);
         /* 内核不认识的工具名（MCP 的 <服务>__<工具>）交给网关执行 */
@@ -617,15 +630,50 @@ static int on_approve(na_core *c, int64_t now, const na_event *ev)
     return 0;
 }
 
-static int on_call_started(na_core *c, int64_t now, const na_event *ev)
+/* 宿主收到了，但在等执行槽或等资源：从“派发等待”转成“排队”，
+ * 执行时限和派发等待都不再走，改由排队时限（没配就只受 run 总时限约束）。 */
+static int on_call_queued(na_core *c, int64_t now, const na_event *ev)
 {
     run_t *r = find_run(c, ev->sid);
     if (r && !same_run(r, ev)) return -1;
     call_t *k = r ? find_call(r, ev->id) : NULL;
     if (!k || k->st != CALL_DISPATCHED) return -1;
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
+    k->st = CALL_QUEUED;
+    k->deadline = r->queued_timeout_ms > 0 ? now + r->queued_timeout_ms : -1;
+    return 0;
+}
+
+static int on_call_started(na_core *c, int64_t now, const na_event *ev)
+{
+    run_t *r = find_run(c, ev->sid);
+    if (r && !same_run(r, ev)) return -1;
+    call_t *k = r ? find_call(r, ev->id) : NULL;
+    /* 直接从派发等待进来，或者先被宿主排过队 */
+    if (!k || !k->sent || (k->st != CALL_DISPATCHED && k->st != CALL_QUEUED)) return -1;
+    if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     k->st = CALL_RUNNING;
     k->deadline = k->tool->timeout_ms > 0 ? now + k->tool->timeout_ms : -1;
+    return 0;
+}
+
+/* 网关说“这次生成让位给插话”：run 还停在等模型，按原来的步数预算再请求一次。
+ * 预算是内核的：插话不会重置计数，也不能靠反复插话绕过上限。 */
+static int on_model_yield(na_core *c, int64_t now, const na_event *ev)
+{
+    (void)now;
+    run_t *r = find_run(c, ev->sid);
+    if (!r || r->st != RUN_WAIT_MODEL || !same_run(r, ev)) return -1;
+    if (ev->turn_id > 0 && r->turn_id && ev->turn_id != r->turn_id) return -1;
+    if (r->max_steps > 0 && r->steps >= r->max_steps) {
+        finish(c, r, "budget", NULL);
+        return 0;
+    }
+    r->steps++;
+    r->turn_id++;
+    na_cmd *m = push(c, NA_CMD_MODEL, r->sid);
+    m->run_id = dupstr(r->run_id);
+    m->turn_id = r->turn_id;
     return 0;
 }
 
@@ -688,7 +736,7 @@ static void on_reset(na_core *c)
     while (c->runs) {
         run_t *r = c->runs;
         for (size_t i = 0; i < r->ncalls; i++)
-            if (call_holds_slot(r->calls[i].st)) kill_call(c, r, &r->calls[i]);
+            if (r->calls[i].sent) kill_call(c, r, &r->calls[i]);
         drop_run(c, r);
     }
 }
@@ -700,6 +748,8 @@ int na_core_feed(na_core *c, int64_t now, const na_event *ev)
     case NA_EV_TURN:         return on_turn(c, now, ev);
     case NA_EV_APPROVE:      return on_approve(c, now, ev);
     case NA_EV_CANCEL:       return on_cancel(c, ev);
+    case NA_EV_MODEL_YIELD:  return on_model_yield(c, now, ev);
+    case NA_EV_CALL_QUEUED:  return on_call_queued(c, now, ev);
     case NA_EV_CALL_STARTED: return on_call_started(c, now, ev);
     case NA_EV_TOOL_DONE:    return on_tool_done(c, now, ev);
     case NA_EV_TICK:         on_tick(c, now); return 0;

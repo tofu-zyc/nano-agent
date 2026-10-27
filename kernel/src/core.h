@@ -70,8 +70,10 @@ typedef enum {
     NA_EV_TURN,         /* 模型完成一轮：sid, run_id, turn_id, reason, calls, detail */
     NA_EV_APPROVE,      /* 审批结果：sid, run_id, turn_id, id, ok */
     NA_EV_CANCEL,       /* 用户要求停止：sid */
+    NA_EV_CALL_QUEUED,  /* 宿主：收到了，但在等执行槽或等资源；排队不占执行槽，执行时限还没开始 */
     NA_EV_CALL_STARTED, /* 宿主：这个调用的执行器真的起来了，执行时限从现在算：sid, run_id, turn_id, id */
     NA_EV_TOOL_DONE,    /* 本地工具执行完毕：sid, run_id, turn_id, id, ok, content */
+    NA_EV_MODEL_YIELD,  /* 网关：这次生成让位给了插话，要重新请求模型（照样算一次轮次） */
     NA_EV_TICK,         /* 只推进时间，用来检查超时 */
     NA_EV_RESET,        /* 与网关断开：丢弃所有 run */
 } na_ev_type;
@@ -103,11 +105,13 @@ typedef struct {
     bool elevated;      /* 模型要求提权写工作目录外（每次都要审批） */
     const char *action; /* 参数里的 action（宿主读出来）：Schedule 和 GatewayAdmin 按它决定怎么审批 */
     /* ---- 并发分类（宿主按真实工具和已验证参数解析，内核不猜） ----
-     * res_keys 是逗号分隔的资源键，比如 "file:/work/a.c" 或 "dir:/work"；
-     * 空表示这个调用不和别人抢东西。res_exclusive 为 true 表示独占这些键。
-     * 两个调用只要共有一个键、且其中至少一个是独占的，就不能同时跑。 */
+     * 两组逗号分隔的资源键，比如 "dir:/work" 或 "file:/work/a.c"：
+     *   res_keys  共享锁：可以和别人的共享锁同时持有
+     *   res_xkeys 独占锁：和别人的任何一组相同的键都冲突
+     * 冲突规则是“独占键 ∩ 对方的（共享 ∪ 独占）非空”，所以文件的读写在父目录上取
+     * 共享锁、在目标文件上取独占锁时，才既能让无关写并行，又能挡住 Shell 的目录独占。 */
     const char *res_keys;
-    bool res_exclusive;
+    const char *res_xkeys;
 } na_call;
 
 typedef struct {

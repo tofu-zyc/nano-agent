@@ -668,7 +668,8 @@ static void test_sandbox_off_vs_missing(void)
     na_core_free(c);
 }
 
-/* 同一个文件上的写只能串行；两个读共享锁可以一起跑；不同文件的写互不影响 */
+/* 资源锁：文件操作在父目录上取共享锁、在目标文件上取独占锁；Shell 在目录上取独占锁。
+ * 于是“Shell vs 同目录的写”一定冲突，“不同文件的写”可以并行。 */
 static void test_resource_locks(void)
 {
     na_core *c = mk(16);
@@ -676,23 +677,70 @@ static void test_resource_locks(void)
     na_core_feed(c, 0, &ev);
     drain(c);
     na_call calls[] = {
-        { .id = "w1", .name = "Write", .args = "{}", .args_ok = true, .res_keys = "file:/w/a", .res_exclusive = true },
-        { .id = "w2", .name = "Write", .args = "{}", .args_ok = true, .res_keys = "file:/w/a", .res_exclusive = true },
-        { .id = "w3", .name = "Write", .args = "{}", .args_ok = true, .res_keys = "file:/w/b", .res_exclusive = true },
-        { .id = "r1", .name = "Read",  .args = "{}", .args_ok = true, .res_keys = "file:/w/c" },
-        { .id = "r2", .name = "Read",  .args = "{}", .args_ok = true, .res_keys = "file:/w/c" },
+        { .id = "w1", .name = "Write", .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w", .res_xkeys = "file:/w/a" },
+        { .id = "w2", .name = "Write", .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w", .res_xkeys = "file:/w/a" },
+        { .id = "w3", .name = "Write", .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w", .res_xkeys = "file:/w/b" },
+        { .id = "r1", .name = "Read",  .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w,file:/w/b" },
+        { .id = "r2", .name = "Read",  .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w,file:/w/c" },
     };
     turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 5);
+    /* 同一个文件上的两个写只能串行；读不同文件、写不同文件都可以并行 */
     EXPECT(c, "EXEC(w1,Write,10000) QUEUED(w2,等前面的工具执行完) EXEC(w3,Write,10000) "
-              "EXEC(r1,Read,5000) EXEC(r2,Read,5000)");
-    /* 再补一条：同一个文件上的读（共享锁）和写（独占锁）不能重叠 */
-    na_call clash[] = {
-        { .id = "x1", .name = "Read",  .args = "{}", .args_ok = true, .res_keys = "file:/w/d" },
-        { .id = "x2", .name = "Read",  .args = "{}", .args_ok = true, .res_keys = "file:/w/d" },
-        { .id = "x3", .name = "Write", .args = "{}", .args_ok = true, .res_keys = "file:/w/d", .res_exclusive = true },
-    };
+              "QUEUED(r1,等前面的工具执行完) EXEC(r2,Read,5000)");
     tool_done(c, 20, "s1", "w1", true, "1");
     EXPECT(c, "RESULT(w1,ok,1) EXEC(w2,Write,10000)");
+    na_core_free(c);
+
+    /* Shell 独占工作目录：同一批里的写必须等它结束（这正是“不会互相覆盖”的保证） */
+    c = mk(16);
+    ev = (na_event){ .type = NA_EV_INPUT, .sid = "s2", .from = "tg:1", .mode = NA_MODE_AUTO, .max_parallel_tools = 4 };
+    na_core_feed(c, 0, &ev);
+    drain(c);
+    na_call mix[] = {
+        { .id = "sh", .name = "Shell", .args = "{}", .args_ok = true, .res_xkeys = "dir:/w" },
+        { .id = "wr", .name = "Write", .args = "{}", .args_ok = true,
+          .res_keys = "dir:/w", .res_xkeys = "file:/w/a" },
+        { .id = "other", .name = "Shell", .args = "{}", .args_ok = true, .res_xkeys = "dir:/other" },
+    };
+    turn(c, 10, "s2", NA_TURN_TOOL_USE, mix, 3);
+    EXPECT(c, "EXEC(sh,Shell,30000) QUEUED(wr,等前面的工具执行完) EXEC(other,Shell,30000)");
+    tool_done(c, 20, "s2", "sh", true, "x");
+    EXPECT(c, "RESULT(sh,ok,x) EXEC(wr,Write,10000)");
+    na_core_free(c);
+}
+
+/* 宿主收到以后在等资源/等槽位：调用转到排队，派发等待不再计时；开始之后执行时限才走 */
+static void test_host_queued_state(void)
+{
+    na_core *c = mk(16);
+    input(c, 0, "s1", "tg:1");
+    drain(c);
+    na_call calls[] = { { "a", "Read", "{}", true, NA_SB_DEFAULT, NULL } };
+    turn(c, 10, "s1", NA_TURN_TOOL_USE, calls, 1);
+    EXPECT(c, "EXEC(a,Read,5000)");
+    CHECK(na_core_next_deadline(c) == 10 + 30000);   /* 派发等待 */
+    na_event q = { .type = NA_EV_CALL_QUEUED, .sid = "s1", .id = "a" };
+    CHECK(na_core_feed(c, 20, &q) == 0);
+    CHECK(na_core_next_deadline(c) == 600000);       /* 排队不单独计时，只剩 run 的总时限 */
+    na_event st = { .type = NA_EV_CALL_STARTED, .sid = "s1", .id = "a" };
+    CHECK(na_core_feed(c, 30, &st) == 0);            /* 从排队直接开始 */
+    CHECK(na_core_next_deadline(c) == 30 + 5000);
+    tool_done(c, 40, "s1", "a", true, "ok");
+    EXPECT(c, "RESULT(a,ok,ok) MODEL(s1)");
+    /* 宿主排过队的调用取消时仍要通知宿主把它从队列里拿掉 */
+    drain(c);
+    na_call two[] = { { "b", "Read", "{}", true, NA_SB_DEFAULT, NULL } };
+    turn(c, 50, "s1", NA_TURN_TOOL_USE, two, 1);
+    drain(c);
+    q = (na_event){ .type = NA_EV_CALL_QUEUED, .sid = "s1", .id = "b" };
+    na_core_feed(c, 60, &q);
+    simple(c, 70, NA_EV_CANCEL, "s1");
+    EXPECT(c, "KILL(b) RESULT(b,err,已取消) DONE(cancelled)");
     na_core_free(c);
 }
 
@@ -868,6 +916,7 @@ int main(void)
     test_admin_tool_always_approves();
     test_parallel_limit_queues();
     test_resource_locks();
+    test_host_queued_state();
     test_sandbox_off_vs_missing();
     test_queued_timeout();
     test_dispatch_timeout();
