@@ -90,6 +90,15 @@ func (s *Store) newPath(sid, suffix string) string {
 	return filepath.Join(s.dirV1Sessions(), Key(sid)+suffix)
 }
 
+// isDead 报告这个会话是不是被明确删除过（墓碑）。已删除的会话不参与读取、列举和分支视图。
+func (s *Store) isDead(sid string) bool {
+	if sid == "" {
+		return false
+	}
+	_, err := os.Stat(s.deletedMarker(sid))
+	return err == nil
+}
+
 // deletedMarker 是“这个会话被明确删除过”的墓碑：旧备份保留，但不再自动复活。
 func (s *Store) deletedMarker(sid string) string {
 	return filepath.Join(s.dirV1(), "deleted", Key(sid))

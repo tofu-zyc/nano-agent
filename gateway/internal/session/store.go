@@ -80,6 +80,17 @@ func New(dir string) (*Store, error) {
 		promoted: map[string]bool{}, snapBudget: 8 << 20}, nil
 }
 
+// renameOp 是一次改名的持久操作记录：失败后按它继续，不用盯着文件存在性猜。
+type renameOp struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Stage string `json:"stage"` // started | copied | committed
+}
+
+func (s *Store) renameOpFile(from, to string) string {
+	return filepath.Join(s.dirV1(), "renames", Key(from)+"-"+Key(to)+".json")
+}
+
 // Dir 是数据目录。
 func (s *Store) Dir() string { return s.dir }
 
@@ -89,13 +100,17 @@ func (s *Store) file(sid string) string {
 
 // ensureActive 给新会话写激活标记：从创建那一刻起它就是新布局里的权威数据。
 func (s *Store) ensureActive(sid string) error {
-	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
-		return nil
-	}
 	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
 		return err
 	}
-	return writeFileAtomic(s.activeMarker(sid), []byte(Key(sid)))
+	if _, err := os.Stat(s.activeMarker(sid)); err != nil {
+		if err := writeFileAtomic(s.activeMarker(sid), []byte(Key(sid))); err != nil {
+			return err
+		}
+	}
+	// 显式重建的新代：墓碑作废（旧备份仍然不会被自动读取，因为 active 已经是权威）
+	_ = os.Remove(s.deletedMarker(sid))
+	return nil
 }
 
 // legacyPath 是旧布局里某一类文件的位置（只读兼容与迁移来源）。
@@ -128,6 +143,9 @@ func (s *Store) History(sid string) []Msg {
 }
 
 func (s *Store) load(sid string) []Msg {
+	if s.isDead(sid) {
+		return nil // 删除墓碑：连分支继承的快照视图也不再授权
+	}
 	base := s.Settings(sid).Base
 	if br, ok := s.Branch(sid); ok {
 		return s.loadBranch(br, base)
@@ -433,6 +451,9 @@ func (s *Store) Reset(sid string) error {
 
 // Exists 判断磁盘上有没有这个会话（有历史或者有设置）。
 func (s *Store) Exists(sid string) bool {
+	if s.isDead(sid) {
+		return false
+	}
 	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
 		if _, ok, err := s.locate(sid, suffix); err == nil && ok {
 			return true
@@ -446,9 +467,34 @@ func (s *Store) Exists(sid string) bool {
 
 // Rename 把会话的历史和设置换一个 ID（升级旧数据用）。新 ID 不能已经存在。
 func (s *Store) Rename(from, to string) error {
-	if s.Exists(to) {
+	if from == to {
+		return nil
+	}
+	if s.isDead(from) {
+		return fmt.Errorf("会话 %s 已经被删除", from)
+	}
+	opPath := s.renameOpFile(from, to)
+	resuming := false
+	if _, err := os.Stat(opPath); err == nil {
+		resuming = true // 上次没做完的同一笔改名：继续，不要当成“目标已存在”
+	}
+	writeOp := func(stage string) error {
+		b, _ := json.MarshalIndent(renameOp{From: from, To: to, Stage: stage}, "", "  ")
+		return writeFileAtomic(opPath, b)
+	}
+	if !resuming && s.Exists(to) {
 		return fmt.Errorf("会话 %s 已经存在", to)
 	}
+	// 1) 先校验目标身份与长键映射：失败时源原样未动
+	if err := s.rememberLongKey(to); err != nil {
+		return err
+	}
+	if !resuming {
+		if err := writeOp("started"); err != nil {
+			return err
+		}
+	}
+	// 2) 复制（不是移动）到目标：任何一步失败都还能从头再来
 	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
 		src, ok, err := s.locate(from, suffix)
 		if err != nil {
@@ -457,28 +503,45 @@ func (s *Store) Rename(from, to string) error {
 		if !ok {
 			continue
 		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
 		dst := s.newPath(to, suffix)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}
-		if err := os.Rename(src, dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return err
 		}
+		if back, err := os.ReadFile(dst); err != nil || string(back) != string(data) {
+			return fmt.Errorf("复制到目标后回读不一致：%s", dst)
+		}
 	}
+	if err := writeOp("copied"); err != nil {
+		return err
+	}
+	// 3) 提交点：目标激活 + 源墓碑
 	if err := s.ensureActive(to); err != nil {
 		return err
 	}
-	if err := s.rememberLongKey(to); err != nil {
-		return err
-	}
-	// 源用墓碑收尾：旧备份不能变成第二个活动会话
-	_ = os.Remove(s.activeMarker(from))
 	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(s.deletedMarker(from), []byte(Key(from))); err != nil {
 		return err
 	}
+	_ = os.Remove(s.activeMarker(from))
+	if err := writeOp("committed"); err != nil {
+		return err
+	}
+	// 4) 清理源文件：失败也只影响磁盘残留，源已经被墓碑挡住
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("改名已提交，清理源文件失败（可重试）：%w", err)
+		}
+	}
+	_ = os.Remove(opPath)
 	delete(s.hist, from)
 	delete(s.settings, from)
 	delete(s.hist, to)
@@ -488,7 +551,7 @@ func (s *Store) Rename(from, to string) error {
 
 // Delete 删除会话的历史和设置。
 func (s *Store) Delete(sid string) error {
-	// 先写墓碑：即使后面删文件失败，这个会话也不会从旧备份复活
+	// 墓碑先落盘：即使后面清理失败，这个会话也不会从旧备份复活
 	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(sid)), 0o700); err != nil {
 		return err
 	}
@@ -496,19 +559,21 @@ func (s *Store) Delete(sid string) error {
 		return err
 	}
 	_ = os.Remove(s.activeMarker(sid))
+	// 物理清理用的是“这次删除拥有的资源”：不能走 locate，墓碑会让它返回空集
+	var firstErr error
 	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
-		path, ok, err := s.locate(sid, suffix)
-		if err != nil {
-			return err // 定位失败就如实报告，不当成“没有文件”
+		if err := os.Remove(s.newPath(sid, suffix)); err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
 		}
-		if !ok {
-			continue
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
+	}
+	if err := os.RemoveAll(filepath.Join(s.dirV1Archive(), Key(sid))); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	delete(s.hist, sid)
 	delete(s.settings, sid)
+	delete(s.branches, sid)
+	if firstErr != nil {
+		return fmt.Errorf("删除会话时清理文件失败（墓碑已生效，可以重试）：%w", firstErr)
+	}
 	return nil
 }
