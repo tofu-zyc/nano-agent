@@ -73,6 +73,9 @@ func (g *gatedLLM) last() llm.Request {
 // 这批还没交给内核的工具调用不再派发。
 func TestInterjectionWhileGeneratingReplansWithoutDispatching(t *testing.T) {
 	e := setup(t)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.Features = map[string]int{"user_interjection": 1}
+	e.a.mu.Unlock()
 	g := newGatedLLM()
 	e.a.SetLLM(g)
 	e.say("任务", msgID("m1"))
@@ -86,9 +89,10 @@ func TestInterjectionWhileGeneratingReplansWithoutDispatching(t *testing.T) {
 	// 第一次生成结束：它提出了一批工具调用
 	g.release(t, &llm.Result{Reason: llm.ReasonToolUse, Content: "我先看看",
 		Calls: []llm.ToolCall{{ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "echo", Arguments: "{}"}}}})
-	// 网关不应该把这批调用交给内核，而是先插入插话、重新请求模型
+	// 网关不应该把这批调用交给内核，而是先插入插话、把重新请求交给内核
+	y := e.k.expect(proto.TModelYield)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: y.TurnID + 1})
 	g.waitCalls(t, 2)
-	e.k.none()
 	req := g.last()
 	last := req.Messages[len(req.Messages)-1]
 	if last.Role != "user" || !strings.Contains(last.Content, "[用户插话]") || !strings.Contains(last.Content, "只改 Linux") {
@@ -113,6 +117,9 @@ func TestInterjectionWhileGeneratingReplansWithoutDispatching(t *testing.T) {
 // 模型生成最终回答时还有插话：正文保留、run 不结束，下一次请求能看到带标记的补充。
 func TestInterjectionOnFinalAnswerKeepsAnswerAndContinues(t *testing.T) {
 	e := setup(t)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.Features = map[string]int{"user_interjection": 1}
+	e.a.mu.Unlock()
 	g := newGatedLLM()
 	e.a.SetLLM(g)
 	e.say("任务", msgID("m1"))
@@ -122,8 +129,9 @@ func TestInterjectionOnFinalAnswerKeepsAnswerAndContinues(t *testing.T) {
 	e.say("再补一句", msgID("m2"))
 	e.ch.wait(t, "已收到插话")
 	g.release(t, &llm.Result{Reason: llm.ReasonFinal, Content: "第一次的结论"})
+	y := e.k.expect(proto.TModelYield)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: y.TurnID + 1})
 	g.waitCalls(t, 2)
-	e.k.none() // run 没有结束
 	req := g.last()
 	if last := req.Messages[len(req.Messages)-1]; !strings.Contains(last.Content, "再补一句") {
 		t.Fatalf("最终回答之后没有注入插话：%+v", last)
@@ -290,4 +298,36 @@ func TestStaleKernelMessagesIgnored(t *testing.T) {
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, RunID: in.RunID, Status: proto.StatusOK})
 	e.ch.wait(t, "（mock）收到：第一轮")
+}
+
+// 旧节点不认识 model_yield：不能在网关里自己重开模型请求（那会绕过内核的步数预算），
+// 退回原来的行为——补充放回会话队列，这一轮按正常结果收尾。
+func TestInterjectionOldNodeFallsBackToQueue(t *testing.T) {
+	e := setup(t)
+	g := newGatedLLM()
+	e.a.SetLLM(g)
+	e.say("任务", msgID("m1"))
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: 1})
+	g.waitCalls(t, 1)
+	e.say("补充", msgID("m2"))
+	e.ch.wait(t, "已收到插话")
+	g.release(t, &llm.Result{Reason: llm.ReasonFinal, Content: "第一次的结论"})
+	// 没有 model_yield，这一轮照常交给内核
+	turn := e.k.expect(proto.TTurn)
+	if turn.Reason != proto.ReasonFinal {
+		t.Fatalf("turn: %+v", turn)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
+	e.ch.wait(t, "已经放在下一轮接着处理")
+	// 补充作为下一轮的用户消息重新开始（不丢）
+	in := e.k.expect(proto.TInput)
+	if in.SID != e.sid {
+		t.Fatalf("input: %+v", in)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid, TurnID: 1})
+	g.waitCalls(t, 2)
+	if last := g.last().Messages[len(g.last().Messages)-1]; !strings.Contains(last.Content, "补充") {
+		t.Fatalf("补充没有在下一轮处理：%+v", last)
+	}
 }

@@ -126,6 +126,26 @@
 5. **插话后的重新请求回到内核预算**：新增 `model_yield`，由内核按自己的步数预算再请求，
    到顶就 `DONE(budget)`。
 
+## 2026-10-27 二轮验收修复（R1–R4）
+
+对应 `docs/REVIEW-v0.9.0-runtime.md` 的四项阻塞问题，全部修掉并补了回归：
+
+| 编号 | 问题 | 修法 | 回归 |
+| --- | --- | --- | --- |
+| R1 | C 把 `sandbox` 发成字符串，Go 按对象解析，连接被断开 | exec 顶层改用 `sandbox_mode`；`sandbox` 只保留 hello 的能力对象和 run / 执行器请求里的字符串 | `TestCExecWireCompatibleWithProtoMsg`、`test_host` 断言真实 exec 帧字段名、真实 C 内核 + 真实 Go 网关的 `TestRealKernelRoundTripWithGatewayTool` |
+| R2 | 宿主已排队的调用被 core 重复派发（一次 Shell 执行了四次） | `dispatch` 严格跳过 `sent=true` 的队列项；宿主再按完整调用身份做一次防重复准入 | `test_host`「宿主排队的调用只执行一次」（追加计数必须正好 1 个 X） |
+| R3 | 取消排队中的代执行后它仍会跑 | `run_cancel` 先 `execq_drop`，没有再 `runner_kill` | `test_host`「取消排队中的代执行后不会再启动」（释放槽位后继续观察） |
+| R4 | 目标节点 `sandbox=on` 被代执行请求的 `off` 绕过 | `spawn_exec` 统一走 `effective_sandbox`，代执行同样受本机部署要求约束 | `test_host`「目标节点 sandbox=on 时，代执行请求 off 不生效」 |
+
+同一批还对齐了 §3 里能确认的几处：
+
+- 提权 Shell 的 `machine:files` 现在和所有文件操作（读写在 `machine:files` 上取共享锁）冲突；
+- 旧节点缺 `user_interjection` 时不再在网关里自己重开模型请求，改为把补充放回会话队列、
+  这一轮按正常结果收尾；
+- 插话的三个状态做了对账：已受理（收件箱）→ 已注入（写进历史）→ 已被模型请求读到，
+  结束时明确告诉用户哪些补充这一轮没被处理；
+- 插话写入历史的 `TS` 改回秒，和其他消息一致。
+
 ## 还没做（按设计文档的阶段）
 
 | 阶段 | 内容 | 说明 |
@@ -134,8 +154,8 @@
 | P3 | 飞书 / Telegram 任务卡片、断线对账、SSH 能力降级 | 依赖 P2 |
 | P5 | 可靠事件、后置 Hook、notify / command / agent、临时会话 | 未开始 |
 | P7 | 前置 Hook、C 文件观察、多平台 I/O 与性能收敛 | 未开始 |
-| — | 会话 Fork（设计文档 §8，2026-10-27 新增） | 未开始 |
-| — | 插话收件箱的持久恢复（journal + 重启按 ID 对账） | 未开始：当前只在内存 |
+| — | 会话 Fork（设计文档 §8，2026-10-27 新增） | 未开始（下一步 C，优先于 P2/P5） |
+| — | 插话收件箱的持久恢复（journal + 重启按 ID 对账） | 未开始：当前只在内存（下一步 B） |
 | — | 心智数值配置、行为维度与阈值预设（设计文档 §7.2 / §7.3） | 未开始 |
 
 设计文档 §3.1 里还有几项**已知简化**：

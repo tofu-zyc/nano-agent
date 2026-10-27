@@ -472,6 +472,9 @@ def t_gateway_exec(gw):
     w = gw.expect("exec", sid="g1", id="c1")
     assert w["name"] == "Write" and w["args"] == {"path": "r.txt", "content": "x"} and w["timeout_ms"] > 0, w
     assert "dirs" not in w and "ro" not in w and w["workspace"] == "box:~/proj", w
+    # 顶层只能用 sandbox_mode：sandbox 是 hello 里的能力对象，写成字符串会让网关断开连接
+    assert w.get("sandbox_mode") in ("auto", "on", "off"), w
+    assert "sandbox" not in w, w
     gw.expect("tool_queued", sid="g1", id="c2")
     gw.send(t="exec_result", sid="g1", id="c1", ok=False, content="写不了")
     gw.expect("result", sid="g1", id="c1", ok=False, content="写不了")
@@ -729,6 +732,102 @@ def slot_tests(T):
             finish(gw, "sl1")
 
         check("代执行和工具调用共用执行槽（max_execs = 1）", host_job_takes_slot)
+
+        def queued_runs_exactly_once():
+            one, two = os.path.join(WORK, "one"), os.path.join(WORK, "two")
+            os.makedirs(one, exist_ok=True)
+            os.makedirs(two, exist_ok=True)
+            counter = os.path.join(two, "execution-count.txt")
+            if os.path.exists(counter):
+                os.unlink(counter)
+            # 两个不同目录的 Shell：状态机允许并行，机器只剩一个 Shell 槽 → 第二个由宿主排队
+            gw.send(t="input", sid="once1", mode="auto",
+                    workspaces=[local_ws((one,)), local_ws((two,))], **{"from": "tg:user"})
+            gw.expect("model", sid="once1")
+            call(gw, "once1",
+                 ("a", "Shell", {"command": "sleep 0.3", "workspace": "本机:" + one}),
+                 ("b", "Shell", {"command": "printf X >> execution-count.txt; sleep 0.2", "workspace": "本机:" + two}))
+            gw.expect("tool_queued", sid="once1", id="b", timeout=5)
+            got = {}
+            while len(got) < 2:
+                m = gw.recv(10)
+                if m.get("t") == "tool_queued":
+                    continue
+                assert m.get("t") == "result", m
+                got[m["id"]] = m
+            assert got["a"]["ok"] and got["b"]["ok"], got
+            time.sleep(0.4)
+            assert open(counter).read() == "X", repr(open(counter).read())
+            finish(gw, "once1")
+
+        check("宿主排队的调用只执行一次", queued_runs_exactly_once)
+
+        def cancel_queued_host_write():
+            one, two = os.path.join(WORK, "one"), os.path.join(WORK, "two")
+            target = os.path.join(two, "queued-write.txt")
+            if os.path.exists(target):
+                os.unlink(target)
+            gw.send(t="run", id="hold", req={"tool": "Shell", "args": {"command": "sleep 0.4"},
+                                            "dirs": [one], "write": True, "max_output": 4096, "sandbox": "auto"})
+            time.sleep(0.1)
+            gw.send(t="run", id="wr", req={"tool": "Write", "args": {"path": "queued-write.txt", "content": "should-not-exist"},
+                                           "dirs": [two], "write": True, "max_output": 4096, "sandbox": "auto"})
+            time.sleep(0.1)
+            assert not os.path.exists(target), "取消之前就已经写进去了？"
+            gw.send(t="run_cancel", id="wr")
+            time.sleep(1.5)
+            assert not os.path.exists(target), "取消的排队代执行仍然执行了"
+
+        check("取消排队中的代执行后不会再启动", cancel_queued_host_write)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+
+
+def sandbox_policy_tests(T):
+    """目标节点的沙箱部署要求不能被协调节点的请求绕过"""
+    U = os.path.join(T, "sbpolicy")
+    os.makedirs(os.path.join(U, "home"), exist_ok=True)
+    os.makedirs(os.path.join(U, "work"), exist_ok=True)
+    sock = os.path.join(U, "gw.sock")
+    conf = os.path.join(U, "kernel.conf")
+    with open(conf, "w") as f:
+        f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nsandbox = on\n")
+    gw = Gateway(sock)
+    log = open(os.path.join(U, "kernel.log"), "w")
+    env = dict(os.environ, HOME=os.path.join(U, "home"), NANO_HOME=os.path.join(U, "home", ".nano-agent"))
+    proc = subprocess.Popen([KERNEL, "-c", conf], stderr=log, env=env)
+    try:
+        try:
+            gw.accept()
+            hello = gw.expect("hello")
+        except Exception as e:  # noqa: BLE001 —— 没有 Landlock 时内核按 on 的语义直接退出
+            print(f"  skip 目标节点沙箱策略（内核没起来：{e}）")
+            return
+        if hello["sandbox"]["mode"] != "on" or hello["sandbox"]["landlock"] == 0:
+            print("  skip 目标节点沙箱策略（本机给不了完整隔离）")
+            return
+        gw.send(t="welcome", v=11)
+        target = "/tmp/na-r4-target.txt"
+        if os.path.exists(target):
+            os.unlink(target)
+        gw.send(t="run", id="r4", req={"tool": "Shell",
+                                       "args": {"command": f"echo x > {target} && cat {target}"},
+                                       "dirs": [os.path.join(U, "work")], "write": True,
+                                       "max_output": 4096, "sandbox": "off"})
+        got = {}
+        while "run_result:r4" not in got:
+            m = gw.recv(15)
+            got[m.get("t") + ":" + str(m.get("id"))] = m
+        r = got["run_result:r4"]
+        assert r["ok"] is False, r
+        assert "Permission denied" in r["content"] or "权限" in r["content"], r
+        assert not os.path.exists(target), "沙箱要求被绕过了"
+        print("  ok   目标节点 sandbox=on 时，代执行请求 off 不生效")
     finally:
         proc.terminate()
         try:
@@ -847,6 +946,7 @@ def main():
         else:
             print("  ok   内核退出时清理正在执行的命令")
         slot_tests(T)
+        sandbox_policy_tests(T)
         update_tests(T)
         kernel_log = open(os.path.join(T, "kernel.log"), errors="replace").read()
         if "Sanitizer" in kernel_log:

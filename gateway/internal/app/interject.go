@@ -115,7 +115,7 @@ func (a *App) drainInterjections(s *sess, r *run) bool {
 		ParentRun: r.runID,
 		SourceID:  strings.Join(ids, ","),
 		Sender:    batch[0].who,
-		TS:        a.now().UnixMilli(),
+		TS:        a.now().Unix(),   // 和其他历史消息一样用秒；毫秒是接收时间，另记在事件里
 	}
 	if err := a.store.Append(s.sid, msg); err != nil {
 		// 写历史失败：消息留着，下一个边界再试（仍受 run 总时限约束）
@@ -198,6 +198,14 @@ func (a *App) yieldToInterjection(s *sess, r *run, res *llm.Result, u llm.Usage)
 	case llm.ReasonToolUse, llm.ReasonFinal:
 	default:
 		return false // 拒绝等结局按原样收尾
+	}
+	// 旧节点不认识 model_yield：不能在这里自己重开一次模型请求（那样绕过了内核的步数预算）。
+	// 退回原来的行为：补充放回会话队列，这一轮按正常结果收尾，下一轮再处理。
+	if !a.interjectionReady(r.node) {
+		if left := a.requeueInterjections(s, r); len(left) > 0 {
+			s.queue = append(left, s.queue...)
+		}
+		return false
 	}
 	// 已经生成出来的正文照常保存：它确实说过了，保留它，不伪装成“已经考虑了后来的补充”。
 	// 注意不带 ToolCalls —— 这批调用没有派发，写进去就没有配对结果了。

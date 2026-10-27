@@ -436,6 +436,9 @@ static void dispatch(na_core *c, int64_t now, run_t *r)
         for (size_t i = 0; i < r->ncalls; i++) {
             call_t *k = &r->calls[i];
             if (k->st != CALL_QUEUED) continue;
+            /* 已经发给宿主的（宿主那边在排队等槽位/资源）不能再派发一次：
+             * 它已经有人管了，重复 EXEC 会让同一次调用真的执行好几遍。 */
+            if (k->sent) continue;
             if (!can_start(r, k)) continue;
             pick = k;
             break;   /* 从最早排队的开始挑，避免后来的插队饿死前面的 */

@@ -547,6 +547,8 @@ static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, 
          * 提权或范围不明时扩大到机器级的文件资源。模型自报“只读”不放松这里的锁。 */
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"))) {
             res_add(xkeys, "machine", "files");
+            /* 提权 Shell 也可能动任何文件：所有文件操作都持 machine 共享锁，才挡得住 */
+            res_add(shared, "machine", "files");
         } else {
             const cJSON *it;
             cJSON_ArrayForEach(it, dirs) {
@@ -557,7 +559,9 @@ static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, 
             }
         }
     } else if (!strcmp(tool, "Write") || !strcmp(tool, "Edit")) {
-        /* 写：目标文件独占，所在的每个工作目录共享（挡住并行的 Shell） */
+        /* 写：目标文件独占，所在的每个工作目录共享（挡住并行的 Shell）；
+         * machine:files 共享锁让提权 Shell 和我们冲突 */
+        res_add(shared, "machine", "files");
         const cJSON *it;
         cJSON_ArrayForEach(it, dirs) {
             if (!cJSON_IsString(it)) continue;
@@ -568,6 +572,7 @@ static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, 
         if (path) res_add(xkeys, "file", path);
     } else if (!strcmp(tool, "Read") || !strcmp(tool, "Grep") || !strcmp(tool, "Fetch")) {
         /* 读：目录和目标文件都取共享锁，可以和别的读、别的写并行，但不能和 Shell 重叠 */
+        res_add(shared, "machine", "files");
         const cJSON *it;
         cJSON_ArrayForEach(it, dirs) {
             if (!cJSON_IsString(it)) continue;
@@ -639,14 +644,26 @@ static void send_exec(kernel_t *k, const na_cmd *c, cJSON *args, const char *wor
     cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
     cJSON_AddNumberToObject(m, "timeout_ms", c->timeout_ms);
     cJSON_AddNumberToObject(m, "max_output", (double)max_output);
-    /* 让网关知道这一轮要的沙箱模式：它在别的机器上执行时要原样转给那台机器 */
-    if (sandbox && *sandbox) cJSON_AddStringToObject(m, "sandbox", sandbox);
+    /* 让网关知道这一轮要的沙箱模式：它在别的机器上执行时要转给那台机器。
+     * 字段名必须叫 sandbox_mode —— 顶层 sandbox 是 hello 里的能力对象（结构化），
+     * 这里写字符串会让网关反序列化失败、直接断开连接。 */
+    if (sandbox && *sandbox) cJSON_AddStringToObject(m, "sandbox_mode", sandbox);
     link_send(&k->link, m);
     gw_add(k, c->sid, c->run_id, c->turn_id, c->id);
     /* 旧网关不会回 exec_started：派发就算开始，行为和以前一样。新网关先回一条
      * exec_started，执行时限从那之后才走。 */
     if (k->gw_ver < 11) call_started(k, c->sid, c->run_id, c->turn_id, c->id, now);
     log_info("交给网关执行 %s（%s）%s%s", c->name, c->id, workspace ? "：" : "", workspace ? workspace : "");
+}
+
+/* 这一轮最终用在执行器上的沙箱模式：节点自己的 on / off 是部署要求，不能被网关绕开；
+ * 节点是 auto 时听这一轮请求的（默认 auto）。 */
+static const char *effective_sandbox(const kernel_t *k, const char *requested)
+{
+    if (k->sb_mode == SB_ON) return "on";
+    if (k->sb_mode == SB_OFF) return "off";
+    if (requested && (!strcmp(requested, "on") || !strcmp(requested, "off"))) return requested;
+    return "auto";
 }
 
 /* 启动执行器。req 是请求（接管所有权），补上执行器需要的通用字段。
@@ -668,9 +685,11 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
             k->runner.out_cap = (size_t)mo->valuedouble * 6 + 4096;   /* 执行器的输出是转义后的 JSON，留足余量 */
         cJSON_DeleteItemFromObjectCaseSensitive(req, "watch_stdin");
         cJSON_AddBoolToObject(req, "watch_stdin", true);
-        /* 这一轮最终的沙箱请求模式：节点自己的 on/off 优先，其余听这一轮的请求 */
+        /* 这一轮最终的沙箱请求模式：节点自己的 on/off 优先，其余听这一轮的请求。
+         * 代执行请求也一样要经过这里，不能把协调节点传来的值当成已经满足本机要求。 */
+        const char *final_sb = effective_sandbox(k, sandbox);
         cJSON_DeleteItemFromObjectCaseSensitive(req, "sandbox");
-        cJSON_AddStringToObject(req, "sandbox", sandbox && *sandbox ? sandbox : sb_name(k->sb_mode));
+        cJSON_AddStringToObject(req, "sandbox", final_sb);
         char *body = cJSON_PrintUnformatted(req);
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
@@ -682,21 +701,11 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
             j->kind = kind;
             j->res_keys = xstrdup(res_keys ? res_keys : "");
             j->res_xkeys = xstrdup(res_xkeys ? res_xkeys : "");
-            j->sandbox = xstrdup(sandbox && *sandbox ? sandbox : sb_name(k->sb_mode));
+            j->sandbox = xstrdup(final_sb);
         }
     }
     cJSON_Delete(req);
     return j;
-}
-
-/* 这一轮最终用在执行器上的沙箱模式：节点自己的 on / off 是部署要求，不能被网关绕开；
- * 节点是 auto 时听这一轮请求的（默认 auto）。 */
-static const char *effective_sandbox(const kernel_t *k, const char *requested)
-{
-    if (k->sb_mode == SB_ON) return "on";
-    if (k->sb_mode == SB_OFF) return "off";
-    if (requested && (!strcmp(requested, "on") || !strcmp(requested, "off"))) return requested;
-    return "auto";
 }
 
 /* 代执行的结果要等启动之后才发，声明放前面 */
@@ -799,11 +808,37 @@ static void pump_execq(kernel_t *k, int64_t now)
 
 /* 把一次本地执行交给执行槽：有空槽、资源也拿得到就立刻起，否则排队（先来后到）。
  * 代执行请求（JOB_HOST）走同一个入口，槽位和资源规则完全一样。 */
+/* 这个调用身份是不是已经在跑或者在排队：宿主的第二道防重复检查。
+ * 状态机已经保证不重复派发，这里再挡一次，避免协议异常导致同一次调用执行多遍。 */
+static bool exec_identity_busy(const kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id)
+{
+    if (!id || !*id) return false;
+    for (const execq_t *q = k->execq; q; q = q->next) {
+        if (q->kind != JOB_TOOL) continue;
+        if (strcmp(q->sid, sid ? sid : "") || strcmp(q->id, id)) continue;
+        if (q->turn_id == turn_id && (!run_id || !*run_id || !q->run_id || !*q->run_id || !strcmp(q->run_id, run_id)))
+            return true;
+    }
+    for (const job_t *j = k->runner.jobs; j; j = j->next) {
+        if (j->kind != JOB_TOOL) continue;
+        if (strcmp(j->sid, sid ? sid : "") || strcmp(j->id, id)) continue;
+        if (j->turn_id == turn_id && (!run_id || !*run_id || !j->run_id || !*j->run_id || !strcmp(j->run_id, run_id)))
+            return true;
+    }
+    return false;
+}
+
 static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run_id, int turn_id,
                        const char *id, const char *name, int kind, const char *sandbox,
                        const char *res_keys, const char *res_xkeys, int64_t now, char *err, size_t errlen)
 {
     bool shell = is_shell_tool(name);
+    if (kind == JOB_TOOL && exec_identity_busy(k, sid, run_id, turn_id, id)) {
+        /* 已经在跑或在排队：不再启动第二个进程，结果由原来那一次给出 */
+        log_warn("重复的派发请求，忽略：%s（%s）", name, id);
+        cJSON_Delete(req);
+        return true;
+    }
     bool has_slot = exec_slots_used(k) < k->conf.max_execs &&
                     (!shell || k->nshells < k->conf.max_parallel_shells);
     if (has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
@@ -1393,7 +1428,10 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         return;
     }
     if (!strcmp(t, "run_cancel")) {
-        runner_kill(&k->runner, "", sget(m, "id"));
+        /* 还没启动的先从队列里拿掉：光杀进程没用，排队的请求会在槽位空出来之后自己跑起来 */
+        const char *cid = sget(m, "id");
+        if (!execq_drop(k, "", cid)) runner_kill(&k->runner, "", cid);
+        log_info("取消代执行 %s", cid ? cid : "?");
         return;
     }
     if (!strcmp(t, "skill_put")) {

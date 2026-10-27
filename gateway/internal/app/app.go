@@ -293,6 +293,7 @@ type run struct {
 	interjectSeq int
 	notified     bool             // 这一批补充已经回执过“已收到”
 	injected     int              // 已经插入历史的条数
+	readRevision int              // 最近一次模型请求实际读到的条数（injected 的快照）
 	dropped      int              // 因为插话而没有派发的工具调用数
 	seenIDs      map[string]bool  // 最近受理过的平台消息 ID（去重）
 	dropInbox    bool             // 用户明确停止/清空：剩下的补充不再交给下一轮
@@ -1385,6 +1386,16 @@ func (a *App) finish(s *sess, status, detail string) {
 	if text, ok := a.afterRun(s); ok {
 		body, note = "", text
 	}
+	// 插话的三个状态：已受理（收件箱）、已注入（写进历史）、已被模型请求读到。
+	// 这里是最后一个状态的对账：写进历史但这一轮没再请求模型，要明确告诉用户，不能装作已处理。
+	if unread := r.injected - r.readRevision; unread > 0 && r.scheduled == nil {
+		more := fmt.Sprintf("（你后来的 %d 条补充已经放进对话，但这一轮没有再请求模型处理它们；下一轮会看到。）", unread)
+		if note != "" {
+			note += "\n" + more
+		} else {
+			note = more
+		}
+	}
 	a.log.Info("处理结束", "sid", s.sid, "status", status, "model_calls", r.calls,
 		"prompt_tokens", r.usage.PromptTokens, "cached_tokens", r.usage.CachedTokens, "completion_tokens", r.usage.CompletionTokens)
 	if r.calls > 0 {
@@ -1503,6 +1514,8 @@ func (a *App) generateModel(s *sess) {
 	// 边界一：上一批工具调用已经全部闭合、这次模型请求还没构造——先把等着的插话写进历史，
 	// 本次请求的快照就能看到补充。快照之后才到的留给下一个边界，不改写在途请求。
 	a.drainInterjections(s, r)
+	// 这次请求的快照包含到哪一条补充：结束时用它判断“已注入但模型没读到”的补充
+	r.readRevision = r.injected
 	r.modelReq++
 	reqID := fmt.Sprintf("%s-m%d", r.runID, r.modelReq)
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
