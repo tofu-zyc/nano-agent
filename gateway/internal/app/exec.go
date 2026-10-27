@@ -24,8 +24,11 @@ import (
 // execTool 处理内核的 exec。调用方持有锁。
 func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	r := s.run
+	// 交给网关执行的调用也要让内核知道“真的开始了”，执行时限从那之后才走
+	a.execStarted(node, m)
 	reply := func(ok bool, content string) {
-		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, OK: proto.Bool(ok), Content: content})
+		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID,
+			OK: proto.Bool(ok), Content: content})
 	}
 	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(r.from) {
 		reply(false, "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态")
@@ -200,6 +203,8 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	ctx, cancel := context.WithTimeout(a.ctx, timeout+10*time.Second)
 	r.execs[m.ID] = cancel
 	a.log.Info("在 "+mt.ws.Host+" 上执行", "sid", s.sid, "tool", m.Name, "id", m.ID, "kernel", node)
+	// 真的开始在这台机器上执行了：先告诉内核，执行时限从那之后算
+	a.execStarted(node, m)
 	go func() {
 		res := h.Exec(ctx, append(req, '\n'))
 		cancel()

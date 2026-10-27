@@ -113,16 +113,29 @@ func (k *fakeKernel) recv(d time.Duration) (proto.Msg, bool) {
 
 func (k *fakeKernel) expect(typ string) proto.Msg {
 	k.t.Helper()
-	m, ok := k.recv(3 * time.Second)
-	if !ok || m.T != typ {
-		k.t.Fatalf("期望内核收到 %s，实际 %+v（ok=%v）", typ, m, ok)
+	for {
+		m, ok := k.recv(3 * time.Second)
+		// 协议 v11：网关在调用真的开始执行时会先发一条 exec_started，测试不逐一断言它
+		if ok && m.T == proto.TExecStarted && typ != proto.TExecStarted {
+			continue
+		}
+		if !ok || m.T != typ {
+			k.t.Fatalf("期望内核收到 %s，实际 %+v（ok=%v）", typ, m, ok)
+		}
+		return m
 	}
-	return m
 }
 
 func (k *fakeKernel) none() {
 	k.t.Helper()
-	if m, ok := k.recv(200 * time.Millisecond); ok {
+	for {
+		m, ok := k.recv(200 * time.Millisecond)
+		if !ok {
+			break
+		}
+		if m.T == proto.TExecStarted {
+			continue // “真的开始了”的通知不算工具结果
+		}
 		k.t.Fatalf("不该收到消息：%+v", m)
 	}
 	// 读超时会让 Scanner 进入错误状态，换一个新的
@@ -321,30 +334,29 @@ func TestToolsOnlyWithWorkdir(t *testing.T) {
 	}
 }
 
-func TestQueuedMessagesFromSameSenderAreMerged(t *testing.T) {
+// 同一发起人任务进行中继续发来的普通消息现在是插话：等本轮的安全边界再插入，
+// 不再整轮排队。另一个人的消息仍然排队，等这一轮结束再开新一轮。
+func TestInterjectionFromInitiatorInjectedAtBoundary(t *testing.T) {
 	e := setup(t)
-	e.say("第一条")
+	e.say("第一条", msgID("m1"))
 	e.k.expect(proto.TInput)
-	e.say("第二条")
-	e.say("第三条")
-	e.say("别人的", from("u2", "李四"))
-	e.k.none() // 上一轮没结束，不能开新 run
-	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
-	e.k.expect(proto.TTurn)
-	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
-	in := e.k.expect(proto.TInput)
-	if in.From != "fake:u1" {
-		t.Fatalf("second run from: %+v", in)
-	}
+	e.say("第二条", msgID("m2"))
+	e.say("第三条", msgID("m3"))
+	e.say("别人的", msgID("m4"), from("u2", "李四"))
+	e.k.none() // 上一轮还没结束：不能开新 run
+	e.ch.wait(t, "已收到插话")
 	e.k.send(proto.Msg{T: proto.TModel, SID: e.sid})
 	e.k.expect(proto.TTurn)
 	msgs := e.llm.lastReq().Messages
-	if got := msgs[len(msgs)-1].Content; got != stamp+" 第二条\n第三条" {
-		t.Fatalf("merged: %q", got)
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "[用户插话]") ||
+		!strings.Contains(last.Content, "第二条") || !strings.Contains(last.Content, "第三条") {
+		t.Fatalf("插话没有进模型请求：%+v", last)
 	}
 	e.k.send(proto.Msg{T: proto.TDone, SID: e.sid, Status: proto.StatusOK})
+	e.ch.wait(t, "已插入")
 	if in := e.k.expect(proto.TInput); in.From != "fake:u2" {
-		t.Fatalf("third run from: %+v", in)
+		t.Fatalf("别人的消息应该单独开一轮：%+v", in)
 	}
 }
 

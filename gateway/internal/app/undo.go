@@ -80,6 +80,18 @@ func (a *App) UndoSession(sid string) (string, error) {
 // undoLatest 撤回会话里最近的一条输入。正在处理的先停下，结束时再删（pending 为 true）。
 // 返回撤回的那段话和给用户的说明。调用方持有锁。
 func (a *App) undoLatest(s *sess) (text, note string, pending bool, err error) {
+	// 还在收件箱里、没写进历史也没让模型看到的插话：直接拿掉，不影响正在跑的这一步
+	if s.run != nil && len(s.run.inbox) > 0 {
+		it := s.run.inbox[len(s.run.inbox)-1]
+		s.run.inbox = s.run.inbox[:len(s.run.inbox)-1]
+		s.run.inboxBytes -= len(it.text)
+		what := it.text
+		if what == "" {
+			what = "（图片）"
+		}
+		a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "withdrawn", ID: it.msg.MsgID, Text: what})
+		return it.text, "已撤回还没处理的消息：" + quoteText(what), false, nil
+	}
 	if n := len(s.queue); n > 0 {
 		q := s.queue[n-1]
 		s.queue = s.queue[:n-1]
@@ -158,11 +170,38 @@ func (a *App) afterRun(s *sess) (string, bool) {
 // 更早的消息后面已经接着聊了，只说明一下。不认识的消息（命令、网关重启前的）不管。
 func (a *App) recall(c in, msgID string) {
 	s := c.s
+	// 还没注入的插话：直接从收件箱里拿掉
+	if s.run != nil {
+		for i, it := range s.run.inbox {
+			if it.msg.MsgID != msgID {
+				continue
+			}
+			s.run.inbox = append(s.run.inbox[:i:i], s.run.inbox[i+1:]...)
+			s.run.inboxBytes -= len(it.text)
+			a.publish(events.Event{T: "interjection", SID: s.sid, Kind: "withdrawn", ID: msgID, Text: it.text})
+			a.answer(c, "已撤回还没处理的消息："+quoteText(it.text))
+			return
+		}
+	}
 	for i, q := range s.queue {
 		if q.m.MsgID == msgID {
 			s.queue = append(s.queue[:i:i], s.queue[i+1:]...)
 			a.publish(events.Event{T: "undo", SID: s.sid, Text: q.m.Text, Data: map[string]any{"queued": true}})
 			a.answer(c, "已撤回还没处理的消息："+quoteText(q.m.Text))
+			return
+		}
+	}
+	// 已经注入历史的插话：不截断仍然有待返回工具结果的历史，按更正处理
+	if s.run != nil {
+		h := a.store.History(s.sid)
+		for i := len(h) - 1; i >= 0; i-- {
+			if h[i].Kind != "user_interjection" || h[i].SourceID == "" {
+				continue
+			}
+			if !strings.Contains(","+h[i].SourceID+",", ","+msgID+",") {
+				continue
+			}
+			a.answer(c, "这条补充已经插进正在进行的任务，撤回不会撤销它；要停下请发 /stop。")
 			return
 		}
 	}

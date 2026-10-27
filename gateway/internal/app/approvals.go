@@ -44,6 +44,8 @@ func (a *App) approvalOuts(s *sess) []out {
 
 type approval struct {
 	sid, id, name, detail, from string
+	runID                       string // 完整调用身份：回审批时原样带回内核
+	turnID                      int
 	at                          time.Time
 	card                        channel.ApprovalCard
 	refs                        []approvalRef // 发出去的带按钮的审批消息
@@ -65,6 +67,7 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 	title, body := callCard(m.Name, m.Args)
 	desc := title + "：\n" + body
 	ap := &approval{sid: s.sid, id: m.ID, name: m.Name, detail: desc, from: m.From, at: a.now(),
+		runID: m.RunID, turnID: m.TurnID,
 		card: channel.ApprovalCard{N: n, Title: title, Detail: body, From: m.From}}
 	a.approvals[n] = ap
 	a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
@@ -100,7 +103,8 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 // autoApprove：放行模式下内核要审批的调用，网关当场批准，不发审批消息，只在网页上记一笔。调用方持有锁。
 func (a *App) autoApprove(s *sess, m *proto.Msg) {
 	title, _ := callCard(m.Name, m.Args)
-	if !a.hub.Send(s.run.node, proto.Msg{T: proto.TApprove, SID: s.sid, ID: m.ID, OK: proto.Bool(true), From: "auto"}) {
+	if !a.hub.Send(s.run.node, proto.Msg{T: proto.TApprove, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID,
+		OK: proto.Bool(true), From: "auto"}) {
 		return
 	}
 	a.log.Info("放行模式：自动批准", "sid", s.sid, "tool", m.Name)

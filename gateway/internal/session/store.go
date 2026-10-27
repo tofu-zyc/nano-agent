@@ -36,6 +36,15 @@ type Msg struct {
 	// Agent 是产生这条消息的 agent（assistant、tool）。会话中途换过 agent 时，旧消息的来源靠它和后缀
 	// （没有字段的老消息用 Settings.AgentSegments 推断）区分；用户消息没有这个字段。
 	Agent string `json:"agent,omitempty"`
+
+	// 下面几项标出来源，用户插话用得上（老消息没有这些字段，读出来是零值）：
+	//   Kind      "user_interjection" 表示这是任务进行中收到的用户补充，不是新起的一轮
+	//   ParentRun 这条插话属于哪一次 run（历史分组、压缩、撤回按它识别，不把一次任务拆成几次）
+	//   SourceID  平台上的原始消息 ID；Sender 平台确认的发送者
+	Kind      string `json:"kind,omitempty"`
+	ParentRun string `json:"parent_run_id,omitempty"`
+	SourceID  string `json:"source_id,omitempty"`
+	Sender    string `json:"sender,omitempty"`
 }
 
 type Store struct {

@@ -54,12 +54,16 @@ func (e *env) hello(t *testing.T, conn net.Conn, name, token string) *fakeKernel
 func (k *fakeKernel) expectAll(n int) map[string]proto.Msg {
 	k.t.Helper()
 	got := map[string]proto.Msg{}
-	for i := 0; i < n; i++ {
+	for i := 0; i < n; {
 		m, ok := k.recv(3 * time.Second)
 		if !ok {
 			k.t.Fatalf("少了消息，已经收到：%v", got)
 		}
+		if m.T == proto.TExecStarted {
+			continue // 协议 v11 的“真的开始了”通知，不计入期望的条数
+		}
 		got[m.T+":"+m.ID] = m
+		i++
 	}
 	return got
 }

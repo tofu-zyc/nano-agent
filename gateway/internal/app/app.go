@@ -281,6 +281,20 @@ type run struct {
 	w     workspace
 	write bool
 	execs map[string]context.CancelFunc // 网关正在执行的工具调用、正在放的技能文件
+
+	// 完整调用身份（协议 v11）：run_id 由网关生成，turn_id 是内核告诉我们的这一次模型轮次
+	runID   string
+	turnID  int
+	modelReq int
+	// 用户插话（interject.go）：本 run 进行中收到的补充，在安全边界插入
+	inbox        []interjection
+	inboxBytes   int
+	interjectSeq int
+	notified     bool             // 这一批补充已经回执过“已收到”
+	injected     int              // 已经插入历史的条数
+	dropped      int              // 因为插话而没有派发的工具调用数
+	seenIDs      map[string]bool  // 最近受理过的平台消息 ID（去重）
+	dropInbox    bool             // 用户明确停止/清空：剩下的补充不再交给下一轮
 }
 
 // views 是这一轮所有能流式显示的窗口
@@ -695,6 +709,13 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		data["images"] = m.Images
 	}
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
+	// 当前这一轮还在跑：发起人在这个会话里继续发来的普通消息是插话，进本轮的有序收件箱，
+	// 等这一批工具调用或这次生成结束再插入——不取消正在跑的命令，也不打断正在生成的回复。
+	if s.run != nil && s.run.canInterject(who) {
+		if a.acceptInterjection(s, s.run, ep, m, who) {
+			return
+		}
+	}
 	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
 	if s.run == nil && !s.compacting {
 		a.startRun(s)
@@ -938,7 +959,8 @@ func (a *App) startRun(s *sess) {
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
-		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
+		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(3)),
+		rt:    rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
 	// 拟人型的私聊不流式显示：像人一样打完字再发（纯聊天的回复还会拆成几条）
@@ -999,7 +1021,7 @@ func (a *App) startRun(s *sess) {
 		r.full, mode = true, proto.ModeAuto
 	}
 	r.mode = mode
-	in := proto.Msg{T: proto.TInput, SID: s.sid, From: r.from, Mode: mode}
+	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
 	in.MaxSteps = wireLimit(ag.Steps)
@@ -1057,6 +1079,12 @@ func (a *App) endRun(s *sess, note string) {
 	r := s.run
 	if r == nil {
 		return
+	}
+	// 这一轮没来得及插入的补充不能悄悄丢掉：放回会话队列，交给后续 run
+	if !r.dropInbox {
+		if left := a.requeueInterjections(s, r); len(left) > 0 {
+			s.queue = append(left, s.queue...)
+		}
 	}
 	// 自主活动的一轮没有正常收尾（内核断线等）：记成没做成，稍后重新确认，不能当成正常休息
 	if r.inner && s.mind != nil {
@@ -1118,7 +1146,8 @@ func (a *App) stop(c in) {
 		return
 	}
 	s.run.addOut(c.ep)
-	a.cancelRun(s) // 内核会回 done(cancelled)
+	s.run.dropInbox = true // 用户明确停止：还在等边界的那几条补充不再自动开新一轮
+	a.cancelRun(s)        // 内核会回 done(cancelled)
 }
 
 func (a *App) reset(c in) {
@@ -1127,6 +1156,7 @@ func (a *App) reset(c in) {
 	if s.run != nil {
 		s.resetAfter = true
 		s.run.addOut(c.ep)
+		s.run.dropInbox = true
 		a.cancelRun(s)
 		return
 	}
@@ -1161,7 +1191,8 @@ func (a *App) decide(c in, arg string, ok bool) {
 		res(ok)
 		return
 	}
-	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id, OK: proto.Bool(ok), From: c.who}) {
+	if a.hub.Send(a.sessions[ap.sid].run.node, proto.Msg{T: proto.TApprove, SID: ap.sid, ID: ap.id,
+		RunID: ap.runID, TurnID: ap.turnID, OK: proto.Bool(ok), From: c.who}) {
 		who := c.who
 		if c.name != "" && !strings.HasPrefix(who, "web:") && !strings.HasPrefix(who, "cli:") {
 			who = c.name
@@ -1169,6 +1200,17 @@ func (a *App) decide(c in, arg string, ok bool) {
 		a.resolveApproval(ap, a.decided(ok, who))
 	}
 }
+
+// execStarted 告诉内核：交给网关的这个调用真的开始执行了（协议 v11）。
+// 旧内核不认识这条消息，用协议版本挡住就行。
+func (a *App) execStarted(node string, m *proto.Msg) {
+	n := a.nodes[node]
+	if n == nil || n.info.Proto < 11 {
+		return
+	}
+	a.hub.Send(node, proto.Msg{T: proto.TExecStarted, SID: m.SID, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID})
+}
+
 
 // ---- 内核事件（kernel.Handler） ----
 
@@ -1218,11 +1260,24 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	switch m.T {
 	case proto.TModel:
+		// 完整调用身份：内核告诉我们这是第几次模型请求，后面 approve / exec_result 原样带回去
+		s.run.turnID = m.TurnID
+		if m.RunID != "" && s.run.runID == "" {
+			s.run.runID = m.RunID
+		}
 		if s.run.fetching > 0 {
 			s.run.modelWaiting = true // 等图片取完（seeImage）
 			break
 		}
 		a.callModel(s)
+	case proto.TToolQueued:
+		// 这个调用还在等执行槽或等资源：只更新界面，不占执行结果的位置
+		s.run.tool = m.Name
+		a.publish(events.Event{T: "tool_queued", SID: s.sid, ID: m.ID, Name: m.Name, Text: m.Text,
+			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
+	case proto.TExecStarted:
+		a.publish(events.Event{T: "tool_started", SID: s.sid, ID: m.ID,
+			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
 	case proto.TExec:
 		a.execTool(node, s, m)
 	case proto.TExecCancel:
@@ -1431,6 +1486,11 @@ func (a *App) callModel(s *sess) {
 // generateModel 用准备好的上下文请求本轮回复，调用方持有锁。
 func (a *App) generateModel(s *sess) {
 	r := s.run
+	// 边界一：上一批工具调用已经全部闭合、这次模型请求还没构造——先把等着的插话写进历史，
+	// 本次请求的快照就能看到补充。快照之后才到的留给下一个边界，不改写在途请求。
+	a.drainInterjections(s, r)
+	r.modelReq++
+	reqID := fmt.Sprintf("%s-m%d", r.runID, r.modelReq)
 	system, snapshotTools, _, _ := a.contextParts(s.sid)
 	st := a.store.Settings(s.sid)
 	// 群聊和房间不套用快照（见 contextParts），也就不写；其余会话权限一变就重写一次
@@ -1481,7 +1541,9 @@ func (a *App) generateModel(s *sess) {
 	r.cancelLLM = cancel
 	r.calls++
 	a.totals.ModelCalls++
-	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start", Data: map[string]any{"thinking": req.Thinking}})
+	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start",
+		Data: map[string]any{"thinking": req.Thinking, "run_id": r.runID, "turn_id": r.turnID,
+			"request_id": reqID, "input_revision": r.injected}})
 
 	// 过程总是发布到事件总线（网页实时显示），支持流式的窗口再自己显示一份
 	views, bus, sid := r.views(), a.bus, s.sid
@@ -1542,6 +1604,11 @@ func (a *App) generateModel(s *sess) {
 		a.addUsage(r, u)
 		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
+		// 边界二：生成完整结束（用量已经结算），但还没把结果交给内核。这期间收到的插话要
+		// 在这里处理：不派发这批尚未接受的工具，先写补充再重新规划。
+		if a.yieldToInterjection(s, r, res, u) {
+			return
+		}
 		if res.Content != "" {
 			r.streamed = true
 		}
@@ -1553,7 +1620,7 @@ func (a *App) generateModel(s *sess) {
 			Reasoning: res.Reasoning, Usage: &u, Agent: a.execAgentID(s.sid)}); err != nil {
 			a.log.Warn("保存模型回复失败", "sid", s.sid, "err", err)
 		}
-		turn := proto.Msg{T: proto.TTurn, SID: s.sid}
+		turn := proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID}
 		switch res.Reason {
 		case llm.ReasonToolUse:
 			turn.Reason = proto.ReasonToolUse

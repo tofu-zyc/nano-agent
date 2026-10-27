@@ -74,6 +74,13 @@ type KernelInfo struct {
 	Since    int64    `json:"since"`
 	Local    bool     `json:"local"`             // 和网关在同一台机器上
 	Managed  bool     `json:"managed,omitempty"` // 网关自己启动的本机内核
+	// 能力集合（协议 v11）：按机器协商，缺能力时不暴露相应参数
+	Features map[string]int `json:"features,omitempty"`
+	// SandboxMode 是这台机器请求的沙箱模式（auto / on / off），SandboxEffective 是实际生效的程度
+	SandboxMode      string `json:"sandbox_mode,omitempty"`
+	SandboxEffective string `json:"sandbox_effective,omitempty"`
+	MaxParallelTools int    `json:"max_parallel_tools,omitempty"`
+	MaxActiveRuns    int    `json:"max_active_runs,omitempty"`
 }
 
 type node struct {

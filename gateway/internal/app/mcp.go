@@ -322,6 +322,7 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	// start 真正发起调用。调用方持有锁：取消函数登记在这一轮上，内核超时或用户停下时
 	// 发来的 exec_cancel 能把它停下来（KernelMsg 的 TExecCancel）
 	start := func() {
+		a.execStarted(r.node, m)
 		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
 		r.execs[id] = cancel
 		go func() {

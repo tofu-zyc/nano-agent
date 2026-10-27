@@ -4,7 +4,7 @@ package proto
 import "encoding/json"
 
 // Version 是当前协议版本，内核在 hello 里带上。
-const Version = 10
+const Version = 11
 
 // MinVersion 是网关还愿意连的最老协议：比 Version 旧、但不比它旧的内核先放进来，
 // 随后靠自动更新换成新的。自我更新是 v9 才有的，再老的放进来也推不了新版本，直接拒绝。
@@ -57,6 +57,15 @@ const (
 	TPipeClose  = "pipe_close"  // 网关 → 内核：关掉（先关 stdin，不退就杀）
 	TPipeData   = "pipe_data"   // 内核 → 网关：stdout 的一行
 	TPipeClosed = "pipe_closed" // 内核 → 网关：进程退出了
+
+	// 协议 v11：并行、排队与完整调用身份
+	TToolQueued  = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
+	TToolStarted = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
+	TExecStarted = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
+	TInputPending = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
+	TInputReady   = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
+	TInputCommit  = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
+	TModelYield   = "model_yield"   // 网关 → 内核：这次生成让位给插话，不算错误、不算停止
 
 	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
@@ -111,6 +120,18 @@ type Msg struct {
 	From   string `json:"from,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Calls  []Call `json:"calls,omitempty"`
+
+	// 完整调用身份（协议 v11）：一次 run 内 sid + run_id + turn_id + call_id 唯一确定一个工具调用。
+	// 迟到、重复、跨 run 的结果靠它们配对，不再只看模型给的 call id。
+	RunID     string `json:"run_id,omitempty"`
+	TurnID    int    `json:"turn_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"` // 控制消息的请求编号（回应时原样带回）
+	// Revision 是插话的消费游标（input_pending / input_ready / input_commit 用）
+	Revision int `json:"revision,omitempty"`
+	// 本机能力与限额：内核在 hello 里报，网关按机器协商
+	Features map[string]json.RawMessage `json:"features,omitempty"`
+	// MaxParallelTools 是网关希望这一轮同时跑几个工具（0 用内核配置）
+	MaxParallelTools int `json:"max_parallel_tools,omitempty"`
 
 	// input：这一轮的权限模式和挂载的工作目录；elevate 表示这个身份能不能提权。
 	// 最多请求模型几次、总时限、审批时限：大于 0 是上限，小于 0 表示不限（不带就用内核自己的配置）；
@@ -198,8 +219,38 @@ type SkillFile struct {
 }
 
 // Sandbox 是内核报告的沙箱能力。Landlock 为 0 表示没有沙箱，自动模式下的 Shell 也要审批。
+// Mode 是请求的模式（auto / on / off），Effective 是实际生效的程度（full / partial / none）。
 type Sandbox struct {
-	Landlock int `json:"landlock"`
+	Landlock  int    `json:"landlock"`
+	Mode      string `json:"mode,omitempty"`
+	Effective string `json:"effective,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// Feature 取能力集合里的一个数（没有时返回 0）。
+func (m *Msg) Feature(name string) int {
+	raw, ok := m.Features[name]
+	if !ok {
+		return 0
+	}
+	var n int
+	if json.Unmarshal(raw, &n) != nil {
+		return 0
+	}
+	return n
+}
+
+// FeatureString 取能力集合里的一个字符串（没有时返回空）。
+func (m *Msg) FeatureString(name string) string {
+	raw, ok := m.Features[name]
+	if !ok {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // Call 是模型请求的一次工具调用。Args 是参数对象；模型给的参数不是合法 JSON 对象时，
