@@ -107,7 +107,12 @@ func (s *Store) snapshotDir(id string) string {
 }
 
 func (s *Store) branchFile(sid string) string {
-	return filepath.Join(s.dir, "sessions", Key(sid)+".branch.json")
+	return s.newPath(sid, ".branch.json")
+}
+
+// legacyBranchFile 是旧布局里的分支元数据（只读兼容）。
+func (s *Store) legacyBranchFile(sid string) string {
+	return filepath.Join(s.dirLegacySessions(), LegacyKey(sid)+".branch.json")
 }
 
 func (s *Store) opFile(requestID string) string {
@@ -592,24 +597,40 @@ func (s *Store) SnapshotRefs(id string) int {
 
 func (s *Store) loadBranches() {
 	s.branches = map[string]BranchMeta{}
-	entries, err := os.ReadDir(filepath.Join(s.dir, "sessions"))
-	if err != nil {
-		return
+	sides := []struct {
+		dir     string
+		resolve func(string) (string, bool)
+	}{
+		{s.dirV1Sessions(), s.resolveNewKey},
+		{s.dirLegacySessions(), resolveLegacyName},
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".branch.json") {
-			continue
+	for _, side := range sides {
+		for _, e := range mustReadDir(side.dir) {
+			name := e.Name()
+			if !strings.HasSuffix(name, ".branch.json") {
+				continue
+			}
+			key := strings.TrimSuffix(name, ".branch.json")
+			sid, ok := side.resolve(key)
+			if !ok {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(side.dir, name))
+			if err != nil {
+				continue
+			}
+			var m BranchMeta
+			if json.Unmarshal(b, &m) != nil {
+				continue
+			}
+			if m.SID == "" {
+				m.SID = sid
+			}
+			if _, dup := s.branches[m.SID]; dup {
+				continue // 新布局优先
+			}
+			s.branches[m.SID] = m
 		}
-		b, err := os.ReadFile(filepath.Join(s.dir, "sessions", name))
-		if err != nil {
-			continue
-		}
-		var m BranchMeta
-		if json.Unmarshal(b, &m) != nil || m.SID == "" {
-			continue
-		}
-		s.branches[m.SID] = m
 	}
 }
 

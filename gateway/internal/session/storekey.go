@@ -176,22 +176,28 @@ func resolveLegacyName(name string) (string, bool) {
 // 写入路径必须用这个接口，不能各自猜文件在不在。
 func (s *Store) locate(sid, suffix string) (string, bool, error) {
 	np := s.newPath(sid, suffix)
-	if _, err := os.Stat(np); err == nil {
-		return np, true, nil
-	}
+	// 已激活：新位置就是权威位置（重置后文件不存在也不回退旧备份）
 	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
-		return np, false, nil // 已激活：新位置就是权威位置
-	}
-	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
-		return np, false, nil // 删除过的会话：旧备份只作为恢复来源，不再自动使用
-	}
-	// 旧布局里有没有这个会话的任何一类文件
-	if !s.hasLegacy(sid) {
+		if _, err := os.Stat(np); err == nil {
+			return np, true, nil
+		}
 		return np, false, nil
 	}
-	if err := s.promote(sid); err != nil {
-		return np, false, fmt.Errorf("把旧会话数据升级到新布局失败：%w", err)
+	// 删除墓碑：旧备份只作恢复来源，扫描和重放都不能自动复活
+	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
+		return np, false, nil
 	}
+	if s.hasLegacy(sid) {
+		// 旧会话：必须完整提升并提交激活标记，未完成之前一律失败，不能拿半成品当数据
+		if err := s.promote(sid); err != nil {
+			return np, false, fmt.Errorf("把旧会话数据升级到新布局失败：%w", err)
+		}
+		if _, err := os.Stat(np); err == nil {
+			return np, true, nil
+		}
+		return np, false, nil
+	}
+	// 没有旧文件：新会话自己就是权威的
 	if _, err := os.Stat(np); err == nil {
 		return np, true, nil
 	}
@@ -219,6 +225,45 @@ func (s *Store) hasLegacy(sid string) bool {
 // promote 把一个会话的旧文件升级到新布局：逐项校验、复制、回读比对，最后写激活标记。
 // 只复制不删旧文件；任何一项失败都不写标记，下次进来还会重试。
 func (s *Store) promote(sid string) error {
+	// 已经提升过：旧文件只是备份，不再做首次导入（否则重置/删除会被重放复活）
+	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
+		return nil
+	}
+	copyOne := func(src, dst string, check func([]byte) error) error {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if err := check(data); err != nil {
+			return fmt.Errorf("%s 内容无法校验：%w", src, err)
+		}
+		old, rerr := os.ReadFile(dst)
+		switch {
+		case rerr == nil:
+			if string(old) == string(data) {
+				return nil // 已经复制过
+			}
+			return fmt.Errorf("%s 与 %s 内容不同，保留双方等待人工核对", src, dst)
+		case errors.Is(rerr, os.ErrNotExist):
+			// 正常：目标还不存在
+		default:
+			return fmt.Errorf("读目标 %s 失败：%w", dst, rerr)
+		}
+		if err := writeFileAtomic(dst, data); err != nil {
+			return err
+		}
+		got, err := os.ReadFile(dst)
+		if err != nil || string(got) != string(data) {
+			return fmt.Errorf("写 %s 后回读不一致", dst)
+		}
+		return nil
+	}
 	ln := LegacyKey(sid)
 	for _, item := range []struct {
 		suffix string
@@ -228,29 +273,11 @@ func (s *Store) promote(sid string) error {
 		{".settings.json", jsonCheck},
 		{".branch.json", jsonCheck},
 	} {
-		src := filepath.Join(s.dirLegacySessions(), ln+item.suffix)
-		data, err := os.ReadFile(src)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return err
-		}
-		if err := item.check(data); err != nil {
-			return fmt.Errorf("%s 内容无法校验：%w", src, err)
-		}
-		dst := s.newPath(sid, item.suffix)
-		if old, err := os.ReadFile(dst); err == nil {
-			if string(old) == string(data) {
-				continue
-			}
-			return fmt.Errorf("%s 已经有不同内容，保留现场等待人工核对", dst)
-		}
-		if err := writeFileAtomic(dst, data); err != nil {
+		if err := copyOne(filepath.Join(s.dirLegacySessions(), ln+item.suffix),
+			s.newPath(sid, item.suffix), item.check); err != nil {
 			return err
 		}
 	}
-	// 归档目录：逐份文件复制
 	oldArch := filepath.Join(s.dirLegacyArchive(), legacyArchiveKey(sid))
 	if entries, err := os.ReadDir(oldArch); err == nil {
 		newArch := filepath.Join(s.dirV1Archive(), Key(sid))
@@ -261,18 +288,7 @@ func (s *Store) promote(sid string) error {
 			if e.IsDir() {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(oldArch, e.Name()))
-			if err != nil {
-				return err
-			}
-			if err := jsonlCheck(data); err != nil {
-				return fmt.Errorf("归档 %s 内容无法校验：%w", e.Name(), err)
-			}
-			dst := filepath.Join(newArch, e.Name())
-			if old, err := os.ReadFile(dst); err == nil && string(old) == string(data) {
-				continue
-			}
-			if err := writeFileAtomic(dst, data); err != nil {
+			if err := copyOne(filepath.Join(oldArch, e.Name()), filepath.Join(newArch, e.Name()), jsonlCheck); err != nil {
 				return err
 			}
 		}
@@ -280,7 +296,7 @@ func (s *Store) promote(sid string) error {
 	if err := s.rememberLongKey(sid); err != nil {
 		return err
 	}
-	// 最后写激活标记：只有所有东西都就位，这个会话才算搬到新布局
+	// 最后写激活标记：所有东西都校验并提交到位，这个会话才算搬到新布局
 	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
 		return err
 	}
@@ -328,11 +344,7 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 		{s.dirLegacySessions(), ".settings.json"},
 		{s.dirLegacySessions(), ".branch.json"},
 	} {
-		entries, err := os.ReadDir(k.dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
+		for _, e := range mustReadDir(k.dir) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), k.suffix) {
 				continue
 			}
@@ -341,20 +353,25 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 			}
 		}
 	}
-	if entries, err := os.ReadDir(s.dirLegacyArchive()); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			if sid, ok := resolveLegacyName(e.Name()); ok {
-				sids[sid] = true
-			}
+	for _, e := range mustReadDir(s.dirLegacyArchive()) {
+		if !e.IsDir() {
+			continue
+		}
+		if sid, ok := resolveLegacyName(e.Name()); ok {
+			sids[sid] = true
 		}
 	}
 	var firstErr error
 	for sid := range sids {
+		// active 是备份、deleted 是墓碑：都不是“待迁移”
+		if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+			continue
+		}
+		if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
+			continue
+		}
 		if err := s.promote(sid); err != nil {
-			rec.Items = append(rec.Items, MigrationItem{SID: sid, Stage: "failed"})
+			rec.Items = append(rec.Items, MigrationItem{SID: sid, Stage: "conflict"})
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -382,9 +399,12 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 
 // HasLegacyKeys 报告旧布局里还有没有**没升级过**的会话（已经写激活标记的不算）。
 func (s *Store) HasLegacyKeys() bool {
-	check := func(sid string) bool {
+	live := func(sid string) bool {
 		if _, err := os.Stat(s.activeMarker(sid)); err == nil {
-			return false
+			return false // 已提升：旧文件是备份
+		}
+		if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
+			return false // 已删除：不能复活
 		}
 		return true
 	}
@@ -395,7 +415,7 @@ func (s *Store) HasLegacyKeys() bool {
 		name := e.Name()
 		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
 			if strings.HasSuffix(name, suffix) {
-				if sid, ok := resolveLegacyName(strings.TrimSuffix(name, suffix)); ok && check(sid) {
+				if sid, ok := resolveLegacyName(strings.TrimSuffix(name, suffix)); ok && live(sid) {
 					return true
 				}
 			}
@@ -405,7 +425,7 @@ func (s *Store) HasLegacyKeys() bool {
 		if !e.IsDir() {
 			continue
 		}
-		if sid, ok := resolveLegacyName(e.Name()); ok && check(sid) {
+		if sid, ok := resolveLegacyName(e.Name()); ok && live(sid) {
 			return true
 		}
 	}

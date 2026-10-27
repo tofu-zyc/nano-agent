@@ -127,6 +127,9 @@ func (s *Store) SaveSettings(sid string, st Settings) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
+	if err := s.ensureActive(sid); err != nil {
+		return err
+	}
 	s.settings[sid] = st
 	return nil
 }
@@ -136,6 +139,10 @@ func (s *Store) List() []string {
 	out := []string{}
 	add := func(sid string) {
 		if sid == "" || seen[sid] {
+			return
+		}
+		// 墓碑：只作为恢复来源，不是活动会话
+		if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
 			return
 		}
 		seen[sid] = true

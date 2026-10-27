@@ -87,6 +87,17 @@ func (s *Store) file(sid string) string {
 	return s.newPath(sid, ".jsonl")
 }
 
+// ensureActive 给新会话写激活标记：从创建那一刻起它就是新布局里的权威数据。
+func (s *Store) ensureActive(sid string) error {
+	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
+		return err
+	}
+	return writeFileAtomic(s.activeMarker(sid), []byte(Key(sid)))
+}
+
 // legacyPath 是旧布局里某一类文件的位置（只读兼容与迁移来源）。
 func (s *Store) legacyPath(sid, suffix string) string {
 	return filepath.Join(s.dirLegacySessions(), LegacyKey(sid)+suffix)
@@ -174,7 +185,6 @@ func (s *Store) Append(sid string, m Msg) error {
 	if m.TS == 0 {
 		m.TS = time.Now().Unix()
 	}
-	// 写之前先把会话放到权威位置：旧会话要整体升级，不能只写增量把前缀留在旧文件里
 	path, _, err := s.locate(sid, ".jsonl")
 	if err != nil {
 		return err
@@ -200,6 +210,10 @@ func (s *Store) Append(sid string, m Msg) error {
 	}
 	if cerr != nil {
 		return fmt.Errorf("保存会话历史：%w", cerr)
+	}
+	// 新会话：从这里开始它就是新布局的权威数据（旧会话在 locate 里已经提升并写过标记）
+	if err := s.ensureActive(sid); err != nil {
+		return fmt.Errorf("登记会话激活状态失败：%w", err)
 	}
 	s.hist[sid] = append(append([]Msg(nil), prev...), m)
 	return nil
@@ -437,7 +451,10 @@ func (s *Store) Rename(from, to string) error {
 	}
 	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
 		src, ok, err := s.locate(from, suffix)
-		if err != nil || !ok {
+		if err != nil {
+			return err
+		}
+		if !ok {
 			continue
 		}
 		dst := s.newPath(to, suffix)
@@ -448,9 +465,19 @@ func (s *Store) Rename(from, to string) error {
 			return err
 		}
 	}
-	if _, err := os.Stat(s.activeMarker(from)); err == nil {
-		_ = writeFileAtomic(s.activeMarker(to), []byte(Key(to)))
-		_ = os.Remove(s.activeMarker(from))
+	if err := s.ensureActive(to); err != nil {
+		return err
+	}
+	if err := s.rememberLongKey(to); err != nil {
+		return err
+	}
+	// 源用墓碑收尾：旧备份不能变成第二个活动会话
+	_ = os.Remove(s.activeMarker(from))
+	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.deletedMarker(from), []byte(Key(from))); err != nil {
+		return err
 	}
 	delete(s.hist, from)
 	delete(s.settings, from)
@@ -461,22 +488,25 @@ func (s *Store) Rename(from, to string) error {
 
 // Delete 删除会话的历史和设置。
 func (s *Store) Delete(sid string) error {
-	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
-		path, ok, err := s.locate(sid, suffix)
-		if err != nil || !ok {
-			continue
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	}
-	// 换成墓碑标记：旧备份保留（人工还能找回），但不会再被自动当成会话内容
-	_ = os.Remove(s.activeMarker(sid))
+	// 先写墓碑：即使后面删文件失败，这个会话也不会从旧备份复活
 	if err := os.MkdirAll(filepath.Dir(s.deletedMarker(sid)), 0o700); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(s.deletedMarker(sid), []byte(Key(sid))); err != nil {
 		return err
+	}
+	_ = os.Remove(s.activeMarker(sid))
+	for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
+		path, ok, err := s.locate(sid, suffix)
+		if err != nil {
+			return err // 定位失败就如实报告，不当成“没有文件”
+		}
+		if !ok {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	delete(s.hist, sid)
 	delete(s.settings, sid)
