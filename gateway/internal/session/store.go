@@ -8,6 +8,7 @@ package session
 
 import (
 	"bufio"
+	"sync"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,12 @@ type Store struct {
 	dir      string
 	hist     map[string][]Msg // 从 Settings.Base 开始的历史
 	settings map[string]Settings
+	branches map[string]BranchMeta // 分支元信息（按需从磁盘加载）
+
+	snapCacheMu sync.Mutex
+	snapCache   map[string][]Msg  // 快照只读缓存（有上限，空闲分支不各留一份）
+	snapBytes   map[string]int64
+	snapBudget  int64
 }
 
 func New(dir string) (*Store, error) {
@@ -82,7 +89,11 @@ func (s *Store) History(sid string) []Msg {
 }
 
 func (s *Store) load(sid string) []Msg {
-	return s.loadFrom(sid, s.Settings(sid).Base)
+	base := s.Settings(sid).Base
+	if br, ok := s.Branch(sid); ok {
+		return s.loadBranch(br, base)
+	}
+	return s.loadFrom(sid, base)
 }
 
 // Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
@@ -324,8 +335,14 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != 0 || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
-		st.EnvNote, st.Base, st.Summary = "", 0, ""
+	// 分支的快照不能删（也许还有别的分支在用）：把 Base 推到超过快照长度，
+	// 有效窗口就空了，下次访问看到的是干净上下文。
+	base := 0
+	if br, ok := s.Branch(sid); ok {
+		base = len(s.SnapshotMessages(br.SnapshotID))
+	}
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
+		st.EnvNote, st.Base, st.Summary = "", base, ""
 		st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 		st.Meter = Meter{}
 		st.Prefix = nil
