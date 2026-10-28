@@ -1,8 +1,8 @@
 // 把会话历史整理成对话视图要显示的块
-import type { Attachment, Msg, Usage } from './types';
+import type { Attachment, Msg, Usage, ExecutionIsolation } from './types';
 import { parseUser, type NoteKind } from './format';
 
-export type ToolView = { id: string; name: string; detail: string; args: string; ok?: boolean; result?: string; media?: Attachment[] };
+export type ToolView = { sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args: string; ok?: boolean; result?: string; media?: Attachment[] };
 
 export type Block =
   | { type: 'env'; text: string }
@@ -75,6 +75,7 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
         t.ok = !c.startsWith('[执行失败] ');
         if (!t.ok) c = c.slice('[执行失败] '.length);
         t.result = c;
+        t.sandbox=m.sandbox;
         // 同一个附件可能既在 images（读到/发给模型的）又在 sent（发出去的）里，
         // 按 id 去重；否则 Svelte 的 keyed each 会抛 each_key_duplicate，整段历史都画不出来。
         const media = [...new Map([...(m.images ?? []), ...(m.sent ?? [])].map((a) => [a.id, a])).values()];

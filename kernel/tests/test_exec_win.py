@@ -125,10 +125,10 @@ def setup():
 
 
 def run(tool, args=None, dirs=(WORK_WIN,), write=True, ro=(), rw=(), home=False,
-        max_output=65536, timeout=40):
+        max_output=65536, timeout=40, sandbox="auto"):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs),
            "write": write, "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test",
-           "max_output": max_output, "watch_stdin": True}
+           "max_output": max_output, "watch_stdin": True, "sandbox": sandbox}
     p = subprocess.Popen(win_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, cwd=WIN_CWD)
     p.stdin.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -391,12 +391,24 @@ def t_directory_diagnostics():
             ENV["NANO_HOME"] = previous
         write_run_cmd()
 
+@case("Windows 隔离：auto/off 回报无隔离，on 失败且不执行")
+def t_sandbox_policy():
+    for mode in ("auto","off"):
+        result=run("Shell",{"command":"Write-Output 'isolated-state'","sandbox_mode":"on"},sandbox=mode)
+        ok(result,"isolated-state")
+        assert result["sandbox_effective"]=="none",result
+    marker=os.path.join(WORK_LINUX,"on-must-not-run")
+    result=run("Shell",{"command":"Set-Content -LiteralPath 'on-must-not-run' -Value unsafe"},sandbox="on")
+    bad(result,"sandbox=on")
+    assert result["sandbox_effective"]=="none" and not os.path.exists(marker),result
+
+
 def main():
     try:
         setup()
         print(f"windows temp：{ROOT_WIN}")
         for t in (t_probe, t_read, t_write, t_edit_crlf, t_fetch, t_escape, t_read_all, t_shell, t_env,
-                  t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics):
+                  t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics, t_sandbox_policy):
             t()
         print(f"exec-win: {len(FAILS)} failures")
         return 1 if FAILS else 0

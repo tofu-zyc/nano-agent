@@ -611,6 +611,7 @@ class Store {
           it.ok = e.ok;
           it.result = e.data;
           it.resultDetail = e.text;
+          it.sandbox = e.sandbox;
         }
         break;
       }

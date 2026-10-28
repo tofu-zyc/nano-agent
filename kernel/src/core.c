@@ -146,7 +146,7 @@ void na_cmd_free(na_cmd *m)
     if (!m) return;
     free(m->sid); free(m->id); free(m->name);
     free(m->args); free(m->from); free(m->text); free(m->policy);
-    free(m->run_id);
+    free(m->run_id); free(m->execution);
     free(m);
 }
 
@@ -368,7 +368,7 @@ static void step(na_core *c, run_t *r)
     m->turn_id = r->turn_id;
 }
 
-static void result(na_core *c, run_t *r, call_t *k, bool ok, const char *text)
+static na_cmd *result(na_core *c, run_t *r, call_t *k, bool ok, const char *text)
 {
     na_cmd *m = push(c, NA_CMD_RESULT, r->sid);
     m->id = dupstr(k->id);
@@ -378,6 +378,7 @@ static void result(na_core *c, run_t *r, call_t *k, bool ok, const char *text)
     m->text = dupstr(text);
     k->st = CALL_DONE;
     k->deadline = -1;
+    return m;
 }
 
 PRINTF_LIKE(4, 5)
@@ -697,7 +698,8 @@ static int on_tool_done(na_core *c, int64_t now, const na_event *ev)
     /* 超时或取消之后才到的结果；跨轮次、跨 run 的迟到结果也在这里被挡住 */
     if (!k || (k->st != CALL_RUNNING && k->st != CALL_DISPATCHED)) return -1;
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
-    result(c, r, k, ev->ok, ev->content ? ev->content : "");
+    na_cmd *reply=result(c, r, k, ev->ok, ev->content ? ev->content : "");
+    reply->execution=dupstr(ev->execution);
     dispatch(c, now, r);
     maybe_advance(c, r);
     return 0;

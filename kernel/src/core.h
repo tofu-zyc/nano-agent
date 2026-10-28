@@ -133,6 +133,7 @@ typedef struct {
     const char *id;
     bool ok;
     const char *content;
+    const char *execution; /* verified executor metadata, never model arguments */
 } na_event;
 
 typedef enum {
@@ -152,6 +153,7 @@ typedef struct na_cmd {
     na_cmd_type type;
     char *sid, *id, *name, *args, *from, *text, *policy;
     char *run_id;
+    char *execution;
     int   turn_id;
     const char *status;  /* DONE："ok" "budget" "timeout" "cancelled" "refused" "error" */
     bool ok;

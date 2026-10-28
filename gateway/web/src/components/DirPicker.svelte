@@ -4,11 +4,12 @@
   import Icon from './Icon.svelte';
 
   let {
+    allowSelf = false,
     start = '~',
     host = '',
     onpick,
     onclose,
-  }: { start?: string; host?: string; onpick: (path: string) => void; onclose: () => void } = $props();
+  }: { allowSelf?: boolean; start?: string; host?: string; onpick: (path: string) => void; onclose: () => void } = $props();
 
   let cur = $state<DirListing | null>(null);
   let error = $state('');
@@ -94,7 +95,7 @@
   }
 
   function pick() {
-    if (cur && !cur.blocked) onpick(toTilde(cur.path, cur.home));
+    if (cur && (!cur.blocked || allowSelf)) onpick(toTilde(cur.path, cur.home));
   }
 
   function onkey(e: KeyboardEvent) {
@@ -147,7 +148,7 @@
         <div class="muted pad">读取中…</div>
       {:else}
         {#each shown as e (e.name)}
-          <button class="row" class:blocked={e.blocked} onclick={() => cur && go(join(cur.path, e.name))} title={e.blocked ? '包含 nano-agent 自己，不能用作工作目录' : ''}>
+          <button class="row" class:blocked={e.blocked} onclick={() => cur && go(join(cur.path, e.name))} title={e.blocked ? '包含 nano-agent 自己；只有明确关闭执行隔离时才能选择' : ''}>
             <Icon name="folder" size={15} />
             <span class="name">{e.name}</span>
             {#if e.blocked}<span class="tag warn">含 nano-agent</span>{/if}
@@ -162,10 +163,10 @@
 
     <footer>
       <code class="cur">{cur ? toTilde(cur.path, cur.home) : ''}</code>
-      {#if cur?.blocked}<span class="warnt small">包含 nano-agent 自己，不能用作工作目录</span>{/if}
+      {#if cur?.blocked}<span class="warnt small">包含 nano-agent 自己；只有明确关闭执行隔离时才能选择</span>{/if}
       <span class="grow"></span>
       <button class="btn" onclick={onclose}>取消</button>
-      <button class="btn primary" onclick={pick} disabled={!cur || cur.blocked}><Icon name="check" size={14} />选择这个目录</button>
+      <button class="btn primary" onclick={pick} disabled={!cur || (cur.blocked && !allowSelf)}><Icon name="check" size={14} />选择这个目录</button>
     </footer>
   </div>
 </div>

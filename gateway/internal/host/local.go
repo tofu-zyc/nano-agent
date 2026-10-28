@@ -23,11 +23,12 @@ type Local struct {
 	exec  Executor
 	guard []string // 不能用作工作目录的路径：网关的配置、数据和执行器（解析过符号链接）
 
-	mu       sync.Mutex
-	probed   bool
-	landlock int
-	osName   string
-	detail   string
+	mu           sync.Mutex
+	probed       bool
+	landlock     int
+	sandboxModes []string
+	osName       string
+	detail       string
 }
 
 func NewLocal(e Executor, guard []string) *Local {
@@ -62,6 +63,7 @@ func (l *Local) Probe() (landlock int, osName string, ok bool, detail string) {
 			l.detail = "执行器 " + l.exec.Path + " 运行不了"
 		} else {
 			l.landlock = *p.Landlock
+			l.sandboxModes = probeSandboxModes(string(out))
 			if p.OS != "" {
 				l.osName = p.OS
 			}
@@ -73,6 +75,9 @@ func (l *Local) Probe() (landlock int, osName string, ok bool, detail string) {
 func (l *Local) Exec(ctx context.Context, req []byte) Result {
 	if _, _, ok, detail := l.Probe(); !ok {
 		return Result{Content: detail}
+	}
+	if err := checkSandboxRequest(req, l.sandboxModes); err != nil {
+		return Result{Content: err.Error()}
 	}
 	out, errOut, code, err := run(ctx, exec.Command(l.exec.Path), req, true)
 	return parseResult(out, errOut, code, err)

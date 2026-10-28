@@ -151,7 +151,7 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft, "call_identity", 1);
     cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
     cJSON_AddNumberToObject(ft, "user_interjection", 1);   /* 认识 model_yield：插话后的重规划也由内核数步数 */
-    cJSON_AddNumberToObject(ft, "sandbox_policy", 1);
+    cJSON_AddNumberToObject(ft, "sandbox_policy", 2);
     cJSON_AddNumberToObject(ft, "max_parallel_tools", k->conf.max_parallel_tools);
     cJSON_AddNumberToObject(ft, "max_active_runs", k->conf.max_active_runs);
     cJSON_AddNumberToObject(ft, "max_execs", k->conf.max_execs);
@@ -350,12 +350,20 @@ static gwjob_t *gw_find(kernel_t *k, const char *sid, const char *run_id, int tu
     return NULL;
 }
 
+static void tool_done_state(kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id,
+                            bool ok, const char *content, const cJSON *state, int64_t now)
+{
+    char *execution = state ? cJSON_PrintUnformatted(state) : NULL;
+    na_event ev = { .type = NA_EV_TOOL_DONE, .sid = sid, .run_id = run_id, .turn_id = turn_id,
+                    .id = id, .ok = ok, .content = content, .execution = execution };
+    na_core_feed(k->core, now, &ev);
+    cJSON_free(execution);
+}
+
 static void tool_done(kernel_t *k, const char *sid, const char *run_id, int turn_id, const char *id,
                       bool ok, const char *content, int64_t now)
 {
-    na_event ev = { .type = NA_EV_TOOL_DONE, .sid = sid, .run_id = run_id, .turn_id = turn_id,
-                    .id = id, .ok = ok, .content = content };
-    na_core_feed(k->core, now, &ev);
+    tool_done_state(k, sid, run_id, turn_id, id, ok, content, NULL, now);
 }
 
 /* 宿主收到了，但在等执行槽或等资源：执行时限还没开始走。状态机认了之后告诉网关，
@@ -672,9 +680,11 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
                          const char *id, const char *name, int kind, const char *sandbox,
                          const char *res_keys, const char *res_xkeys, char *err, size_t errlen)
 {
-    bool ok = true;
+    const char *final_sb = effective_sandbox(k, sandbox);
+    bool ok = !(sandbox && !strcmp(sandbox, "on") && k->sb_mode == SB_OFF);
+    if (!ok) snprintf(err, errlen, "请求 sandbox=on 与执行节点的 sandbox=off 部署要求冲突，没有执行");
     /* 只检查工作目录：ro 只读放行；rw 只有提权时才会出现 /，已经过用户审批 */
-    for (const char *const *key = (const char *const[]){ "dirs", NULL }; *key && ok; key++)
+    for (const char *const *key = (const char *const[]){ "dirs", NULL }; *key && ok && strcmp(final_sb, "off"); key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
     job_t *j = NULL;
     if (ok) {
@@ -687,7 +697,6 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
         cJSON_AddBoolToObject(req, "watch_stdin", true);
         /* 这一轮最终的沙箱请求模式：节点自己的 on/off 优先，其余听这一轮的请求。
          * 代执行请求也一样要经过这里，不能把协调节点传来的值当成已经满足本机要求。 */
-        const char *final_sb = effective_sandbox(k, sandbox);
         cJSON_DeleteItemFromObjectCaseSensitive(req, "sandbox");
         cJSON_AddStringToObject(req, "sandbox", final_sb);
         char *body = cJSON_PrintUnformatted(req);
@@ -702,6 +711,7 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
             j->res_keys = xstrdup(res_keys ? res_keys : "");
             j->res_xkeys = xstrdup(res_xkeys ? res_xkeys : "");
             j->sandbox = xstrdup(final_sb);
+            j->sandbox_requested = xstrdup(sandbox ? sandbox : "auto");
         }
     }
     cJSON_Delete(req);
@@ -912,6 +922,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
     buf_t shared_keys = {0}, xkeys = {0};
     if (ws) call_resource(c->name, args, ws, &shared_keys, &xkeys);
     const char *sandbox = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(pol, "sandbox"));
+    if (ws && sget(ws, "sandbox_mode")) sandbox = sget(ws, "sandbox_mode");
     if (ws) {
         cJSON_DeleteItemFromObjectCaseSensitive(args, "workspace");
         if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"))) {
@@ -1150,6 +1161,10 @@ static void pump(kernel_t *k, int64_t now)
             if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
             if (c->turn_id) cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
             cJSON_AddBoolToObject(m, "ok", c->ok);
+            if (c->execution) {
+                cJSON *state = cJSON_Parse(c->execution);
+                if (state) cJSON_AddItemToObject(m, "sandbox", state);
+            }
             cJSON_AddStringToObject(m, "content", c->text ? c->text : "");
             if (!c->ok) log_info("调用 %s 没有成功：%.*s", c->id, (int)utf8_cut(c->text ? c->text : "", c->text ? strlen(c->text) : 0, 200), c->text ? c->text : "");
             break;
@@ -1425,7 +1440,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         if (!g) return;   /* 已经超时、被停止，或者身份对不上（上一轮的迟到结果） */
         bool ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "ok"));
         log_info("网关执行 %s %s", g->id, ok ? "完成" : "失败");
-        tool_done(k, g->sid, g->run_id, g->turn_id, g->id, ok, sget(m, "content") ? sget(m, "content") : "", now);
+        tool_done_state(k, g->sid, g->run_id, g->turn_id, g->id, ok, sget(m, "content") ? sget(m, "content") : "", cJSON_GetObjectItemCaseSensitive(m, "sandbox"), now);
         gw_free(g);
         return;
     }
@@ -1492,7 +1507,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         /* 这一轮最终的沙箱模式：节点自己的 on/off 优先，其余听网关的请求 */
         const char *sb = effective_sandbox(k, sget(m, "sandbox_mode"));
         ev.sandbox = !strcmp(sb, "off") ? NA_SB_OFF : k->landlock > 0 ? NA_SB_YES : NA_SB_NO;
-        policy = build_policy(m, ev.mode, sb);
+        policy = build_policy(m, ev.mode, sget(m, "sandbox_mode"));
         ev.policy = policy;
         const cJSON *ws = cJSON_GetObjectItemCaseSensitive(m, "workspaces");
         log_info("run 开始 sid=%s from=%s mode=%s 工作目录 %d 个", ev.sid ? ev.sid : "-", ev.from ? ev.from : "-",
@@ -1554,12 +1569,14 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                     int landlock = local ? k->landlock : cJSON_IsNumber(ll) ? ll->valueint : 0;
                     /* 明确关掉隔离的（这一轮 off，或者那台机器上的内核也是 off）不再退回审批；
                      * 其余按那台机器有没有沙箱算 */
-                    const char *want = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(run_pol, "sandbox"));
-                    const cJSON *rs = cJSON_GetObjectItemCaseSensitive(ws, "sandbox_mode");
-                    int mode = want && !strcmp(want, "off") ? SB_OFF : want && !strcmp(want, "on") ? SB_ON : k->sb_mode;
-                    if (!local && cJSON_IsString(rs)) {
-                        if (!strcmp(rs->valuestring, "off")) mode = SB_OFF;
-                        else if (!strcmp(rs->valuestring, "on")) mode = SB_ON;
+                    const char *want = sget(ws, "sandbox_mode");
+                    if (!want) want = sget(run_pol, "sandbox");
+                    const char *required = local ? k->conf.sandbox_mode : sget(ws, "sandbox_required");
+                    const char *effective = required && (!strcmp(required, "on") || !strcmp(required, "off")) ? required : want;
+                    int mode = effective && !strcmp(effective, "off") ? SB_OFF : effective && !strcmp(effective, "on") ? SB_ON : SB_AUTO;
+                    if ((want && !strcmp(want, "on") && required && !strcmp(required, "off")) || (mode == SB_ON && landlock <= 0)) {
+                        owned[ncalls + i] = xstrdup("目标机器不能满足 sandbox=on（不支持完整隔离或节点部署要求为 off），没有执行");
+                        calls[i].error = owned[ncalls + i];
                     }
                     calls[i].sandbox = mode == SB_OFF ? NA_SB_OFF : landlock > 0 ? NA_SB_YES : NA_SB_NO;
                     /* 并发分类：按真工具、真参数算，交给状态机排队 */
@@ -1667,11 +1684,25 @@ static void collect_finished(kernel_t *k, int64_t now)
             bool ok;
             char *res = job_result(j, &ok);
             log_info("%s（%s）%s", j->name, j->id, ok ? "完成" : "失败");
+            cJSON *raw = cJSON_Parse(buf_cstr(&j->out));
+            cJSON *state = cJSON_CreateObject();
+            cJSON_AddStringToObject(state, "mode", j->sandbox ? j->sandbox : "auto");
+            cJSON_AddStringToObject(state, "requested", j->sandbox_requested ? j->sandbox_requested : "auto");
+            const char *effective = sget(raw, "sandbox_effective");
+            cJSON_AddStringToObject(state, "effective", effective ? effective : "unknown");
+            if (!effective) cJSON_AddStringToObject(state, "reason", "执行器未回报实际隔离状态");
             if (j->kind == JOB_HOST) {
-                send_run_result(k, j->id, ok, res);
+                cJSON *m = msg_new("run_result", NULL);
+                cJSON_AddStringToObject(m, "id", j->id);
+                cJSON_AddBoolToObject(m, "ok", ok);
+                cJSON_AddStringToObject(m, "content", res);
+                cJSON_AddItemToObject(m, "sandbox", cJSON_Duplicate(state, 1));
+                link_send(&k->link, m);
             } else {
-                tool_done(k, j->sid, j->run_id, j->turn_id, j->id, ok, res, now);
+                tool_done_state(k, j->sid, j->run_id, j->turn_id, j->id, ok, res, state, now);
             }
+            cJSON_Delete(raw);
+            cJSON_Delete(state);
             free(res);
         } else if (j->kind != JOB_HOST) {
             /* 被终止的（超时、停止、断线）也要让状态机闭合这个调用，不能只等它自己超时 */

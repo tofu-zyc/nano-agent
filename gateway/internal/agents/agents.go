@@ -39,6 +39,7 @@ type Agent struct {
 	ApprovalTimeout *string  `json:"approval_timeout,omitempty"`
 	MaxOutputKB     *int     `json:"max_output_kb,omitempty"`
 	Mode            *string  `json:"mode,omitempty"`
+	SandboxMode     *string  `json:"sandbox_mode,omitempty"`
 	CompactAt       *float64 `json:"compact_at,omitempty"`
 	CompactTo       *float64 `json:"compact_to,omitempty"`
 	KeepTurns       *int     `json:"keep_turns,omitempty"`
@@ -68,12 +69,12 @@ type Agent struct {
 	LifeMaxReaches *int    `json:"life_max_reaches,omitempty"`
 	LifeWakeMin    *string `json:"life_wake_min,omitempty"` // 如 1h
 	LifeWakeMax    *string `json:"life_wake_max,omitempty"` // 如 2h
-	Memory     *string `json:"memory,omitempty"`      // on | off
-	DreamWhen  *string `json:"dream_when,omitempty"`  // idle | nightly | sleep | off
-	DreamAt    *string `json:"dream_at,omitempty"`    // nightly 时几点，如 03:00
-	DreamIdle  *string `json:"dream_idle,omitempty"`  // idle 时空闲多久，如 2h
-	DreamMax   *int    `json:"dream_max,omitempty"`   // 每天最多自动整理几次
-	DreamModel *string `json:"dream_model,omitempty"` // 整理记忆用的模型，空就用 agent 的
+	Memory         *string `json:"memory,omitempty"`        // on | off
+	DreamWhen      *string `json:"dream_when,omitempty"`    // idle | nightly | sleep | off
+	DreamAt        *string `json:"dream_at,omitempty"`      // nightly 时几点，如 03:00
+	DreamIdle      *string `json:"dream_idle,omitempty"`    // idle 时空闲多久，如 2h
+	DreamMax       *int    `json:"dream_max,omitempty"`     // 每天最多自动整理几次
+	DreamModel     *string `json:"dream_model,omitempty"`   // 整理记忆用的模型，空就用 agent 的
 
 	Created int64 `json:"created,omitempty"`
 }
@@ -109,6 +110,9 @@ func Open(path string) (*Store, error) {
 		s.st.Default = DefaultID
 	}
 	for i := range s.st.Agents {
+		if mode := s.st.Agents[i].SandboxMode; mode != nil && *mode != "auto" && *mode != "on" && *mode != "off" {
+			return nil, fmt.Errorf("agent %s 的 sandbox_mode 无效", s.st.Agents[i].ID)
+		}
 		if s.st.Agents[i].Name == "" {
 			s.st.Agents[i].Name = s.st.Agents[i].ID
 		}
@@ -221,6 +225,9 @@ func normalize(a *Agent) error {
 		if v != nil {
 			*v = strings.TrimSpace(*v)
 		}
+	}
+	if a.SandboxMode != nil && *a.SandboxMode != "auto" && *a.SandboxMode != "on" && *a.SandboxMode != "off" {
+		return errors.New("sandbox_mode 只能是 auto、on、off，或 null 跟随全局")
 	}
 	if a.Mode != nil && *a.Mode != "" && !slices.Contains([]string{"full", "auto", "ask", "readonly"}, *a.Mode) {
 		return errors.New("权限模式只能是 full、auto、ask、readonly，或者空（跟随默认）")

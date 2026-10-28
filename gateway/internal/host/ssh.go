@@ -24,11 +24,12 @@ type sshConn struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu       sync.Mutex
-	ready    bool
-	landlock int
-	osName   string
-	master   *exec.Cmd
+	mu           sync.Mutex
+	ready        bool
+	landlock     int
+	sandboxModes []string
+	osName       string
+	master       *exec.Cmd
 }
 
 const (
@@ -243,7 +244,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, string, error) {
 	}
 	if strings.HasPrefix(line, "OK ") {
 		h.dropOldCache(ctx)
-		return parseProbe(line)
+		return h.acceptProbe(line)
 	}
 	f := strings.Fields(strings.TrimPrefix(line, "NEED"))
 	if !strings.HasPrefix(line, "NEED") || len(f) == 0 {
@@ -272,7 +273,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, string, error) {
 			return 0, "", err
 		}
 		if strings.HasPrefix(line, "OK ") {
-			return parseProbe(line)
+			return h.acceptProbe(line)
 		}
 		if cc == "" || e.SrcTar == "" {
 			return 0, "", fmt.Errorf("上传的执行器在服务器上跑不起来（%s）。服务器上装个 C 编译器（cc）就能现编", clip(strings.TrimPrefix(line, "FAIL "), 200))
@@ -297,7 +298,7 @@ func (h *sshConn) prepare(ctx context.Context) (int, string, error) {
 	}
 	if strings.HasPrefix(line, "OK ") {
 		h.dropOldCache(ctx)
-		return parseProbe(line)
+		return h.acceptProbe(line)
 	}
 	return 0, osName, fmt.Errorf("在服务器上编译执行器失败：%s", clip(strings.TrimPrefix(line, "FAIL "), 300))
 }
@@ -306,6 +307,12 @@ func (h *sshConn) prepare(ctx context.Context) (int, string, error) {
 type sshHost struct{ h *sshConn }
 
 func (s sshHost) Exec(ctx context.Context, req []byte) Result {
+	s.h.mu.Lock()
+	modes := append([]string(nil), s.h.sandboxModes...)
+	s.h.mu.Unlock()
+	if err := checkSandboxRequest(req, modes); err != nil {
+		return Result{Content: err.Error()}
+	}
 	out, errOut, code, err := run(ctx, s.h.muxCmd("exec "+s.h.exe()), req, true)
 	r := parseResult(out, errOut, code, err)
 	if code == 255 && !bytes.Contains(out, []byte(`"ok"`)) && ctx.Err() == nil {
@@ -365,4 +372,15 @@ func (s sshHost) PutFiles(ctx context.Context, dir string, files []File) (string
 		return "", fmt.Errorf("传文件到服务器 %s 失败：%s", s.h.c.Name, firstLine(errOut+" "+fmt.Sprint(err)))
 	}
 	return string(out), nil
+}
+
+func (h *sshConn) acceptProbe(line string) (int, string, error) {
+	n, osName, err := parseProbe(line)
+	if err == nil {
+		modes := probeSandboxModes(strings.TrimPrefix(line, "OK "))
+		h.mu.Lock()
+		h.sandboxModes = modes
+		h.mu.Unlock()
+	}
+	return n, osName, err
 }

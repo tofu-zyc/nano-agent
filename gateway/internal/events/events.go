@@ -3,22 +3,24 @@
 package events
 
 import (
+	"nano-agent/gateway/internal/proto"
 	"sync"
 	"time"
 )
 
 // Event 是一条事件。T 是类型，其余字段按类型取用，没用到的省略。
 type Event struct {
-	T    string `json:"t"`
-	At   int64  `json:"at"` // 毫秒时间戳
-	SID  string `json:"sid,omitempty"`
-	Kind string `json:"kind,omitempty"`
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name,omitempty"`
-	Text string `json:"text,omitempty"`
-	OK   *bool  `json:"ok,omitempty"`
-	N    int    `json:"n,omitempty"`
-	Data any    `json:"data,omitempty"`
+	Sandbox *proto.Sandbox `json:"sandbox,omitempty"`
+	T       string         `json:"t"`
+	At      int64          `json:"at"` // 毫秒时间戳
+	SID     string         `json:"sid,omitempty"`
+	Kind    string         `json:"kind,omitempty"`
+	ID      string         `json:"id,omitempty"`
+	Name    string         `json:"name,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	OK      *bool          `json:"ok,omitempty"`
+	N       int            `json:"n,omitempty"`
+	Data    any            `json:"data,omitempty"`
 }
 
 // Bus 把事件分发给所有订阅者。发布从不阻塞：订阅者处理不过来时丢掉它的事件。

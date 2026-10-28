@@ -344,6 +344,8 @@ func (a *App) agentSettings(ag agents.Agent) []AgentSetting {
 			Global:    modeDef,
 			Value:     ptrAny(ag.Mode),
 			Effective: pickString(ag.Mode, modeDef)},
+		{Key: "sandbox_mode", Group: "work", Label: "执行隔离", Type: "enum", Options: []string{"auto", "on", "off"}, Global: c.Sandbox.ModeOrDefault(), Value: ptrAny(ag.SandboxMode), Effective: pickString(ag.SandboxMode, c.Sandbox.ModeOrDefault()), Help: "auto 使用可用隔离；on 要求完整隔离，不支持时失败；off 跳过系统隔离。工作目录可覆盖，执行节点部署要求仍优先。审批和文件工具权限独立。"},
+
 		{Key: "compact_at", Group: "work", Label: "自动整理阈值", Type: "float",
 			Help:      "上下文到模型窗口的这个比例时自动整理",
 			Global:    at,
@@ -690,7 +692,7 @@ func applyAgentPatch(ag *agents.Agent, p AgentPatch) error {
 // applyAgentSetting 设置一个可覆盖的项；v 是 nil 表示恢复跟随全局（或者默认值）。
 func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 	strs := map[string]**string{"run_timeout": &ag.RunTimeout, "approval_timeout": &ag.ApprovalTimeout, "idle_compact": &ag.IdleCompact,
-		"mode": &ag.Mode, "group_eagerness": &ag.GroupEagerness, "group_quiet": &ag.GroupQuiet, "group_min_gap": &ag.GroupMinGap,
+		"sandbox_mode": &ag.SandboxMode, "mode": &ag.Mode, "group_eagerness": &ag.GroupEagerness, "group_quiet": &ag.GroupQuiet, "group_min_gap": &ag.GroupMinGap,
 		"life_awake": &ag.LifeAwake, "life_level": &ag.LifeLevel, "life_reach": &ag.LifeReach, "memory": &ag.Memory,
 		"life_wake_min": &ag.LifeWakeMin, "life_wake_max": &ag.LifeWakeMax,
 		"dream_when": &ag.DreamWhen, "dream_at": &ag.DreamAt, "dream_idle": &ag.DreamIdle, "dream_model": &ag.DreamModel}
@@ -708,7 +710,7 @@ func applyAgentSetting(ag *agents.Agent, key string, v any) error {
 			return fmt.Errorf("%s 要填文字", key)
 		}
 		s = strings.TrimSpace(s)
-		enums := map[string][]string{"mode": {"full", "auto", "ask", "readonly"}, "group_eagerness": {"off", "low", "normal", "high"},
+		enums := map[string][]string{"sandbox_mode": {"auto", "on", "off"}, "mode": {"full", "auto", "ask", "readonly"}, "group_eagerness": {"off", "low", "normal", "high"},
 			"life_level": {"low", "normal", "high"}, "life_reach": {"owner", "all", "off"}, "memory": {"on", "off"},
 			"dream_when": {"idle", "nightly", "sleep", "off"}}
 		switch {

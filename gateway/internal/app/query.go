@@ -55,6 +55,7 @@ type SessionInfo struct {
 	Pending        int            `json:"pending"` // 待审批的工具调用
 	LastAt         int64          `json:"last_at"` // 最后一条消息的时间（秒）
 	Messages       int            `json:"messages"`
+	SandboxMode    string         `json:"sandbox_mode"`
 	Mode           string         `json:"mode"`
 	Thinking       string         `json:"thinking"`
 	ThinkingLevels []string       `json:"thinking_levels"` // 这个模型的思考强度可选值
@@ -74,10 +75,12 @@ type SessionInfo struct {
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
 // gateway（交给网关在那台机器上执行）、down（那台机器现在用不了）。
 type MountInfo struct {
-	ID   string `json:"id"`
-	Host string `json:"host"`
-	Path string `json:"path"`
-	How  string `json:"how"`
+	SandboxMode     string `json:"sandbox_mode,omitempty"`
+	SandboxRequired string `json:"sandbox_required,omitempty"`
+	ID              string `json:"id"`
+	Host            string `json:"host"`
+	Path            string `json:"path"`
+	How             string `json:"how"`
 }
 
 type ApprovalInfo struct {
@@ -148,7 +151,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		context = session.ContextInfo{Lazy: true, Last: st.Meter.Usage, Compacted: st.Base, CompactedAt: st.CompactedAt, Total: st.Meter.Usage.PromptTokens}
 	}
 	info := SessionInfo{SID: sid, Agent: a.execAgentID(sid), RouteAgent: a.routeAgentID(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
-		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
+		SandboxMode: a.sandboxModeFor(sid), Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
 		Model: st.Model, Compacted: st.Base, Context: context}
 	info.Interrupted = a.interruptedCount(sid)
 	info.AgentFixed = fixedAgentSID(sid) || branch
@@ -158,6 +161,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		info.ModelUsed, info.ModelLabel = m.ID, modelLabel(m)
 	}
 	rt := a.route(w)
+	a.freezeSandboxRoute(&rt, info.SandboxMode)
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		rt = s.run.rt
 	}
@@ -170,7 +174,13 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		} else if m != nil {
 			how = "gateway"
 		}
-		info.Workspaces = append(info.Workspaces, MountInfo{ID: x.ID, Host: x.Host, Path: x.Path, How: how})
+		requested, required := info.SandboxMode, ""
+		if mt := rt.find(x.Label()); mt != nil {
+			requested, required = mt.sandboxMode, mt.sandboxRequired
+		} else if x.SandboxMode != "" {
+			requested = x.SandboxMode
+		}
+		info.Workspaces = append(info.Workspaces, MountInfo{ID: x.ID, Host: x.Host, Path: x.Path, How: how, SandboxMode: requested, SandboxRequired: required})
 	}
 	if len(info.Endpoints) > 0 {
 		info.Channel = info.Endpoints[0].Channel
@@ -443,6 +453,7 @@ func (a *App) ListDir(ctx context.Context, hostName, path string) (*DirListing, 
 	a.mu.Lock()
 	h, _, why := a.hostFor(hostName)
 	known := a.knownHost(hostName)
+	osName := a.machineOS(hostName)
 	a.mu.Unlock()
 	if h == nil {
 		if !known {
@@ -454,7 +465,7 @@ func (a *App) ListDir(ctx context.Context, hostName, path string) (*DirListing, 
 	if err != nil {
 		return nil, err
 	}
-	out := &DirListing{Path: l.Path, Home: l.Home, OS: a.machineOS(hostName), Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
+	out := &DirListing{Path: l.Path, Home: l.Home, OS: osName, Blocked: l.Blocked, Entries: l.Entries, Truncated: l.Truncated}
 	if out.Entries == nil {
 		out.Entries = []proto.DirEntry{}
 	}

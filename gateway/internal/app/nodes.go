@@ -376,10 +376,12 @@ func (a *App) hostFor(name string) (host.Host, int, string) {
 
 // mount 是这一轮挂上的一个工作目录
 type mount struct {
-	ws       *Workspace
-	local    bool // 在跑这一轮的内核的机器上，内核自己执行
-	landlock int  // 异机时执行的那台机器的沙箱版本
-	os       string
+	ws              *Workspace
+	local           bool // 在跑这一轮的内核的机器上，内核自己执行
+	landlock        int  // 异机时执行的那台机器的沙箱版本
+	os              string
+	sandboxMode     string
+	sandboxRequired string
 }
 
 // route 是一轮怎么跑
@@ -404,7 +406,9 @@ func (a *App) route(w workspace) route {
 		return rt
 	}
 	here := a.machineOf(rt.kernel)
-	for _, x := range w.wss {
+	for _, original := range w.wss {
+		xcopy := *original
+		x := &xcopy
 		if x.Host == here {
 			rt.mounts = append(rt.mounts, mount{ws: x, local: true, landlock: a.nodes[rt.kernel].info.Landlock, os: a.machineOS(x.Host)})
 			continue
@@ -442,7 +446,7 @@ func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
 		ro = []string{"/"}
 	}
 	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock,
-		OS: m.os}
+		OS: m.os, SandboxMode: m.sandboxMode, SandboxRequired: m.sandboxRequired}
 }
 
 // hostUsable：机器 name 上的工作目录现在能用（有内核，或者网关能在上面执行）

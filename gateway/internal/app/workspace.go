@@ -252,7 +252,7 @@ func (a *App) cmdMode(c in, arg string) {
 
 // checkDir 拒绝会暴露网关自己的目录：配置里有 API key，数据目录里有所有会话的聊天记录。
 func (a *App) checkDir(path string) string {
-	if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") {
+	if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") && !isWindowsAbs(path) {
 		return "工作目录要写成绝对路径或 ~ 开头，比如 /dir add ~/projects/foo"
 	}
 	full := expandHome(path)
@@ -266,7 +266,7 @@ func (a *App) checkDir(path string) string {
 		if real, err := filepath.EvalSymlinks(mine); err == nil {
 			mine = real
 		}
-		if mine == full || strings.HasPrefix(mine, strings.TrimSuffix(full, "/")+"/") {
+		if rel, err := filepath.Rel(full, mine); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "不能把 " + path + " 设为工作目录：它包含 nano-agent 网关自己的配置或数据（里面有 API key 和聊天记录）"
 		}
 	}

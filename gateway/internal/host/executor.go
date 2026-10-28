@@ -92,6 +92,7 @@ type Result struct {
 	OK      bool
 	Content string
 	Lost    bool
+	Sandbox *proto.Sandbox
 }
 
 // Listing 是执行器 --ls 列出的目录（只有子目录名）。
@@ -185,11 +186,16 @@ func run(ctx context.Context, cmd *exec.Cmd, input []byte, keepOpen bool) (out [
 // parseResult 解析执行器的输出 {"ok":…,"content":…}；执行器没正常给出结果时，按退出情况说明原因。
 func parseResult(out []byte, errOut string, code int, err error) Result {
 	var r struct {
-		OK      *bool   `json:"ok"`
-		Content *string `json:"content"`
+		OK        *bool   `json:"ok"`
+		Content   *string `json:"content"`
+		Effective string  `json:"sandbox_effective"`
 	}
 	if json.Unmarshal(bytes.TrimSpace(out), &r) == nil && r.OK != nil && r.Content != nil {
-		return Result{OK: *r.OK, Content: *r.Content}
+		var state *proto.Sandbox
+		if r.Effective != "" {
+			state = &proto.Sandbox{Effective: r.Effective}
+		}
+		return Result{OK: *r.OK, Content: *r.Content, Sandbox: state}
 	}
 	why := fmt.Sprintf("执行器异常结束（退出码 %d）", code)
 	if err != nil && code < 0 {

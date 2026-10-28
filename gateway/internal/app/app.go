@@ -72,6 +72,7 @@ var Commands = []Command{
 	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
+	{Name: "sandbox", Args: "[global|agent|workspace ID] [auto|on|off|default]", Desc: "查看、设置执行隔离；审批和文件权限独立", Admin: true},
 	{Name: "mode", Args: "[full | auto | ask | readonly]", Desc: "查看、切换权限模式：放行、自动、审批、只读", Admin: true},
 	{Name: "think", Args: "[强度 | default]", Desc: "查看、切换思考强度", Admin: true},
 	{Name: "model", Args: "[编号 | default]", Desc: "查看、切换这个会话用的模型", Admin: true},
@@ -732,6 +733,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	case "dir":
 		a.cmdDir(c, arg)
 		return
+	case "sandbox":
+		a.cmdSandbox(c, arg)
+		return
 	case "mode":
 		a.cmdMode(c, strings.ToLower(arg))
 		return
@@ -946,6 +950,27 @@ func (a *App) startRun(s *sess) {
 			node = k // HOME 模式必须在网关本机执行
 		}
 	}
+	sandboxMode := a.sandboxModeFor(s.sid)
+	a.freezeSandboxRoute(&rt, sandboxMode)
+	if err := sandboxRouteError(sandboxMode, rt); err != nil {
+		a.publish(events.Event{T: "say", SID: s.sid, Text: err.Error()})
+		a.deliver(head.ep, err.Error(), "")
+		s.queue = nil
+		return
+	}
+	if n := a.nodes[node]; n != nil {
+		unsupported := sandboxMode != "auto" && n.info.Features["sandbox_policy"] < 1
+		for _, mt := range rt.mounts {
+			unsupported = unsupported || (mt.sandboxMode != sandboxMode && n.info.Features["sandbox_policy"] < 2)
+		}
+		if unsupported {
+			text := "这个内核尚不支持所选执行隔离策略，请更新内核后重试。"
+			a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+			a.deliver(head.ep, text, "")
+			s.queue = nil
+			return
+		}
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
@@ -998,6 +1023,9 @@ func (a *App) startRun(s *sess) {
 	note := ""
 	if !group && !isDreamSID(s.sid) && !head.trigger {
 		note = a.envNote(w, rt, admin)
+		if admin {
+			note += a.sandboxNote(sandboxMode, rt)
+		}
 	}
 	// 长期记忆：记忆说明（变了才放）和这一轮想起来的几条，也放在消息前面（memory.go）
 	recallText := text
@@ -1133,7 +1161,7 @@ func (a *App) startRun(s *sess) {
 		r.full, mode = true, proto.ModeAuto
 	}
 	r.mode = mode
-	r.sandboxMode = a.cfg.Sandbox.ModeOrDefault()
+	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
 		SandboxMode: r.sandboxMode}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
@@ -1161,7 +1189,9 @@ func (a *App) startRun(s *sess) {
 			// 没有工作目录：在网关本机的 HOME 下工作。读不限，写只到临时目录；写外面要 elevated。
 			r.write = false
 			in.Mode = mode
-			in.Workspaces = []proto.WorkspaceSpec{homeSpec()}
+			home := homeSpec()
+			home.SandboxMode = sandboxMode
+			in.Workspaces = []proto.WorkspaceSpec{home}
 		} else if admin && mode != proto.ModeNone {
 			// 本机内核不在线：没法在网关自己的 HOME 上执行
 			r.noTools = true
@@ -1466,7 +1496,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		if !a.seeImage(s, m) {
 			// MCP 工具返回的图片：模型支持看图时一起发过去
 			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Agent: a.execAgentID(s.sid),
-				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID]}); err != nil {
+				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID], Sandbox: m.Sandbox}); err != nil {
 				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 			}
 		}
@@ -1490,7 +1520,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 			}
 		}
 		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
-			Text: resultDetail(m.Content), Data: clip(m.Content, 4000)})
+			Text: resultDetail(m.Content), Data: clip(m.Content, 4000), Sandbox: m.Sandbox})
 	case proto.TApproveReq:
 		if s.run.full {
 			a.autoApprove(s, m)

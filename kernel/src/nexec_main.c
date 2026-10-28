@@ -55,7 +55,11 @@ static const char *sb_effective(int mode, int landlock)
 {
     if (mode == SB_OFF) return "none";
     if (landlock > 0) return "full";
+    #if defined(__linux__)
     return mode == SB_ON ? "none" : "partial";
+#else
+    return "none";
+#endif
 }
 
 static const tool_entry TOOLS[] = {
@@ -290,7 +294,7 @@ static int enter_sandbox(const xctx *x, int mode, buf_t *err)
 #endif
 
     sb_rules r = { .rw = (const char *const *)rw, .nrw = nrw, .ro = (const char *const *)ro, .nro = nro };
-    char msg[512];
+    char msg[512] = {0};
     int rc = sb_apply(&r, msg, sizeof msg);
     if (rc < 0) {
         buf_puts(err, "沙箱启动失败，没有执行：");
@@ -467,6 +471,7 @@ int main(int argc, char **argv)
 
     buf_t out = {0};
     bool ok = false;
+    const char *applied="none";
     xctx x = {0};
     int mode = parse_sandbox(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "sandbox")));
     if (!t) {
@@ -477,12 +482,13 @@ int main(int argc, char **argv)
     } else if (mode < 0) {
         buf_puts(&out, "sandbox 只能是 auto、on 或 off");
     } else if (setup(&x, req, mode, &out) == 0 && enter_sandbox(&x, mode, &out) == 0) {
+        applied=sb_effective(mode,sb_landlock_abi());
         cJSON *empty = args ? NULL : cJSON_CreateObject();
         ok = t->fn(&x, args ? args : empty, &out);
         cJSON_Delete(empty);
     }
     if (!out.len) buf_puts(&out, "（无输出）");
-    respond(ok, buf_cstr(&out), mode >= 0 ? sb_effective(mode, sb_landlock_abi()) : "");
+    respond(ok, buf_cstr(&out), applied);
     buf_free(&out);
     xctx_free(&x);
     cJSON_Delete(req);

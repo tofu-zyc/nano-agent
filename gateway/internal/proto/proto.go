@@ -59,9 +59,9 @@ const (
 	TPipeClosed = "pipe_closed" // 内核 → 网关：进程退出了
 
 	// 协议 v11：并行、排队与完整调用身份
-	TToolQueued  = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
-	TToolStarted = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
-	TExecStarted = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
+	TToolQueued   = "tool_queued"   // 内核 → 网关：这个调用在等执行槽或等资源
+	TToolStarted  = "tool_started"  // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
+	TExecStarted  = "exec_started"  // 网关 → 内核：交给网关的调用真的开始了
 	TInputPending = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
 	TInputReady   = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
 	TInputCommit  = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
@@ -197,14 +197,16 @@ type ToolSpec struct {
 // 工具参数里的 workspace 用它。Local 表示在跑这一轮的内核的机器上，内核自己执行，
 // 否则交给网关（Landlock 是那台机器的沙箱版本）。
 type WorkspaceSpec struct {
-	Name     string   `json:"name"`
-	Dirs     []string `json:"dirs"`
-	RO       []string `json:"ro"`
-	RW       []string `json:"rw"`
-	Home     bool     `json:"home,omitempty"` // 没有工作目录时的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME
-	Local    bool     `json:"local,omitempty"`
-	Landlock int      `json:"landlock,omitempty"`
-	OS       string   `json:"os,omitempty"` // 这台机器上的路径属于哪个系统：linux / macos / windows
+	SandboxMode     string   `json:"sandbox_mode,omitempty"`
+	SandboxRequired string   `json:"sandbox_required,omitempty"`
+	Name            string   `json:"name"`
+	Dirs            []string `json:"dirs"`
+	RO              []string `json:"ro"`
+	RW              []string `json:"rw"`
+	Home            bool     `json:"home,omitempty"` // 没有工作目录时的 HOME 模式：dirs 为空，相对路径和 Shell 用 HOME
+	Local           bool     `json:"local,omitempty"`
+	Landlock        int      `json:"landlock,omitempty"`
+	OS              string   `json:"os,omitempty"` // 这台机器上的路径属于哪个系统：linux / macos / windows
 }
 
 // SkillSpec 是技能简介，正文在调用 Skill 时才加载。
@@ -223,6 +225,7 @@ type SkillFile struct {
 // Sandbox 是内核报告的沙箱能力。Landlock 为 0 表示没有沙箱，自动模式下的 Shell 也要审批。
 // Mode 是请求的模式（auto / on / off），Effective 是实际生效的程度（full / partial / none）。
 type Sandbox struct {
+	Requested string `json:"requested,omitempty"`
 	Landlock  int    `json:"landlock"`
 	Mode      string `json:"mode,omitempty"`
 	Effective string `json:"effective,omitempty"`

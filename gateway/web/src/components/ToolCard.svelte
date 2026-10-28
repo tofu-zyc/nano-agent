@@ -1,12 +1,12 @@
 <script lang="ts">
   import { toolIcon } from '../lib/format';
   import { prettyArgs } from '../lib/conv';
-  import type { Attachment } from '../lib/types';
+  import type { Attachment, ExecutionIsolation } from '../lib/types';
   import Icon from './Icon.svelte';
 
   // media：工具读到的图片（交给模型看了）、SendFile 发出去的文件，一直显示在卡片下面
-  let { name, detail, args = '', ok, result, running = false, media = [] }: {
-    name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean; media?: Attachment[];
+  let { name, detail, args = '', ok, result, running = false, media = [], sandbox }: {
+    sandbox?: ExecutionIsolation; name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean; media?: Attachment[];
   } = $props();
   const isImage = (a: Attachment) => /^image\/(png|jpeg|gif|webp)$/.test(a.mime);
   const sizeOf = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
@@ -42,6 +42,10 @@
   {/if}
   {#if open}
     <div class="more">
+      {#if sandbox}
+        <div class="lbl">执行隔离</div>
+        <div>请求 {sandbox.requested || sandbox.mode || '未回报'} · 执行策略 {sandbox.mode || '未回报'} · 实际 {({full:'完整',partial:'部分',none:'无',unknown:'未回报'} as Record<string,string>)[sandbox.effective || 'unknown'] || sandbox.effective}{sandbox.reason ? ' · ' + sandbox.reason : ''}</div>
+      {/if}
       {#if args}
         <div class="lbl">参数</div>
         <pre>{prettyArgs(args)}</pre>

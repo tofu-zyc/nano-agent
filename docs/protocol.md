@@ -1,4 +1,6 @@
-# 内核 ⇄ 网关协议（v9）
+# 内核 ⇄ 网关协议（v11）
+
+当前 v11：模型、工具、审批和取消使用完整 `(sid, run_id, turn_id, id)` 身份；`hello.features` 按能力协商有界并行、调用身份和执行隔离策略。旧协议演进说明如下；新字段见本文各扩展说明。
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
 - **版本**：v9 起 `hello` 带 `version`（内核的发布版本）和 `update_failed`（上次自动更新失败、已经退回的版本），网关可以发 `update` 让内核换成新版本（见下面「内核更新」）。**从 v9 起，网关遇到协议版本比自己旧、但不低于 9 的内核时，应先推 `update` 把它升上来，而不是直接拒绝**。v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（当前技能源文件在 `skills/`，执行缓存在 `skill-cache/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
@@ -20,8 +22,8 @@
 |---|---|---|
 | `hello` | `v` `token` `pair?` `node` `os` `arch` `tools[]` `sandbox` | 握手。没有口令时 `token` 为空、`pair` 为 true，请求配对，报告工具、沙箱能力和系统。`tools` 每项是 `{name, description, input_schema}`（五个基础工具，`Skill` 由网关提供）；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`os` 是 linux / macos / windows，`arch` 是 x86_64 / arm64 |
 | `tools` | `tools[]` | 工具定义变了（旧内核用来报技能，现在网关忽略其中的 `Skill`） |
-| `model` | `sid` | 请模型基于这个会话的上下文生成下一轮 |
-| `result` | `sid` `id` `ok` `content` | 一次工具调用的结果，包括内核自己生成的失败结果（权限不足、超时、被拒……） |
+| `model` | `sid` `run_id` `turn_id` | 请模型基于这个会话的上下文生成下一轮 |
+| `result` | `sid` `run_id` `turn_id` `id` `ok` `content` `sandbox?` | 一次工具调用的结果，包括内核自己生成的失败结果（权限不足、超时、被拒……） |
 | `approve_req` | `sid` `id` `name` `args` `from` | 这次调用需要管理员审批 |
 | `notice` | `sid` `text` | 发给用户看的提示 |
 | `done` | `sid` `status` `detail?` | 这一轮处理结束，`status` 见下表 |
@@ -157,3 +159,11 @@ K→G {"t":"update_result","ok":true,"version":"0.1.1"}
 - WebSearch/WebFetch 是公开只读策略：含 none/readonly 在内均可执行，内核通过 exec 交给网关，不附工作目录，不接收搜索密钥。
 - Schedule 只允许管理员（input.elevate=true）。list/run_now 走只读策略，create/update/delete 走写策略：ask 审批、auto 直接、readonly 拒绝。网关再次验证身份和任务权限上限。
 - GatewayAdmin 的 history_delete 在 readonly 下也要求审批，其他管理动作沿用既有规则。
+
+### v11 执行隔离策略能力 2（v0.9.0）
+
+hello.features.sandbox_policy=2 支持 workspace 覆盖和逐次执行状态。全局 sandbox.mode、agent.sandbox_mode、workspace.sandbox_mode 按顺序解析；会话不增加临时覆盖。input.sandbox_mode 为 agent 解析值，workspaces[].sandbox_mode 为冻结的工作目录请求；workspaces[].sandbox_required 是目标节点部署要求，供协调内核在执行前判断。工具参数不能覆盖策略。部署 on 强制施加；部署 off 与请求 on 冲突时失败。
+
+result / exec_result / run_result 可带 sandbox 对象：requested（原请求）、mode（目标节点最终执行策略）、effective（full / partial / none / unknown）、reason（原因）。此对象来自执行器结果，和 hello 的能力探测分开。核心只在完整调用身份匹配后转发，不改变模型工具正文。Gateway 保存到原始历史并用于工具卡片显示，不将其作为模型参数。
+
+旧执行器未声明 sandbox_modes 时，只兼容 auto；显式 on/off 在执行前失败。旧协调内核不支持所需覆盖时，在模型启动前要求更新；不假装执行了新策略。外部副作用和权限仍以实际执行系统为准，关闭隔离不授予访客工具权限或管理员身份。

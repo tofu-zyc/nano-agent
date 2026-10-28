@@ -33,6 +33,7 @@
   );
   let browsing = $state<MachineInfo | null>(null);
   let busy = $state(false);
+  let sandbox = $state('');
 
   function status(m: MachineInfo) {
     if (m.online) return m.kind === 'local' && !m.kernels.length ? '在线 · 由网关执行' : '在线';
@@ -50,7 +51,7 @@
     browsing = null;
     busy = true;
     try {
-      const w = await api.post<WorkspaceInfo>('/api/workspaces', { host: m.name, path });
+      const w = await api.post<WorkspaceInfo>('/api/workspaces', { host: m.name, path, sandbox_mode:sandbox });
       if (mounting) onchange?.([...mounted!.filter((x) => x !== w.id), w.id]);
       else onpick?.(w.id);
     } catch (err) {
@@ -92,7 +93,7 @@
     {#if mounting}
       <p class="lead">挂上的工作目录 AI 都能用，可以在不同的机器上；挂了好几个时，它调用工具会写明在哪个上执行。排第一的决定优先由哪台机器上的内核来跑。</p>
     {:else}
-      <p class="lead">工作目录是“机器 + 目录”：工具在那台机器上、只能碰到这个目录。</p>
+      <p class="lead">工作目录是“机器 + 目录”：文件工具按目录权限工作，Shell 的实际访问范围由执行隔离决定。</p>
     {/if}
 
     <div class="body">
@@ -125,6 +126,7 @@
 
       <div class="add">
         <div class="ah"><Icon name="plus" size={14} />添加新的工作目录：先选机器</div>
+        <label>执行隔离 <select bind:value={sandbox}><option value="">跟随 agent 和全局</option><option value="auto">auto</option><option value="on">on · 要求完整隔离</option><option value="off">off · 按系统用户执行</option></select></label>
         <div class="machines">
           {#each machines as m (m.name)}
             <button class="mc" disabled={!m.online || busy} onclick={() => (browsing = m)} title={m.online ? `浏览 ${m.name} 上的目录` : status(m)}>
@@ -148,7 +150,7 @@
 </div>
 
 {#if browsing}
-  <DirPicker host={browsing.kind === 'local' ? '' : browsing.name} onpick={add} onclose={() => (browsing = null)} />
+  <DirPicker allowSelf={sandbox === 'off'} host={browsing.kind === 'local' ? '' : browsing.name} onpick={add} onclose={() => (browsing = null)} />
 {/if}
 
 <style>

@@ -701,3 +701,5 @@ docs/protocol.md   内核 ⇄ 网关协议
 ## 许可
 
 [Apache-2.0](LICENSE)
+
+执行隔离可在全局设置、agent 的「执行隔离」和工作目录面板设置 auto/on/off，也可用 /sandbox 查看、/sandbox agent off、/sandbox workspace <ID> on 修改。default 恢复继承。on 无法满足时失败；off 按系统用户权限运行 Shell，文件工具路径检查和审批仍独立生效。执行节点的部署要求优先；调用卡片展开后显示原请求、最终策略和实际隔离。设置只影响新调用，已开始的任务保留启动时快照。

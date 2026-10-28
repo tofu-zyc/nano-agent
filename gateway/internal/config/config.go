@@ -44,6 +44,7 @@ type Config struct {
 //   - auto：用当前可用的实现；没有完整隔离时保留旧行为（Shell 审批）
 //   - on：要求完整隔离，机器给不了就明确失败，不静默降级
 //   - off：明确跳过 Landlock / seccomp / no_new_privs，按当前 OS 用户身份执行
+//
 // 执行节点自己的 kernel.conf 里 sandbox 更严时以节点为准（节点要求不能被网关绕开）。
 type Sandbox struct {
 	Mode string `toml:"mode" json:"mode"` // auto（默认）/ on / off
@@ -477,6 +478,11 @@ func (c *Config) validate() error {
 		if _, err := time.LoadLocation(c.Session.Timezone); err != nil {
 			errs = append(errs, fmt.Errorf("session.timezone：%w", err))
 		}
+	}
+	switch c.Sandbox.Mode {
+	case "", "auto", "on", "off":
+	default:
+		errs = append(errs, fmt.Errorf("sandbox.mode 只能是 auto、on 或 off，现在是 %q", c.Sandbox.Mode))
 	}
 	switch c.Workspace.Mode {
 	case "full", "auto", "ask", "readonly":

@@ -31,15 +31,17 @@
         <span class="dot online"></span>
         <strong class="p-grow">{k.node}</strong>
         <span class="tag">{k.managed ? '网关启动' : k.local ? '在本机' : '在别的电脑上'}</span>
-        {#if k.landlock > 0}<span class="tag ok"><Icon name="shield" size={11} />Landlock v{k.landlock}</span>{:else}<span class="tag warn">没有沙箱</span>{/if}
+        {#if k.landlock > 0}<span class="tag"><Icon name="shield" size={11} />支持 Landlock v{k.landlock}</span>{:else}<span class="tag warn">没有完整隔离能力</span>{/if}
       </div>
+      <div class="p-row"><span class="p-k">节点部署</span><span class="p-grow">{k.sandbox_mode || 'auto'} · 探测状态 {k.sandbox_effective || '未报告'}</span></div>
+      <p class="p-note">这里是能力探测。实际执行隔离按每次调用结果显示；请求 on 与节点 off 冲突时失败。</p>
       <div class="p-row"><span class="p-k">系统</span><span class="p-grow">{[osLabel(k.os), k.arch, k.version ? 'v' + k.version : ''].filter(Boolean).join(' · ') || '—'}</span></div>
       <div class="p-row"><span class="p-k">连接</span><span class="p-grow">已连接 {since(k.since)}</span></div>
       <div class="p-row"><span class="p-k">工具</span><span class="p-grow">{k.tools.join('、')}</span></div>
       <div class="p-row"><span class="p-k">正在跑</span><span class="p-grow">{busy.length ? busy.map((s) => s.title).join('、') : '没有'}</span></div>
       <button class="btn sm" onclick={() => store.open({ type: 'machine', name: machine })}><Icon name="hub" size={13} />它所在的机器：{machine}</button>
     </div>
-    <p class="p-note" style="margin-top: 10px">内核是跑对话循环、判断权限的程序，没有自己的设置：工具调用轮数上限、每条消息的时限这些在 <button class="p-lnk" onclick={() => store.open({ type: 'agentDefaults' }, 'agent.max_steps')}>Agent 默认值</button>里设，网关每一轮带给它；它连哪个网关写在那台电脑的 kernel.conf 里（<code>nano-kernel connect 地址</code> 改）。版本自动跟网关一致。</p>
+    <p class="p-note" style="margin-top: 10px">内核是跑对话循环、判断权限的程序，节点部署要求在 kernel.conf 设置；工具调用轮数上限、每条消息的时限这些在 <button class="p-lnk" onclick={() => store.open({ type: 'agentDefaults' }, 'agent.max_steps')}>Agent 默认值</button>里设，网关每一轮带给它；它连哪个网关写在那台电脑的 kernel.conf 里（<code>nano-kernel connect 地址</code> 改）。版本自动跟网关一致。</p>
     {#if paired}
       <div class="p-danger-zone">
         <button class="btn sm danger" onclick={unpair}><Icon name="trash" size={13} />移除这台电脑（口令作废）</button>

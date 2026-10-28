@@ -50,7 +50,7 @@ const gatewayAdminSchema = `{
     "action":{"type":"string","enum":[
       "model_endpoint_save","model_endpoint_delete","model_fetch","model_save","model_delete","model_default","model_test","model_use",
       "ssh_save","ssh_delete","ssh_connect","ssh_disconnect","ssh_setup",
-      "workspace_add","workspace_delete","workspace_mount","workspace_default",
+      "workspace_add","workspace_delete","workspace_mount","workspace_default","workspace_sandbox",
       "pair_allow","pair_deny","pair_remove","restart","update","history_delete","settings_set","agent_save","agent_delete","bot_bind",
       "mcp_save","mcp_delete","mcp_test"
     ],"description":"要做什么"},
@@ -82,6 +82,7 @@ const gatewayAdminSchema = `{
     "thinking_levels":{"type":"array","items":{"type":"string"},"description":"可选思考强度"},
     "modalities":{"type":"array","items":{"type":"string"},"description":"能接收的输入类型：text、image"},
     "path":{"type":"string","description":"工作目录路径，或者 ssh_setup 时要添加并挂载的目录"},
+    "sandbox_mode":{"type":"string","enum":["auto","on","off",""],"description":"workspace_sandbox：工作目录隔离覆盖，空字符串跟随 agent。agent_save 用 settings.sandbox_mode，null 跟随全局"},
     "default":{"type":"boolean","description":"设为新会话默认"},
     "all":{"type":"boolean","description":"history_delete：删除全部历史和归档"},
     "from":{"type":"integer","description":"history_delete：起始轮次（从 0 开始）"},
@@ -260,6 +261,7 @@ type gatewayArgs struct {
 	MaxHistory     int            `json:"max_history_tokens"`
 	AutoConnect    bool           `json:"auto_connect"`
 	Default        bool           `json:"default"`
+	SandboxMode    string         `json:"sandbox_mode"`
 	Mount          *bool          `json:"mount"`
 	BaseURL        string         `json:"base_url"`
 	APIKey         string         `json:"api_key"`
@@ -451,7 +453,7 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 	case "ssh_setup":
 		return a.sshSetup(sid, args)
 	case "workspace_add":
-		w, err := a.AddWorkspace(context.Background(), args.Host, args.Path, args.Default)
+		w, err := a.AddWorkspace(context.Background(), args.Host, args.Path, args.Default, args.SandboxMode)
 		if err != nil {
 			return "", err
 		}
@@ -489,6 +491,11 @@ func (a *App) gatewayAdmin(sid string, args gatewayArgs) (string, error) {
 			return "工作目录已挂到本会话：" + args.ID, nil
 		}
 		return "工作目录已取下：" + args.ID, nil
+	case "workspace_sandbox":
+		if err := a.SetWorkspaceSandbox(args.ID, args.SandboxMode); err != nil {
+			return "", err
+		}
+		return "工作目录执行隔离已保存", nil
 	case "workspace_default":
 		if err := a.SetDefaultWorkspace(args.ID, args.Default); err != nil {
 			return "", err

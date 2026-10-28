@@ -105,6 +105,22 @@ func TestStoreOverlay(t *testing.T) {
 	}
 }
 
+func TestSandboxModeValidation(t *testing.T) {
+	path := writeConf(t)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("\n[sandbox]\nmode = \"invented\"\n")
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(path); err == nil || !strings.Contains(err.Error(), "sandbox.mode") {
+		t.Fatal("invalid execution isolation silently became auto", err)
+	}
+}
+
 func TestMigrateGatewaySecrets(t *testing.T) {
 	home := t.TempDir()
 	if err := secret.Init(home); err != nil {

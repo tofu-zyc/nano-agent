@@ -170,6 +170,7 @@
       {/if}
     </div>
 
+    <div class="p-card"><div class="p-row"><span class="p-k">隔离请求</span><span class="p-grow">{sess.sandbox_mode || 'auto'}</span><button class="p-lnk" onclick={() => store.open({type:'agent',id:sess.agent})}>agent 设置</button></div><p class="p-note">工作目录可以覆盖，节点部署要求仍优先；每次调用结果记录实际状态。隔离与审批、文件工具权限分别生效。</p></div>
     <h5 class="p-h">工作目录 <span class="muted p-small">{sess.workspaces.length ? `挂了 ${sess.workspaces.length} 个${sess.kernel ? ` · 由内核 ${sess.kernel} 跑` : ''}` : '在哪些机器的哪些目录上干活'}</span></h5>
     <div class="mounts">
       {#each sess.workspaces as mt (mt.id)}
@@ -179,11 +180,11 @@
           <button class="mp" onclick={() => store.open({ type: 'workspace', id: mt.id })} title="{mt.host}:{mt.path}">
             <b>{mt.host}</b><code>{shortPath(homeShort(mt.path), 34)}</code>
           </button>
-          <span class="how {mt.how}">{howText[mt.how]}</span>
+          <span class="tag" title="执行隔离请求">{mt.sandbox_mode || sess.sandbox_mode || 'auto'}</span><span class="how {mt.how}">{howText[mt.how]}</span>
           <button class="x" title="取下" aria-label="取下 {mt.host}:{mt.path}" onclick={() => patch({ workspaces: sess.workspaces.filter((x) => x.id !== mt.id).map((x) => x.id) })}><Icon name="x" size={12} /></button>
         </div>
       {:else}
-        <div class="mount empty"><Icon name="chat" size={14} /><span>在 HOME 下工作：能读、能执行，只能写临时目录；写外面要提权</span></div>
+        <div class="mount empty"><Icon name="chat" size={14} /><span>在 HOME 下工作；文件工具写目录外要提权，Shell 访问范围由执行隔离决定</span></div>
       {/each}
       <button class="btn sm" onclick={() => (picking = true)}><Icon name="plus" size={13} />{sess.workspaces.length ? '挂载 / 取下…' : '挂载工作目录…'}</button>
     </div>

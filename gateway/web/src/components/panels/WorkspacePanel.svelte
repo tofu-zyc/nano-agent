@@ -22,6 +22,9 @@
       store.fail(err);
     }
   }
+  async function setSandbox(w: WorkspaceInfo, mode: string) {
+    try { await api.patch('/api/workspaces/' + w.id, {sandbox_mode:mode}); await store.refresh(); } catch(err) { store.fail(err); }
+  }
   async function remove(w: WorkspaceInfo) {
     if (!confirm(`从列表里删掉 ${w.host}:${w.path}？${w.sessions ? `挂着它的 ${w.sessions} 个会话会取下它。` : ''}机器上的文件不会动。`)) return;
     try {
@@ -44,6 +47,13 @@
           <span class="dot {ws.online ? 'online' : 'stopped'}"></span>
         </div>
         {#if !ws.online}<p class="p-note">这台机器现在用不了，挂着它的会话暂时不能在这里执行工具。</p>{/if}
+        <div class="p-row">
+          <label class="p-k" for="workspace-sandbox">执行隔离</label>
+          <select id="workspace-sandbox" value={ws.sandbox_mode || ''} onchange={e => setSandbox(ws,e.currentTarget.value)}>
+            <option value="">跟随 agent</option><option value="auto">auto · 使用可用隔离</option><option value="on">on · 必须完整隔离</option><option value="off">off · 关闭执行隔离</option>
+          </select>
+        </div>
+        <p class="p-note">工作目录覆盖 agent 和全局请求。节点部署要求仍优先。off 的 Shell 按系统用户权限执行；审批与文件工具路径权限分别生效。正在执行的调用保留启动设置。</p>
         <div class="p-actions tight">
           <button class="btn sm" onclick={() => setDefault(ws)}><span class="star" class:on={ws.default}>★</span>{ws.default ? '取消新会话默认' : '设为新会话的默认'}</button>
         </div>

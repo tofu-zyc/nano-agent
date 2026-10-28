@@ -602,6 +602,38 @@ def t_sandbox_off_via_kernel(gw):
     os.unlink(os.path.join(other, "kernel-off.txt"))
 
 
+@case("工作目录覆盖隔离策略、远端审批按目标部署要求、结果回报实际隔离", approvals=True)
+def t_workspace_sandbox(gw):
+    ws = local_ws()
+    ws["sandbox_mode"] = "off"
+    gw.send(t="input", sid="sb-ws", mode="auto", sandbox_mode="on", workspaces=[ws], **{"from":"tg:user"})
+    gw.expect("model",sid="sb-ws")
+    call(gw,"sb-ws",("s","Shell",{"command":"echo workspace-off","sandbox_mode":"on"}))
+    result=gw.expect("result",sid="sb-ws",id="s",ok=True)
+    assert result["sandbox"]["requested"]=="off" and result["sandbox"]["mode"]=="off" and result["sandbox"]["effective"]=="none",result
+    finish(gw,"sb-ws")
+    remote=box_ws(landlock=0)
+    remote["sandbox_mode"]="on"
+    gw.send(t="input",sid="sb-no-full",mode="auto",workspaces=[remote],**{"from":"tg:user"})
+    gw.expect("model",sid="sb-no-full")
+    call(gw,"sb-no-full",("s","Shell",{"command":"never"}))
+    result=gw.expect("result",sid="sb-no-full",id="s",ok=False)
+    assert "sandbox=on" in result["content"],result
+    finish(gw,"sb-no-full")
+    remote=box_ws(landlock=7)
+    remote["sandbox_mode"]="off";remote["sandbox_required"]="on"
+    gw.send(t="input",sid="sb-remote-policy",mode="auto",workspaces=[remote],**{"from":"tg:user"})
+    gw.expect("model",sid="sb-remote-policy")
+    call(gw,"sb-remote-policy",("s","Shell",{"command":"echo remote"}))
+    request=gw.expect("exec",sid="sb-remote-policy",id="s")
+    assert request["sandbox_mode"]=="off",request
+    state={"requested":"off","mode":"on","effective":"full"}
+    gw.send(t="exec_result",sid="sb-remote-policy",id="s",ok=True,content="remote",sandbox=state)
+    result=gw.expect("result",sid="sb-remote-policy",id="s",ok=True)
+    assert result["sandbox"]==state,result
+    finish(gw,"sb-remote-policy")
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -837,6 +869,38 @@ def sandbox_policy_tests(T):
         log.close()
 
 
+def sandbox_off_node_tests(T):
+    U=os.path.join(T,"sb-off-node")
+    os.makedirs(os.path.join(U,"work"));os.makedirs(os.path.join(U,"home"))
+    sock=os.path.join(U,"gw.sock");conf=os.path.join(U,"kernel.conf")
+    with open(conf,"w") as f:f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nsandbox = off\n")
+    gw=Gateway(sock)
+    log=open(os.path.join(U,"kernel.log"),"w")
+    proc=subprocess.Popen([KERNEL,"-c",conf],stderr=log,env=dict(os.environ,HOME=os.path.join(U,"home"),NANO_HOME=os.path.join(U,"home",".nano-agent")))
+    try:
+        gw.accept();gw.expect("hello");gw.send(t="welcome",v=11)
+        marker=os.path.join(U,"must-not-exist")
+        gw.send(t="run",id="conflict",req={"tool":"Shell","args":{"command":f"echo unsafe > {marker}"},"dirs":[os.path.join(U,"work")],"write":True,"sandbox":"on"})
+        result=gw.expect("run_result",id="conflict",ok=False)
+        assert "冲突" in result["content"] and not os.path.exists(marker),result
+        # Local tool dispatch must fail before approval too.
+        ws=local_ws((os.path.join(U,"work"),));ws["sandbox_mode"]="on"
+        gw.send(t="input",sid="conflict-tool",mode="auto",sandbox_mode="on",workspaces=[ws],**{"from":"admin"})
+        gw.expect("model",sid="conflict-tool")
+        call(gw,"conflict-tool",("c","Shell",{"command":f"echo unsafe > {marker}"}))
+        gw.expect("result",sid="conflict-tool",id="c",ok=False)
+        assert not os.path.exists(marker)
+        finish(gw,"conflict-tool")
+        print("  ok   节点 off 与请求 on 冲突：工具和代执行均明确失败，无副作用")
+    except Exception as e:
+        FAILS.append("node-off-request-on");print(f"  FAIL 节点 off 请求 on：{e}")
+    finally:
+        proc.terminate()
+        try:proc.wait(5)
+        except subprocess.TimeoutExpired:proc.kill()
+        log.close()
+
+
 def old_ssh_config():
     """kernel.conf 里的 remote = / ssh = 已经不用了，要给出明白的提示"""
     conf = os.path.join(T, "old.conf")
@@ -922,7 +986,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理
@@ -947,6 +1011,7 @@ def main():
             print("  ok   内核退出时清理正在执行的命令")
         slot_tests(T)
         sandbox_policy_tests(T)
+        sandbox_off_node_tests(T)
         update_tests(T)
         kernel_log = open(os.path.join(T, "kernel.log"), errors="replace").read()
         if "Sanitizer" in kernel_log:

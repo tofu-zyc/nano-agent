@@ -105,7 +105,7 @@ func (a *App) seeImage(s *sess, m *proto.Msg) bool {
 	}
 	p := match[1]
 	appendResult := func(content string, imgs []media.Attachment) {
-		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Images: imgs}); err != nil {
+		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Sandbox: m.Sandbox, Content: content, Images: imgs}); err != nil {
 			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 		}
 	}

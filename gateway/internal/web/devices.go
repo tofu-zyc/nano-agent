@@ -155,14 +155,15 @@ func (s *Server) getWorkspaces(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) addWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Host    string `json:"host"`
-		Path    string `json:"path"`
-		Default bool   `json:"default"`
+		Host        string `json:"host"`
+		Path        string `json:"path"`
+		Default     bool   `json:"default"`
+		SandboxMode string `json:"sandbox_mode"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	ws, err := s.app.AddWorkspace(r.Context(), req.Host, req.Path, req.Default)
+	ws, err := s.app.AddWorkspace(r.Context(), req.Host, req.Path, req.Default, req.SandboxMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -199,4 +200,18 @@ func downloadBase(mirror string) string {
 		return strings.TrimRight(mirror, "/")
 	}
 	return release.DefaultBase
+}
+
+func (s *Server) patchWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SandboxMode string `json:"sandbox_mode"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.SetWorkspaceSandbox(r.PathValue("id"), req.SandboxMode); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }

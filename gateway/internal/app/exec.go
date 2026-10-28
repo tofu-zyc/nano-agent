@@ -197,7 +197,9 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
-	sandbox := m.SandboxMode
+	// Host execution takes the frozen host policy, never a model argument or
+	// a coordinator-supplied override.
+	sandbox := mt.sandboxMode
 	if sandbox == "" {
 		sandbox = r.sandboxMode
 	}
@@ -207,7 +209,7 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	req, _ := json.Marshal(map[string]any{
 		"tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
 		"tmp_key": s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,
-		"sandbox": sandbox,   // 在别的机器上执行时，那台机器按这个模式准备执行器
+		"sandbox": sandbox, // 在别的机器上执行时，那台机器按这个模式准备执行器
 	})
 	timeout := time.Duration(m.TimeoutMs) * time.Millisecond
 	if timeout <= 0 || timeout > time.Hour {
@@ -228,7 +230,16 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		if res.Lost {
 			a.log.Warn("执行时连不上机器", "host", mt.ws.Host, "detail", res.Content)
 		}
-		reply(res.OK, res.Content)
+		state := res.Sandbox
+		if state == nil {
+			state = &proto.Sandbox{Requested: sandbox, Mode: sandbox, Effective: "unknown", Reason: "执行器未回报实际隔离状态"}
+		} else if state.Mode == "" {
+			state.Mode = sandbox
+		}
+		if state.Requested == "" {
+			state.Requested = sandbox
+		}
+		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID, OK: proto.Bool(res.OK), Content: res.Content, Sandbox: state})
 	}()
 }
 

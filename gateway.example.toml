@@ -96,7 +96,9 @@ mode = "ask"
 #   auto（默认）：用执行机器上可用的隔离；没有完整隔离时保留旧行为（Shell 要审批）
 #   on          ：要求完整隔离，机器给不了就明确失败
 #   off         ：明确关闭执行隔离，按执行机器的系统用户身份执行
-# 执行节点自己的 kernel.conf 里 sandbox 更严时以节点为准。
+# 可在 agent 设置的 sandbox_mode、工作目录的 sandbox_mode 覆盖；空或 null 跟随上一层。
+# 执行节点 kernel.conf 的 on 必须施加；节点 off 与请求 on 冲突时失败。
+# /sandbox 查看各层请求、目标能力；每次调用的结果记录实际隔离，探测不等于执行状态。
 mode = "auto"
 
 [network]

@@ -59,7 +59,7 @@ func (k kernelHost) Exec(ctx context.Context, req []byte) host.Result {
 	if r.T == "" {
 		return host.Result{Content: k.node + " 的内核断开了", Lost: true}
 	}
-	return host.Result{OK: r.OK != nil && *r.OK, Content: r.Content}
+	return host.Result{OK: r.OK != nil && *r.OK, Content: r.Content, Sandbox: r.Sandbox}
 }
 
 func (k kernelHost) Ls(ctx context.Context, path string) (*host.Listing, error) {

@@ -14,7 +14,7 @@ export type ChannelStatus = { state: string; identity?: string; error?: string; 
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
 // 一个在线的内核（agent）。local 表示它和网关在同一台机器上，managed 表示是网关自己启动的
-export type KernelInfo = { node: string; os?: string; arch?: string; version?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
+export type KernelInfo = { sandbox_mode?: string; sandbox_effective?: string; features?: Record<string,number>; node: string; os?: string; arch?: string; version?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
 
 // 技能放在网关上
 export type SkillInfo = { name: string; description: string; dir: string };
@@ -35,7 +35,7 @@ export type MachineInfo = {
 };
 
 // 工作目录：机器 + 路径。会话可以同时挂好几个；default 表示新会话默认挂上
-export type WorkspaceInfo = { id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
+export type WorkspaceInfo = { sandbox_mode?: string; id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
 
 // 模型接口（端点）：模型服务的地址和密钥，一个接口上可以放多个模型
 export type ModelEndpoint = {
@@ -70,7 +70,7 @@ export type RemoteModel = { id: string; owned_by?: string; context_window?: numb
 
 // 会话挂载的一个工作目录。how：local（跑这一轮的内核在同一台机器上，自己执行）、
 // gateway（交给网关在那台机器上执行）、down（那台机器现在用不了）
-export type MountInfo = { id: string; host: string; path: string; how: 'local' | 'gateway' | 'down' };
+export type MountInfo = { sandbox_mode?: string; sandbox_required?: string; id: string; host: string; path: string; how: 'local' | 'gateway' | 'down' };
 
 // 聊天窗口：终端、和机器人的某个私聊。每个窗口接在一个会话上
 // who 是在这个窗口说话的人，admin 表示他是管理员
@@ -95,6 +95,7 @@ export type SessionInfo = {
   pending: number;
   last_at: number;
   messages: number;
+  sandbox_mode?: string;
   mode: string;
   thinking: string;
   thinking_levels: string[] | null; // 这个模型的思考强度可选值
@@ -230,7 +231,9 @@ export type FieldState = {
 
 export type ToolCall = { id: string; type: string; function: { name: string; arguments: string } };
 
+export type ExecutionIsolation = { requested?: string; mode?: string; effective?: string; reason?: string };
 export type Msg = {
+  sandbox?: ExecutionIsolation;
 	 kind?: string;
 	 parent_run_id?: string;
 	 agenda_id?: string;
@@ -248,6 +251,7 @@ export type Msg = {
 };
 
 export type Ev = {
+  sandbox?: ExecutionIsolation;
   t: string;
   at: number;
   sid?: string;
@@ -265,7 +269,7 @@ export type LiveItem =
   | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; images?: Attachment[]; at: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'content'; text: string }
-  | { kind: 'tool'; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string; media?: Attachment[] }
+  | { kind: 'tool'; sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string; media?: Attachment[] }
   | { kind: 'say'; text: string; at: number };
 
 // 一个 agent 可以覆盖的全局设置：全局值（global）、自己的值（value，null 表示跟随全局）、实际生效的值

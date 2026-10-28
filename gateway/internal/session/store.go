@@ -23,6 +23,7 @@ import (
 
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
+	"nano-agent/gateway/internal/proto"
 )
 
 // Msg 是历史里的一条消息。Reasoning 和 Usage 只保存备查，默认不回传给模型。
@@ -51,9 +52,10 @@ type Msg struct {
 	// ID 是这条消息的稳定标识（插话批量注入时用它和历史对账，位置/Base 只作辅助）。
 	ID string `json:"id,omitempty"`
 	// SourceIDs 是这条消息由哪些插话合并而来（按接收顺序）。
-	SourceIDs []string `json:"source_ids,omitempty"`
-	AgendaID  string   `json:"agenda_id,omitempty"`
-	Reason    string   `json:"reason,omitempty"`
+	SourceIDs []string       `json:"source_ids,omitempty"`
+	Sandbox   *proto.Sandbox `json:"sandbox,omitempty"`
+	AgendaID  string         `json:"agenda_id,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
 }
 
 type Store struct {

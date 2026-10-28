@@ -297,6 +297,9 @@ func (s *Store) SnapshotMessages(id string) []Msg {
 		for _, at := range m.Sent {
 			cost += int64(unsafe.Sizeof(at)) + int64(len(at.ID)+len(at.Name)+len(at.MIME)+len(at.Source))
 		}
+		if m.Sandbox != nil {
+			cost += int64(unsafe.Sizeof(*m.Sandbox)) + int64(len(m.Sandbox.Requested)+len(m.Sandbox.Mode)+len(m.Sandbox.Effective)+len(m.Sandbox.Reason))
+		}
 		if m.Usage != nil {
 			cost += int64(unsafe.Sizeof(*m.Usage))
 		}

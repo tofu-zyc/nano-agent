@@ -27,11 +27,12 @@ import (
 // 标了默认的工作目录，新会话第一次说话时都挂上。工作目录在哪台机器上，决定工具怎么执行（nodes.go 的 route）。
 
 type Workspace struct {
-	ID      string `json:"id"`
-	Host    string `json:"host"` // 机器
-	Path    string `json:"path"` // 那台机器上的路径，规范形式由那台机器给
-	OS      string `json:"os,omitempty"`
-	Default bool   `json:"default,omitempty"`
+	SandboxMode string `json:"sandbox_mode,omitempty"` // 空跟随 agent，全局 -> agent -> workspace
+	ID          string `json:"id"`
+	Host        string `json:"host"` // 机器
+	Path        string `json:"path"` // 那台机器上的路径，规范形式由那台机器给
+	OS          string `json:"os,omitempty"`
+	Default     bool   `json:"default,omitempty"`
 }
 
 func (w Workspace) Label() string { return w.Host + ":" + w.Path }
@@ -231,7 +232,7 @@ func (a *App) checkWorkspace(hostName, path string) error {
 		return fmt.Errorf("没有叫 %s 的机器（本机、在拓扑图「接入机器」里添加的 SSH 服务器、或者连上来的内核）", hostName)
 	}
 	if hostName == host.LocalName {
-		if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") {
+		if !strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "~") && !isWindowsAbs(path) {
 			return errors.New("路径要写成绝对路径或 ~ 开头，比如 ~/projects/foo")
 		}
 		if msg := a.checkDir(path); msg != "" {
@@ -273,10 +274,25 @@ func (a *App) publishWorkspaces() {
 }
 
 // AddWorkspace 添加一个工作目录（已经有了就返回原来的）。机器能用时先确认目录存在。
-func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefault bool) (Workspace, error) {
+func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefault bool, sandboxOverride ...string) (Workspace, error) {
 	a.mu.Lock()
 	hostName, path = a.parseWorkspace(path, hostName) // 要查已知机器，持锁
+	mode := a.cfg.Sandbox.ModeOrDefault()
+	override := ""
+	if len(sandboxOverride) > 0 {
+		override = sandboxOverride[0]
+		if override != "" {
+			mode = override
+		}
+	}
+	if mode != "auto" && mode != "on" && mode != "off" {
+		a.mu.Unlock()
+		return Workspace{}, errors.New("执行隔离只能是 auto、on、off")
+	}
 	err := a.checkWorkspace(hostName, path)
+	if mode == "off" && hostName == host.LocalName && (strings.HasPrefix(path, "/") || strings.HasPrefix(path, "~") || isWindowsAbs(path)) {
+		err = nil
+	}
 	usable := a.hostUsable(hostName)
 	a.mu.Unlock()
 	if err != nil {
@@ -288,10 +304,10 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 		if err != nil {
 			return Workspace{}, fmt.Errorf("%s 上的 %s 用不了：%w", hostName, path, err)
 		}
-		if l.Blocked {
-			return Workspace{}, fmt.Errorf("%s 包含 nano-agent 自己，不能当工作目录", path)
-		}
 		// 规范形式由那台机器给：~、相对路径、符号链接、Windows 的盘符大小写都在 ListDir 里定好
+		if l.Blocked && mode != "off" {
+			return Workspace{}, fmt.Errorf("%s 包含 nano-agent 自己，隔离模式为 %s 时不能用作工作目录", path, mode)
+		}
 		if l.Path != "" {
 			path = l.Path
 		}
@@ -305,6 +321,9 @@ func (a *App) AddWorkspace(ctx context.Context, hostName, path string, makeDefau
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	w := a.addWorkspaceLocked(hostName, path, osName)
+	if override != "" {
+		w.SandboxMode = override
+	}
 	if makeDefault {
 		w.Default = true
 	}
@@ -560,11 +579,12 @@ func (a *App) cmdDir(c in, arg string) {
 			return
 		}
 		hostName, path := a.parseWorkspace(rest, host.LocalName)
+		sandbox := a.sandboxModeFor(c.s.sid)
 		// 确认目录存在要等机器回复，不能拿着锁等
 		go func() {
 			ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 			defer cancel()
-			w, err := a.AddWorkspace(ctx, hostName, path, false)
+			w, err := a.AddWorkspace(ctx, hostName, path, false, sandbox)
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			if err != nil {
