@@ -267,7 +267,7 @@ func (a *App) memoryNotes(sid, who, text string, st *session.Settings, dirty *bo
 			st.MemNote, *dirty = h, true
 		}
 	}
-	if note := a.lifeRecentNote(sid); note != "" {
+	if note := a.experienceNote(sid, who); note != "" {
 		if h := fmt.Sprintf("%x", sha256.Sum256([]byte(note))); h != st.LifeNote {
 			parts = append(parts, note)
 			st.LifeNote, *dirty = h, true

@@ -158,6 +158,7 @@ func (a *App) undoTurn(s *sess) (text, note string, pending bool, err error) {
 	}
 	a.saveEndpoints()
 	text = userText(removed[0])
+	a.lifecycleExperience(s.sid, "撤回了最近一轮聊天；原来已发生的操作不会自动撤销")
 	a.log.Info("撤回了一轮", "sid", s.sid, "messages", len(removed))
 	a.publish(events.Event{T: "undo", SID: s.sid, Text: text})
 	a.publishSession(s.sid)

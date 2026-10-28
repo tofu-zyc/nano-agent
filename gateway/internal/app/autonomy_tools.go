@@ -31,7 +31,7 @@ const agendaSchema = `{"type":"object","properties":{
 },"required":["action"]}`
 
 func agendaTool() proto.ToolSpec {
-	return proto.ToolSpec{Name: "Agenda", Description: "你自己的日程：查看、安排、挪动、取消，或者报告一件事真的做完了。" +
+	return proto.ToolSpec{Name: "Agenda", Description: "你自己的日程：查看、安排、挪动、取消，或者报告一件事真的做完了。这是把事情交给以后的自己的显式入口；聊过的话不会自动变成待办。" +
 		"和人有明确约定（几点提醒、答应做什么）、或决定以后推进什么，就用它排进日程；到点时你会自己醒来处理（明确的约定不受作息和“最近没人找”限制）。" +
 		"done 必须写真实结果，不能只说做完了。", InputSchema: json.RawMessage(agendaSchema)}
 }
@@ -72,6 +72,10 @@ func mindTool() proto.ToolSpec {
 // lifeMind 是这个会话所属的拟人型 agent 的心智状态。调用方持有锁。
 func (a *App) lifeMind(sid string) (*autonomy.State, agents.Agent, error) {
 	ag := a.agentOf(sid)
+	a.loadMinds()
+	if a.mindsErr != nil {
+		return nil, ag, a.mindsErr
+	}
 	if !ag.Life() {
 		return nil, ag, errors.New("只有拟人型 agent 有自己的日程和想法")
 	}
@@ -160,7 +164,6 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 		if kind == autonomy.KindCommitment {
 			st.AddEvent(autonomy.Event{Kind: autonomy.EventCommitment, Source: "agenda:" + item.ID, SID: sid, AgendaID: item.ID,
 				Dedupe: "agenda:" + item.ID, Text: item.Title}, now, 0)
-			st.SetBelief("和对方的约定", item.Title, "agenda:"+item.ID, 0.9, now)
 		}
 		a.afterMindChange(st, ag, now)
 		return "排好了：" + at.In(a.loc).Format("01-02 15:04") + " " + item.Title + "（" + item.ID + "）", nil

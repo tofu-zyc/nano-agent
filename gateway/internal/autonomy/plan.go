@@ -137,14 +137,14 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 		b.WriteString("（自主活动现在是暂停的，这一轮是主人叫醒的。）\n")
 	}
 	if len(s.Beliefs) > 0 {
-		b.WriteString("最近形成的认识：\n")
+		b.WriteString("【最近的认识和反思】\n")
 		for _, belief := range s.Beliefs[max(0, len(s.Beliefs)-5):] {
 			fmt.Fprintf(&b, "- %s：%s（来源：%s）\n", belief.Subject, clip(belief.Value, 200), belief.Source)
 		}
 	}
 	open := s.OpenAgenda()
 	if len(open) > 0 {
-		b.WriteString("你的安排：\n")
+		b.WriteString("【你的安排】：\n")
 		for i, a := range open {
 			if i >= 10 {
 				break
@@ -166,10 +166,10 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 			b.WriteString("）\n")
 		}
 	} else {
-		b.WriteString("你的安排：现在没有排着的事。\n")
+		b.WriteString("【你的安排】：现在没有排着的事。\n")
 	}
 	if intents := s.ActiveIntentions(); len(intents) > 0 {
-		b.WriteString("在推进的目标：\n")
+		b.WriteString("【在推进的目标】：\n")
 		for i, in := range intents {
 			if i >= 6 {
 				break
@@ -185,7 +185,7 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 		}
 	}
 	if ideas := s.OpenIdeas(now); len(ideas) > 0 {
-		b.WriteString("想到的事（还没决定做）：\n")
+		b.WriteString("【想到的事】（还没决定做）：\n")
 		for i, x := range ideas {
 			if i >= 5 {
 				break
@@ -196,6 +196,9 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 	if events := s.UnprocessedEvents(6); len(events) > 0 {
 		b.WriteString("最近发生：\n")
 		for _, e := range events {
+			if e.Kind == EventConversation || strings.HasPrefix(e.Source, "followup:") {
+				continue
+			}
 			what := EventLabel(e.Kind)
 			line := "- " + time.Unix(e.At, 0).In(loc).Format("01-02 15:04") + " " + what
 			if e.Text != "" {
@@ -222,9 +225,7 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 			fmt.Fprintf(&b, "下次的调整：%s\n", clip(r.Change, 300))
 		}
 	}
-	b.WriteString("\n这一轮只推进一件事：能现在做的就用工具真的去做（上网、查记忆、看文件、做东西都行）；" +
-		"需要以后做的用 Agenda 排时间；有新的想法用 Idea 记下来（写清来源）。做完了要说清楚真实的結果。" +
-		"什么都不用做就只回 [不做]。\n")
+	b.WriteString("\n只处理本次【要处理的】；其他记录不是任务。需要以后做的用 Agenda 显式交接。什么都不用做就只回 [不做]。\n")
 	return b.String()
 }
 

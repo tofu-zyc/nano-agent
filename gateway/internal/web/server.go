@@ -281,6 +281,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/dream", s.auth(s.startDream))
 	mux.HandleFunc("POST /api/agents/{id}/wake", s.auth(s.wakeAgent))
 	mux.HandleFunc("GET /api/agents/{id}/autonomy", s.auth(s.getAutonomy))
+	mux.HandleFunc("GET /api/agents/{id}/experience", s.auth(s.getAgentExperience))
 	mux.HandleFunc("POST /api/agents/{id}/autonomy", s.auth(s.autonomyAction))
 	mux.HandleFunc("GET /api/agents/{id}/dreams", s.auth(s.getDreams))
 	mux.HandleFunc("GET /api/rooms", s.auth(s.listRooms))

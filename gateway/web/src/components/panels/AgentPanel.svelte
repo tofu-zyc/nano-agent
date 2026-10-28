@@ -199,6 +199,7 @@
     {#if a.life}
       {@const L = a.life}
       <div class="p-card lifecard">
+		{#if L.error}<p class="p-note warn">{L.error}</p>{/if}
         <div class="p-row">
           <span class="p-grow">
             {#if a.doing}{a.doing.icon} {a.doing.text}{:else if L.state === 'sleeping'}💤 睡着了，{when(L.wake_at)} 醒{:else}🌱 醒着{/if}
@@ -210,15 +211,23 @@
         <div class="p-note p-small">
           今天探索 {L.wakes} 次{L.wakes_unlimited ? ' / 不限' : ` / ${L.max_wakes} 次`} · 主动联系 {L.reaches} 次{L.reaches_unlimited ? ' / 不限' : ` / ${L.max_reaches} 次`} · 用了 {L.tokens.toLocaleString()} token{#if auto?.budget?.limit}（预算上限 {auto.budget.limit.toLocaleString()}）{/if}{#if auto?.next_check} · 下次自己看 {when(auto.next_check)}{/if}{#if auto} · 今天日程 {auto.today_done}/{auto.today_planned} 件{/if}{#if L.waiting?.length} · 在等 {L.waiting.join('、')} 回话{/if}
         </div>
-        {#if L.recent.length}
-          <ul class="recent">
-            {#each L.recent.slice().reverse() as n (n.at)}
-              <li><span class="muted">{when(n.at * 1000)}</span> {n.text}</li>
-            {/each}
-          </ul>
-        {:else}
-          <p class="p-note p-small">还没有近况：它第一次醒来以后，这里会写它做了什么、心情怎样。</p>
-        {/if}
+        <details class="experience" open>
+          <summary>最近的经历（带来源和结局）</summary>
+          {#if L.experience?.length}
+            <ul class="recent">
+              {#each L.experience as n (n.id)}
+                <li><span class="muted">{when(n.at * 1000)} · {n.where ?? n.kind} · {n.visible}</span>
+                  <details><summary>{n.said || n.reason || n.kind} · {n.status === 'ok' ? '已结束' : n.status}</summary>
+                    {#if n.asked}<p>当时的请求：{n.asked}</p>{/if}
+                    {#if n.did?.length}<p>实际操作：{n.did.join('；')}</p>{/if}
+                    {#if n.episode}<p>片段：{n.episode}</p>{/if}
+                    {#if n.agenda_id}<p>日程：{n.agenda_id}</p>{/if}
+                  </details>
+                </li>
+              {/each}
+            </ul>
+          {:else}<p class="p-note p-small">还没有经历；聊天和活动结束后会在这里记录实际结果。</p>{/if}
+        </details>
         <div class="p-actions tight">
           <button class="btn sm primary" disabled={busy || L.state === 'thinking'} onclick={() => post('/wake', '叫醒了，它在想事情')}><Icon name="sparkles" size={13} />现在叫醒它</button>
           {#if auto?.paused}

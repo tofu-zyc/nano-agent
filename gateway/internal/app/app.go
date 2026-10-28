@@ -21,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
@@ -97,6 +98,8 @@ var helpText = func() string {
 }()
 
 type App struct {
+	experiences       map[string]*experience.Store
+	mindsErr          error
 	schedules         *schedule.Store
 	schedulesErr      error
 	schedulerStarted  bool
@@ -178,7 +181,7 @@ type App struct {
 	deskMu         sync.Mutex                 // 上面两张表单独的锁：结束 Driver session 时可能正拿着总锁
 	mcpRef         atomic.Pointer[mcp.Manager]
 	mcpStoreRef    atomic.Pointer[mcp.Store]
-	rnd            func() float64 // 随机数，测试里换成固定的
+	rnd            func() float64                  // 随机数，测试里换成固定的
 	journals       map[string]*interjectionJournal // 插话日志句柄（interject_journal.go）
 	pendingForks   map[string][]forkPending        // 等安全边界的 Fork 操作（session_fork.go）
 	approvals      map[int]*approval
@@ -197,9 +200,9 @@ type sess struct {
 	deleteArchivesAfter bool
 	queue               []queued
 	run                 *run
-	resetAfter          bool     // run 结束后清空上下文（/reset 时正好有任务在跑）
-	undoAfter           bool     // run 结束后撤回这一轮（/undo 时正好有任务在跑）
-	recent              []msgPos // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
+	resetAfter          bool           // run 结束后清空上下文（/reset 时正好有任务在跑）
+	undoAfter           bool           // run 结束后撤回这一轮（/undo 时正好有任务在跑）
+	recent              []msgPos       // 最近处理过的平台消息在历史里的位置，平台上撤回消息时用
 	interjectSeq        int64          // 插话接收序号（单调递增，落进日志）
 	restored            bool           // 已经从日志恢复过插话
 	pending             []interjection // 从日志恢复的补充：等这一轮开始时装进收件箱
@@ -248,16 +251,21 @@ type out struct {
 }
 
 type run struct {
-	scheduled  *schedule.Task
-	id         uint64
-	node       string // 跑这一轮的内核
-	from       string // 触发者身份，内核据此判断权限
-	outs       []out  // 第一个是说话的窗口，后面是同步显示的窗口和中途来停止、清空的窗口
-	final      string
-	truncated  bool
-	cancelLLM  context.CancelFunc // 非空表示有模型请求在路上
-	stopTyping func()
-	full       bool // 放行模式：内核要审批的调用由网关自动批准
+	experienceActions    []string
+	experienceActionTurn int
+	experienceActionKeys map[string]bool
+	experiencePrivate    bool
+	asked                string // 原始输入；经历索引不读取附加的系统/记忆说明
+	scheduled            *schedule.Task
+	id                   uint64
+	node                 string // 跑这一轮的内核
+	from                 string // 触发者身份，内核据此判断权限
+	outs                 []out  // 第一个是说话的窗口，后面是同步显示的窗口和中途来停止、清空的窗口
+	final                string
+	truncated            bool
+	cancelLLM            context.CancelFunc // 非空表示有模型请求在路上
+	stopTyping           func()
+	full                 bool // 放行模式：内核要审批的调用由网关自动批准
 
 	streamed        bool // 回复正文已经通过 RunView 显示过了
 	start           time.Time
@@ -290,24 +298,24 @@ type run struct {
 	execs map[string]context.CancelFunc // 网关正在执行的工具调用、正在放的技能文件
 
 	// 完整调用身份（协议 v11）：run_id 由网关生成，turn_id 是内核告诉我们的这一次模型轮次
-	runID      string
-	turnID     int
-	modelReq   int
+	runID       string
+	turnID      int
+	modelReq    int
 	sandboxMode string // 这一轮请求的沙箱模式（auto / on / off），远程执行时要转给那台机器
 	// 用户插话（interject.go / interject_journal.go）：本 run 进行中收到的补充，在安全边界插入
 	inbox        []interjection
 	inboxBytes   int
 	interjectSeq int
-	notified     bool             // 这一批补充已经回执过“已收到”
-	injected     int              // 已经插入历史的条数
-	readRevision int              // 最近一次模型请求实际读到的条数（injected 的快照）
+	notified     bool // 这一批补充已经回执过“已收到”
+	injected     int  // 已经插入历史的条数
+	readRevision int  // 最近一次模型请求实际读到的条数（injected 的快照）
 	// 持久日志用：还没进过模型请求快照的、这一轮处理过的插话 ID
 	pendingInclude []string
 	journalIDs     []string
-	outcome        string // 这一轮的终态（结束前由 finish 填）
-	dropped      int              // 因为插话而没有派发的工具调用数
-	seenIDs      map[string]bool  // 最近受理过的平台消息 ID（去重）
-	dropInbox    bool             // 用户明确停止/清空：剩下的补充不再交给下一轮
+	outcome        string          // 这一轮的终态（结束前由 finish 填）
+	dropped        int             // 因为插话而没有派发的工具调用数
+	seenIDs        map[string]bool // 最近受理过的平台消息 ID（去重）
+	dropInbox      bool            // 用户明确停止/清空：剩下的补充不再交给下一轮
 }
 
 // views 是这一轮所有能流式显示的窗口
@@ -720,6 +728,13 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	// 心跳状态：拟人型的每次聊天都记一条事件（同一个会话合并），不每条都唤醒模型
 	a.mindHeard(c.s.sid, who, m.SenderName, heard)
 	s := c.s
+	if isLifeSID(s.sid) && a.agentOf(s.sid).Life() && s.run == nil && !s.compacting {
+		ag := a.agentOf(s.sid)
+		if err := a.startMindLocked(ag, a.mind(ag.ID), autonomy.Trigger{Kind: autonomy.EventManualWake, Reason: "主人留言：" + m.Text, Due: a.now().Unix()}, true); err != nil {
+			a.answer(c, "留言未能开始："+err.Error())
+		}
+		return
+	}
 	s.lastActivity = a.now()
 	s.idleCompacted = false
 	if s.compacting {
@@ -732,7 +747,7 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
 	// 当前这一轮还在跑：发起人在这个会话里继续发来的普通消息是插话，进本轮的有序收件箱，
 	// 等这一批工具调用或这次生成结束再插入——不取消正在跑的命令，也不打断正在生成的回复。
-	if s.run != nil && s.run.canInterject(who) {
+	if s.run != nil && (s.run.canInterject(who) || (isLifeSID(s.sid) && a.isAdmin(who))) {
 		if a.acceptInterjection(s, s.run, ep, m, who) {
 			return
 		}
@@ -856,6 +871,21 @@ func (a *App) startRun(s *sess) {
 		return
 	}
 	head := s.queue[0]
+	// 排队期间（例如压缩时）收到的内心留言也必须开启独立片段，
+	// 不能从 startRun 的普通聊天入口接回旧上下文。
+	if isLifeSID(s.sid) && !head.inner && a.agentOf(s.sid).Life() {
+		var notes []string
+		for _, q := range s.queue {
+			notes = append(notes, q.m.Text)
+		}
+		s.queue = nil
+		ag := a.agentOf(s.sid)
+		if err := a.startMindLocked(ag, a.mind(ag.ID), autonomy.Trigger{Kind: autonomy.EventManualWake, Reason: "留言：" + strings.Join(notes, "\n"), Due: a.now().Unix()}, true); err != nil {
+			a.log.Warn("内心留言未能开始", "err", err)
+			a.deliver(head.ep, "留言未能开始："+err.Error(), "")
+		}
+		return
+	}
 	// 没有配置模型：不进 run，直接告诉用户去加接口和模型
 	if a.models != nil && len(a.models.Models()) == 0 {
 		const text = "还没有配置模型。请先在网页的模型节点里添加接口和模型。"
@@ -973,7 +1003,15 @@ func (a *App) startRun(s *sess) {
 	}
 	a.remember(s, batch, a.histEnd(s.sid))
 	if !head.trigger {
-		if err := a.store.Append(s.sid, session.Msg{Role: "user", Content: content, Images: images}); err != nil {
+		msg := session.Msg{Role: "user", Content: content, Images: images}
+		if isLifeSID(s.sid) && head.inner {
+			msg.Kind = "life_episode"
+			if s.mind != nil {
+				msg.Reason = s.mind.Trigger.Reason
+				msg.AgendaID = s.mind.Trigger.AgendaID
+			}
+		}
+		if err := a.store.Append(s.sid, msg); err != nil {
 			a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
 		}
 	}
@@ -982,8 +1020,8 @@ func (a *App) startRun(s *sess) {
 	a.runSeq++
 	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
-		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(3)),
-		rt:    rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
+		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(8)), asked: text,
+		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
 	s.run = r
 	s.groupPending = 0
 	// 上次进程退出时没处理完的补充：装进这一轮的收件箱，到了安全边界再插入
@@ -1294,7 +1332,6 @@ func (a *App) execStarted(node string, m *proto.Msg) {
 	a.hub.Send(node, proto.Msg{T: proto.TExecStarted, SID: m.SID, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID})
 }
 
-
 // ---- 内核事件（kernel.Handler） ----
 
 func (a *App) KernelMsg(node string, m *proto.Msg) {
@@ -1333,7 +1370,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		return
 	}
-s := a.sessions[m.SID]
+	s := a.sessions[m.SID]
 	if s == nil || s.run == nil || s.run.node != node {
 		if m.T == proto.TModel { // 内核以为还有 run，告诉它结束
 			a.hub.Send(node, proto.Msg{T: proto.TTurn, SID: m.SID, Reason: proto.ReasonError, Detail: "网关没有这个会话在这个内核上的进行中任务"})
@@ -1502,6 +1539,7 @@ func (a *App) finish(s *sess, status, detail string) {
 		r.scheduled = nil
 		body, note = "", ""
 	}
+	a.recordRunExperience(s, r, status, strings.TrimSpace(body+"\n"+note))
 	if r.inner {
 		a.commitAgendaResults(s, r, status)
 		a.innerDone(s, r, status, strings.TrimSpace(body+"\n"+note))

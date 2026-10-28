@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/session"
 )
@@ -778,11 +780,14 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 	if !ok {
 		return "", errors.New("没有这个 agent")
 	}
-	if a.execAgentID(target) != agentID || !a.hasSession(target) {
+	if a.execAgentID(target) != agentID || (!a.hasSession(target) && target != lifeSID(agentID)) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
 	}
 	// 给拟人型自己的内心留一句话：不是对外发消息，放进 life 的历史里；它没在忙就顺手叫醒它。
 	if isLifeSID(target) {
+		if !ag.Life() || a.agentRoot == "" {
+			return "", errors.New("只有拟人型 agent 能接收内心留言")
+		}
 		if isLifeSID(fromSID) {
 			return "", errors.New("不能给自己的内心留言")
 		}
@@ -795,17 +800,23 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 			}
 		}
 		line := fmt.Sprintf("[%s 留了一句] %s", sender, text)
-		if err := a.store.Append(target, session.Msg{Role: "user", Content: line}); err != nil {
-			return "", fmt.Errorf("保存留言失败：%w", err)
-		}
-		a.publishSession(target)
-		if s := a.sessions[target]; s == nil || (s.run == nil && len(s.queue) == 0 && !s.compacting) {
-			if err := a.startLife(agentID, true); err != nil {
-				a.log.Info("内心留言已保存，但它现在没法开始", "agent", agentID, "err", err)
+		targetSession := a.sessOf(target)
+		if targetSession.run != nil {
+			who := ""
+			if source := a.sessions[fromSID]; source != nil && source.run != nil {
+				who = source.run.from
+			}
+			if !a.acceptInterjection(targetSession, targetSession.run, endpoint{ch: "life", chat: agentID}, channel.Message{Text: line}, who) {
+				return "", errors.New("留言未能受理")
+			}
+		} else {
+			ag, _ := a.agentByID(agentID)
+			if err := a.startMindLocked(ag, a.mind(agentID), autonomy.Trigger{Kind: autonomy.EventManualWake, Reason: line, Due: a.now().Unix()}, true); err != nil {
+				return "", err
 			}
 		}
-		a.log.Info("给内心留言", "agent", agentID, "from", fromSID)
-		return "留言放进它的内心了，它会把这句话当成一轮任务；正在想事情的话，下次醒来会看到。", nil
+		a.publishSession(target)
+		return "留言已作为当前片段的插话或新片段任务受理。", nil
 	}
 	if !a.isPrivateChat(target) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
@@ -834,8 +845,33 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 	if s := a.sessions[target]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return "", errors.New("那边正在聊着，等会儿再说")
 	}
-	if err := a.store.Append(target, session.Msg{Role: "assistant", Content: text, Agent: agentID}); err != nil {
+	msg := session.Msg{Role: "assistant", Content: text, Agent: agentID}
+	partner := ""
+	for _, ep := range a.eps {
+		if ep.Session == target && ep.Who != "" {
+			partner = ep.Who
+			break
+		}
+	}
+	reach := experience.Entry{Kind: "reach", SID: target, Where: target, Visible: a.experienceVisibility(target, partner), Said: text, Status: "ok"}
+	if fromLife {
+		msg.Kind = "proactive"
+		if s := a.sessions[fromSID]; s != nil && s.run != nil {
+			msg.ParentRun = s.run.runID
+			reach.Episode = s.run.runID
+			if s.mind != nil {
+				msg.AgendaID = s.mind.Trigger.AgendaID
+				msg.Reason = s.mind.Trigger.Reason
+				reach.AgendaID = msg.AgendaID
+				reach.Reason = msg.Reason
+			}
+		}
+	}
+	if err := a.store.Append(target, msg); err != nil {
 		return "", fmt.Errorf("保存消息失败：%w", err)
+	}
+	if fromLife {
+		a.appendExperience(agentID, reach)
 	}
 	a.publish(events.Event{T: "say", SID: target, Text: text})
 	if fromLife {

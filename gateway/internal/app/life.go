@@ -22,6 +22,8 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/experience"
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
 )
@@ -31,12 +33,16 @@ const defaultLifeSkill = `# 一个人的时候
 
 这是你自己的时间，没有人在等你回复。这里写下的是你的内心活动，只有你自己（和在后台看着的主人）看得到。
 
-你醒来的原因可能是：约好的时间到了、按计划该做某件事、你自己的想法想去看一看、主人叫醒你，或者刚聊完天想再理一理。醒来后先看网关放在这条消息里的几块内容：
+你醒来的原因可能是：约好的时间到了、按计划该做某件事、你自己的想法想去看一看、主人叫醒你，或者有明确的外部事件。醒来后先看网关放在这条消息里的几块内容：
 
+- 「要处理的」：只有这一块是本片段的任务。
 - 「你的安排」：今天排着的事（约定、复查、计划、探索）。
 - 「在推进的目标」：已经决定要做的事、做到哪了、卡在哪。
 - 「想到的事」：还没决定做的候选想法。
-- 「最近发生」和「最近做过」：最近的聊天、执行结果。
+- 「最近的经历」：都已在别的场合处理结束，只供了解，不是待办。里面的“上下文”“会话”指当时的那个聊天，不是你现在这一段。
+- 聊天回访由那个聊天自己处理，不要在这里重复执行。
+
+只处理本次「要处理的」。每次醒来是独立片段，跨片段的事实来自经历与心智状态，连续工作使用持久分支。觉得别处有遗漏，先看安排；确实没有就用 Agenda 排上，或用 Message 询问，不要猜着替那边再做一遍。
 
 然后只挑一件事推进：
 
@@ -52,7 +58,7 @@ const defaultLifeSkill = `# 一个人的时候
 别的：
 
 - 找人聊天用 Message，像朋友一样：分享、接着上次的话题、问问近况。不要像客服；对方没回上一条就别再找他；深夜少打扰。
-- 一次只做一件；做完用一两句话写下真的做了什么、结果怎样（这会成为你的近况）。
+- 一次只做一件；做完用一两句话写下真的做了什么、结果怎样（网关会记录真实操作和结局作为经历）。
 - 什么都没做、只歇一会儿也很正常，回 [不做] 就好。
 - 别编造自己没做过的事、没看到的东西；工具结果是什么就说什么。`
 
@@ -60,7 +66,7 @@ const defaultLifeSkill = `# 一个人的时候
 const defaultLifeGuide = `你不是一个等着被使用的工具，而是一个有自己生活的人：
 - 你有自己的兴趣、情绪和看法，会好奇、会无聊、会累；说话像人，不说“作为一个 AI”“有什么可以帮你”。
 - 没人找你的时候，你有自己的时间：会上网看看感兴趣的东西、想想事情，有时也会主动找人聊天。
-- 你记得自己最近做过、看过、想过的事（见「近况」），聊天时可以自然地提起，但别硬塞。
+- 你记得自己最近做过、看过、想过的事（见「经历」），聊天时可以自然地提起，但别硬塞。
 - 答应了别人什么事、决定以后做什么，就用 Agenda 记下来；有新的念头用 Idea 记下来（写明来源）。这些会一直留着，不是说完就忘。
 - 别人找你帮忙，照样认真做好；只是不用客套，做完也不用问“还有什么需要”。
 - 私聊里像朋友发消息：一两句话一段，可以用空行分成几条；对方只是说“好的”“晚安”这种收尾的话，可以不接，只回 [不回复]。
@@ -218,14 +224,15 @@ func validateLifePolicy(a agents.Agent) error {
 
 // lifeState 是 data/life.json 里一个 agent 的状态。
 type lifeState struct {
-	Next      int64               `json:"next,omitempty"` // 下次醒来
-	Day       string              `json:"day,omitempty"`
-	Wakes     int                 `json:"wakes,omitempty"`   // 今天自己醒了几次
-	Reaches   int                 `json:"reaches,omitempty"` // 今天主动找了几次人
-	Tokens    int                 `json:"tokens,omitempty"`  // 今天内心活动用了多少 token
-	Recent    []lifeNote          `json:"recent,omitempty"`
-	Awaiting  map[string]int64    `json:"awaiting,omitempty"`   // 主动发了消息、对方还没回的私聊
-	FollowUps map[string]followUp `json:"follow_ups,omitempty"` // 约好过会儿再看的会话（统一聊天循环）
+	ExperienceImported bool                `json:"experience_imported,omitempty"`
+	Next               int64               `json:"next,omitempty"` // 下次醒来
+	Day                string              `json:"day,omitempty"`
+	Wakes              int                 `json:"wakes,omitempty"`   // 今天自己醒了几次
+	Reaches            int                 `json:"reaches,omitempty"` // 今天主动找了几次人
+	Tokens             int                 `json:"tokens,omitempty"`  // 今天内心活动用了多少 token
+	Recent             []lifeNote          `json:"recent,omitempty"`
+	Awaiting           map[string]int64    `json:"awaiting,omitempty"`   // 主动发了消息、对方还没回的私聊
+	FollowUps          map[string]followUp `json:"follow_ups,omitempty"` // 约好过会儿再看的会话（统一聊天循环）
 }
 
 type lifeNote struct {
@@ -487,21 +494,14 @@ func (a *App) lifeDone(s *sess, r *run, status, body string) {
 	ls := a.lifeOf(agentID)
 	ls.Tokens += r.usage.PromptTokens + r.usage.CompletionTokens
 	text := strings.TrimSpace(body)
-	if status == proto.StatusOK && text != "" && !isNoopMind(text) {
-		ls.Recent = append(ls.Recent, lifeNote{At: a.now().Unix(), Text: cutRunes(text, 200)})
-		if len(ls.Recent) > lifeRecent {
-			ls.Recent = ls.Recent[len(ls.Recent)-lifeRecent:]
-		}
-	}
+
 	a.saveLife()
 	a.publish(events.Event{T: "life", Name: agentID, Kind: "end", Text: text})
 }
 
 // lifeHeard 把一件事记进 agent 的内心会话（比如昨晚整理了记忆），它下次醒来时会看到。调用方持有锁。
 func (a *App) lifeHeard(agentID, text string) {
-	if err := a.store.Append(lifeSID(agentID), session.Msg{Role: "user", Content: "[系统] " + text}); err != nil {
-		a.log.Warn("记进内心会话失败", "agent", agentID, "err", err)
-	}
+	a.appendExperience(agentID, experience.Entry{Kind: "dream", Where: "整理记忆", Visible: "admin", Said: text, Status: "ok"})
 }
 
 // lifeAnswered：有人在这个私聊里说话了，之前的主动消息算回了。调用方持有锁。
@@ -521,24 +521,7 @@ func (a *App) lifeAnswered(sid string) {
 }
 
 // lifeRecentNote 是拟人型 agent 的近况说明（最近几次内心活动），放在聊天的消息前面。调用方持有锁。
-func (a *App) lifeRecentNote(sid string) string {
-	ag := a.agentOf(sid)
-	if !ag.Life() || isInnerSID(sid) || a.agentRoot == "" {
-		return ""
-	}
-	ls := a.lifeOf(ag.ID)
-	if len(ls.Recent) == 0 {
-		return ""
-	}
-	recent := ls.Recent[max(0, len(ls.Recent)-lifeShown):]
-	var b strings.Builder
-	b.WriteString(lifeRecentOp + "\n你最近自己做的事（只有你自己知道；聊天时可以自然地提起，别硬塞）：")
-	for _, n := range recent {
-		fmt.Fprintf(&b, "\n- %s %s", time.Unix(n.At, 0).In(a.loc).Format("01-02 15:04"), n.Text)
-	}
-	b.WriteString("\n" + lifeRecentEd)
-	return b.String()
-}
+func (a *App) lifeRecentNote(sid string) string { return a.experienceNote(sid, "") }
 
 // lifeGuide 是拟人守则：agents/<id>/life.md，没有就用内置的。
 func (a *App) lifeGuide(agentID string) string {
@@ -552,19 +535,21 @@ func (a *App) lifeGuide(agentID string) string {
 
 // LifeBrief 是网页上拟人型 agent 的状态。
 type LifeBrief struct {
-	State   string     `json:"state"`             // sleeping 睡着 / awake 醒着 / thinking 正在想事情
-	Next    int64      `json:"next,omitempty"`    // 下次自己醒（毫秒）
-	WakeAt  int64      `json:"wake_at,omitempty"` // 睡着时：几点醒（毫秒）
-	Wakes   int        `json:"wakes"`
-	Reaches int        `json:"reaches"`
+	Error      string             `json:"error,omitempty"`
+	Experience []experience.Entry `json:"experience"`
+	State      string             `json:"state"`             // sleeping 睡着 / awake 醒着 / thinking 正在想事情
+	Next       int64              `json:"next,omitempty"`    // 下次自己醒（毫秒）
+	WakeAt     int64              `json:"wake_at,omitempty"` // 睡着时：几点醒（毫秒）
+	Wakes      int                `json:"wakes"`
+	Reaches    int                `json:"reaches"`
 	// 次数上限：0 表示不限（界面上不能写成 8/0）
-	MaxWakes    int  `json:"max_wakes"`
-	MaxReaches  int  `json:"max_reaches"`
-	WakesFree   bool `json:"wakes_unlimited,omitempty"`
-	ReachesFree bool `json:"reaches_unlimited,omitempty"`
-	Tokens  int        `json:"tokens"`
-	Recent  []lifeNote `json:"recent"`
-	Waiting []string   `json:"waiting,omitempty"` // 主动找了还没回的人
+	MaxWakes    int        `json:"max_wakes"`
+	MaxReaches  int        `json:"max_reaches"`
+	WakesFree   bool       `json:"wakes_unlimited,omitempty"`
+	ReachesFree bool       `json:"reaches_unlimited,omitempty"`
+	Tokens      int        `json:"tokens"`
+	Recent      []lifeNote `json:"recent"`
+	Waiting     []string   `json:"waiting,omitempty"` // 主动找了还没回的人
 }
 
 // lifeBrief 是 agent 的内心活动状态。调用方持有锁。
@@ -578,6 +563,13 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	b := &LifeBrief{State: "awake", Next: ls.Next * 1000, Wakes: ls.Wakes, Reaches: ls.Reaches, Tokens: ls.Tokens,
 		MaxWakes: p.MaxWakes, MaxReaches: p.MaxReaches, WakesFree: p.WakesUnlimited(), ReachesFree: p.ReachesUnlimited(),
 		Recent: []lifeNote{}}
+	b.Experience = a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", 12, a.now())
+	if err := a.experienceOf(ag.ID).Error(); err != nil {
+		b.Error = "经历记录异常，已保留现场：" + err.Error()
+	}
+	if a.mindsErr != nil {
+		b.Error = a.mindsErr.Error()
+	}
 	w := a.awakeOf(ag)
 	if !w.contains(now) {
 		b.State, b.WakeAt = "sleeping", w.nextStart(now).UnixMilli()
@@ -585,7 +577,9 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	if s := a.sessions[lifeSID(ag.ID)]; s != nil && s.run != nil {
 		b.State = "thinking"
 	}
-	b.Recent = append(b.Recent, ls.Recent[max(0, len(ls.Recent)-lifeShown):]...)
+	for _, e := range a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", lifeShown, a.now()) {
+		b.Recent = append(b.Recent, lifeNote{At: e.At, Text: e.Where + "：" + e.Said})
+	}
 	for sid := range ls.Awaiting {
 		b.Waiting = append(b.Waiting, a.chatName(sid))
 	}
@@ -639,7 +633,7 @@ const followUpSchema = `{"type":"object","properties":{
 
 func followUpTool() proto.ToolSpec {
 	return proto.ToolSpec{Name: "FollowUp", Description: "约好过一会儿再看看这个聊天：到时候你会在这里醒来（带着你写的 note），可以接着说点什么，也可以不说。" +
-		"比如问了对方一个问题还没回、他说等会儿找你、你答应了晚点提醒他。私聊里对方先说话了就自动取消；一个聊天只留一个，新的替换旧的。",
+		"这是把事情交给以后的自己的显式入口；聊过的话不会自动变成待办。比如问了对方一个问题还没回、他说等会儿找你、你答应了晚点提醒他。私聊里对方先说话了就自动取消；一个聊天只留一个，新的替换旧的。",
 		InputSchema: json.RawMessage(followUpSchema)}
 }
 

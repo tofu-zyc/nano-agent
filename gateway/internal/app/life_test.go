@@ -12,6 +12,7 @@ import (
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
 )
 
@@ -84,7 +85,7 @@ func TestLifeWake(t *testing.T) {
 	waitIdle(t, e, sid)
 	e.a.mu.Lock()
 	ls := e.a.lifeOf("default")
-	next, wakes, recent := ls.Next, ls.Wakes, len(ls.Recent)
+	next, wakes, recent := ls.Next, ls.Wakes, len(e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 3, e.a.now()))
 	info := e.a.lifeBrief(func() agents.Agent { ag, _ := store.Get("default"); return ag }())
 	e.a.mu.Unlock()
 	// normal：1 小时 + 0.5×1 小时
@@ -98,12 +99,12 @@ func TestLifeWake(t *testing.T) {
 	e.sid = mainSID
 	e.say("在干嘛")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); !strings.Contains(got, lifeRecentOp) || !strings.Contains(got, "（mock）") {
+	if got := lastUser(e.roundTrip(t)); !strings.Contains(got, "[经历]") || !strings.Contains(got, "（mock）") {
 		t.Fatalf("聊天里没带近况：%q", got)
 	}
 	e.say("哦")
 	e.k.expect(proto.TInput)
-	if got := lastUser(e.roundTrip(t)); strings.Contains(got, lifeRecentOp) {
+	if got := lastUser(e.roundTrip(t)); strings.Contains(got, "[经历]") {
 		t.Fatalf("近况没变不该再放：%q", got)
 	}
 	// /wake 立刻叫醒（不算每天的次数）
@@ -410,22 +411,21 @@ func TestMessageToOwnLifeLeavesNote(t *testing.T) {
 	life := lifeSID("default")
 
 	e.a.mu.Lock()
-	// 让它“正在想事情”，避免留言顺手叫醒一轮，测试只关心留言本身
-	e.a.sessOf(life).queue = []queued{{}}
 	out, err := e.a.messageChat(mainSID, life, "下午去看看日程")
-	e.a.sessOf(life).queue = nil
 	h := e.a.store.History(life)
 	e.a.mu.Unlock()
-	if err != nil || !strings.Contains(out, "留言放进它的内心") {
-		t.Fatalf("给内心留言失败：%q %v", out, err)
+	if err != nil || !strings.Contains(out, "新片段任务") {
+		t.Fatalf("留言失败：%q %v", out, err)
 	}
-	if len(h) == 0 {
-		t.Fatal("留言没有进 life 历史")
+	in := e.k.expect(proto.TInput)
+	if in.SID != life || len(h) == 0 || h[0].Kind != "life_episode" || !strings.Contains(h[0].Content, "下午去看看日程") {
+		t.Fatalf("没有新片段：%+v %+v", in, h)
 	}
-	last := h[len(h)-1]
-	if last.Role != "user" || !strings.Contains(last.Content, "下午去看看日程") || !strings.Contains(last.Content, "留了一句") {
-		t.Fatalf("留言格式不对：%+v", last)
-	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: life})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: life, Status: proto.StatusOK})
+	waitIdle(t, e, life)
+
 	e.a.mu.Lock()
 	_, err = e.a.messageChat(life, life, "自己给自己")
 	e.a.mu.Unlock()

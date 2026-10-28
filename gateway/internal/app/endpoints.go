@@ -380,9 +380,11 @@ func (a *App) DeleteSession(sid string) error {
 	if s := a.sessions[sid]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return errors.New("这个会话有任务在跑，先停止再删除")
 	}
+	agent := a.execAgentID(sid)
 	if err := a.store.Delete(sid); err != nil {
 		return err
 	}
+	a.lifecycleExperienceFor(agent, sid, "删除了这个会话")
 	a.dropJournal(sid) // 会话没了，它的插话日志也不能留着复活
 	a.endDesktopSession(sid)
 	delete(a.sessions, sid)

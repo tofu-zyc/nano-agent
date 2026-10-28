@@ -23,7 +23,7 @@ import (
 )
 
 // SchemaVersion 是心智状态的版本，加载旧文件时按它迁移。
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // 事件种类。
 const (
@@ -242,8 +242,26 @@ func New() *State {
 
 // Normalize 补齐旧文件缺的字段，并迁移不能识别的版本。
 func (s *State) Normalize() {
-	if s.SchemaVersion <= 0 || s.SchemaVersion > SchemaVersion {
+	if s.SchemaVersion > SchemaVersion {
+		return
+	} // 未来版本不降级、不改写
+	if s.SchemaVersion < 2 {
+		beliefs := s.Beliefs[:0]
+		for _, b := range s.Beliefs {
+			autoChat := strings.HasPrefix(b.Source, "chat:") && strings.HasPrefix(b.Subject, "最近和")
+			autoFollow := (strings.HasPrefix(b.Source, "followup:") || strings.HasPrefix(b.Source, "agenda:")) && b.Subject == "和对方的约定"
+			if !autoChat && !autoFollow {
+				beliefs = append(beliefs, b)
+			}
+		}
+		s.Beliefs = beliefs
+		for i := range s.Events {
+			if s.Events[i].Kind == EventConversation || strings.HasPrefix(s.Events[i].Source, "followup:") {
+				s.Events[i].Processed = true
+			}
+		}
 		s.SchemaVersion = SchemaVersion
+		s.Touch()
 	}
 	for i := range s.Agenda {
 		if s.Agenda[i].Status == "" {

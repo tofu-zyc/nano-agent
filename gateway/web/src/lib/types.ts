@@ -229,6 +229,10 @@ export type FieldState = {
 export type ToolCall = { id: string; type: string; function: { name: string; arguments: string } };
 
 export type Msg = {
+	 kind?: string;
+	 parent_run_id?: string;
+	 agenda_id?: string;
+	 reason?: string;
   role: 'user' | 'assistant' | 'tool' | 'system';
   content?: string;
   images?: Attachment[]; // 用户消息附带的图片；工具（Read）读到、交给模型看的图片
@@ -359,6 +363,8 @@ export type LifeBrief = {
   wakes_unlimited?: boolean;
   reaches_unlimited?: boolean;
   recent: { at: number; text: string }[];
+  experience?: { id: string; at: number; kind: string; sid?: string; where?: string; visible: string; reason?: string; asked?: string; did?: string[]; said?: string; status: string; episode?: string; agenda_id?: string }[];
+  error?: string;
   waiting?: string[];
 };
 

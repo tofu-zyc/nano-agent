@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"nano-agent/gateway/internal/agents"
@@ -21,6 +22,16 @@ import (
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"items": s.app.AgentList()})
+}
+
+func (s *Server) getAgentExperience(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.app.AgentExperience(r.PathValue("id"), limit)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"items": items})
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {

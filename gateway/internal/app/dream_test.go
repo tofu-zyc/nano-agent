@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
 )
@@ -264,10 +265,10 @@ func TestDreamTriggers(t *testing.T) {
 	waitIdle(t, e, in.SID)
 	// 拟人型整理完，内心会话里记一笔
 	e.a.mu.Lock()
-	h := e.a.store.History(lifeSID("default"))
+	rows := e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 12, e.a.now())
 	e.a.mu.Unlock()
-	if len(h) == 0 || !strings.Contains(h[len(h)-1].Content, "昨晚整理记忆") {
-		t.Fatalf("内心会话里没记：%+v", h)
+	if len(rows) == 0 || rows[0].Kind != "dream" || !strings.Contains(rows[0].Said, "昨晚整理记忆") {
+		t.Fatalf("梦境经历缺失：%+v", rows)
 	}
 	// 关掉
 	e.a.mu.Lock()

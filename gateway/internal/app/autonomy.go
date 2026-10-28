@@ -24,6 +24,8 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/experience"
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
 )
 
@@ -60,17 +62,70 @@ func (a *App) loadMinds() {
 		a.log.Warn("自主活动状态读不了，先用空的", "file", a.autonomyFile(), "err", err)
 		return
 	}
+	needsMigration := doc.Version < autonomy.SchemaVersion
+	if doc.Version > autonomy.SchemaVersion {
+		a.mindsErr = fmt.Errorf("自主状态版本过新，拒绝降级覆盖")
+		a.log.Error(a.mindsErr.Error())
+		return
+	}
+	for _, st := range doc.Agents {
+		if st != nil {
+			if st.SchemaVersion > autonomy.SchemaVersion || doc.Version > autonomy.SchemaVersion {
+				a.mindsErr = fmt.Errorf("自主状态版本过新，拒绝降级覆盖")
+				a.log.Error(a.mindsErr.Error())
+				return
+			}
+			needsMigration = needsMigration || st.SchemaVersion < autonomy.SchemaVersion
+		}
+	}
+	if needsMigration {
+		backup := a.autonomyFile() + ".schema1.bak"
+		if saved, readErr := os.ReadFile(backup); readErr == nil {
+			if !json.Valid(saved) {
+				a.mindsErr = fmt.Errorf("旧自主状态备份损坏，保留现场")
+				return
+			}
+		} else if errors.Is(readErr, os.ErrNotExist) {
+			tmp := backup + ".tmp"
+			f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			if err == nil {
+				_, err = f.Write(b)
+				if err == nil {
+					err = f.Sync()
+				}
+				closeErr := f.Close()
+				if err == nil {
+					err = closeErr
+				}
+			}
+			if err == nil {
+				err = os.Rename(tmp, backup)
+			}
+			if err != nil {
+				a.mindsErr = fmt.Errorf("自主状态迁移备份失败：%w", err)
+				a.log.Error(a.mindsErr.Error())
+				return
+			}
+		} else {
+			a.mindsErr = readErr
+			return
+		}
+
+	}
 	for id, st := range doc.Agents {
 		if st != nil {
 			st.Normalize()
 			a.minds[id] = st
 		}
 	}
+	if needsMigration {
+		a.saveMinds()
+	}
 }
 
 // saveMinds 把所有 agent 的心智状态写盘（原子替换）。调用方持有锁。
 func (a *App) saveMinds() {
-	if a.minds == nil {
+	if a.minds == nil || a.mindsErr != nil {
 		return
 	}
 	doc := autonomyDoc{Version: autonomy.SchemaVersion, Agents: a.minds}
@@ -81,7 +136,7 @@ func (a *App) saveMinds() {
 	}
 	p := a.autonomyFile()
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+	if err = os.WriteFile(tmp, b, 0o600); err == nil {
 		err = os.Rename(tmp, p)
 	}
 	if err != nil {
@@ -102,23 +157,10 @@ func (a *App) mind(agentID string) *autonomy.State {
 	}
 	st.Normalize()
 	now := a.now().In(a.loc)
-	// 旧版的近况导入一次
+	// Recent 已改为经历索引；不再从旧近况制造心智事件。
 	if st.Migrated&1 == 0 {
-		if a.agentRoot != "" {
-			ls := a.lifeOf(agentID)
-			if ls != nil && len(ls.Recent) > 0 {
-				notes := make([]autonomy.LifeNote, 0, len(ls.Recent))
-				for _, n := range ls.Recent {
-					notes = append(notes, autonomy.LifeNote{At: n.At, Text: n.Text})
-				}
-				st.ImportLife(notes, now)
-			} else {
-				st.Migrated |= 1
-				st.Touch()
-			}
-		} else {
-			st.Migrated |= 1
-		}
+		st.Migrated |= 1
+		st.Touch()
 	}
 	// 重启恢复：上次没结束的执行结果未知，不重放，改成稍后重新确认（每个进程启动做一次）
 	if !a.mindsRecovered[agentID] {
@@ -158,52 +200,11 @@ func (a *App) autonomyView(ag agents.Agent) *autonomy.View {
 	return &v
 }
 
-// mindHeard 把一条聊天记进心智状态：同一个会话 10 分钟内的高频消息合并成一条事件，
-// 顺便更新“最近和谁聊到什么”的认识，并把自己安排的检查提前到 10 分钟后（不是每条消息都唤醒模型）。
-// 调用方持有锁。
-func (a *App) mindHeard(sid, who, name, text string) {
-	if a.agentStore == nil || a.agentRoot == "" {
-		return
-	}
-	if isInnerSID(sid) || isCronSID(sid) || isRoomMemberSID(sid) || strings.HasPrefix(sid, "room:") {
-		return
-	}
-	ag := a.agentOf(sid)
-	if !ag.Life() {
-		return
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	st := a.mind(ag.ID)
-	now := a.now().In(a.loc)
-	added := st.AddEvent(autonomy.Event{Kind: autonomy.EventConversation, Source: "chat:" + sid, SID: sid,
-		Dedupe: "conv:" + sid, Text: cutRunes(name+"："+text, 200)}, now, 10*time.Minute)
-	if name == "" {
-		name = "对方"
-	}
-	st.SetBelief("最近和"+name+"聊到", cutRunes(text, 200), "chat:"+sid, 0.6, now)
-	next := now.Add(10 * time.Minute)
-	if st.NextCheck == 0 || st.NextCheck > next.Unix() {
-		st.SetNextCheck(next)
-	}
-	a.saveMinds()
-	if added {
-		a.publishAutonomy(ag.ID)
-	}
-}
+// mindHeard 保留旧调用兼容；聊天只在真实轮次结束后写经历，不产生待办或唤醒。
+func (a *App) mindHeard(sid, who, name, text string) {}
 
-// mindFollowUp 是约好过会儿再看（FollowUp）时的心智记录：让 agent 知道这是自己答应的事。
-func (a *App) mindFollowUp(sid, agentID, note string, at time.Time) {
-	st := a.mind(agentID)
-	now := a.now().In(a.loc)
-	st.AddEvent(autonomy.Event{Kind: autonomy.EventCommitment, Source: "followup:" + sid, SID: sid, Dedupe: "followup:" + sid,
-		Text: "约好 " + at.In(a.loc).Format("01-02 15:04") + " 再看看" + note}, now, 0)
-	st.SetBelief("和对方的约定", "约好 "+at.In(a.loc).Format("01-02 15:04")+" 再看看这个聊天："+cutRunes(note, 120), "followup:"+sid, 0.9, now)
-	a.saveMinds()
-	a.publishAutonomy(agentID)
-}
+// FollowUp 由原聊天自己触发，不再复制成内心的认识或事件。
+func (a *App) mindFollowUp(sid, agentID, note string, at time.Time) {}
 
 // mindDream 是整理完记忆之后的反思：经验写进心智状态，下一次规划能看到。
 func (a *App) mindDream(agentID, note string) {
@@ -307,6 +308,10 @@ func (a *App) autonomyTick() {
 
 // autonomyAgent 处理一个 agent 的到期事项。调用方持有锁。
 func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
+	a.loadMinds()
+	if a.mindsErr != nil {
+		return
+	}
 	ls := a.lifeOf(ag.ID)
 	// 旧版约好的回访（FollowUp）仍然是自己的执行者，先处理
 	a.followUpTick(ag, ls, now)
@@ -386,6 +391,10 @@ func (a *App) mirrorNextCheck(st *autonomy.State, ls *lifeState) {
 // startLife 是 /wake、网页按钮和旧调用入口：让 agent 现在自主活动一次。
 // manual 表示主人叫醒的，不算每天次数、不看作息；仍然受模型/内核可用性的限制。
 func (a *App) startLife(agentID string, manual bool) error {
+	a.loadMinds()
+	if a.mindsErr != nil {
+		return a.mindsErr
+	}
 	ag, ok := a.agentByID(agentID)
 	if !ok {
 		return errors.New("没有这个 agent")
@@ -445,6 +454,12 @@ func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy
 	// 先记次数，这样这次醒来的说明里能看到“第几次”；开始失败时下面会退回去
 	if !manual && trig.IsExploration() {
 		ls.Wakes++
+	}
+	if err := a.store.BeginEpisode(s.sid); err != nil {
+		if !manual && trig.IsExploration() {
+			ls.Wakes--
+		}
+		return fmt.Errorf("开启内心片段失败：%w", err)
 	}
 	note := a.mindNote(ag, st, trig, now, manual)
 	pending := st.UnprocessedEvents(20)
@@ -515,7 +530,14 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	ls := a.lifeOf(ag.ID)
 	p := effectiveLifePolicy(ag)
 	fmt.Fprintf(&b, "%s；%s。\n", p.wakeText(ls.Wakes), p.reachText(ls.Reaches))
+	fmt.Fprintf(&b, "【要处理的】%s\n", trig.Reason)
 	b.WriteString(st.BriefForModel(now, a.loc))
+	for sid, f := range a.lifeOf(ag.ID).FollowUps {
+		fmt.Fprintf(&b, "\n【聊天回访】%s %s：%s；到点会在那个聊天里醒来，由那边处理，不是本片段的任务。\n", sid, time.Unix(f.At, 0).In(a.loc).Format("01-02 15:04"), f.Note)
+	}
+	b.WriteString("\n【最近的经历】以下都已经在当时的场合处理结束，只供了解，不是给你的任务；其中的上下文或会话指当时那个聊天。\n")
+	b.WriteString(experience.Render(a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", 12, now), a.loc, 4500))
+
 	if targets := a.lifeTargets(ag); len(targets) > 0 {
 		b.WriteString("\n可以找的聊天（Message 的 to 写括号里的）：\n")
 		for _, t := range targets {
@@ -608,6 +630,7 @@ func (a *App) mindAborted(s *sess, r *run, why string) {
 	if mr == nil {
 		return
 	}
+	a.recordRunExperience(s, r, "interrupted", why)
 	s.mind = nil
 	now := a.now().In(a.loc)
 	st := a.mind(mr.AgentID)
@@ -678,6 +701,7 @@ func (a *App) mindExternal(agentID, source, text string) {
 	if !ok || !ag.Life() {
 		return
 	}
+	a.appendExperience(agentID, experience.Entry{Kind: "external", Where: source, Visible: "admin", Said: text, Status: "ok", Reason: source})
 	st := a.mind(agentID)
 	now := a.now()
 	st.AddEvent(autonomy.Event{Kind: autonomy.EventExternal, Source: source, Dedupe: "external:" + source,
@@ -703,6 +727,10 @@ type AutonomyActionReq struct {
 func (a *App) AutonomyAgent(id string) (autonomy.View, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.loadMinds()
+	if a.mindsErr != nil {
+		return autonomy.View{}, a.mindsErr
+	}
 	ag, ok := a.agentByID(id)
 	if !ok {
 		return autonomy.View{}, errors.New("没有这个 agent")
@@ -721,6 +749,10 @@ func (a *App) AutonomyAgent(id string) (autonomy.View, error) {
 func (a *App) AutonomyAction(id string, x AutonomyActionReq) (autonomy.View, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.loadMinds()
+	if a.mindsErr != nil {
+		return autonomy.View{}, a.mindsErr
+	}
 	ag, ok := a.agentByID(id)
 	if !ok {
 		return autonomy.View{}, errors.New("没有这个 agent")
@@ -833,6 +865,7 @@ func (a *App) cmdAutonomy(c in, arg string) {
 		if v.Budget.Limit > 0 {
 			fmt.Fprintf(&b, "（上限 %d）", v.Budget.Limit)
 		}
+		b.WriteString("\n最近的经历（已经结束，不是待办）：\n" + experience.Render(a.experienceOf(ag.ID).Recent(a.viewerOf(c.s.sid, c.who), c.s.sid, 3, now), a.loc, 1200))
 		b.WriteString("\n/autonomy pause 暂停，/autonomy resume 恢复，/autonomy wake 现在叫醒。")
 		a.answer(c, b.String())
 	case "pause", "resume":

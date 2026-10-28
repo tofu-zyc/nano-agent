@@ -142,6 +142,7 @@ func displayAgentName(ag agents.Agent) string {
 // recordAgentSwitch 把切换写进会话设置：显式选择、来源区间、交接说明，并清掉按旧身份构造的缓存。
 // position 是切换时的历史绝对位置（含已经被整理掉的消息）。调用方持有锁。
 func (a *App) recordAgentSwitch(sid string, st *session.Settings, oldAg, newAg agents.Agent, position int) {
+	a.lifecycleExperienceFor(oldAg.ID, sid, "会话交给了 "+newAg.Name)
 	st.Agent = newAg.ID
 	st.AgentSegments = append(st.AgentSegments, session.AgentSegment{Agent: newAg.ID, At: a.now().Unix(), Position: position})
 	if n := len(st.AgentSegments); n > maxAgentSegments {

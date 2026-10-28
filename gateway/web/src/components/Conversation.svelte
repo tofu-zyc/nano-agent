@@ -2,7 +2,7 @@
   import { tick, untrack } from 'svelte';
   import { store } from '../lib/state.svelte';
   import { api, ApiError, sidPath, uploadImage } from '../lib/api';
-  import { buildBlocks, type Block } from '../lib/conv';
+  import { buildBlocks, groupEpisodes, type Block } from '../lib/conv';
   import { markdown } from '../lib/markdown';
   import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
   import type { Attachment, CommandInfo, Msg, SessionInfo } from '../lib/types';
@@ -24,8 +24,14 @@
   }
   // 拟人型的内心活动、整理记忆：agent 自己的会话，只能看
   const innerKind = $derived(/^@[^/]+\/life$/.test(sid) ? 'life' : /^@[^/]+\/dream$/.test(sid) ? 'dream' : '');
+  let expandedEpisodes = $state<Set<number>>(new Set());
+  function toggleEpisode(start: number) {
+    const next = new Set(expandedEpisodes);
+    if (next.has(start)) next.delete(start); else next.add(start);
+    expandedEpisodes = next;
+  }
   const innerAgent = $derived(store.agent(sid.replace(/^@([^/]+)\/.*$/, '$1')));
-  const noteTitle: Record<string, string> = { memory: '带上了长期记忆', recall: '想起来的几条记忆', life: '它最近自己做的事（近况）' };
+  const noteTitle: Record<string, string> = { memory: '带上了长期记忆', recall: '想起来的几条记忆', life: '最近的经历（已结束）' };
   async function wakeInner() {
     try {
       await api.post('/api/agents/' + encodeURIComponent(innerAgent?.id ?? '') + '/wake', {});
@@ -36,6 +42,7 @@
   }
 
   let blocks = $state<Block[]>([]);
+  const episodeGroups = $derived(groupEpisodes(blocks));
   let summary = $state('');
   let loading = $state(true);
   let missing = $state(false);
@@ -431,7 +438,16 @@
         </div>
       {/if}
 
-      {#each blocks as b, i}
+      {#each episodeGroups as episode}
+        <section class="episode">
+          {#if innerKind === 'life'}
+            <button class="btn sm ghost" onclick={() => toggleEpisode(episode.start)}>
+              <Icon name="sparkles" size={13} />{episode.title} · {episode.latest || expandedEpisodes.has(episode.start) ? '收起 / 展开' : '展开'}
+            </button>
+          {/if}
+          <div hidden={innerKind === 'life' && (episode.latest ? expandedEpisodes.has(episode.start) : !expandedEpisodes.has(episode.start))}>
+      {#each episode.blocks as b, localIndex}
+        {@const i = episode.start + localIndex}
         {#if b.type === 'env'}
           <div class="sys"><Icon name="folder" size={13} />{b.text}</div>
         {:else if b.type === 'wake'}
@@ -460,6 +476,7 @@
           </div>
         {:else}
           <div class="msg bot">
+            {#if b.proactive}<div class="meta">主动发来 · {b.reason ?? '自己的时间'}{#if b.episode} · 片段 {b.episode}{/if}{#if b.agenda} · 日程 {b.agenda}{/if}</div>{/if}
             {#if isRoom}
               {@const speaker = roomSpeaker(b.agent, b.sender)}
               <div class="meta room-speaker"><span class="speaker-avatar">{speaker?.emoji || '🙂'}</span><b>{speaker?.name ?? b.sender ?? '成员'}</b>{#if b.ts}<span>{clock(b.ts * 1000)}</span>{/if}</div>
@@ -488,6 +505,10 @@
             {/if}
           </div>
         {/if}
+      {/each}
+
+          </div>
+        </section>
       {/each}
 
       <!-- 正在进行的这一轮：实时内容 -->

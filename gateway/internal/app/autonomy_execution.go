@@ -108,6 +108,41 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 	if !ok {
 		return
 	}
+	turn := m.TurnID
+	if turn == 0 {
+		turn = r.turnID
+	}
+	if r.experienceActionTurn != turn {
+		r.experienceActionKeys = nil
+		r.experienceActionTurn = turn
+	}
+	if r.experienceActionKeys == nil {
+		r.experienceActionKeys = map[string]bool{}
+	}
+	if !r.experienceActionKeys[m.ID] {
+		r.experienceActionKeys[m.ID] = true
+		label := call.Name
+		var args map[string]any
+		if json.Unmarshal(call.Args, &args) == nil {
+			for _, field := range []string{"action", "title", "id", "to"} {
+				if value, ok := args[field].(string); ok && value != "" {
+					label += " " + field + "=" + cutRunes(value, 80)
+				}
+			}
+		}
+		if m.OK != nil && !*m.OK {
+			label += "（失败）"
+		} else {
+			label += "（已执行）"
+		}
+		r.experienceActions = append(r.experienceActions, label)
+		if len(r.experienceActions) > 16 {
+			r.experienceActions = append([]string(nil), r.experienceActions[len(r.experienceActions)-16:]...)
+		}
+		if call.Name != "WebSearch" && call.Name != "WebFetch" {
+			r.experiencePrivate = true
+		}
+	}
 	if r.toolEvidence == nil {
 		r.toolEvidence = map[string]autonomy.ToolEvidence{}
 	}

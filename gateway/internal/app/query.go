@@ -202,6 +202,9 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Usage.ReasoningTokens += m.Usage.ReasoningTokens
 		}
 	}
+	if isLifeSID(sid) {
+		info.Messages, info.LastAt, info.Usage = a.store.RawStats(sid)
+	}
 	if _, path := a.personaFor(sid); path != "" {
 		info.Persona = filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path)
 	}

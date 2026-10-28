@@ -40,10 +40,7 @@ func (a *App) compactLimits(sid string) (int, int, int) {
 		}
 		low = int(float64(limit) * ratio)
 	}
-	if isLifeSID(sid) {
-		// 内心活动：保持连续，但每次醒来不能带着几十万 token 的旧事
-		high, low = min(high, lifeHighCtx), min(low, lifeLowCtx)
-	}
+
 	return high, low, keep
 }
 
@@ -220,6 +217,7 @@ func (a *App) beginCompact(s *sess, high, low int, focus string, background bool
 			}
 			return
 		}
+		a.lifecycleExperience(s.sid, "整理了聊天上下文，原始历史仍保留")
 		text := fmt.Sprintf("已整理上下文：%d → %d", before, a.contextInfo(s.sid).Total)
 		if r != nil {
 			for _, v := range r.views() {

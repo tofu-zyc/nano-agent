@@ -235,7 +235,7 @@ func (a *App) diaryPartner(agentID, sid string) (title, partner, label string) {
 
 // diaryText 去掉网关加在消息前面的东西（环境说明、记忆说明、想起来的）
 func diaryText(s string) string {
-	for _, pair := range [][2]string{{memNoteOpen, memNoteClose}, {recallOpen, recallClose}, {lifeRecentOp, lifeRecentEd}} {
+	for _, pair := range [][2]string{{memNoteOpen, memNoteClose}, {recallOpen, recallClose}, {lifeRecentOp, lifeRecentEd}, {"[经历]", "[/经历]"}} {
 		for {
 			i := strings.Index(s, pair[0])
 			if i < 0 {

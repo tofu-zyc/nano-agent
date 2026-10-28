@@ -49,6 +49,14 @@ func turnsOf(h []session.Msg, base int) []turn {
 			t.user = text
 			out = append(out, t)
 		case "assistant":
+			if m.Kind == "proactive" {
+				reason := m.Reason
+				if reason == "" {
+					reason = "自己的时间"
+				}
+				out = append(out, turn{start: base + i, reply: "〔主动发来 · " + reason + "〕\n" + m.Content})
+				continue
+			}
 			if len(out) == 0 {
 				continue
 			}

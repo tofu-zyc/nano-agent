@@ -7,7 +7,12 @@ import (
 	"strings"
 )
 
-func (a *App) resetHistory(s *sess) error {
+func (a *App) resetHistory(s *sess) (err error) {
+	defer func() {
+		if err == nil {
+			a.lifecycleExperience(s.sid, "清空了聊天上下文；清空前已经执行的操作仍是过去的事实，不是待办")
+		}
+	}()
 	if s.compactCancel != nil {
 		s.compactCancel()
 		s.compactCancel = nil

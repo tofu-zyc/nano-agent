@@ -249,7 +249,7 @@ func TestAutonomyRestartRecovery(t *testing.T) {
 	}
 }
 
-func TestAutonomyChatEventsMergeAndDoNotWakeEachMessage(t *testing.T) {
+func TestAutonomyChatDoesNotCreateBeliefsEventsOrWake(t *testing.T) {
 	e := setup(t)
 	store, _ := withAgents(t, e)
 	withModels(t, e)
@@ -263,11 +263,11 @@ func TestAutonomyChatEventsMergeAndDoNotWakeEachMessage(t *testing.T) {
 	n := len(st.UnprocessedEvents(10))
 	next := st.NextCheck
 	e.a.mu.Unlock()
-	if n != 1 {
-		t.Fatalf("同一个会话的高频消息应该合并成一条事件: %d", n)
+	if n != 0 || len(st.Beliefs) != 0 {
+		t.Fatalf("聊天不应产生心智待办或认识: %d / %+v", n, st.Beliefs)
 	}
-	if next != base.Add(10*time.Minute).Unix() {
-		t.Fatalf("聊天事件应该把下一次检查放到 10 分钟后: %v", time.Unix(next, 0))
+	if next != 0 {
+		t.Fatalf("聊天不应安排检查: %v", time.Unix(next, 0))
 	}
 	// 合并窗口里不会每条消息都调用模型
 	setNow(e, base.Add(2*time.Minute))

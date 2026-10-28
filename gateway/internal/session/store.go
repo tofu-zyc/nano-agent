@@ -52,6 +52,8 @@ type Msg struct {
 	ID string `json:"id,omitempty"`
 	// SourceIDs 是这条消息由哪些插话合并而来（按接收顺序）。
 	SourceIDs []string `json:"source_ids,omitempty"`
+	AgendaID  string   `json:"agenda_id,omitempty"`
+	Reason    string   `json:"reason,omitempty"`
 }
 
 type Store struct {

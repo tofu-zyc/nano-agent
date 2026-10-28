@@ -7,9 +7,9 @@ export type ToolView = { id: string; name: string; detail: string; args: string;
 export type Block =
   | { type: 'env'; text: string }
   | { type: 'note'; kind: NoteKind; text: string }
-  | { type: 'wake'; text: string } // agent 自己的会话里，网关放的整段说明（醒来时看到的情况、昨晚整理了什么）
+  | { type: 'wake'; text: string; episode?: boolean; ts?: number; reason?: string }
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
-  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number; sender?: string; agent?: string };
+  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number; sender?: string; agent?: string; proactive?: boolean; reason?: string; episode?: string; agenda?: string };
 
 export function toolDetail(name: string, args: string): string {
   let a: Record<string, any>;
@@ -52,7 +52,7 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
       const p = parseUser(m.content ?? '');
       for (const n of p.notes) out.push({ type: 'note', kind: n.kind, text: n.text });
       const text = [...p.env, p.text].filter((x) => x.trim()).join('\n');
-      if (text) out.push({ type: 'wake', text });
+      if (text) out.push({ type: 'wake', text, episode: m.kind === 'life_episode', ts: m.ts, reason: m.reason });
     } else if (m.role === 'user') {
       const p = parseUser(m.content ?? '');
       for (const e of p.env) out.push({ type: 'env', text: e });
@@ -67,7 +67,7 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
       });
       const speaker = room ? parseUser(m.content ?? '') : undefined;
       out.push({ type: 'assistant', text: speaker?.text ?? m.content ?? '', sender: speaker?.sender, agent: m.agent,
-        reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts });
+        reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts, proactive: m.kind === 'proactive', reason: m.reason, episode: m.parent_run_id, agenda: m.agenda_id });
     } else if (m.role === 'tool') {
       const t = byId.get(m.tool_call_id ?? '');
       if (t) {
@@ -83,4 +83,18 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
     }
   }
   return out;
+}
+
+/** Persistent episode boundaries, including legacy history before the first one. */
+export function groupEpisodes(blocks: Block[]) {
+  const groups: { start: number; blocks: Block[]; title: string; latest: boolean }[] = [];
+  for (const [i, b] of blocks.entries()) {
+    if (!groups.length || (b.type === 'wake' && b.episode)) {
+      groups.push({ start: i, blocks: [], title: b.type === 'wake' && b.episode
+        ? `${b.ts ? new Date(b.ts * 1000).toLocaleString() : ''} · ${b.reason || '内心片段'}` : '较早的原始记录', latest: false });
+    }
+    groups[groups.length - 1].blocks.push(b);
+  }
+  if (groups.length) groups[groups.length - 1].latest = true;
+  return groups;
 }
