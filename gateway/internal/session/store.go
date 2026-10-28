@@ -395,6 +395,16 @@ func (s *Store) publishRenameTarget(op renameOp, staging string, suffixes []stri
 // Dir 是数据目录。
 func (s *Store) Dir() string { return s.dir }
 
+// LifecycleVersion is the common authorization boundary for deferred publication.
+func (s *Store) LifecycleVersion(sid string) (generation, revision int64, err error) {
+	generation, err = s.readGen(sid)
+	if err != nil {
+		return
+	}
+	revision, err = s.readRev(sid)
+	return
+}
+
 func (s *Store) file(sid string) string {
 	return s.newPath(sid, ".jsonl")
 }
@@ -495,7 +505,26 @@ func (s *Store) load(sid string) []Msg {
 }
 
 // Archive 返回完整原始记录，仅用于查看历史；模型继续使用压缩后的 History。
-func (s *Store) Archive(sid string) []Msg { return s.loadFrom(sid, 0) }
+func (s *Store) Archive(sid string) []Msg {
+	if _, branch := s.Branch(sid); !branch {
+		return s.loadFrom(sid, 0)
+	}
+	lease, err := s.FreezeSnapshot(sid, s.Settings(sid))
+	if err != nil {
+		return nil
+	}
+	defer lease.Close()
+	sc := bufio.NewScanner(lease.reader())
+	sc.Buffer(make([]byte, 64<<10), 64<<20)
+	var out []Msg
+	for sc.Scan() {
+		var m Msg
+		if json.Unmarshal(sc.Bytes(), &m) == nil && m.Role != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
 func (s *Store) loadFrom(sid string, skip int) []Msg {
 	p, ok := s.readFileFor(sid, ".jsonl")
@@ -720,11 +749,36 @@ func (s *Store) Undo(sid string) ([]Msg, error) {
 	if i < 0 {
 		return nil, ErrNothingToUndo
 	}
-	off, err := s.offsetOf(sid, s.Settings(sid).Base+i)
+	absolute := s.Settings(sid).Base + i
+	physical := absolute
+	if br, ok := s.Branch(sid); ok {
+		info, exists := s.Snapshot(br.SnapshotID)
+		if !exists {
+			return nil, errors.New("分支快照缺失")
+		}
+		end := info.Messages
+		if br.InheritedEndSet {
+			end = br.InheritedEnd
+		}
+		if absolute < end {
+			if err := writeFileAtomic(s.file(sid), nil); err != nil {
+				return nil, err
+			}
+			br.InheritedEnd, br.InheritedEndSet = absolute, true
+			if err := s.saveBranch(br); err != nil {
+				return nil, err
+			}
+			removed := append([]Msg(nil), h[i:]...)
+			s.hist[sid] = append([]Msg(nil), h[:i]...)
+			return removed, nil
+		}
+		physical -= end
+	}
+	off, err := s.offsetOf(sid, physical)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Truncate(s.file(sid), off); err != nil {
+	if err := replaceHistoryPrefix(s.file(sid), off); err != nil {
 		return nil, fmt.Errorf("撤回：%w", err)
 	}
 	removed := append([]Msg(nil), h[i:]...)
@@ -778,7 +832,12 @@ func (s *Store) Reset(sid string) error {
 	// 有效窗口就空了，下次访问看到的是干净上下文。
 	base := 0
 	if br, ok := s.Branch(sid); ok {
-		base = len(s.SnapshotMessages(br.SnapshotID))
+		if info, exists := s.Snapshot(br.SnapshotID); exists {
+			base = info.Messages
+			if br.InheritedEndSet {
+				base = br.InheritedEnd
+			}
+		}
 	}
 	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
 		st.EnvNote, st.Base, st.Summary = "", base, ""

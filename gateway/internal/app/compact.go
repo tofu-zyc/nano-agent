@@ -292,6 +292,10 @@ func (a *App) Maintain() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, sid := range a.sessionIDs() {
+		if a.isBranchSID(sid) && (a.sessions[sid] == nil || a.sessions[sid].run == nil) {
+			a.store.UnloadHistory(sid)
+			continue
+		}
 		if isCronSID(sid) {
 			continue
 		} // 下次任务会归档并清空，无需空闲摘要

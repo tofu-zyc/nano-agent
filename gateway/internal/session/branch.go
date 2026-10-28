@@ -1,17 +1,17 @@
 package session
 
 import (
-	"bufio"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"nano-agent/gateway/internal/llm"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 // ---- 会话 Fork 的存储层（设计文档 §8 / F1） ----
@@ -46,20 +46,24 @@ const (
 
 // BranchMeta 是一个分支会话的来源、边界与状态。
 type BranchMeta struct {
-	SID         string `json:"sid"`
-	ParentSID   string `json:"parent_sid"`
-	RootSID     string `json:"root_sid,omitempty"`
-	SnapshotID  string `json:"snapshot_id,omitempty"`
-	OperationID string `json:"operation_id,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
-	OwnerAgent  string `json:"owner_agent,omitempty"`
-	CreatedBy   string `json:"created_by,omitempty"`
-	CreatedAt   int64  `json:"created_at"`
-	ReadyAt     int64  `json:"ready_at,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Intent      string `json:"intent,omitempty"`
-	Status      string `json:"status"`
-	Delivery    string `json:"delivery_policy"`
+	OriginRunID     string `json:"origin_run_id,omitempty"`
+	StartRequested  bool   `json:"start_requested,omitempty"`
+	InheritedEnd    int    `json:"inherited_end,omitempty"`
+	InheritedEndSet bool   `json:"inherited_end_set,omitempty"`
+	SID             string `json:"sid"`
+	ParentSID       string `json:"parent_sid"`
+	RootSID         string `json:"root_sid,omitempty"`
+	SnapshotID      string `json:"snapshot_id,omitempty"`
+	OperationID     string `json:"operation_id,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
+	OwnerAgent      string `json:"owner_agent,omitempty"`
+	CreatedBy       string `json:"created_by,omitempty"`
+	CreatedAt       int64  `json:"created_at"`
+	ReadyAt         int64  `json:"ready_at,omitempty"`
+	Title           string `json:"title,omitempty"`
+	Intent          string `json:"intent,omitempty"`
+	Status          string `json:"status"`
+	Delivery        string `json:"delivery_policy"`
 	// Checkpoint 是分叉点在源会话里的绝对位置（含已经被压缩掉的）
 	Checkpoint int    `json:"fork_checkpoint"`
 	Generation int64  `json:"generation,omitempty"`
@@ -69,6 +73,7 @@ type BranchMeta struct {
 
 // SnapshotInfo 是一份不可变快照的说明（context.json）。
 type SnapshotInfo struct {
+	Stats      HistoryStats   `json:"stats"`
 	SnapshotID string         `json:"snapshot_id"`
 	SourceSID  string         `json:"source_sid"`
 	Messages   int            `json:"messages"`  // 快照里的总条数（含已压缩前缀）
@@ -83,23 +88,37 @@ type SnapshotInfo struct {
 	Settings SnapshotSettings `json:"settings"`
 }
 
+type HistoryStats struct {
+	Messages int       `json:"messages"`
+	LastAt   int64     `json:"last_at"`
+	Usage    llm.Usage `json:"usage"`
+}
+
 // SnapshotSettings 是快照里保存的"适用设置"：分支继承这些，但不继承运行态。
 type SnapshotSettings struct {
-	Agent      string   `json:"agent,omitempty"`
-	Model      string   `json:"model,omitempty"`
-	Thinking   string   `json:"thinking,omitempty"`
-	Mode       string   `json:"mode,omitempty"`
-	Workspaces []string `json:"workspaces,omitempty"`
-	Title      string   `json:"title,omitempty"`
+	Persona       string   `json:"persona,omitempty"`
+	WorkspacesSet bool     `json:"workspaces_set,omitempty"`
+	Group         bool     `json:"group,omitempty"`
+	Agent         string   `json:"agent,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	Thinking      string   `json:"thinking,omitempty"`
+	Mode          string   `json:"mode,omitempty"`
+	Workspaces    []string `json:"workspaces,omitempty"`
+	Title         string   `json:"title,omitempty"`
 }
 
 // ForkOp 是一次 Fork 操作的持久记录，用来保证重试和重启幂等。
 type ForkOp struct {
-	OperationID string `json:"operation_id"`
-	RequestID   string `json:"request_id"`
-	ParentSID   string `json:"parent_sid"`
-	BranchSID   string `json:"branch_sid"`
-	CreatedAt   int64  `json:"created_at"`
+	Version          int    `json:"version,omitempty"`
+	TargetGeneration int64  `json:"target_generation,omitempty"`
+	TargetRevision   int64  `json:"target_revision,omitempty"`
+	Stage            string `json:"stage,omitempty"`
+	SnapshotID       string `json:"snapshot_id,omitempty"`
+	OperationID      string `json:"operation_id"`
+	RequestID        string `json:"request_id"`
+	ParentSID        string `json:"parent_sid"`
+	BranchSID        string `json:"branch_sid"`
+	CreatedAt        int64  `json:"created_at"`
 }
 
 func (s *Store) snapshotDir(id string) string {
@@ -202,118 +221,31 @@ func (s *Store) Ops() []ForkOp {
 // 多个分支共用一份快照。contentHash 由调用方给出（源文件与设置一起算），
 // 内容相同就直接复用，不重复写盘。
 func (s *Store) WriteSnapshot(srcSID, snapshotID string, src Settings) (SnapshotInfo, error) {
-	if snapshotID == "" {
-		return SnapshotInfo{}, errors.New("快照缺少 ID")
-	}
-	dir := s.snapshotDir(snapshotID)
-	if info, ok := s.Snapshot(snapshotID); ok {
-		return info, nil // 复用：内容一样
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return SnapshotInfo{}, err
-	}
-	tmp := filepath.Join(dir, "messages.jsonl.tmp")
-	in, err := os.Open(s.file(srcSID))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return SnapshotInfo{}, err
-	}
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	lease, err := s.FreezeSnapshot(srcSID, src)
 	if err != nil {
-		if in != nil {
-			in.Close()
-		}
 		return SnapshotInfo{}, err
 	}
-	var count, effective int
-	var bytes int64
-	if in != nil {
-		br := bufio.NewReaderSize(in, 64*1024)
-		bw := bufio.NewWriterSize(out, 64*1024)
-		for {
-			line, rerr := br.ReadBytes('\n')
-			if len(line) > 0 {
-				var m Msg
-				if json.Unmarshal(line, &m) == nil && m.Role != "" {
-					count++
-					if count > src.Base {
-						effective++
-					}
-				}
-				if _, werr := bw.Write(line); werr != nil {
-					in.Close()
-					out.Close()
-					os.Remove(tmp)
-					return SnapshotInfo{}, werr
-				}
-				bytes += int64(len(line))
-			}
-			if rerr != nil {
-				break
-			}
-		}
-		if err := bw.Flush(); err != nil {
-			in.Close()
-			out.Close()
-			os.Remove(tmp)
-			return SnapshotInfo{}, err
-		}
-		in.Close()
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		os.Remove(tmp)
+	defer lease.Close()
+	id, err := lease.Fingerprint()
+	if err != nil {
 		return SnapshotInfo{}, err
 	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return SnapshotInfo{}, err
+	if id != snapshotID {
+		return SnapshotInfo{}, errors.New("快照版本在冻结边界之后变化")
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, "messages.jsonl")); err != nil {
-		os.Remove(tmp)
-		return SnapshotInfo{}, err
-	}
-	info := SnapshotInfo{
-		SnapshotID: snapshotID, SourceSID: srcSID, Messages: count, Base: src.Base,
-		Effective: effective, Omitted: src.Omitted, Summary: src.Summary,
-		Generation: src.SessionGeneration, CreatedAt: time.Now().Unix(), Bytes: bytes,
-		Settings: SnapshotSettings{Agent: src.Agent, Model: src.Model, Thinking: src.Thinking,
-			Mode: src.Mode, Workspaces: src.Workspaces, Title: src.Title},
-	}
-	b, _ := json.MarshalIndent(info, "", "  ")
-	if err := writeFileAtomic(filepath.Join(dir, "context.json"), b); err != nil {
-		return SnapshotInfo{}, err
-	}
-	s.snapCacheMu.Lock()
-	s.snapBytes = map[string]int64{}
-	s.snapCache = map[string][]Msg{}
-	s.snapCacheMu.Unlock()
-	return info, nil
+	return lease.Write()
 }
-
-// SnapshotIDFor 由源会话的历史内容与设置算出一个稳定的快照 ID：内容一样就复用。
 func (s *Store) SnapshotIDFor(srcSID string, st Settings) string {
-	f, err := os.Open(s.file(srcSID))
+	lease, err := s.FreezeSnapshot(srcSID, st)
 	if err != nil {
-		return fmt.Sprintf("snap-%d", time.Now().UnixNano())
+		return ""
 	}
-	defer f.Close()
-	h := sha1.New()
-	fmt.Fprintf(h, "%s|%d|%d|%s", srcSID, st.Base, st.SessionGeneration, st.Summary)
-	br := bufio.NewReaderSize(f, 64*1024)
-	buf := make([]byte, 64*1024)
-	var total int64
-	for {
-		n, err := br.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-			total += int64(n)
-		}
-		if err != nil {
-			break
-		}
+	defer lease.Close()
+	id, err := lease.Fingerprint()
+	if err != nil {
+		return ""
 	}
-	sum := h.Sum(nil)
-	return "snap-" + hex.EncodeToString(sum)[:16]
+	return id
 }
 
 // Snapshot 读一份快照的说明。
@@ -350,9 +282,24 @@ func (s *Store) SnapshotMessages(id string) []Msg {
 	s.snapCacheMu.Unlock()
 
 	all := readMsgs(filepath.Join(s.snapshotDir(id), "messages.jsonl"), info.Base)
-	cost := int64(0)
+	cost := int64(cap(all)) * int64(unsafe.Sizeof(Msg{}))
 	for _, m := range all {
-		cost += int64(len(m.Content) + len(m.Reasoning))
+		cost += int64(len(m.Content) + len(m.Reasoning) + len(m.Role) + len(m.ToolCallID) + len(m.Agent) + len(m.Kind) + len(m.ParentRun) + len(m.SourceID) + len(m.Sender) + len(m.ID) + len(m.AgendaID) + len(m.Reason))
+		for _, id := range m.SourceIDs {
+			cost += int64(unsafe.Sizeof(id)) + int64(len(id))
+		}
+		for _, tc := range m.ToolCalls {
+			cost += int64(unsafe.Sizeof(tc)) + int64(len(tc.ID)+len(tc.Type)+len(tc.Function.Name)+len(tc.Function.Arguments))
+		}
+		for _, at := range m.Images {
+			cost += int64(unsafe.Sizeof(at)) + int64(len(at.ID)+len(at.Name)+len(at.MIME)+len(at.Source))
+		}
+		for _, at := range m.Sent {
+			cost += int64(unsafe.Sizeof(at)) + int64(len(at.ID)+len(at.Name)+len(at.MIME)+len(at.Source))
+		}
+		if m.Usage != nil {
+			cost += int64(unsafe.Sizeof(*m.Usage))
+		}
 	}
 	s.snapCacheMu.Lock()
 	if s.snapCache == nil {
@@ -397,6 +344,19 @@ func (s *Store) snapshotBudget() int64 {
 // UnloadHistory 丢掉某个会话在内存里的历史（空闲分支用，下次访问再从磁盘加载）。
 func (s *Store) UnloadHistory(sid string) {
 	delete(s.hist, sid)
+	delete(s.settings, sid)
+}
+
+// CacheUsage is a lightweight diagnostic; call under the Store owner's lock.
+func (s *Store) CacheUsage() (histories, snapshots int, bytes int64) {
+	histories = len(s.hist)
+	s.snapCacheMu.Lock()
+	defer s.snapCacheMu.Unlock()
+	snapshots = len(s.snapCache)
+	for _, n := range s.snapBytes {
+		bytes += n
+	}
+	return
 }
 
 // ---- 分支 ----
@@ -445,33 +405,31 @@ func (s *Store) ReadyBranch(sid string, snap SnapshotInfo, status string) error 
 		status = BranchReady
 	}
 	meta.Status = status
-	if err := s.saveBranch(meta); err != nil {
-		return err
-	}
-	// 继承适用设置：模型、思考、agent、工作目录、模式；运行态一律清掉
-	st := s.Settings(meta.ParentSID)
-	st.Agent = meta.OwnerAgent
+	// Settings must be durable before ready is visible.
+	st := Settings{Agent: meta.OwnerAgent, Model: snap.Settings.Model, Mode: snap.Settings.Mode}
 	if st.Agent == "" {
 		st.Agent = snap.Settings.Agent
-	}
-	if snap.Settings.Model != "" {
-		st.Model = snap.Settings.Model
 	}
 	st.Thinking = snap.Settings.Thinking
 	if snap.Settings.Mode != "" {
 		st.Mode = snap.Settings.Mode
 	}
 	st.Workspaces = append([]string(nil), snap.Settings.Workspaces...)
-	st.WorkspacesSet = true
+	st.WorkspacesSet = snap.Settings.WorkspacesSet
 	st.Title = meta.Title
 	st.Prefix = nil
 	st.Meter = Meter{}
 	st.EnvNote, st.MemNote, st.LifeNote, st.Handoff = "", "", "", ""
 	st.Recalled = nil
 	st.Omitted = snap.Omitted
+	st.Summary = snap.Summary
 	st.Base = snap.Base // 快照里的有效窗口从 Base 之后开始
-	st.Group, st.Web = false, false
+	st.Group, st.Web = snap.Settings.Group, false
 	if err := s.SaveSettings(sid, st); err != nil {
+		return err
+	}
+	meta.InheritedEnd, meta.InheritedEndSet = snap.Messages, true
+	if err := s.saveBranch(meta); err != nil {
 		return err
 	}
 	delete(s.hist, sid)
@@ -643,15 +601,25 @@ func (s *Store) loadBranches() {
 // loadBranch 是分支的有效历史：快照里分叉点的有效窗口 + 自己的尾部。
 // skip 是已经压缩掉的条数（Settings.Base），跨这两段一起数。
 func (s *Store) loadBranch(br BranchMeta, skip int) []Msg {
-	snap := s.SnapshotMessages(br.SnapshotID)
-	out := make([]Msg, 0, len(snap)+16)
-	if skip < len(snap) {
-		out = append(out, snap[skip:]...)
-		skip = 0
-	} else {
-		skip -= len(snap)
+	info, ok := s.Snapshot(br.SnapshotID)
+	if !ok {
+		return nil
 	}
-	return append(out, s.loadFrom(br.SID, skip)...)
+	snap := s.SnapshotMessages(br.SnapshotID)
+	end := info.Messages
+	if br.InheritedEndSet {
+		end = min(end, br.InheritedEnd)
+	}
+	keep := max(0, end-info.Base)
+	if keep < len(snap) {
+		snap = snap[:keep]
+	}
+	offset := max(0, skip-info.Base)
+	out := make([]Msg, 0, len(snap)+16)
+	if offset < len(snap) {
+		out = append(out, snap[offset:]...)
+	}
+	return append(out, s.loadFrom(br.SID, max(0, skip-end))...)
 }
 
 func writeFileAtomic(path string, data []byte) error {

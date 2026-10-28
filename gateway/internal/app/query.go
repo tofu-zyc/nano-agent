@@ -137,11 +137,19 @@ func (a *App) approvalList() []ApprovalInfo {
 func (a *App) sessionInfo(sid string) SessionInfo {
 	st := a.store.Settings(sid)
 	w := a.workspaceOf(sid)
+	branch := a.isBranchSID(sid)
+	active := a.sessions[sid] != nil && a.sessions[sid].run != nil
+	var context session.ContextInfo
+	if !branch || active {
+		context = a.contextInfo(sid)
+	} else {
+		context = session.ContextInfo{Lazy: true, Last: st.Meter.Usage, Compacted: st.Base, CompactedAt: st.CompactedAt, Total: st.Meter.Usage.PromptTokens}
+	}
 	info := SessionInfo{SID: sid, Agent: a.execAgentID(sid), RouteAgent: a.routeAgentID(sid), Group: st.Group, Channel: "web", Endpoints: a.endpointsOf(sid), Title: st.Title,
 		Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
-		Model: st.Model, Compacted: st.Base, Context: a.contextInfo(sid)}
+		Model: st.Model, Compacted: st.Base, Context: context}
 	info.Interrupted = a.interruptedCount(sid)
-	info.AgentFixed = fixedAgentSID(sid)
+	info.AgentFixed = fixedAgentSID(sid) || branch
 	info.SwitchBlocked = a.agentSwitchBlocked(sid)
 	info.CanSwitchAgent = info.SwitchBlocked == "" && a.agentStore != nil
 	if m, _, ok := a.modelOf(sid); ok {
@@ -189,6 +197,12 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 			info.Pending++
 		}
 	}
+	if branch && !active {
+		info.Messages, info.LastAt, info.Usage = a.store.RawStats(sid)
+		info.Context.Messages = max(0, info.Messages-st.Base)
+		info.PersonaFile = persona.FileFor(sid)
+		return info
+	}
 	h := a.store.History(sid)
 	info.Messages = len(h)
 	for _, m := range h {
@@ -219,14 +233,26 @@ func (a *App) Session(sid string) (info SessionInfo, ok bool) {
 	if !a.hasSession(sid) {
 		return SessionInfo{}, false
 	}
-	return a.sessionInfo(sid), true
+	info = a.sessionInfo(sid)
+	if a.isBranchSID(sid) {
+		info.Context = a.contextInfo(sid)
+		if a.sessions[sid] == nil || a.sessions[sid].run == nil {
+			a.store.UnloadHistory(sid)
+		}
+	}
+	return info, true
 }
 
 // History 返回会话历史（从上次裁剪的位置开始）和代替被裁掉部分的说明。
 func (a *App) History(sid string) ([]session.Msg, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return slices.Clone(a.store.History(sid)), a.store.Settings(sid).Summary
+	h := slices.Clone(a.store.History(sid))
+	summary := a.store.Settings(sid).Summary
+	if a.isBranchSID(sid) && (a.sessions[sid] == nil || a.sessions[sid].run == nil) {
+		a.store.UnloadHistory(sid)
+	}
+	return h, summary
 }
 
 // SessionPatch 是网页里对会话设置的修改，nil 表示不改。

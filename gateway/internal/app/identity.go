@@ -50,6 +50,9 @@ func (a *App) execAgentID(sid string) string {
 	if sid == "" {
 		return agents.DefaultID
 	}
+	if br, ok := a.store.Branch(sid); ok && br.OwnerAgent != "" {
+		return br.OwnerAgent
+	}
 	if fixedAgentSID(sid) || a.agentStore == nil {
 		return a.routeAgentID(sid)
 	}
@@ -97,6 +100,9 @@ func (a *App) hasExplicitAgent(sid string) bool {
 
 // agentSwitchBlocked 是现在不能切换 agent 的原因，空表示可以。调用方持有锁。
 func (a *App) agentSwitchBlocked(sid string) string {
+	if a.isBranchSID(sid) {
+		return "分支固定创建时的执行身份"
+	}
 	if fixedAgentSID(sid) {
 		return "这是 agent 自己的内部会话（内心活动、整理记忆、定时任务或房间成员），身份是固定的"
 	}

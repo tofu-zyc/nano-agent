@@ -98,6 +98,9 @@ var helpText = func() string {
 }()
 
 type App struct {
+	forkWG            sync.WaitGroup
+	forkWork          map[string]chan struct{}
+	forkSlots         chan struct{}
 	experiences       map[string]*experience.Store
 	mindsErr          error
 	schedules         *schedule.Store
@@ -393,6 +396,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	}
 	a.migrate()
 	a.loadEndpoints()
+	a.recoverForksLocked()
 	a.loadWorkspaces()
 	a.loadSchedules()
 	a.skills.Scan()
@@ -728,6 +732,10 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	// 心跳状态：拟人型的每次聊天都记一条事件（同一个会话合并），不每条都唤醒模型
 	a.mindHeard(c.s.sid, who, m.SenderName, heard)
 	s := c.s
+	if br, ok := a.store.Branch(s.sid); ok && (br.Status == session.BranchPreparing || br.Status == session.BranchPendingBoundary || br.SnapshotID == "") {
+		a.answer(c, "分支还没有就绪，请先查看分支状态")
+		return
+	}
 	if isLifeSID(s.sid) && a.agentOf(s.sid).Life() && s.run == nil && !s.compacting {
 		ag := a.agentOf(s.sid)
 		if err := a.startMindLocked(ag, a.mind(ag.ID), autonomy.Trigger{Kind: autonomy.EventManualWake, Reason: "主人留言：" + m.Text, Due: a.now().Unix()}, true); err != nil {
@@ -1172,6 +1180,9 @@ func (a *App) endRun(s *sess, note string) {
 	if r.cancelLLM != nil {
 		r.cancelLLM()
 	}
+	if r.outcome == "" {
+		r.outcome = proto.StatusError
+	}
 	// 源会话到了安全边界：这一轮的工具批次和生成都已经结束，等着的 Fork 可以复制上下文了
 	a.finishPendingForks(s.sid)
 	for _, cancel := range r.execs {
@@ -1549,7 +1560,10 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	a.endRun(s, "")
 	// 这一轮显示到的窗口都看到了这里
-	end := a.histEnd(s.sid)
+	end := 0
+	if len(r.outs) > 0 {
+		end = a.histEnd(s.sid)
+	}
 	for _, o := range r.outs {
 		a.markSeen(o.ep, s.sid, end, false)
 	}
@@ -1617,7 +1631,9 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	s.lastActivity = a.now()
 	a.startRun(s)
-	if s.run == nil && !isCronSID(s.sid) {
+	if s.run == nil && a.isBranchSID(s.sid) {
+		a.store.UnloadHistory(s.sid)
+	} else if s.run == nil && !isCronSID(s.sid) {
 		a.maybeCompact(s, false)
 	}
 }
@@ -1644,6 +1660,9 @@ func (a *App) generateModel(s *sess) {
 	// 边界一：上一批工具调用已经全部闭合、这次模型请求还没构造——先把等着的插话写进历史，
 	// 本次请求的快照就能看到补充。快照之后才到的留给下一个边界，不改写在途请求。
 	a.drainInterjections(s, r)
+	if r.calls > 0 && len(r.inbox) == 0 {
+		a.finishPendingForks(s.sid)
+	}
 	// 这次请求的快照包含到哪一条补充：结束时用它判断“已注入但模型没读到”的补充
 	r.readRevision = r.injected
 	r.modelReq++

@@ -75,6 +75,11 @@ func (a *App) personaFor(sid string) (string, string) {
 	if t, p := a.persona.File(persona.FileFor(sid)); p != "" {
 		return t, p
 	}
+	if br, ok := a.store.Branch(sid); ok && br.SnapshotID != "" {
+		if snap, exists := a.store.Snapshot(br.SnapshotID); exists && snap.Settings.Persona != "" {
+			return snap.Settings.Persona, ""
+		}
+	}
 	ag := a.agentOf(sid)
 	if a.personaAgent != nil {
 		if t, p := a.personaAgent.File(filepath.Join(ag.ID, "persona.md")); p != "" {

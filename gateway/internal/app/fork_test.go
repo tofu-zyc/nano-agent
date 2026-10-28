@@ -110,7 +110,9 @@ func TestForkWhileGeneratingWaitsForBoundary(t *testing.T) {
 	e.ch.wait(t, "收到：正在做的事")
 	deadline := time.Now().Add(2 * time.Second)
 	for {
+		e.a.mu.Lock()
 		m, ok := e.a.store.Branch(res.BranchSID)
+		e.a.mu.Unlock()
 		if ok && m.Status == session.BranchReady {
 			if m.SnapshotID == "" {
 				t.Fatal("ready 了却没有快照")

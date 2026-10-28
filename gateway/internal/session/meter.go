@@ -12,6 +12,7 @@ type Meter struct {
 	Signature string    `json:"signature"`
 }
 type ContextInfo struct {
+	Lazy        bool      `json:"lazy,omitempty"`
 	AutoAt      int       `json:"auto_at"`
 	IdleFor     string    `json:"idle_for"`
 	Total       int       `json:"total"`

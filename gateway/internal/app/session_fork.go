@@ -67,7 +67,7 @@ type BranchInfo struct {
 }
 
 // maxBranchesPerSession 是一个会话最多能分出来几个分支：不让自动分支无限展开。
-const maxBranchesPerSession = 16
+const maxBranchesPerSession = 128
 
 // forkPending 是一个已经落盘、还在等源会话安全边界的 Fork。
 type forkPending struct {
@@ -115,8 +115,29 @@ func (a *App) newBranchSID() string {
 // SessionFork 创建一个会话分支。用户命令和 agent 的 Session 工具都走这里。
 func (a *App) SessionFork(req SessionForkRequest) (SessionForkResult, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.sessionForkLocked(req)
+	res, err := a.sessionForkLocked(req)
+	done := a.forkWork[res.BranchSID]
+	a.mu.Unlock()
+	if err != nil {
+		return res, err
+	}
+	if done != nil && res.Status == session.BranchPreparing {
+		select {
+		case <-done:
+		case <-a.ctx.Done():
+			return res, a.ctx.Err()
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if br, ok := a.store.Branch(res.BranchSID); ok {
+			res = a.forkResultOf(br, res.OperationID)
+			res.Started = br.Status == session.BranchRunning
+			if br.Status == session.BranchNeedsAttention {
+				return res, errors.New(br.Note)
+			}
+		}
+	}
+	return res, nil
 }
 
 func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, error) {
@@ -129,6 +150,9 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	}
 	if !a.hasSession(src) && !a.isBranchSID(src) {
 		return SessionForkResult{}, errors.New("没有这个会话")
+	}
+	if req.Start && strings.TrimSpace(req.Prompt) == "" {
+		return SessionForkResult{}, errors.New("启动分支必须提供 prompt")
 	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
@@ -154,13 +178,17 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	// 幂等：同一个 request_id 返回同一个操作和分支
 	if op, ok := a.store.OpByRequest(requestID); ok {
 		if br, ok := a.store.Branch(op.BranchSID); ok {
+			if br.Status == session.BranchNeedsAttention && op.Stage == "snapshot_ready" {
+				a.recoverForksLocked()
+				br, _ = a.store.Branch(op.BranchSID)
+			}
 			return a.forkResultOf(br, op.OperationID), nil
 		}
 	}
 	if len(a.store.Children(src)) >= maxBranchesPerSession {
-		return SessionForkResult{}, fmt.Errorf("这个会话已经有 %d 个分支了，先归档一些再建新的", maxBranchesPerSession)
+		return SessionForkResult{}, fmt.Errorf("这个会话已达到保留上限 %d；请显式删除不用的分支后再创建", maxBranchesPerSession)
 	}
-	op, err := a.store.BeginOp(session.ForkOp{RequestID: requestID, ParentSID: src})
+	op, err := a.store.BeginOp(session.ForkOp{Version: 2, RequestID: requestID, ParentSID: src, BranchSID: a.newBranchSID(), Stage: "reserved"})
 	if err != nil {
 		return SessionForkResult{}, err
 	}
@@ -169,20 +197,41 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 			return a.forkResultOf(br, op.OperationID), nil
 		}
 	}
+	if op.BranchSID == "" {
+		for _, br := range a.store.Branches() {
+			if br.OperationID == op.OperationID {
+				op.BranchSID = br.SID
+				break
+			}
+		}
+		if op.BranchSID == "" {
+			op.BranchSID = a.newBranchSID()
+		}
+		if err := a.store.UpdateOp(op); err != nil {
+			return SessionForkResult{}, err
+		}
+		if br, ok := a.store.Branch(op.BranchSID); ok {
+			return a.forkResultOf(br, op.OperationID), nil
+		}
+	}
 	agentID := a.execAgentID(src)
 	meta := session.BranchMeta{
-		SID:         a.newBranchSID(),
-		ParentSID:   src,
-		OwnerAgent:  agentID,
-		CreatedBy:   by,
-		CreatedAt:   a.now().Unix(),
-		Title:       title,
-		Intent:      req.Prompt,
-		Status:      session.BranchPreparing,
-		Delivery:    delivery,
-		OperationID: op.OperationID,
-		RequestID:   requestID,
-		Generation:  a.store.Settings(src).SessionGeneration,
+		SID:            op.BranchSID,
+		ParentSID:      src,
+		OwnerAgent:     agentID,
+		CreatedBy:      by,
+		CreatedAt:      a.now().Unix(),
+		Title:          title,
+		Intent:         req.Prompt,
+		Status:         session.BranchPreparing,
+		Delivery:       delivery,
+		OperationID:    op.OperationID,
+		RequestID:      requestID,
+		Generation:     a.store.Settings(src).SessionGeneration,
+		StartRequested: req.Start,
+	}
+	if source := a.sessions[src]; source != nil && source.run != nil {
+		meta.OriginRunID = source.run.runID
 	}
 	meta.Checkpoint = a.forkCheckpoint(src)
 	if err := a.store.BeginBranch(meta); err != nil {
@@ -195,10 +244,12 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	a.log.Info("受理会话分支", "branch", meta.SID, "parent", src, "op", op.OperationID, "by", by)
 	// 同批工具里调用、或者源会话正在跑：先回 pending_boundary，等安全边界再做快照
 	if a.forkWaitBoundary(src) {
-		_ = a.store.SetBranch(meta.SID, func(m *session.BranchMeta) {
+		if err := a.store.SetBranch(meta.SID, func(m *session.BranchMeta) {
 			m.Status = session.BranchPendingBoundary
 			m.Note = "等源会话这一轮结束"
-		})
+		}); err != nil {
+			return SessionForkResult{}, err
+		}
 		a.pendingForks[src] = append(a.pendingForks[src], forkPending{BranchSID: meta.SID, Prompt: req.Prompt, Start: req.Start, By: by})
 		got, _ := a.store.Branch(meta.SID)
 		return a.forkResultOf(got, op.OperationID), nil
@@ -207,11 +258,56 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	if err != nil {
 		return SessionForkResult{}, err
 	}
-	if req.Start && strings.TrimSpace(req.Prompt) != "" {
-		a.startBranchRunLocked(meta.SID, req.Prompt, by)
-		res.Started = true
-	}
 	return res, nil
+}
+
+// Recovery never substitutes today's context for an interrupted boundary.
+// A durable completed snapshot can finish publication; an unknown source run
+// stays visible for review and is not automatically replayed.
+func (a *App) recoverForksLocked() {
+	for _, br := range a.store.Branches() {
+		if a.forkWork[br.SID] != nil {
+			continue
+		}
+		if current := a.sessions[br.SID]; current != nil && current.run != nil {
+			continue
+		}
+		if source := a.sessions[br.ParentSID]; source != nil && source.run != nil && br.OriginRunID != "" && br.OriginRunID == source.run.runID && br.Status == session.BranchPendingBoundary {
+			continue
+		}
+		if br.Status == session.BranchRunning {
+			if err := a.store.SetBranch(br.SID, func(m *session.BranchMeta) {
+				m.Status = session.BranchNeedsAttention
+				m.Note = "上次分支执行中断，先确认真实状态，再显式继续；不重放旧工具"
+			}); err != nil {
+				a.log.Error("记录分支中断失败", "err", err)
+			}
+			continue
+		}
+		if br.Status != session.BranchPreparing && br.Status != session.BranchPendingBoundary && br.Status != session.BranchNeedsAttention {
+			continue
+		}
+		op, ok := a.store.OpByRequest(br.RequestID)
+		if br.Status == session.BranchNeedsAttention && (!ok || op.Stage != "snapshot_ready") {
+			continue
+		}
+		var recoveryErr error
+		if ok && op.BranchSID == br.SID && op.OperationID == br.OperationID && op.Stage == "snapshot_ready" && op.SnapshotID != "" && a.checkForkPublication(op) == nil {
+			if snap, exists := a.store.Snapshot(op.SnapshotID); exists {
+				recoveryErr = a.store.ReadyBranch(br.SID, snap, session.BranchReady)
+				if recoveryErr == nil {
+					continue
+				}
+			} else {
+				recoveryErr = errors.New("已登记快照缺失")
+			}
+		} else {
+			recoveryErr = errors.New("来源执行已中断，无法确认所需边界；请检查后显式继续或重新分叉")
+		}
+		if err := a.store.SetBranch(br.SID, func(m *session.BranchMeta) { m.Status = session.BranchNeedsAttention; m.Note = recoveryErr.Error() }); err != nil {
+			a.log.Error("恢复分支状态失败", "branch", br.SID, "err", err)
+		}
+	}
 }
 
 // forkCheckpoint 是源会话现在的分叉点（绝对位置）。
@@ -230,29 +326,125 @@ func (a *App) forkWaitBoundary(sid string) bool {
 
 // materializeForkLocked 做快照、把分支连上去、发布 ready。调用方持有锁。
 func (a *App) materializeForkLocked(branchSID string) (SessionForkResult, error) {
+	if err := a.ctx.Err(); err != nil {
+		return SessionForkResult{}, err
+	}
 	meta, ok := a.store.Branch(branchSID)
 	if !ok {
 		return SessionForkResult{}, errors.New("没有这个分支")
 	}
+	if a.forkWork == nil {
+		a.forkWork = map[string]chan struct{}{}
+		a.forkSlots = make(chan struct{}, 2)
+	}
+	if a.forkWork[branchSID] != nil {
+		return a.forkResultOf(meta, meta.OperationID), nil
+	}
+	if len(a.forkWork) >= 32 {
+		return SessionForkResult{}, errors.New("快照队列已满，请稍后重试")
+	}
 	src := a.store.Settings(meta.ParentSID)
-	snapID := a.store.SnapshotIDFor(meta.ParentSID, src)
-	snap, err := a.store.WriteSnapshot(meta.ParentSID, snapID, src)
+	src.Agent = meta.OwnerAgent
+	if m, _, ok := a.modelOf(meta.ParentSID); ok {
+		src.Model = m.ID
+	}
+	src.Thinking = a.thinkingOf(meta.ParentSID)
+	w := a.workspaceOf(meta.ParentSID)
+	src.Workspaces, src.WorkspacesSet = w.ids(), true
+	src.Mode = w.mode
+	if !a.isAdmin(meta.CreatedBy) {
+		src.Mode = a.runMode(w, meta.CreatedBy)
+	}
+	src.SnapshotPersona, _ = a.personaFor(meta.ParentSID)
+	lease, err := a.store.FreezeSnapshot(meta.ParentSID, src)
 	if err != nil {
-		a.log.Warn("做分叉快照失败", "branch", branchSID, "err", err)
-		_ = a.store.SetBranch(branchSID, func(m *session.BranchMeta) {
-			m.Status = session.BranchNeedsAttention
-			m.Note = "快照失败：" + err.Error()
-		})
 		return SessionForkResult{}, err
 	}
-	if err := a.store.ReadyBranch(branchSID, snap, session.BranchReady); err != nil {
+	if err = a.store.SetBranch(branchSID, func(m *session.BranchMeta) {
+		m.Status = session.BranchPreparing
+		m.Note = "正在保存固定边界快照"
+	}); err != nil {
+		lease.Close()
 		return SessionForkResult{}, err
 	}
-	got, _ := a.store.Branch(branchSID)
-	a.publish(events.Event{T: "branch", SID: branchSID, Name: got.ParentSID, Kind: "ready",
-		Data: map[string]any{"status": got.Status, "snapshot_id": snap.SnapshotID, "title": got.Title}})
-	a.log.Info("分支就绪", "branch", branchSID, "snapshot", snap.SnapshotID)
-	return a.forkResultOf(got, got.OperationID), nil
+	done := make(chan struct{})
+	a.forkWork[branchSID] = done
+	a.forkWG.Add(1)
+	go func() {
+		defer a.forkWG.Done()
+		select {
+		case a.forkSlots <- struct{}{}:
+		case <-a.ctx.Done():
+			lease.Close()
+			a.mu.Lock()
+			delete(a.forkWork, branchSID)
+			close(done)
+			a.mu.Unlock()
+			return
+		}
+		snap, copyErr := lease.Write()
+		lease.Close()
+		<-a.forkSlots
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		defer close(done)
+		defer delete(a.forkWork, branchSID)
+		current, exists := a.store.Branch(branchSID)
+		if a.ctx.Err() != nil {
+			return
+		}
+		if !exists || current.OperationID != meta.OperationID || current.Status != session.BranchPreparing {
+			return
+		}
+		err := copyErr
+		if err == nil {
+			op, ok := a.store.OpByRequest(meta.RequestID)
+			if !ok || op.BranchSID != branchSID {
+				err = errors.New("分叉操作记录缺失或归属不匹配")
+			} else if checkErr := a.checkForkPublication(op); checkErr != nil {
+				err = checkErr
+			} else {
+				op.SnapshotID = snap.SnapshotID
+				op.Stage = "snapshot_ready"
+				err = a.store.UpdateOp(op)
+				if err == nil {
+					err = a.store.ReadyBranch(branchSID, snap, session.BranchReady)
+				}
+			}
+		}
+		if err != nil {
+			if saveErr := a.store.SetBranch(branchSID, func(m *session.BranchMeta) {
+				m.Status = session.BranchNeedsAttention
+				m.Note = "快照未提交：" + err.Error()
+			}); saveErr != nil {
+				a.log.Error("保存分支恢复错误失败", "branch", branchSID, "err", saveErr)
+			}
+			a.log.Error("保存分支快照失败", "branch", branchSID, "err", err)
+			return
+		}
+		a.lifecycleExperienceFor(meta.OwnerAgent, meta.ParentSID, "在稳定边界创建了分支 "+branchSID)
+		a.publish(events.Event{T: "branch", SID: branchSID, Name: meta.ParentSID, Kind: "ready", Data: map[string]any{"status": session.BranchReady, "snapshot_id": snap.SnapshotID, "title": meta.Title}})
+		a.store.UnloadHistory(branchSID)
+		if current.StartRequested && strings.TrimSpace(current.Intent) != "" {
+			a.startBranchRunLocked(branchSID, current.Intent, current.CreatedBy)
+		}
+	}()
+	meta.Status = session.BranchPreparing
+	return a.forkResultOf(meta, meta.OperationID), nil
+}
+
+func (a *App) checkForkPublication(op session.ForkOp) error {
+	if op.Version > 2 {
+		return errors.New("分叉操作版本过新")
+	}
+	gen, rev, err := a.store.LifecycleVersion(op.BranchSID)
+	if err != nil {
+		return err
+	}
+	if gen != op.TargetGeneration || rev != op.TargetRevision {
+		return errors.New("目标已被重置或换代，旧分叉发布授权失效")
+	}
+	return nil
 }
 
 // startBranchRunLocked 在分支里排一条自己的任务并开跑。分支没有聊天窗口，输出只写进分支。
@@ -294,12 +486,24 @@ func (a *App) finishPendingForks(sid string) {
 		if got.Status != session.BranchPendingBoundary && got.Status != session.BranchPreparing {
 			continue
 		}
+		if source := a.sessions[sid]; source != nil && source.run != nil {
+			r := source.run
+			if (r.outcome != "" && r.outcome != proto.StatusOK) || (got.OriginRunID != "" && got.OriginRunID != r.runID) {
+				if err := a.store.SetBranch(p.BranchSID, func(m *session.BranchMeta) {
+					m.Status = session.BranchCancelled
+					m.Note = "来源在完整边界前中止，未发布快照"
+				}); err != nil {
+					a.log.Error("保存分叉取消失败", "err", err)
+				}
+				continue
+			}
+		}
 		if _, err := a.materializeForkLocked(p.BranchSID); err != nil {
 			a.log.Warn("边界到了但分支没做成", "branch", p.BranchSID, "err", err)
 			continue
 		}
 		if p.Start && strings.TrimSpace(p.Prompt) != "" {
-			a.startBranchRunLocked(p.BranchSID, p.Prompt, p.By)
+			// The copy worker starts only after durable ready publication.
 		}
 	}
 }
@@ -534,6 +738,8 @@ func (a *App) cmdSessionFork(c in, title string) {
 		"结果留在分支里，不会发到这个聊天。"
 	if res.Status == session.BranchPendingBoundary {
 		text = "已登记分支 " + res.BranchSID + "，等当前这一轮结束（工具批次和生成都完成）后才会复制上下文并发布 ready。"
+	} else if res.Status == session.BranchPreparing {
+		text = "已创建分支记录 " + res.BranchSID + "，正在保存固定边界上下文（preparing），尚未就绪；原聊天窗口继续使用。"
 	}
 	a.answer(c, text)
 }
@@ -587,7 +793,7 @@ func sessionTool() proto.ToolSpec {
     "title": {"type": "string", "description": "分支标题"},
     "prompt": {"type": "string", "description": "start=true 或 continue 时，这一轮要在分支里做什么"},
     "start": {"type": "boolean", "description": "建完就在分支里开始跑"},
-    "delivery": {"type": "string", "enum": ["silent", "report"], "description": "默认 silent：结果留在分支里，不发回原来的聊天"},
+    "delivery": {"type": "string", "enum": ["silent"], "description": "结果留在分支里；只有用户显式操作可以开启报告"},
     "request_id": {"type": "string", "description": "幂等键：同一个 request_id 重试返回同一个分支"}
   },
   "required": ["action"]
