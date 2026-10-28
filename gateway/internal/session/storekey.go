@@ -307,6 +307,19 @@ func resolveLegacyName(name string) (string, bool) {
 // 写入路径必须用这个接口，不能各自猜文件在不在。
 func (s *Store) locate(sid, suffix string) (string, bool, error) {
 	np := s.newPath(sid, suffix)
+	// 提升计划的所有权先于“旧源是否还在”。缺失旧源不能让半成品
+	// 变成原生新会话，普通读写也不能替冲突计划写 active。
+	if op, has, err := s.readPromoteOp(sid); err != nil {
+		return np, false, fmt.Errorf("%w：%v", errLegacyUnauthorized, err)
+	} else if has && !s.isDead(sid) {
+		if _, err := os.Stat(s.activeMarker(sid)); err == nil {
+			if err := s.checkPromotionPublication(op); err != nil {
+				return np, false, err
+			}
+		} else if err := s.promote(sid); err != nil {
+			return np, false, fmt.Errorf("%w：%v", errLegacyUnauthorized, err)
+		}
+	}
 	// 已激活：新位置就是权威位置（重置后文件不存在也不回退旧备份）
 	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
 		if _, err := os.Stat(np); err == nil {
@@ -317,6 +330,9 @@ func (s *Store) locate(sid, suffix string) (string, bool, error) {
 	// 删除墓碑：旧备份只作恢复来源，扫描和重放都不能自动复活
 	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
 		return np, false, nil
+	}
+	if err := s.checkPromotionEligibility(sid); err != nil {
+		return np, false, err
 	}
 	if s.hasLegacy(sid) {
 		// 旧会话：必须完整提升并提交激活标记，未完成之前一律失败，不能拿半成品当数据

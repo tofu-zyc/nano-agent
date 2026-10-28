@@ -309,6 +309,13 @@ func (s *Store) markPromoteConflict(op *promoteOp, idx int, note string) error {
 }
 
 func (s *Store) settlePromoteOp(op promoteOp, stage, reason string) error {
+	// 失效的是这个来源的导入授权，不仅是某个操作编号。先持久撤权，
+	// 再移走活动记录；否则下一次 locate 可以换一个 operation_id 重导旧正文。
+	if stage == "superseded" {
+		if err := writeFileAtomic(s.promotionRevokedPath(op.SID), []byte(op.OperationID)); err != nil {
+			return fmt.Errorf("保存旧来源失效状态失败：%w", err)
+		}
+	}
 	op.Stage, op.Reason, op.UpdatedAt = stage, reason, time.Now().Unix()
 	b, _ := json.MarshalIndent(op, "", "  ")
 	if err := writeFileAtomic(s.promoteSettledPath(op), b); err != nil {
@@ -373,19 +380,24 @@ func (s *Store) promoteSession(sid string) (promoteOp, error) {
 		}
 		// 任何后续删除 / 重置 / 换代都先让旧提升失效，再谈续办。
 		if deleted {
-			_ = s.settlePromoteOp(op, "superseded", "会话已被删除")
-			return op, nil
+			return op, s.settlePromoteOp(op, "superseded", "会话已被删除")
 		}
 		if op.FromGen != gen || op.ToGen != gen || op.FromRev != rev || op.ToRev != rev {
-			_ = s.settlePromoteOp(op, "superseded", "会话在提升期间删除、重置或换代")
+			if err := s.settlePromoteOp(op, "superseded", "会话在提升期间删除、重置或换代"); err != nil {
+				return op, err
+			}
 			if active {
 				return op, nil
 			}
 			return op, fmt.Errorf("%w：提升操作已因后续失效被取消", errLegacyUnauthorized)
 		}
 		if active {
-			// active 是提交点。记录停在 verified 说明提交后没来得及写终态，补上即可。
-			_ = s.finishPromoteCommitted(op)
+			if err := s.checkPromotionPublication(op); err != nil {
+				return op, err
+			}
+			if err := s.finishPromoteCommitted(op); err != nil {
+				return op, err
+			}
 			op.Stage = "committed"
 			return op, nil
 		}
@@ -400,6 +412,9 @@ func (s *Store) promoteSession(sid string) (promoteOp, error) {
 	} else {
 		if active || deleted {
 			return op, nil
+		}
+		if err := s.checkPromotionEligibility(sid); err != nil {
+			return op, err
 		}
 		if gen > 0 {
 			return op, fmt.Errorf("%w：旧会话已经开过第 %d 代，旧备份不能自动升级", errLegacyUnauthorized, gen)
@@ -512,14 +527,74 @@ func (s *Store) promoteSession(sid string) (promoteOp, error) {
 	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
 		return op, err
 	}
-	if err := writeFileAtomic(s.activeMarker(sid), []byte(Key(sid))); err != nil {
+	publication, _ := json.Marshal(map[string]string{"sid": sid, "operation_id": op.OperationID})
+	if err := writeFileAtomic(s.activeMarker(sid), publication); err != nil {
 		return op, err
 	}
 	s.legacyActive(sid)
 	op.Stage = "committed"
 	// active 已经落盘，提交点已过；终态记录失败不能反过来让调用方以为没提升。
-	_ = s.finishPromoteCommitted(op)
-	return op, nil
+	return op, s.finishPromoteCommitted(op)
+}
+
+func (s *Store) promotionRevokedPath(sid string) string {
+	return filepath.Join(s.dirV1Promotions(), Key(sid)+".revoked")
+}
+
+func (s *Store) checkPromotionEligibility(sid string) error {
+	if _, err := os.Stat(s.promotionRevokedPath(sid)); err == nil {
+		return fmt.Errorf("%w：旧来源已持久失效", errLegacyUnauthorized)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// 发布证据绑定操作；普通 ensureActive 不能替不完整清单补交提交。
+// 兼容旧版 verified + 裸键提交点，但仍核验完整集合，历史允许合法后续追加。
+func (s *Store) checkPromotionPublication(op promoteOp) error {
+	if op.Stage != "verified" && op.Stage != "committed" {
+		return fmt.Errorf("%w：提升尚未完整校验，不能发布", errLegacyUnauthorized)
+	}
+	for _, item := range op.Items {
+		if item.Stage != "verified" {
+			return fmt.Errorf("%w：提升项目尚未完成", errLegacyUnauthorized)
+		}
+	}
+	b, err := os.ReadFile(s.activeMarker(op.SID))
+	if err != nil {
+		return err
+	}
+	var publication struct {
+		SID         string `json:"sid"`
+		OperationID string `json:"operation_id"`
+	}
+	if json.Unmarshal(b, &publication) == nil && publication.SID == op.SID && publication.OperationID == op.OperationID {
+		return nil
+	}
+	if string(b) != Key(op.SID) {
+		return fmt.Errorf("%w：提升提交归属不匹配", errLegacyUnauthorized)
+	}
+	for _, item := range op.Items {
+		_, dst, err := s.promoteItemPaths(op.SID, item)
+		if err != nil {
+			return err
+		}
+		meta := renameFile{Len: item.Len, Sum: item.Sum}
+		var ok bool
+		if item.Kind == "history" {
+			ok, err = versionIsPrefix(dst, meta)
+		} else {
+			ok, err = versionMatches(dst, meta)
+		}
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w：提升副本不完整", errLegacyUnauthorized)
+		}
+	}
+	return nil
 }
 
 // ResumePromotions 在启动时继续/结算中断的旧布局提升。没有 active 标记的记录会

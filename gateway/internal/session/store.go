@@ -420,7 +420,9 @@ func (s *Store) ensureActive(sid string) error {
 // startNewGeneration 显式创建同 sid 的新一代：先把旧代残留整体挪进 orphan 目录隔离，
 // 再清墓碑、写激活标记。任何一步失败都返回错误，绝不先追加到残留文件上。
 func (s *Store) startNewGeneration(sid string) error {
-	if !s.isDead(sid) {
+	_, revokedErr := os.Stat(s.promotionRevokedPath(sid))
+	_, activeErr := os.Stat(s.activeMarker(sid))
+	if !s.isDead(sid) && !(revokedErr == nil && errors.Is(activeErr, os.ErrNotExist)) {
 		return nil
 	}
 	stamp := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -757,6 +759,11 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
+	// 先固定一个完整已提交视图，再推进失效 revision；不能让 Reset 自己
+	// 将一个尚有导入资格的旧会话留在“revision 已变但未提升”的窗口。
+	if _, _, err := s.locate(sid, ".jsonl"); err != nil {
+		return err
+	}
 	// 先推进上下文版本：即使后面清理失败，也绝不能让更早的改名恢复把旧上下文写回来。
 	if _, err := s.bumpRev(sid); err != nil {
 		return fmt.Errorf("重置前登记上下文版本失败：%w", err)
