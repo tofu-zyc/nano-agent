@@ -8,7 +8,7 @@ package session
 
 import (
 	"bufio"
-	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,7 +75,9 @@ func New(dir string) (*Store, error) {
 		filepath.Join(dir, "v1", "active"),
 		filepath.Join(dir, "v1", "deleted"),
 		filepath.Join(dir, "v1", "gen"),
+		filepath.Join(dir, "v1", "rev"),
 		filepath.Join(dir, "v1", "renames"),
+		filepath.Join(dir, "v1", "renames", "settled"),
 		filepath.Join(dir, "v1", "staging"),
 		filepath.Join(dir, "v1", "orphan"),
 		filepath.Join(dir, "v1", "archive"),
@@ -96,15 +98,29 @@ func (s *Store) targetHasOurContent(to string, op renameOp, suffixes []string) e
 		if !tracked {
 			continue
 		}
-		data, err := os.ReadFile(s.newPath(to, suffix))
-		if err != nil {
-			return fmt.Errorf("提交点已过但目标缺少内容（%s），保留现场等待人工核对", suffix)
-		}
-		if int64(len(data)) == meta.Len && sumOf(data) == meta.Sum {
-			continue
-		}
-		if suffix == ".jsonl" && int64(len(data)) > meta.Len && sumOf(data[:meta.Len]) == meta.Sum {
-			continue // 发布过之后又追加了新消息
+		path := s.newPath(to, suffix)
+		if suffix == ".jsonl" {
+			ok, err := versionIsPrefix(path, meta)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("提交点已过但目标缺少内容（%s），保留现场等待人工核对", suffix)
+				}
+				return err
+			}
+			if ok {
+				continue
+			}
+		} else {
+			ok, err := versionMatches(path, meta)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("提交点已过但目标缺少内容（%s），保留现场等待人工核对", suffix)
+				}
+				return err
+			}
+			if ok {
+				continue
+			}
 		}
 		return fmt.Errorf("提交点已过但目标内容与记录不一致（%s），保留双方等待人工核对", suffix)
 	}
@@ -118,13 +134,17 @@ func (s *Store) renameStagingDir(from, to string) string {
 
 // ResumeRenames 在启动时把没做完的改名按阶段继续（启动入口和测试共用）。
 func (s *Store) ResumeRenames() error {
-	for _, e := range mustReadDir(filepath.Join(s.dirV1(), "renames")) {
+	entries, err := os.ReadDir(filepath.Join(s.dirV1(), "renames"))
+	if err != nil {
+		return fmt.Errorf("读未完成改名目录失败：%w", err)
+	}
+	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(s.dirV1(), "renames", e.Name()))
 		if err != nil {
-			continue
+			return fmt.Errorf("读改名操作记录失败：%s：%w", e.Name(), err)
 		}
 		var op renameOp
 		if json.Unmarshal(b, &op) != nil || op.From == "" || op.To == "" {
@@ -137,19 +157,40 @@ func (s *Store) ResumeRenames() error {
 	return nil
 }
 
-// renameOp 是一次改名的持久操作记录：绑定源的目标身份、世代与每个文件的内容版本。
+// renameOp 是一次改名的持久操作记录：绑定 operation_id、源 / 目标身份、
+// 双方世代与上下文版本，以及每个文件的内容版本。
+//
+// 版本 2 起，恢复必须先核对这份记录仍然有效（尤其是目标在操作之后没有被
+// 删除 / 重置、源没有换代），再决定提交、清理或结算为失效。缺 operation_id
+// 的记录是旧版本留下的，只能按旧协议处理，不能据此取得新的删除权限。
 type renameOp struct {
-	From    string                `json:"from"`
-	To      string                `json:"to"`
-	Stage   string                `json:"stage"` // started | copied | committed
-	FromGen int64                 `json:"from_gen"`
-	Files   map[string]renameFile `json:"files,omitempty"`
+	Version     int                   `json:"version,omitempty"`
+	OperationID string                `json:"operation_id,omitempty"`
+	From        string                `json:"from"`
+	To          string                `json:"to"`
+	Stage       string                `json:"stage"` // started | copied | committing | committed（另有终态 settled 记录）
+	Reason      string                `json:"reason,omitempty"`
+	SettledAt   int64                 `json:"settled_at,omitempty"`
+	FromGen     int64                 `json:"from_gen"`
+	FromRev     int64                 `json:"from_rev,omitempty"`
+	ToGen       int64                 `json:"to_gen,omitempty"`
+	ToRev       int64                 `json:"to_rev,omitempty"`
+	Files       map[string]renameFile `json:"files,omitempty"`
 }
 
-// renameFile 是一个文件在复制时的内容版本（长度 + sha1）。
+// renameFile 是一个文件在复制时的内容版本（长度 + sha256）。
 type renameFile struct {
 	Len int64  `json:"len"`
 	Sum string `json:"sum"`
+}
+
+// renameTombstone 是改名提交时写的来源墓碑。带 operation_id 才能区分
+// “本操作按协议让源失效”和“用户后来主动删除源”；旧版墓碑是裸键，没有归属。
+type renameTombstone struct {
+	OperationID string `json:"operation_id"`
+	From        string `json:"from,omitempty"`
+	FromGen     int64  `json:"from_gen,omitempty"`
+	At          int64  `json:"at,omitempty"`
 }
 
 func sumOf(b []byte) string {
@@ -161,6 +202,192 @@ func (s *Store) renameOpFile(from, to string) string {
 	return filepath.Join(s.dirV1(), "renames", Key(from)+"-"+Key(to)+".json")
 }
 
+func newRenameOperationID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("生成改名操作 ID 失败：%w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func (s *Store) writeRenameTombstone(op renameOp) error {
+	b, err := json.MarshalIndent(renameTombstone{OperationID: op.OperationID, From: op.From,
+		FromGen: op.FromGen, At: time.Now().Unix()}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(s.deletedMarker(op.From), b)
+}
+
+// deadMarkerOwner 读墓碑归属。exists=false 表示没有墓碑；owner="" 表示
+// 旧版墓碑或用户删除，不属于当前改名操作。
+func (s *Store) deadMarkerOwner(sid string) (owner string, exists bool, err error) {
+	b, err := os.ReadFile(s.deletedMarker(sid))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", true, err
+	}
+	var t renameTombstone
+	if json.Unmarshal(b, &t) == nil && t.OperationID != "" {
+		return t.OperationID, true, nil
+	}
+	return "", true, nil
+}
+
+// renameTargetAuthorized 核对目标仍然是操作开始时的那一代 / 那一版上下文。
+// 目标被删除、重置或换代后，旧操作必须失效，不能把旧上下文写回去。
+func (s *Store) renameTargetAuthorized(op renameOp) (bool, error) {
+	if s.isDead(op.To) {
+		return false, nil
+	}
+	rev, err := s.readRev(op.To)
+	if err != nil {
+		return false, err
+	}
+	if rev != op.ToRev {
+		return false, nil
+	}
+	if op.OperationID == "" {
+		return true, nil // 旧记录没有绑定目标世代；至少删除 / 重置 / 版本错误仍然会使其失效
+	}
+	gen, err := s.readGen(op.To)
+	if err != nil {
+		return false, err
+	}
+	return gen == op.ToGen, nil
+}
+
+// renameSourceState 返回源在恢复时的归属状态：alive = 仍是操作开始时的同一代；
+// ours = 墓碑属于本操作（提交点已过）；other = 已被用户删除 / 重置 / 换代，
+// 旧操作不得再发布或清理。
+func (s *Store) renameSourceState(op renameOp) (string, error) {
+	if s.isDead(op.From) {
+		owner, _, err := s.deadMarkerOwner(op.From)
+		if err != nil {
+			return "", err
+		}
+		if op.OperationID != "" && owner != op.OperationID {
+			return "other", nil
+		}
+		return "ours", nil
+	}
+	gen, err := s.readGen(op.From)
+	if err != nil {
+		return "", err
+	}
+	if gen != op.FromGen {
+		return "other", nil
+	}
+	rev, err := s.readRev(op.From)
+	if err != nil {
+		return "", err
+	}
+	if rev != op.FromRev {
+		return "other", nil
+	}
+	return "alive", nil
+}
+
+// settleRenameOp 把一笔不再能继续（或已经完成）的操作写成终态记录，保留现场供排查，
+// 但不静默发布 / 清理另一代。活动记录和暂存目录随后移除。
+func (s *Store) settleRenameOp(op renameOp, opPath, stage, reason string) error {
+	op.Stage, op.Reason, op.SettledAt = stage, reason, time.Now().Unix()
+	b, _ := json.MarshalIndent(op, "", "  ")
+	id := op.OperationID
+	if id == "" {
+		id = Key(op.From) + "-" + Key(op.To)
+	}
+	if err := writeFileAtomic(filepath.Join(s.dirV1(), "renames", "settled", id+".json"), b); err != nil {
+		return fmt.Errorf("记录改名终态失败（保留活动记录）：%w", err)
+	}
+	_ = os.RemoveAll(s.renameStagingDir(op.From, op.To))
+	if err := os.Remove(opPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("改名已结算，移除活动记录失败（可以重试）：%w", err)
+	}
+	return nil
+}
+
+// validateRenameSource 核对源仍是复制时的同一组文件、同一份内容。
+// 复制之后新出现的文件也必须算进来，否则发布后清理会删掉已受理的新消息。
+func (s *Store) validateRenameSource(op renameOp, suffixes []string) error {
+	for _, suffix := range suffixes {
+		meta, tracked := op.Files[suffix]
+		src, ok, err := s.locate(op.From, suffix)
+		if err != nil {
+			return err
+		}
+		if !tracked && !ok {
+			continue
+		}
+		if !tracked && ok {
+			return fmt.Errorf("源在这一笔改名期间新出现了文件（%s），保留双方等待人工核对", suffix)
+		}
+		if tracked && !ok {
+			return fmt.Errorf("改名的源文件不见了（%s），保留现场等待人工核对", suffix)
+		}
+		if err := verifyFileVersion(src, meta, fmt.Sprintf("源在这一笔改名期间的内容（%s）", suffix)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRenameStaging 核对暂存副本齐全且与记录一致。记录里有、暂存里没了，
+// 就是丢了内容，不能继续发布再删源。
+func (s *Store) validateRenameStaging(op renameOp, staging string) error {
+	for suffix, meta := range op.Files {
+		staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
+		if err := verifyFileVersion(staged, meta, fmt.Sprintf("改名的暂存副本（%s）", suffix)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publishRenameTarget 把暂存副本发布到目标。目标已激活过（重试）时，只接受
+// 已经属于本操作的内容：完全相同，或历史以本操作发布的内容开头（后面有新消息）。
+func (s *Store) publishRenameTarget(op renameOp, staging string, suffixes []string) error {
+	if err := s.ensureActive(op.To); err != nil {
+		return err
+	}
+	for _, suffix := range suffixes {
+		meta, tracked := op.Files[suffix]
+		if !tracked {
+			continue
+		}
+		staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
+		dst := s.newPath(op.To, suffix)
+		if _, statErr := os.Stat(dst); statErr == nil {
+			var ok bool
+			var err error
+			if suffix == ".jsonl" {
+				ok, err = versionIsPrefix(dst, meta)
+			} else {
+				ok, err = versionMatches(dst, meta)
+			}
+			if err != nil {
+				return err
+			}
+			if ok {
+				continue // 已经发布过
+			}
+			return fmt.Errorf("目标已经有不同的内容（%s），保留双方等待人工核对", suffix)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		got, err := copyFileVersion(staged, dst)
+		if err != nil {
+			return fmt.Errorf("发布改名目标失败（%s）：%w", suffix, err)
+		}
+		if got.Len != meta.Len || got.Sum != meta.Sum {
+			return fmt.Errorf("发布后的目标内容与记录不一致（%s），保留双方等待人工核对", suffix)
+		}
+	}
+	return nil
+}
+
 // Dir 是数据目录。
 func (s *Store) Dir() string { return s.dir }
 
@@ -169,6 +396,9 @@ func (s *Store) file(sid string) string {
 }
 
 // ensureActive 给新会话写激活标记：从创建那一刻起它就是新布局里的权威数据。
+//
+// 注意：它会清掉删除墓碑。只有明确的用户写入（startNewGeneration）或已经核对过
+// 目标世代 / 版本 / 归属的改名发布才能调用；恢复旧操作不能直接拿它取消后续删除。
 func (s *Store) ensureActive(sid string) error {
 	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
 		return err
@@ -224,6 +454,9 @@ func (s *Store) legacyPath(sid, suffix string) string {
 func (s *Store) readFileFor(sid, suffix string) (string, bool) {
 	p, ok, err := s.locate(sid, suffix)
 	if err != nil {
+		if errors.Is(err, errLegacyUnauthorized) {
+			return p, false // 旧备份已失去自动授权，不能退回旧路径继续读
+		}
 		if lp := s.legacyPath(sid, suffix); lp != "" {
 			if _, statErr := os.Stat(lp); statErr == nil {
 				return lp, true
@@ -522,6 +755,10 @@ func (s *Store) offsetOf(sid string, n int) (int64, error) {
 
 // Reset 清空会话历史（磁盘文件一并删除）。工作目录等设置保留，但环境说明要在新的历史里重新给一次。
 func (s *Store) Reset(sid string) error {
+	// 先推进上下文版本：即使后面清理失败，也绝不能让更早的改名恢复把旧上下文写回来。
+	if _, err := s.bumpRev(sid); err != nil {
+		return fmt.Errorf("重置前登记上下文版本失败：%w", err)
+	}
 	// 分支的快照不能删（也许还有别的分支在用）：把 Base 推到超过快照长度，
 	// 有效窗口就空了，下次访问看到的是干净上下文。
 	base := 0
@@ -572,6 +809,10 @@ func (s *Store) Exists(sid string) bool {
 }
 
 // Rename 把会话的历史和设置换一个 ID（升级旧数据用）。新 ID 不能已经存在。
+//
+// 恢复协议（版本 2）：operation_id 绑定双方世代 / 上下文版本；提交前先落盘
+// committing 意图，来源墓碑带 operation_id。恢复时先核对这份授权仍然有效，
+// 再消费复制内容；目标被删除 / 重置或源已换代时只结算旧操作，不发布、不清理。
 func (s *Store) Rename(from, to string) error {
 	if from == to {
 		return nil
@@ -585,9 +826,28 @@ func (s *Store) Rename(from, to string) error {
 		}
 		stage = op.Stage
 		switch stage {
-		case "started", "copied", "committed":
+		case "started", "copied", "committing", "committed":
+		case "cancelled", "superseded", "conflict":
+			return s.settleRenameOp(op, opPath, stage, op.Reason)
 		default:
 			return fmt.Errorf("改名操作记录的阶段不认识：%q（保留现场，不执行清理）", stage)
+		}
+		if op.Version >= 2 && op.OperationID == "" {
+			return fmt.Errorf("改名操作记录缺少 operation_id：%s（保留现场，不执行清理）", opPath)
+		}
+		if op.Files == nil {
+			op.Files = map[string]renameFile{}
+		}
+		for suffix := range op.Files {
+			switch suffix {
+			case ".jsonl", ".settings.json", ".branch.json":
+			default:
+				return fmt.Errorf("改名操作记录包含未知文件类型 %q（保留现场，不执行清理）", suffix)
+			}
+		}
+		if op.FromGen < 0 || op.FromGen > maxCounter || op.FromRev < 0 || op.FromRev > maxCounter ||
+			op.ToGen < 0 || op.ToGen > maxCounter || op.ToRev < 0 || op.ToRev > maxCounter {
+			return fmt.Errorf("改名操作记录的世代 / 版本越界（保留现场，不执行清理）")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -602,6 +862,9 @@ func (s *Store) Rename(from, to string) error {
 		if s.isDead(from) {
 			return fmt.Errorf("会话 %s 已经被删除", from)
 		}
+		if s.isDead(to) {
+			return fmt.Errorf("目标会话 %s 已经被删除", to)
+		}
 		if s.Exists(to) {
 			return fmt.Errorf("会话 %s 已经存在", to)
 		}
@@ -612,13 +875,46 @@ func (s *Store) Rename(from, to string) error {
 		if err != nil {
 			return err
 		}
-		op = renameOp{From: from, To: to, Stage: "started", FromGen: gen, Files: map[string]renameFile{}}
+		rev, err := s.readRev(from)
+		if err != nil {
+			return err
+		}
+		toGen, err := s.readGen(to)
+		if err != nil {
+			return err
+		}
+		toRev, err := s.readRev(to)
+		if err != nil {
+			return err
+		}
+		id, err := newRenameOperationID()
+		if err != nil {
+			return err
+		}
+		op = renameOp{Version: 2, OperationID: id, From: from, To: to, Stage: "started",
+			FromGen: gen, FromRev: rev, ToGen: toGen, ToRev: toRev, Files: map[string]renameFile{}}
 		if err := writeOp(); err != nil {
 			return err
 		}
 		stage = "started"
 	}
 	if stage == "started" {
+		if op.OperationID != "" {
+			state, err := s.renameSourceState(op)
+			if err != nil {
+				return err
+			}
+			if state != "alive" {
+				return s.settleRenameOp(op, opPath, "superseded", "源在复制前已删除、重置或换代")
+			}
+			ok, err := s.renameTargetAuthorized(op)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return s.settleRenameOp(op, opPath, "superseded", "目标在复制前已删除、重置或换代")
+			}
+		}
 		if err := os.MkdirAll(staging, 0o700); err != nil {
 			return err
 		}
@@ -630,14 +926,14 @@ func (s *Store) Rename(from, to string) error {
 			if !ok {
 				continue
 			}
-			data, err := os.ReadFile(src)
+			if _, err := os.Stat(src); err != nil {
+				return err
+			}
+			meta, err := copyFileVersion(src, filepath.Join(staging, strings.TrimPrefix(suffix, ".")))
 			if err != nil {
-				return err
+				return fmt.Errorf("复制改名源文件失败（%s）：%w", suffix, err)
 			}
-			if err := os.WriteFile(filepath.Join(staging, strings.TrimPrefix(suffix, ".")), data, 0o600); err != nil {
-				return err
-			}
-			op.Files[suffix] = renameFile{Len: int64(len(data)), Sum: sumOf(data)}
+			op.Files[suffix] = meta
 		}
 		op.Stage = "copied"
 		if err := writeOp(); err != nil {
@@ -645,10 +941,27 @@ func (s *Store) Rename(from, to string) error {
 		}
 		stage = "copied"
 	}
+	// 任何继续动作之前先核对目标授权：后面的 ensureActive 会清墓碑、发布会写正文，
+	// 被后续删除 / 重置使旧操作失效时绝不能走到那里。
+	if op.OperationID != "" {
+		ok, err := s.renameTargetAuthorized(op)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return s.settleRenameOp(op, opPath, "superseded", "目标在改名期间被删除、重置或换代")
+		}
+	}
 	if stage == "copied" {
-		// 提交窗口：源墓碑已经写下去、committed 记录没写成就中断了。
-		// 这说明提交点已经过了，只需核对目标确实有我们的内容，然后补记录收尾。
-		if s.isDead(from) {
+		state, err := s.renameSourceState(op)
+		if err != nil {
+			return err
+		}
+		if state == "other" {
+			return s.settleRenameOp(op, opPath, "superseded", "源在改名期间被删除、重置或换代")
+		}
+		if state == "ours" {
+			// 提交窗口：来源墓碑已经是本操作的，committed 记录没写成就中断了。
 			if err := s.targetHasOurContent(to, op, suffixes); err != nil {
 				return err
 			}
@@ -660,97 +973,82 @@ func (s *Store) Rename(from, to string) error {
 		}
 	}
 	if stage == "copied" {
-		// 源在这一笔期间有没有变：每次都要把**完整文件集合**核对一遍。
-		// 复制之后新出现的文件（例如原本没有历史、后来写了一条）也要算进来，
-		// 否则发布后清理会把这条已受理的消息删掉。
-		for _, suffix := range suffixes {
-			meta, tracked := op.Files[suffix]
-			src, ok, err := s.locate(from, suffix)
-			if err != nil {
-				return err
-			}
-			if !tracked && !ok {
-				continue
-			}
-			if !tracked && ok {
-				return fmt.Errorf("源在这一笔改名期间新出现了文件（%s），保留双方等待人工核对", suffix)
-			}
-			if tracked && !ok {
-				return fmt.Errorf("改名的源文件不见了（%s），保留现场等待人工核对", suffix)
-			}
-			data, err := os.ReadFile(src)
-			if err != nil {
-				return err
-			}
-			if int64(len(data)) != meta.Len || sumOf(data) != meta.Sum {
-				return fmt.Errorf("源在这一笔改名期间又被写了新内容（%s），保留双方等待人工核对", suffix)
-			}
-		}
-		// 暂存副本必须齐全：记录里有、暂存里没了，就是丢了内容，不能继续发布再删源
-		for _, suffix := range suffixes {
-			meta, tracked := op.Files[suffix]
-			if !tracked {
-				continue
-			}
-			staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
-			data, err := os.ReadFile(staged)
-			if err != nil {
-				return fmt.Errorf("改名的暂存副本不见了（%s），保留源和现场", suffix)
-			}
-			if int64(len(data)) != meta.Len || sumOf(data) != meta.Sum {
-				return fmt.Errorf("改名的暂存副本与记录不一致（%s），保留源和现场", suffix)
-			}
-		}
-		if err := s.ensureActive(to); err != nil {
+		// 源仍是同一代：完整文件集合、内容和暂存副本都核对一遍，再写提交意图。
+		if err := s.validateRenameSource(op, suffixes); err != nil {
 			return err
 		}
-		for _, suffix := range suffixes {
-			staged := filepath.Join(staging, strings.TrimPrefix(suffix, "."))
-			data, err := os.ReadFile(staged)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				return err
-			}
-			dst := s.newPath(to, suffix)
-			if old, err := os.ReadFile(dst); err == nil {
-				if sumOf(old) == sumOf(data) {
-					continue // 已经发布过
-				}
-				// 历史是追加写的：目标以我们的内容开头，说明发布已经发生、后面又追加了新消息，
-				// 这些新消息必须保留，不能覆盖也不能因此丢掉源。只有前缀成立才这么判。
-				if suffix == ".jsonl" && len(old) > len(data) && bytes.Equal(old[:len(data)], data) {
-					continue
-				}
-				return fmt.Errorf("目标已经有不同的内容（%s），保留双方等待人工核对", suffix)
-			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
-			if err := os.WriteFile(dst, data, 0o600); err != nil {
-				return err
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(s.deletedMarker(from)), 0o700); err != nil {
+		if err := s.validateRenameStaging(op, staging); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(s.deletedMarker(from), []byte(Key(from))); err != nil {
-			return err
-		}
-		_ = os.Remove(s.activeMarker(from))
-		op.Stage = "committed"
+		op.Stage = "committing"
 		if err := writeOp(); err != nil {
 			return err
 		}
-		stage = "committed"
+		stage = "committing"
+	}
+	if stage == "committing" {
+		state, err := s.renameSourceState(op)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case "other":
+			return s.settleRenameOp(op, opPath, "superseded", "源的后续失效不属于本操作")
+		case "ours":
+			// 提交点已过：只核对目标确实承接了我们的内容，然后补记录收尾。
+			if err := s.targetHasOurContent(to, op, suffixes); err != nil {
+				return err
+			}
+			op.Stage = "committed"
+			if err := writeOp(); err != nil {
+				return err
+			}
+			stage = "committed"
+		case "alive":
+			if err := s.validateRenameSource(op, suffixes); err != nil {
+				return err
+			}
+			if err := s.validateRenameStaging(op, staging); err != nil {
+				return err
+			}
+			if err := s.publishRenameTarget(op, staging, suffixes); err != nil {
+				return err
+			}
+			if err := s.writeRenameTombstone(op); err != nil {
+				return err
+			}
+			_ = os.Remove(s.activeMarker(from))
+			op.Stage = "committed"
+			if err := writeOp(); err != nil {
+				return err
+			}
+			stage = "committed"
+		}
+	}
+	if stage != "committed" {
+		return fmt.Errorf("改名操作停在未知状态 %q（保留现场）", stage)
 	}
 	// committed：只做清理。源如果已经开了新一代，这些路径属于新代，绝不能删。
 	gen, gerr := s.readGen(from)
 	if gerr != nil {
 		return fmt.Errorf("改名已提交，但读会话世代失败，暂不清理源文件（可以重试）：%w", gerr)
 	}
-	if gen == op.FromGen {
+	rev, rerr := s.readRev(from)
+	if rerr != nil {
+		return fmt.Errorf("改名已提交，但读会话上下文版本失败，暂不清理源文件（可以重试）：%w", rerr)
+	}
+	owned := gen == op.FromGen && rev == op.FromRev
+	if owned {
+		owner, exists, err := s.deadMarkerOwner(from)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return s.settleRenameOp(op, opPath, "conflict", "改名已提交但来源墓碑不存在，保留双方")
+		}
+		if op.OperationID != "" && owner != op.OperationID {
+			return s.settleRenameOp(op, opPath, "superseded", "来源墓碑属于后续操作，保留现有状态")
+		}
 		for _, suffix := range suffixes {
 			if err := os.Remove(s.newPath(from, suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("改名已提交，清理源文件失败（可以重试）：%w", err)
@@ -777,6 +1075,12 @@ func (s *Store) Delete(sid string) error {
 	if err := writeFileAtomic(s.deletedMarker(sid), []byte(Key(sid))); err != nil {
 		return err
 	}
+	// 推进上下文版本：删除之后的恢复必须能看出旧改名已经失效。
+	// 墓碑已经生效，即使这里失败也绝不能反过来复活旧内容。
+	var revErr error
+	if _, err := s.bumpRev(sid); err != nil {
+		revErr = fmt.Errorf("登记删除后的上下文版本失败：%w", err)
+	}
 	_ = os.Remove(s.activeMarker(sid))
 	// 物理清理用的是“这次删除拥有的资源”：不能走 locate，墓碑会让它返回空集
 	var firstErr error
@@ -785,6 +1089,9 @@ func (s *Store) Delete(sid string) error {
 			firstErr = err
 		}
 	}
+	if firstErr == nil {
+		firstErr = revErr
+	}
 	if err := os.RemoveAll(filepath.Join(s.dirV1Archive(), Key(sid))); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -792,7 +1099,7 @@ func (s *Store) Delete(sid string) error {
 	delete(s.settings, sid)
 	delete(s.branches, sid)
 	if firstErr != nil {
-		return fmt.Errorf("删除会话时清理文件失败（墓碑已生效，可以重试）：%w", firstErr)
+		return fmt.Errorf("删除会话时登记删除状态或清理文件失败（墓碑已生效，可以重试）：%w", firstErr)
 	}
 	return nil
 }

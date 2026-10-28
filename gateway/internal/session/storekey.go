@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +39,10 @@ const (
 	keyLongPrefix = "h-"
 	keyMaxBase    = 96 // 超过这个长度的 sid 用哈希键 + 持久映射
 )
+
+// errLegacyUnauthorized 表示旧备份已经失去自动授权（开过新一代或世代状态损坏）。
+// 调用方不能像普通升级失败那样退回旧路径继续读。
+var errLegacyUnauthorized = errors.New("旧备份没有自动授权")
 
 // Key 是会话 ID 的规范文件名键：UTF-8 字节的十六进制。
 func Key(sid string) string {
@@ -106,7 +111,28 @@ func (s *Store) genFile(sid string) string {
 	return filepath.Join(s.dirV1(), "gen", Key(sid))
 }
 
-// readGen 读当前世代号（没有文件是第 0 代）。
+// 世代 / 上下文版本都是有限单调计数。超过上界视为损坏，不能继续加、更不能回绕。
+const maxCounter = int64(1) << 62
+
+// parseCounter 只接受规范的十进制非负整数。空内容、带单位、负值、超出上界都算损坏。
+func parseCounter(txt string) (int64, bool) {
+	txt = strings.TrimSpace(txt)
+	if txt == "" || strings.HasPrefix(txt, "+") || strings.HasPrefix(txt, "-") {
+		return 0, false
+	}
+	if len(txt) > 1 && txt[0] == '0' {
+		return 0, false // 只接受规范十进制，前导零不是产品写出的格式
+	}
+	n, err := strconv.ParseInt(txt, 10, 64)
+	if err != nil || n < 0 || n > maxCounter {
+		return 0, false
+	}
+	return n, true
+}
+
+// readGen 读当前世代号。只有文件真正不存在才是第 0 代；空文件、未知格式、
+// 负值 / 越界都返回错误，绝不给出一个可能恰好匹配旧操作的默认数字。
+// 上一版写进文件的是 Key(sid) 本身，只有它精确等于当前 sid 的旧键时才兼容为第 1 代。
 func (s *Store) readGen(sid string) (int64, error) {
 	b, err := os.ReadFile(s.genFile(sid))
 	if err != nil {
@@ -116,28 +142,70 @@ func (s *Store) readGen(sid string) (int64, error) {
 		return 0, fmt.Errorf("读会话世代失败（%s）：%w", sid, err)
 	}
 	txt := strings.TrimSpace(string(b))
-	if txt == "" {
-		return 0, nil
+	if txt == Key(sid) {
+		if _, ambiguous := parseCounter(txt); ambiguous {
+			// 旧版标记和普通计数恰好长得一样：不猜，保留现场等待迁移。
+			return 0, fmt.Errorf("会话世代文件格式有歧义（%s）：%q", sid, txt)
+		}
+		return 1, nil // 上一版的旧键标记
 	}
-	n, err := strconv.ParseInt(txt, 10, 64)
-	if err != nil {
-		// 上一版的标记写的是键本身（不是数字）：那也算“已经开过新一代”
-		return 1, nil
+	if n, ok := parseCounter(txt); ok {
+		return n, nil
 	}
-	return n, nil
+	return 0, fmt.Errorf("会话世代文件内容无效（%s）：%q", sid, txt)
 }
 
-// bumpGen 把世代号加一并持久化，返回新值。
+// bumpGen 把世代号加一并持久化，返回新值。先成功读取并验证原值，再写入。
 func (s *Store) bumpGen(sid string) (int64, error) {
 	cur, err := s.readGen(sid)
 	if err != nil {
 		return 0, err
+	}
+	if cur >= maxCounter {
+		return 0, fmt.Errorf("会话世代已经达到上界（%s）：%d", sid, cur)
 	}
 	next := cur + 1
 	if err := os.MkdirAll(filepath.Dir(s.genFile(sid)), 0o700); err != nil {
 		return 0, err
 	}
 	if err := writeFileAtomic(s.genFile(sid), []byte(strconv.FormatInt(next, 10))); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// revFile 是上下文版本：Delete / Reset 这类“后续失效决定”会把它推进。
+// 改名操作同时记录源 / 目标的世代与版本，恢复时必须逐项核对，旧授权不能覆盖后来的删除或重置。
+func (s *Store) revFile(sid string) string {
+	return filepath.Join(s.dirV1(), "rev", Key(sid))
+}
+
+func (s *Store) readRev(sid string) (int64, error) {
+	b, err := os.ReadFile(s.revFile(sid))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读会话上下文版本失败（%s）：%w", sid, err)
+	}
+	txt := strings.TrimSpace(string(b))
+	n, ok := parseCounter(txt)
+	if !ok {
+		return 0, fmt.Errorf("会话上下文版本文件内容无效（%s）：%q", sid, txt)
+	}
+	return n, nil
+}
+
+func (s *Store) bumpRev(sid string) (int64, error) {
+	cur, err := s.readRev(sid)
+	if err != nil {
+		return 0, err
+	}
+	if cur >= maxCounter {
+		return 0, fmt.Errorf("会话上下文版本已经达到上界（%s）：%d", sid, cur)
+	}
+	next := cur + 1
+	if err := writeFileAtomic(s.revFile(sid), []byte(strconv.FormatInt(next, 10))); err != nil {
 		return 0, err
 	}
 	return next, nil
@@ -294,46 +362,60 @@ func (s *Store) promote(sid string) error {
 	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
 		return nil
 	}
-	copyOne := func(src, dst string, check func([]byte) error) error {
-		data, err := os.ReadFile(src)
+	// 旧备份的自动升级也必须消费世代错误：身份读不出来或已经开过新一代时，
+	// 不能把旧文件重新提升成权威数据。
+	gen, err := s.readGen(sid)
+	if err != nil {
+		return fmt.Errorf("%w：旧会话的世代状态不可读：%v", errLegacyUnauthorized, err)
+	}
+	if gen > 0 {
+		return fmt.Errorf("%w：旧会话已经开过第 %d 代，旧备份不能自动升级", errLegacyUnauthorized, gen)
+	}
+	copyOne := func(src, dst string, check func(io.Reader) error) error {
+		sf, err := os.Open(src)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		if err := check(data); err != nil {
-			return fmt.Errorf("%s 内容无法校验：%w", src, err)
+		checkErr := check(sf)
+		sf.Close()
+		if checkErr != nil {
+			return fmt.Errorf("%s 内容无法校验：%w", src, checkErr)
 		}
-		old, rerr := os.ReadFile(dst)
-		switch {
-		case rerr == nil:
-			if string(old) == string(data) {
+		if _, err := os.Stat(dst); err == nil {
+			same, err := sameFileContent(src, dst)
+			if err != nil {
+				return err
+			}
+			if same {
 				return nil // 已经复制过
 			}
 			return fmt.Errorf("%s 与 %s 内容不同，保留双方等待人工核对", src, dst)
-		case errors.Is(rerr, os.ErrNotExist):
-			// 正常：目标还不存在
-		default:
-			return fmt.Errorf("读目标 %s 失败：%w", dst, rerr)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("读目标 %s 失败：%w", dst, err)
 		}
-		if err := writeFileAtomic(dst, data); err != nil {
+		if _, err := copyFileVersion(src, dst); err != nil {
 			return err
 		}
-		got, err := os.ReadFile(dst)
-		if err != nil || string(got) != string(data) {
-			return fmt.Errorf("写 %s 后回读不一致", dst)
+		same, err := sameFileContent(src, dst)
+		if err != nil {
+			return err
+		}
+		if !same {
+			return fmt.Errorf("写 %s 后内容与源不一致", dst)
 		}
 		return nil
 	}
 	ln := LegacyKey(sid)
 	for _, item := range []struct {
 		suffix string
-		check  func([]byte) error
+		check  func(io.Reader) error
 	}{
-		{".jsonl", jsonlCheck},
-		{".settings.json", jsonCheck},
-		{".branch.json", jsonCheck},
+		{".jsonl", jsonlCheckReader},
+		{".settings.json", jsonCheckReader},
+		{".branch.json", jsonCheckReader},
 	} {
 		if err := copyOne(filepath.Join(s.dirLegacySessions(), ln+item.suffix),
 			s.newPath(sid, item.suffix), item.check); err != nil {
@@ -350,7 +432,7 @@ func (s *Store) promote(sid string) error {
 			if e.IsDir() {
 				continue
 			}
-			if err := copyOne(filepath.Join(oldArch, e.Name()), filepath.Join(newArch, e.Name()), jsonlCheck); err != nil {
+			if err := copyOne(filepath.Join(oldArch, e.Name()), filepath.Join(newArch, e.Name()), jsonlCheckReader); err != nil {
 				return err
 			}
 		}
@@ -495,15 +577,35 @@ func (s *Store) HasLegacyKeys() bool {
 }
 
 func jsonCheck(b []byte) error {
-	if len(strings.TrimSpace(string(b))) == 0 {
-		return nil
-	}
+	return jsonCheckReader(strings.NewReader(string(b)))
+}
+
+func jsonCheckReader(r io.Reader) error {
+	dec := json.NewDecoder(bufio.NewReader(r))
 	var v any
-	return json.Unmarshal(b, &v)
+	err := dec.Decode(&v)
+	if errors.Is(err, io.EOF) {
+		return nil // 空文件允许
+	}
+	if err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("JSON 后面还有多余内容")
+		}
+		return err
+	}
+	return nil
 }
 
 func jsonlCheck(b []byte) error {
-	sc := bufio.NewScanner(strings.NewReader(string(b)))
+	return jsonlCheckReader(strings.NewReader(string(b)))
+}
+
+func jsonlCheckReader(r io.Reader) error {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 64<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -515,7 +617,7 @@ func jsonlCheck(b []byte) error {
 			return err
 		}
 	}
-	return nil
+	return sc.Err()
 }
 
 // mustReadDir 读目录，失败返回空（不存在和读失败在这里等价）。
