@@ -25,6 +25,7 @@ import (
 
 // SessionForkRequest 是创建分支的请求（Session 工具或 /session fork）。
 type SessionForkRequest struct {
+	CallerSID string `json:"-"` // 宿主确认的调用场合，不能来自模型参数
 	SourceSID string `json:"source_sid"`
 	Title     string `json:"title"`
 	Prompt    string `json:"prompt"`
@@ -123,6 +124,9 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	if src == "" {
 		src = mainSID
 	}
+	if !a.canAccessForkContext(req.By, req.CallerSID, src) {
+		return SessionForkResult{}, errors.New("没有这个来源会话的访问权限")
+	}
 	if !a.hasSession(src) && !a.isBranchSID(src) {
 		return SessionForkResult{}, errors.New("没有这个会话")
 	}
@@ -143,6 +147,10 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 		// 没给 request_id 的（用户手动点的）：按来源、标题和当前时刻生成，仍然可审计
 		requestID = fmt.Sprintf("fork:%s:%d", src, a.now().UnixNano())
 	}
+	// 幂等责任绑定真实主体和来源范围；模型不能借别人的 request_id
+	// 取出另一个人的私有上下文。
+	scope, _ := json.Marshal([]string{by, req.CallerSID, src, requestID})
+	requestID = string(scope)
 	// 幂等：同一个 request_id 返回同一个操作和分支
 	if op, ok := a.store.OpByRequest(requestID); ok {
 		if br, ok := a.store.Branch(op.BranchSID); ok {
@@ -341,6 +349,9 @@ func (a *App) SessionBranchAction(action, sid, prompt, by string) (BranchInfo, e
 
 // sessionBranchActionLocked 是 SessionBranchAction 的持锁版本（exec 路径里已经拿着锁）。
 func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchInfo, error) {
+	if !a.canAccessForkContext(by, "", sid) {
+		return BranchInfo{}, errors.New("没有这个分支的访问权限")
+	}
 	m, ok := a.store.Branch(sid)
 	if !ok {
 		return BranchInfo{}, errors.New("没有这个分支")
@@ -349,6 +360,9 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 	case "inspect":
 		return a.branchInfo(m), nil
 	case "continue":
+		if m.SnapshotID == "" || m.Status == session.BranchPreparing || m.Status == session.BranchPendingBoundary || m.Status == session.BranchCancelled {
+			return BranchInfo{}, errors.New("分支还没有就绪")
+		}
 		if m.Status == session.BranchArchived {
 			return BranchInfo{}, errors.New("这个分支已经归档，先取消归档再继续")
 		}
@@ -441,8 +455,8 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 		if src == "" {
 			src = s.sid
 		}
-		res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: src, Title: args.Title, Prompt: args.Prompt,
-			Start: args.Start != nil && *args.Start, Delivery: args.Delivery, RequestID: args.RequestID, By: from})
+		res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: src, CallerSID: s.sid, Title: args.Title, Prompt: args.Prompt,
+			Start: args.Start != nil && *args.Start, Delivery: session.BranchDeliverySilent, RequestID: args.RequestID, By: from})
 		if err != nil {
 			return err.Error(), false
 		}
@@ -465,6 +479,9 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 		if src == "" {
 			src = s.sid
 		}
+		if !a.canAccessForkContext(from, s.sid, src) {
+			return "没有这个来源会话的访问权限", false
+		}
 		list := a.branchInfos(src)
 		if len(list) == 0 {
 			return "这个会话还没有分支。", true
@@ -481,6 +498,9 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 	case "inspect", "continue", "pause", "archive":
 		if args.BranchSID == "" {
 			return "要指定 branch_sid", false
+		}
+		if !a.canAccessForkContext(from, s.sid, args.BranchSID) {
+			return "没有这个分支的访问权限", false
 		}
 		info, err := a.sessionBranchActionLocked(action, args.BranchSID, args.Prompt, from)
 		if err != nil {
@@ -505,7 +525,7 @@ func (a *App) cmdSessionFork(c in, title string) {
 	if title == "" {
 		title = "分支 " + a.now().Format("01-02 15:04")
 	}
-	res, err := a.SessionFork(SessionForkRequest{SourceSID: c.s.sid, Title: title, By: c.who})
+	res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: c.s.sid, CallerSID: c.s.sid, Title: title, By: c.who})
 	if err != nil {
 		a.answer(c, "创建分支失败："+err.Error())
 		return
@@ -516,6 +536,44 @@ func (a *App) cmdSessionFork(c in, title string) {
 		text = "已登记分支 " + res.BranchSID + "，等当前这一轮结束（工具批次和生成都完成）后才会复制上下文并发布 ready。"
 	}
 	a.answer(c, text)
+}
+
+// 同一 agent 并不代表不同用户的聊天可以互读。群内管理员也只能
+// 按群聊范围操作；life 的正向授权来自同 agent 的主人会话或公开群聊。
+func (a *App) canAccessForkContext(by, caller, target string) bool {
+	if by == "" {
+		return false
+	}
+	if caller != "" && caller == target {
+		return true
+	}
+	if caller != "" && a.isGroupSession(caller) {
+		br, ok := a.store.Branch(target)
+		return ok && br.RootSID == caller
+	}
+	if br, ok := a.store.Branch(target); ok {
+		if br.CreatedBy == by && (caller == "" || a.execAgentID(caller) == br.OwnerAgent) {
+			return true
+		}
+		if caller != "" && a.isGroupSession(caller) {
+			return br.RootSID == caller
+		}
+	}
+	if id, life := strings.CutPrefix(by, "life:"); life {
+		return a.execAgentID(target) == id && (a.isOwnerSID(id, target) || a.isGroupSession(target))
+	}
+	if caller != "" && a.isGroupSession(caller) {
+		return false
+	}
+	if a.isAdmin(by) {
+		return true
+	}
+	for _, ep := range a.eps {
+		if ep.Session == target && ep.Who == by {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionTool 是 Session 工具的定义：Fork、列分支、查看、继续、暂停、归档。
