@@ -120,6 +120,7 @@ export type Totals = {
 
 // 版本检查的结果
 export type UpdateInfo = {
+	installed?: boolean;
   current: string;
   latest?: string;
   available: boolean;

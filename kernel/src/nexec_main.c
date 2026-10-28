@@ -216,8 +216,10 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
     }
     free(self);
 
-    const char *nh = getenv("NANO_HOME");
+    char *nh = plat_getenv_utf8("NANO_HOME");
+    if (!nh && errno != ENOENT) { buf_puts(err, "读取 NANO_HOME 的 Unicode 值失败"); return -1; }
     char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(x->home, ".nano-agent");
+    free(nh);
     /* 技能缓存独立于可写的通用 cache；自定义 NANO_HOME 时也只读可见。 */
     char *skill_path = plat_join(base, "skill-cache");
     char *skill_real = plat_canonical(skill_path);
@@ -230,9 +232,14 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
     free(tmpbase);
     free(base);
     free(key);
-    if (plat_makedirs(x->tmp) < 0 || plat_makedirs(x->cache) < 0) {
+    const char *failed_path = NULL;
+    if (plat_makedirs(x->tmp) < 0) failed_path = x->tmp;
+    else if (plat_makedirs(x->cache) < 0) failed_path = x->cache;
+    if (failed_path) {
+        char *detail = plat_failure_detail("executor.prepare_directories", failed_path);
         buf_puts(err, "创建临时目录失败：");
-        buf_puts(err, strerror(errno));
+        buf_puts(err, detail);
+        free(detail);
         return -1;
     }
     x->env = plat_build_env(x->home, x->tmp, x->cache);

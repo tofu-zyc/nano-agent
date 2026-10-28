@@ -32,7 +32,7 @@
       {#if up?.available}<span class="tag accent">新版本 {up.latest}</span>{:else if up?.checked && !up.error}<span class="tag ok">已经是最新</span>{/if}
     </div>
     {#if up?.error}<div class="p-err">检查失败：{up.error}</div>{/if}
-    {#if up?.available && !up.updatable}<p class="p-note">这个网关不能在这里更新：{up.why}</p>{/if}
+    {#if up && !up.updatable && up.why}<p class="p-note">{up.installed ? '安装版 · 手动升级' : '当前程序布局'}：{up.why}</p>{/if}
     <div class="p-actions tight">
       {#if up?.available && up.updatable}
         <button class="btn sm primary" disabled={store.updating || store.restarting} onclick={() => store.updateGateway()}>

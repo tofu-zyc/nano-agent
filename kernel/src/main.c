@@ -1016,8 +1016,10 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
         free(home);
         return false;
     }
-    const char *nh = getenv("NANO_HOME");
+    char *nh = plat_getenv_utf8("NANO_HOME");
+    if (!nh && errno != ENOENT) { snprintf(err, errlen, "读取 NANO_HOME 的 Unicode 值失败"); free(home); return false; }
     char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(home, ".nano-agent");
+    free(nh);
     char *root = plat_join(base, "skill-cache");
     char *dir = plat_join(root, name);
     char *tmpname = xasprintf(".%s.tmp", name);
@@ -1028,7 +1030,11 @@ static bool put_skill(const char *name, const cJSON *files, char *dir_out, size_
     bool ok = plat_makedirs(root) == 0;
     if (ok) plat_remove_tree(tmp);
     ok = ok && plat_mkdir(tmp) == 0;
-    if (!ok) snprintf(err, errlen, "建不了目录 %s", tmp);
+    if (!ok) {
+        char *detail = plat_failure_detail("kernel.skill_cache.prepare", tmp);
+        snprintf(err, errlen, "建不了目录：%s", detail);
+        free(detail);
+    }
     const cJSON *f;
     cJSON_ArrayForEach(f, files) {
         if (!ok) break;

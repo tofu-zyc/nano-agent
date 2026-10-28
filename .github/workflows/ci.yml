@@ -88,6 +88,10 @@ jobs:
           cache-dependency-path: gateway/go.sum
       - name: Windows 技能缓存和配套文件路径
         run: go -C gateway test ./internal/host -run 'TestPortableSkillPaths|TestSkillCacheUsesCustomHomeWithoutReplacingSource' -count=1
+      - name: Windows 离线时区与安装识别
+        run: |
+          $env:NANO_TEST_GATEWAY_EXE = (Resolve-Path .\gateway-win\nano-gateway.exe).Path
+          go -C gateway test ./cmd/nano-gateway -run 'TestOfflineWindowsIANATimezones|TestStandaloneWindowsGatewayTimezoneConfig|TestInstalledLayoutSuffixAndFileIdentity' -count=1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

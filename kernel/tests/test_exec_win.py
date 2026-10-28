@@ -88,11 +88,11 @@ RUN_CMD_WIN = ROOT_WIN + "\\run.cmd"
 
 
 def write_run_cmd():
-    lines = ["@echo off", "cd /d " + q(ROOT_WIN)]
+    lines = ["@echo off", "chcp 65001 >nul", "cd /d " + q(ROOT_WIN)]
     for k, v in ENV.items():
         lines.append(f'set "{k}={v}"')
     lines.append(q(EXEC_WIN) + " %*")
-    with open(RUN_CMD_LINUX, "w", encoding="ascii", newline="\r\n") as f:
+    with open(RUN_CMD_LINUX, "w", encoding="utf-8", newline="\r\n") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -345,12 +345,58 @@ def t_bad_request():
     bad(run("Read", {"path": "a.txt"}, dirs=[os.path.join(ROOT_WIN, "missing")]), "工作目录不存在")
 
 
+@case("Unicode NANO_HOME：中文、空格、非 BMP 字符，tmp/cache 与文件执行")
+def t_unicode_home():
+    previous = ENV.get("NANO_HOME")
+    name = "自定义 空间-\U0001f680"
+    ENV["NANO_HOME"] = ROOT_WIN + "\\" + name
+    try:
+        write_run_cmd()
+        ok(run("Read", {"path": "中文.txt"}), "第一行")
+        ok(run("Write", {"path": "Unicode-\U0001f680.txt", "content": "正确位置"}), "已创建")
+        ok(run("Shell", {"command": "[Console]::Write($env:NANO_HOME)"}), name)
+        for part in ("tmp", "cache"):
+            assert os.path.isdir(os.path.join(ROOT_LINUX, name, part)), (name, part)
+        assert os.path.isfile(os.path.join(WORK_LINUX, "Unicode-\U0001f680.txt"))
+    finally:
+        if previous is None:
+            ENV.pop("NANO_HOME", None)
+        else:
+            ENV["NANO_HOME"] = previous
+        write_run_cmd()
+
+
+@case("目录失败诊断：原生错误、路径、完整性级别、父进程与程序摘要")
+def t_directory_diagnostics():
+    previous = ENV.get("NANO_HOME")
+    blocked = os.path.join(ROOT_LINUX, "blocked-home")
+    with open(blocked, "w", encoding="utf-8") as f:
+        f.write("regular file, not a directory")
+    ENV["NANO_HOME"] = ROOT_WIN + "\\blocked-home"
+    try:
+        write_run_cmd()
+        text = bad(run("Read", {"path": "中文.txt"}), "executor.prepare_directories", "blocked-home",
+                   "win32_error=", "integrity_rid=", "parent_pid=", "parent_integrity_rid=", "parent_exe=", "sha256=")
+        import re
+        assert int(re.search(r"win32_error=(\d+)", text).group(1)) != 0, text
+        assert int(re.search(r"integrity_rid=(-?\d+)", text).group(1)) >= 0, text
+        digest = text.split("sha256=", 1)[1].strip()
+        import hashlib
+        with open(EXEC_LINUX, "rb") as f:
+            assert digest == hashlib.file_digest(f, "sha256").hexdigest(), digest
+    finally:
+        if previous is None:
+            ENV.pop("NANO_HOME", None)
+        else:
+            ENV["NANO_HOME"] = previous
+        write_run_cmd()
+
 def main():
     try:
         setup()
         print(f"windows temp：{ROOT_WIN}")
         for t in (t_probe, t_read, t_write, t_edit_crlf, t_fetch, t_escape, t_read_all, t_shell, t_env,
-                  t_timeout, t_cancel, t_grep, t_ls, t_bad_request):
+                  t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics):
             t()
         print(f"exec-win: {len(FAILS)} failures")
         return 1 if FAILS else 0

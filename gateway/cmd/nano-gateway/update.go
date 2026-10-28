@@ -102,12 +102,22 @@ func installedExe() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	want := filepath.Join(paths.Home(), "bin", "nano-gateway")
-	if r, err := filepath.EvalSymlinks(want); err == nil {
-		want = r
+	return installedExeAt(self, paths.Home(), runtime.GOOS)
+}
+
+func installedExeAt(self, home, osName string) (string, error) {
+	name := "nano-gateway"
+	if osName == "windows" {
+		name += ".exe"
 	}
-	if self != want {
-		return "", fmt.Errorf("这个网关（%s）不是用安装脚本装在 %s 的；源码目录里用 git pull && make install 更新", self, paths.Home())
+	want := filepath.Join(home, "bin", name)
+	actual, err := os.Stat(self)
+	if err != nil {
+		return "", err
+	}
+	expected, err := os.Stat(want)
+	if err != nil || !os.SameFile(actual, expected) {
+		return "", fmt.Errorf("这个网关（%s）不在安装目录 %s；请使用对应安装包手动升级", self, want)
 	}
 	return self, nil
 }
@@ -129,6 +139,12 @@ func (u *gatewayUpdater) Check(ctx context.Context) (app.UpdateInfo, error) {
 	info := app.UpdateInfo{Current: version.Version, Updatable: true}
 	if _, err := installedExe(); err != nil {
 		info.Updatable, info.Why = false, err.Error()
+	} else {
+		info.Installed = true
+		if runtime.GOOS == "windows" {
+			info.Updatable = false
+			info.Why = "Windows 请下载新版 zip，重跑 install-gateway.ps1 手动升级；配置和数据保留"
+		}
 	}
 	latest, err := u.client().Latest(ctx)
 	if err != nil {

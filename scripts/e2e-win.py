@@ -47,6 +47,7 @@ WIN_WORK_L = os.path.join(WIN_ROOT_L, "工作 目录")
 WIN_WORK = WIN_ROOT + "\\工作 目录"
 WIN_HOME_L = os.path.join(WIN_ROOT_L, "home")
 WIN_HOME = WIN_ROOT + "\\home"
+WIN_NANO_HOME = WIN_HOME + "\\自定义 空间-\U0001f680"
 PORT = free_port()
 
 for name in ("nano-kernel.exe", "nano-exec.exe"):
@@ -104,7 +105,7 @@ klog = os.path.join(WIN_ROOT_L, "kernel.log")
 with open(ps1, "w", encoding="utf-8-sig", newline="\r\n") as f:
     f.write("$ErrorActionPreference = 'Stop'\n")
     f.write(f"$env:USERPROFILE = '{WIN_HOME}'\n$env:HOME = '{WIN_HOME}'\n")
-    f.write(f"$env:NANO_HOME = '{WIN_HOME}\\.nano-agent'\n")
+    f.write(f"$env:NANO_HOME = '{WIN_NANO_HOME}'\n")
     f.write(f"$env:TEMP = '{WIN_ROOT}'\n$env:TMP = '{WIN_ROOT}'\n")
     f.write("$env:PATH = '" + WIN_ROOT + r";C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0" + "'\n")
     f.write("$env:SystemRoot = 'C:\\Windows'\n$env:ComSpec = 'C:\\Windows\\System32\\cmd.exe'\n")
@@ -130,10 +131,14 @@ wink = subprocess.Popen([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
 chat = None
 lines = queue.Queue()
 passed = 0
+turn_finished = threading.Event()
+turn_finished.set()
 
 
 def reader(proc):
     for line in proc.stdout:
+        if "次模型调用" in line and "用时" in line:
+            turn_finished.set()
         lines.put(line.rstrip("\n"))
 
 
@@ -155,6 +160,12 @@ def expect(desc, want, timeout=15):
 
 
 def send(s):
+    # 工具进度出现不等于模型轮次已经完成；本夹具测试顺序操作，
+    # 不让下一条 !call 偶然变成插话（插话本身另有专项测试）。
+    if not s.startswith(("/approve", "/deny", "/stop")):
+        assert turn_finished.wait(20), "上一轮没有正常结束"
+    if s.startswith("!call "):
+        turn_finished.clear()
     chat.stdin.write(s + "\n")
     chat.stdin.flush()
 
@@ -232,7 +243,7 @@ try:
     # 技能文件放到独立、按内容版本分隔的缓存；读取实际路径
     send("!call Skill " + json.dumps({"name": "demo"}, ensure_ascii=False))
     expect("加载技能", "读取 data.txt", 20)
-    cache_files = glob.glob(os.path.join(WIN_HOME_L, ".nano-agent", "skill-cache", "demo-*", "data.txt"))
+    cache_files = glob.glob(os.path.join(WIN_HOME_L, "自定义 空间-\U0001f680", "skill-cache", "demo-*", "data.txt"))
     assert len(cache_files) == 1, cache_files
     send("!call Read " + json.dumps({"path": wslpath("-w", cache_files[0])}, ensure_ascii=False))
     expect("技能文件放到 Windows", "skill-e2e-data", 20)

@@ -14,6 +14,7 @@ import (
 
 // UpdateInfo 是版本检查的结果（status、网页、/update 用）。
 type UpdateInfo struct {
+	Installed bool   `json:"installed"`
 	Current   string `json:"current"`
 	Latest    string `json:"latest,omitempty"`
 	Available bool   `json:"available"`          // 有比现在新的版本

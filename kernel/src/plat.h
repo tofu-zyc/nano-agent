@@ -40,6 +40,11 @@ void plat_sleep_ms(int ms);
 char *plat_self_exe(void);
 char *plat_exe_dir(void);
 char *plat_home(void);
+/* malloc UTF-8 value, including an allocated empty string. NULL sets errno:
+ * ENOENT means absent; other errors must not silently select a different root. */
+char *plat_getenv_utf8(const char *name);
+/* Bounded diagnostic after a filesystem failure; never changes token policy. */
+char *plat_failure_detail(const char *stage, const char *path);
 char *plat_hostname(void);
 /* 用 argv 执行 path，替换当前进程（更新后重启自己）。POSIX 上成功不返回；Windows 上返回 -1、errno = ENOSYS。 */
 int plat_exec(const char *path, char **argv);

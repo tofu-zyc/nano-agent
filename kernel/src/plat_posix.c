@@ -117,6 +117,19 @@ char *plat_exe_dir(void)
     return d;
 }
 
+char *plat_failure_detail(const char *stage, const char *path)
+{
+    int e = errno;
+    return xasprintf("stage=%s path=%s errno=%d (%s)", stage, path, e, strerror(e));
+}
+
+char *plat_getenv_utf8(const char *name)
+{
+    const char *v = getenv(name);
+    if (!v) { errno = ENOENT; return NULL; }
+    return xstrdup(v);
+}
+
 char *plat_home(void)
 {
     const char *h = getenv("HOME");

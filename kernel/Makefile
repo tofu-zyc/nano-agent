@@ -50,7 +50,7 @@ RG_WIN   ?= ../build/tools/rg.exe
 WIN_EXEC := build/nano-exec.exe
 WIN_KERNEL := build/nano-kernel.exe
 WIN_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Wshadow -Isrc -Ibuild -Ithird_party/cjson
-WIN_LIBS   := -lws2_32 -lshell32
+WIN_LIBS   := -lws2_32 -lshell32 -ladvapi32
 
 # 发布包用：Linux 静态链接（musl），不挑发行版的 glibc
 CROSS_CFLAGS := -O2 -std=c11 -fno-lto -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -Ibuild -Ithird_party/cjson

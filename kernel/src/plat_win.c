@@ -11,6 +11,8 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
+#include <wincrypt.h>
 #include <io.h>
 #include <fcntl.h>
 #include <process.h>
@@ -244,6 +246,100 @@ char *plat_exe_dir(void)
     char *d = plat_dirname(self);
     free(self);
     return d;
+}
+
+static long integrity_rid(HANDLE process)
+{
+    HANDLE token = NULL; DWORD n = 0; long rid = -1;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return rid;
+    GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &n);
+    if (n && n <= 65536) {
+        TOKEN_MANDATORY_LABEL *label = xmalloc(n);
+        if (GetTokenInformation(token, TokenIntegrityLevel, label, n, &n) && IsValidSid(label->Label.Sid)) {
+            BYTE count = *GetSidSubAuthorityCount(label->Label.Sid);
+            if (count) rid = (long)*GetSidSubAuthority(label->Label.Sid, count - 1);
+        }
+        free(label);
+    }
+    CloseHandle(token); return rid;
+}
+
+static void exe_sha256(char out[65])
+{
+    strcpy(out, "unavailable");
+    HCRYPTPROV provider = 0; HCRYPTHASH hash = 0; HANDLE file = INVALID_HANDLE_VALUE;
+    char *self = plat_self_exe(); wchar_t *path = to_w(self); free(self);
+    if (!path) return;
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) goto done;
+    if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash)) goto done;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto done;
+    BYTE data[65536]; DWORD got = 0;
+    for (;;) {
+        if (!ReadFile(file, data, sizeof data, &got, NULL)) goto done;
+        if (!got) break;
+        if (!CryptHashData(hash, data, got, 0)) goto done;
+    }
+    BYTE digest[32]; DWORD size = sizeof digest;
+    if (CryptGetHashParam(hash, HP_HASHVAL, digest, &size, 0) && size == 32) {
+        static const char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < 32; i++) { out[2*i] = hex[digest[i] >> 4]; out[2*i+1] = hex[digest[i] & 15]; }
+        out[64] = 0;
+    }
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (hash) CryptDestroyHash(hash);
+    if (provider) CryptReleaseContext(provider, 0);
+    free(path);
+}
+
+char *plat_failure_detail(const char *stage, const char *path)
+{
+    DWORD native_error = GetLastError(), parent_pid = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W item = {0}; item.dwSize = sizeof item;
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        if (Process32FirstW(snapshot, &item)) do {
+            if (item.th32ProcessID == GetCurrentProcessId()) { parent_pid = item.th32ParentProcessID; break; }
+        } while (Process32NextW(snapshot, &item));
+        CloseHandle(snapshot);
+    }
+    long parent_rid = -1;
+    HANDLE parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent_pid);
+    wchar_t parent_path[32768] = L""; DWORD length = 32768;
+    if (parent) { parent_rid = integrity_rid(parent); if (!QueryFullProcessImageNameW(parent, 0, parent_path, &length)) parent_path[0] = 0; CloseHandle(parent); }
+    char *parent_u8 = to_u8(parent_path), *self = plat_self_exe(); char sum[65]; exe_sha256(sum);
+    char *result = xasprintf("stage=%s path=%s win32_error=%lu integrity_rid=%ld parent_pid=%lu parent_integrity_rid=%ld parent_exe=%s exe=%s sha256=%s",
+        stage, path, (unsigned long)native_error, integrity_rid(GetCurrentProcess()), (unsigned long)parent_pid, parent_rid, parent_u8 ? parent_u8 : "unknown", self ? self : "unknown", sum);
+    free(parent_u8); free(self); return result;
+}
+
+char *plat_getenv_utf8(const char *name)
+{
+    wchar_t *key = to_w(name);
+    if (!key) { errno = EINVAL; return NULL; }
+    for (int attempt = 0; attempt < 8; attempt++) {
+        SetLastError(ERROR_SUCCESS);
+        DWORD n = GetEnvironmentVariableW(key, NULL, 0);
+        if (!n) {
+            DWORD e = GetLastError(); free(key);
+            if (e == ERROR_SUCCESS) return xstrdup("");
+            errno = e == ERROR_ENVVAR_NOT_FOUND ? ENOENT : EIO;
+            return NULL;
+        }
+        if (n > 32768) { free(key); errno = EOVERFLOW; return NULL; }
+        wchar_t *value = xmalloc((size_t)n * sizeof *value);
+        DWORD got = GetEnvironmentVariableW(key, value, n);
+        if (!got || got >= n) { free(value); continue; }
+        int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, NULL, 0, NULL, NULL);
+        if (!bytes) { free(value); free(key); errno = EILSEQ; return NULL; }
+        char *result = xmalloc((size_t)bytes);
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, result, bytes, NULL, NULL)) {
+            free(result); free(value); free(key); errno = EILSEQ; return NULL;
+        }
+        free(value); free(key); return result;
+    }
+    free(key); errno = EAGAIN; return NULL;
 }
 
 char *plat_home(void)
@@ -507,12 +603,15 @@ static int makedirs_w(const wchar_t *path)
         if (i > start && !CreateDirectoryW(p, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
             int e = (int)GetLastError();
             free(p);
+            SetLastError((DWORD)e);
             return e ? -1 : 0;
         }
         p[i] = c;
     }
     if (!CreateDirectoryW(p, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        DWORD e = GetLastError();
         free(p);
+        SetLastError(e);
         return -1;
     }
     free(p);
@@ -527,7 +626,7 @@ int plat_makedirs(const char *p)
     int rc = makedirs_w(w);
     DWORD e = GetLastError();
     free(w);
-    if (rc < 0) set_errno_from_win(e ? e : before);
+    if (rc < 0) { set_errno_from_win(e ? e : before); SetLastError(e ? e : before); }
     return rc;
 }
 
@@ -536,8 +635,10 @@ int plat_mkdir(const char *p)
     wchar_t *w = to_w(p);
     if (!w) { errno = EINVAL; return -1; }
     int ok = CreateDirectoryW(w, NULL) != 0;
-    if (!ok) set_errno_from_win(GetLastError());
+    DWORD e = GetLastError();
+    if (!ok) set_errno_from_win(e);
     free(w);
+    if (!ok) SetLastError(e);
     return ok ? 0 : -1;
 }
 
