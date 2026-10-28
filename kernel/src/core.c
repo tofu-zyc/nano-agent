@@ -672,7 +672,8 @@ static int on_call_started(na_core *c, int64_t now, const na_event *ev)
     if (!k || !k->sent || (k->st != CALL_DISPATCHED && k->st != CALL_QUEUED)) return -1;
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     k->st = CALL_RUNNING;
-    k->deadline = k->tool->timeout_ms > 0 ? now + k->tool->timeout_ms : -1;
+    int64_t timeout=ev->started_timeout_ms?ev->started_timeout_ms:k->tool->timeout_ms;
+    k->deadline = timeout > 0 ? now + timeout : -1;
     return 0;
 }
 
@@ -721,6 +722,19 @@ static int on_tool_done(na_core *c, int64_t now, const na_event *ev)
     return 0;
 }
 
+static int on_call_detached(na_core *c,int64_t now,const na_event *ev)
+{
+    run_t *r=find_run(c,ev->sid);
+    if(!r || !same_run(r,ev))return -1;
+    call_t *k=find_call(r,ev->id);
+    if(!k || !k->sent || (k->st!=CALL_RUNNING && k->st!=CALL_DISPATCHED && k->st!=CALL_QUEUED))return -1;
+    if(ev->turn_id>0 && k->turn_id && ev->turn_id!=k->turn_id)return -1;
+    na_cmd *reply=result(c,r,k,true,ev->content?ev->content:"");
+    reply->execution=dupstr(ev->execution);
+    dispatch(c,now,r);maybe_advance(c,r);
+    return 0;
+}
+
 static void on_tick(na_core *c, int64_t now)
 {
     run_t *next;
@@ -744,6 +758,7 @@ static void on_tick(na_core *c, int64_t now)
             } else if (k->st == CALL_WAIT_APPROVAL) {
                 result(c, r, k, false, "审批超时，未执行");
             } else if (k->st == CALL_QUEUED) {
+                if(k->sent)kill_call(c,r,k);
                 result(c, r, k, false, "排队超时：一直没等到执行槽，未执行");
             }
         }
@@ -757,7 +772,7 @@ static void on_reset(na_core *c)
     while (c->runs) {
         run_t *r = c->runs;
         for (size_t i = 0; i < r->ncalls; i++)
-            if (r->calls[i].sent) kill_call(c, r, &r->calls[i]);
+            if (r->calls[i].sent && r->calls[i].st!=CALL_DONE) kill_call(c, r, &r->calls[i]);
         drop_run(c, r);
     }
 }
@@ -772,6 +787,7 @@ int na_core_feed(na_core *c, int64_t now, const na_event *ev)
     case NA_EV_MODEL_YIELD:  return on_model_yield(c, now, ev);
     case NA_EV_CALL_QUEUED:  return on_call_queued(c, now, ev);
     case NA_EV_CALL_STARTED: return on_call_started(c, now, ev);
+    case NA_EV_CALL_DETACHED:return on_call_detached(c,now,ev);
     case NA_EV_TOOL_DONE:    return on_tool_done(c, now, ev);
     case NA_EV_TICK:         on_tick(c, now); return 0;
     case NA_EV_RESET:        on_reset(c);     return 0;

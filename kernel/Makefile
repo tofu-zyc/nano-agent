@@ -35,11 +35,11 @@ RUNNER := src/runner.c
 PIPE   :=
 endif
 
-SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
+SRCS  := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
-KWIN_SRCS := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
-MAC_SRCS  := src/main.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
+KWIN_SRCS := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
+MAC_SRCS  := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
 MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -113,17 +113,31 @@ build/test_exec_stream: tests/test_exec_stream.c src/exec_stream.c src/exec_stre
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ tests/test_exec_stream.c src/exec_stream.c src/util.c $(PLAT) third_party/cjson/cJSON.c
 
-build/test_runner: tests/test_runner.c $(RUNNER) src/runner.h src/util.c $(PLAT) third_party/cjson/cJSON.c
+build/test_job_manager: tests/test_job_manager.c src/job_manager.c src/job_manager.h src/job_io.c src/job_io.h src/util.c $(PLAT) third_party/cjson/cJSON.c
 	@mkdir -p $(dir $@)
-	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ tests/test_runner.c $(RUNNER) src/util.c $(PLAT) third_party/cjson/cJSON.c
+	$(CC) $(STD) $(CPPFLAGS) -pthread -O1 -g $(SAN) -o $@ tests/test_job_manager.c src/job_manager.c src/job_io.c src/util.c $(PLAT) third_party/cjson/cJSON.c
 
-build/test_runner.exe: tests/test_runner.c src/runner_win.c src/runner.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
-	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_runner.c src/runner_win.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
+build/test_job_manager.exe: tests/test_job_manager.c src/job_manager.c src/job_manager.h src/job_io.c src/job_io.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_job_manager.c src/job_manager.c src/job_io.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
+
+build/test_job_io: tests/test_job_io.c src/job_io.c src/job_io.h src/util.c $(PLAT) third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(CPPFLAGS) -pthread -O1 -g $(SAN) -o $@ tests/test_job_io.c src/job_io.c src/util.c $(PLAT) third_party/cjson/cJSON.c
+
+build/test_job_io.exe: tests/test_job_io.c src/job_io.c src/job_io.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_job_io.c src/job_io.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
+
+build/test_runner: tests/test_runner.c src/exec_stream.c src/runner_stream.c $(RUNNER) src/runner.h src/util.c $(PLAT) third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ tests/test_runner.c src/exec_stream.c src/runner_stream.c $(RUNNER) src/util.c $(PLAT) third_party/cjson/cJSON.c
+
+build/test_runner.exe: tests/test_runner.c src/exec_stream.c src/runner_stream.c src/runner_win.c src/runner.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_runner.c src/exec_stream.c src/runner_stream.c src/runner_win.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
 
 build/test_exec_stream.exe: tests/test_exec_stream.c src/exec_stream.c src/exec_stream.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
 	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_exec_stream.c src/exec_stream.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
 
-windows-tests: build/test_runner.exe build/test_exec_stream.exe
+windows-tests: build/test_runner.exe build/test_exec_stream.exe build/test_job_io.exe build/test_job_manager.exe
 
 windows-exec: $(WIN_EXEC)
 windows-kernel: $(WIN_KERNEL)
@@ -161,13 +175,15 @@ test-win:
 	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  $(MAKE) --no-print-directory windows-exec windows-kernel windows-tests && \
 	  { test -f "$(RG_WIN)" || { echo "没有 $(RG_WIN)：先运行 scripts/fetch-rg.sh"; exit 1; }; } && \
-	  ./build/test_runner.exe && ./build/test_exec_stream.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
+	  ./build/test_runner.exe && ./build/test_exec_stream.exe && ./build/test_job_io.exe && ./build/test_job_manager.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 执行器测试；Windows 上的测试在 CI 的 Windows runner 跑）"; fi
 
-test: build/test_core build/test_runner build/test_exec_stream build/nano-kernel-asan build/nano-exec-asan test-win
+test: build/test_core build/test_runner build/test_exec_stream build/test_job_io build/test_job_manager build/nano-kernel-asan build/nano-exec-asan test-win
 	./build/test_core
 	./build/test_runner
 	./build/test_exec_stream
+	./build/test_job_io
+	./build/test_job_manager
 	python3 tests/test_exec.py build/nano-exec-asan
 	python3 tests/test_host.py build/nano-kernel-asan build/nano-exec-asan
 

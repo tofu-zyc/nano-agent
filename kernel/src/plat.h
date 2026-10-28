@@ -89,6 +89,11 @@ int  plat_unlink(const char *p);
 int  plat_write_atomic(const char *path, const char *data, size_t n, int mode);
 /* 读整个文件，最多 max 字节；超出时 errno = EFBIG。 */
 int  plat_read_file(const char *path, buf_t *out, size_t max);
+/* Job persistence: append logs, flush a log fence, and durably publish metadata. */
+int plat_append_file(const char *path,const void *data,size_t n,bool sync);
+int plat_sync_file(const char *path);
+int plat_write_durable(const char *path,const char *data,size_t n,int mode);
+
 
 /* ---- 目录 ---- */
 

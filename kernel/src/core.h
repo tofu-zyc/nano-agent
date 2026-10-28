@@ -72,6 +72,7 @@ typedef enum {
     NA_EV_CANCEL,       /* 用户要求停止：sid */
     NA_EV_CALL_QUEUED,  /* 宿主：收到了，但在等执行槽或等资源；排队不占执行槽，执行时限还没开始 */
     NA_EV_CALL_STARTED, /* 宿主：这个调用的执行器真的起来了，执行时限从现在算：sid, run_id, turn_id, id */
+    NA_EV_CALL_DETACHED, /* durable wait ownership handoff; result closes only this call */
     NA_EV_TOOL_DONE,    /* 本地工具执行完毕：sid, run_id, turn_id, id, ok, content */
     NA_EV_MODEL_YIELD,  /* 网关：这次生成让位给了插话，要重新请求模型（照样算一次轮次） */
     NA_EV_TICK,         /* 只推进时间，用来检查超时 */
@@ -134,6 +135,7 @@ typedef struct {
     bool ok;
     const char *content;
     const char *execution; /* verified executor metadata, never model arguments */
+    int64_t started_timeout_ms; /* CALL_STARTED: positive override, negative unlimited, 0 policy default */
 } na_event;
 
 typedef enum {

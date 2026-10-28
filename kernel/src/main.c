@@ -90,6 +90,7 @@ typedef struct {
     int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
     bool leasing, lease_synced;
+    int exec_stream_version;
     char node_epoch[33];
     unsigned long long lease_seq;
     int64_t next_lease_sync;
@@ -157,6 +158,7 @@ static void send_hello(kernel_t *k)
     cJSON *ft = cJSON_AddObjectToObject(m, "features");
     cJSON_AddNumberToObject(ft, "call_identity", 1);
     cJSON_AddNumberToObject(ft, "machine_leases", 1);
+    cJSON_AddNumberToObject(ft,"job_stream",k->exec_stream_version);
     cJSON_AddNumberToObject(ft, "max_parallel_shells", k->conf.max_parallel_shells);
     cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
     cJSON_AddNumberToObject(ft, "max_calls_per_turn", 32);
@@ -734,7 +736,14 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
         char *argv[] = { k->conf.exec, NULL };
-        j = runner_start_bounded(&k->runner, argv, sid, id, name, line, strlen(line), out_cap, err, errlen);
+        const cJSON *stream=cJSON_GetObjectItemCaseSensitive(req,"stream");
+        if(cJSON_IsNumber(stream) && stream->valueint==1) {
+            const char *job_id=sget(req,"job_id");
+            if(k->exec_stream_version<1 || !job_id || !*job_id || strlen(job_id)>128 || strcmp(name,"Shell")) {
+                snprintf(err,errlen,"目标执行器不支持所需流式协议，或 Job 身份无效，未执行");
+                free(line);
+            } else j=runner_start_streamed(&k->runner,argv,sid,id,name,line,strlen(line),job_id,NULL,NULL,err,errlen);
+        } else j = runner_start_bounded(&k->runner, argv, sid, id, name, line, strlen(line), out_cap, err, errlen);
         if (j) {
             j->run_id = xstrdup(run_id ? run_id : "");
             j->turn_id = turn_id;
@@ -2058,6 +2067,8 @@ static int probe_exec(kernel_t *k, char *err, size_t errlen)
         snprintf(err, errlen, "执行器 %s 的自检结果看不懂（用 exec = 指定它的路径）", k->conf.exec);
         return -1;
     }
+    const cJSON *stream=cJSON_GetObjectItemCaseSensitive(r,"job_stream");
+    k->exec_stream_version=cJSON_IsNumber(stream)?stream->valueint:0;
     k->landlock = (int)ll->valuedouble;
     k->rg = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "rg"));
     cJSON_Delete(r);

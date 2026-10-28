@@ -10,6 +10,7 @@
 
 #include "plat.h"
 #include "util.h"
+#include "exec_stream.h"
 
 #include <stdbool.h>
 #include <sys/types.h>
@@ -20,6 +21,7 @@ typedef struct job {
     int     turn_id;
     char   *res_keys, *res_xkeys;  /* 这个任务占着的资源键：运行期间挡住别的冲突调用 */
     char   *lease_id, *lease_spec;
+    exec_stream *stream; /* stdout reader owns it until the process is drained */
     char   *sandbox_requested;
     char   *sandbox;               /* 启动时的沙箱模式快照（auto / on / off） */
     int     kind, tag;             /* 调用方自己定义的任务类型和附加信息 */
@@ -31,7 +33,7 @@ typedef struct job {
     buf_t   out, err;
     size_t  out_cap;               /* frozen before readers start; never shared across calls */
     size_t  out_total, err_total;  /* 实际产生的字节数，超出上限的部分丢弃 */
-    bool    exited, killed;
+    bool    exited, killed, detached;
     int     status;                /* POSIX wait 状态；Windows 上不用 */
     int     exit_code, term_signal;
     int64_t exit_at, term_at;
@@ -63,8 +65,17 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
                        char *input, size_t in_len, char *err, size_t errlen);
 job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                             char *input, size_t in_len, size_t out_cap, char *err, size_t errlen);
+job_t *runner_start_streamed(runner_t *r,char *const argv[],const char *sid,const char *id,const char *name,
+                             char *input,size_t in_len,const char *job_id,exec_frame_fn receive,void *ctx,
+                             char *err,size_t errlen);
+/* Shared incremental stdout path, called only by the task's stdout reader. */
+void runner_stream_feed(job_t *j,const void *data,size_t n);
+cJSON *runner_result_object(const job_t *j);
+void runner_stream_destroy(exec_stream *stream);
 void   runner_kill(runner_t *r, const char *sid, const char *id);
 void   runner_kill_all(runner_t *r);
+void   runner_kill_foreground(runner_t *r);
+void   runner_stop(job_t *j);
 void   runner_reap(runner_t *r, int64_t now);
 void   runner_tick(runner_t *r, int64_t now);   /* SIGTERM 之后迟迟不退出的，改用 SIGKILL */
 size_t runner_pollfds(runner_t *r, na_pollfd *pfds, pollref_t *refs, size_t max);

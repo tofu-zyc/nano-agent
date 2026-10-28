@@ -751,6 +751,40 @@ int plat_write_atomic(const char *path, const char *data, size_t n, int mode)
     return rc;
 }
 
+int plat_append_file(const char *path,const void *data,size_t n,bool sync)
+{
+    wchar_t *name=to_w(path);
+    if(!name)return -1;
+    HANDLE h=CreateFileW(name,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                         NULL,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+    free(name);if(h==INVALID_HANDLE_VALUE){set_errno_from_win(GetLastError());return -1;}
+    const char *p=data;size_t off=0;int rc=0;
+    while(off<n) {
+        DWORD wrote=0,take=(DWORD)(n-off>(1u<<20)?(1u<<20):n-off);
+        if(!WriteFile(h,p+off,take,&wrote,NULL) || !wrote){rc=-1;break;}
+        off+=wrote;
+    }
+    if(rc==0 && sync && !FlushFileBuffers(h))rc=-1;
+    if(rc<0)set_errno_from_win(GetLastError());
+    CloseHandle(h);return rc;
+}
+int plat_sync_file(const char *path)
+{
+    wchar_t *name=to_w(path);if(!name)return -1;
+    HANDLE h=CreateFileW(name,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                         NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    free(name);if(h==INVALID_HANDLE_VALUE){set_errno_from_win(GetLastError());return -1;}
+    int rc=FlushFileBuffers(h)?0:-1;
+    if(rc<0)set_errno_from_win(GetLastError());
+    CloseHandle(h);return rc;
+}
+int plat_write_durable(const char *path,const char *data,size_t n,int mode)
+{
+    /* The Windows atomic writer already flushes the file and uses
+       MOVEFILE_WRITE_THROUGH before acknowledging publication. */
+    return plat_write_atomic(path,data,n,mode);
+}
+
 int plat_read_file(const char *path, buf_t *out, size_t max)
 {
     wchar_t *w = to_w(path);

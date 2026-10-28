@@ -408,6 +408,43 @@ int plat_write_atomic(const char *path, const char *data, size_t n, int mode)
     return rc;
 }
 
+int plat_append_file(const char *path,const void *data,size_t n,bool sync)
+{
+    int fd=open(path,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);
+    if(fd<0)return -1;
+    const char *p=data;size_t off=0;int rc=0;
+    while(off<n) {
+        ssize_t wrote=write(fd,p+off,n-off);
+        if(wrote<0 && errno==EINTR)continue;
+        if(wrote<=0){rc=-1;break;}
+        off+=(size_t)wrote;
+    }
+    if(rc==0 && sync && fsync(fd)<0)rc=-1;
+    int error=errno;
+    if(close(fd)<0 && rc==0){rc=-1;error=errno;}
+    errno=error;return rc;
+}
+int plat_sync_file(const char *path)
+{
+    int fd=open(path,O_WRONLY|O_CLOEXEC);
+    if(fd<0)return -1;
+    int rc=fsync(fd),error=errno;close(fd);errno=error;return rc;
+}
+int plat_write_durable(const char *path,const char *data,size_t n,int mode)
+{
+    if(plat_write_atomic(path,data,n,mode)<0 || plat_sync_file(path)<0)return -1;
+    char *dir=plat_dirname(path);
+    int rc=0;
+    for(int i=0;i<3 && dir;i++) {
+        int fd=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+        if(fd<0){rc=-1;break;}
+        rc=fsync(fd);int error=errno;close(fd);errno=error;
+        if(rc<0)break;
+        char *parent=plat_dirname(dir);free(dir);dir=parent;
+    }
+    free(dir);return rc;
+}
+
 int plat_read_file(const char *path, buf_t *out, size_t max)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);

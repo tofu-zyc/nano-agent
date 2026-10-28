@@ -33,8 +33,25 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     return runner_start_bounded(r,argv,sid,id,name,input,in_len,r->out_cap,err,errlen);
 }
 
+static job_t *start_job(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, exec_stream *stream, char *err, size_t errlen);
+
 job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                        char *input, size_t in_len, size_t out_cap, char *err, size_t errlen)
+{
+    return start_job(r,argv,sid,id,name,input,in_len,out_cap,NULL,err,errlen);
+}
+job_t *runner_start_streamed(runner_t *r,char *const argv[],const char *sid,const char *id,const char *name,
+                             char *input,size_t in_len,const char *job_id,exec_frame_fn receive,void *ctx,
+                             char *err,size_t errlen)
+{
+    exec_stream *stream=xcalloc(1,sizeof *stream);
+    exec_stream_init(stream,job_id,receive,ctx);
+    return start_job(r,argv,sid,id,name,input,in_len,NA_EXEC_FRAME_MAX,stream,err,errlen);
+}
+
+static job_t *start_job(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, exec_stream *stream, char *err, size_t errlen)
 {
     int in[2] = { -1, -1 }, out[2] = { -1, -1 }, er[2] = { -1, -1 };
     if (pipe(in) || pipe(out) || pipe(er)) {
@@ -77,6 +94,7 @@ job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, co
 
     job_t *j = xcalloc(1, sizeof *j);
     j->out_cap=out_cap;
+    j->stream=stream;
     j->sid = xstrdup(sid);
     j->id = xstrdup(id);
     j->name = xstrdup(name);
@@ -91,6 +109,7 @@ job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, co
     return j;
 
 fail:
+    runner_stream_destroy(stream);
     free(input);
     close_fd(&in[0]); close_fd(&in[1]);
     close_fd(&out[0]); close_fd(&out[1]);
@@ -112,7 +131,13 @@ static void stop_job(job_t *j)
 void runner_kill(runner_t *r, const char *sid, const char *id)
 {
     for (job_t *j = r->jobs; j; j = j->next)
-        if (!strcmp(j->sid, sid) && !strcmp(j->id, id)) stop_job(j);
+        if (!j->detached && !strcmp(j->sid, sid) && !strcmp(j->id, id)) stop_job(j);
+}
+
+void runner_stop(job_t *j){stop_job(j);}
+void runner_kill_foreground(runner_t *r)
+{
+    for(job_t *j=r->jobs;j;j=j->next)if(!j->detached)stop_job(j);
 }
 
 void runner_kill_all(runner_t *r)
@@ -168,13 +193,14 @@ size_t runner_pollfds(runner_t *r, na_pollfd *pfds, pollref_t *refs, size_t max)
 }
 
 /* 读空管道（每次最多读一定量，避免被疯狂输出的进程卡住） */
-static void drain(int *fd, buf_t *b, size_t *total, size_t cap)
+static void drain(int *fd, buf_t *b, size_t *total, size_t cap, job_t *stream_job)
 {
     char tmp[16384];
     for (int i = 0; i < 16; i++) {
         ssize_t n = read(*fd, tmp, sizeof tmp);
         if (n > 0) {
             *total += (size_t)n;
+            if(stream_job && stream_job->stream){runner_stream_feed(stream_job,tmp,(size_t)n);continue;}
             if (b->len < cap) {
                 size_t room = cap - b->len;
                 buf_append(b, tmp, (size_t)n < room ? (size_t)n : room);
@@ -209,10 +235,10 @@ void runner_on_poll(runner_t *r, const na_pollfd *pfds, const pollref_t *refs, s
             }
             break;
         case 1:
-            if (j->fd_out >= 0) drain(&j->fd_out, &j->out, &j->out_total, j->out_cap);
+            if (j->fd_out >= 0) drain(&j->fd_out, &j->out, &j->out_total, j->out_cap,j);
             break;
         case 2:
-            if (j->fd_err >= 0) drain(&j->fd_err, &j->err, &j->err_total, STDERR_CAP);
+            if (j->fd_err >= 0) drain(&j->fd_err, &j->err, &j->err_total, STDERR_CAP,NULL);
             break;
         }
     }
@@ -265,7 +291,7 @@ void runner_shutdown(runner_t *r, int grace_ms)
 char *job_result(const job_t *j, bool *ok)
 {
     *ok = false;
-    cJSON *res = j->out_total <= j->out.len ? cJSON_ParseWithLength(j->out.p ? j->out.p : "", j->out.len) : NULL;
+    cJSON *res = runner_result_object(j);
     const cJSON *okv = cJSON_GetObjectItemCaseSensitive(res, "ok");
     const cJSON *content = cJSON_GetObjectItemCaseSensitive(res, "content");
     if (cJSON_IsBool(okv) && cJSON_IsString(content)) {
@@ -276,6 +302,8 @@ char *job_result(const job_t *j, bool *ok)
         return buf_cstr(&b);
     }
     cJSON_Delete(res);
+    if(j->stream && j->stream->failed)
+        return xasprintf("执行器流式协议错误：%s",j->stream->error?j->stream->error:"无完整终态");
 
     /* 执行器没有正常给出结果：多半是崩溃了、被杀了，或者根本没启动起来 */
     buf_t b = {0};
@@ -304,6 +332,7 @@ void job_free(job_t *j)
     free(j->res_keys);
     free(j->res_xkeys);
     free(j->lease_id); free(j->lease_spec);
+    runner_stream_destroy(j->stream);
     free(j->sandbox); free(j->sandbox_requested);
     free(j->in);
     buf_free(&j->out);

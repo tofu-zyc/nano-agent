@@ -39,6 +39,7 @@ typedef struct {
 } reader_arg;
 
 static DWORD WINAPI reader_thread(LPVOID p);
+static void join_reader(void *thread,void *arg);
 
 int runner_start(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                  char *input, char *err, size_t errlen)
@@ -52,8 +53,25 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     return runner_start_bounded(r,argv,sid,id,name,input,in_len,r->out_cap,err,errlen);
 }
 
+static job_t *start_job(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, exec_stream *stream, char *err, size_t errlen);
+
 job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                        char *input, size_t in_len, size_t out_cap, char *err, size_t errlen)
+{
+    return start_job(r,argv,sid,id,name,input,in_len,out_cap,NULL,err,errlen);
+}
+job_t *runner_start_streamed(runner_t *r,char *const argv[],const char *sid,const char *id,const char *name,
+                             char *input,size_t in_len,const char *job_id,exec_frame_fn receive,void *ctx,
+                             char *err,size_t errlen)
+{
+    exec_stream *stream=xcalloc(1,sizeof *stream);
+    exec_stream_init(stream,job_id,receive,ctx);
+    return start_job(r,argv,sid,id,name,input,in_len,NA_EXEC_FRAME_MAX,stream,err,errlen);
+}
+
+static job_t *start_job(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, exec_stream *stream, char *err, size_t errlen)
 {
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL, er_r = NULL, er_w = NULL;
@@ -119,6 +137,7 @@ job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, co
 
     job_t *j = xcalloc(1, sizeof *j);
     j->out_cap=out_cap;
+    j->stream=stream;
     j->sid = xstrdup(sid);
     j->id = xstrdup(id);
     j->name = xstrdup(name);
@@ -165,6 +184,7 @@ job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, co
     return j;
 
 fail:
+    runner_stream_destroy(stream);
     if (in_r) CloseHandle(in_r);
     if (in_w) CloseHandle(in_w);
     if (out_r) CloseHandle(out_r);
@@ -188,6 +208,7 @@ static DWORD WINAPI reader_thread(LPVOID p)
         DWORD got = 0;
         if (!ReadFile(a->h, tmp, sizeof tmp, &got, NULL) || !got) break;
         *total += got;
+        if(a->which==1 && j->stream){runner_stream_feed(j,tmp,got);continue;}
         if (b->len < cap) {
             size_t room = cap - b->len;
             buf_append(b, tmp, got < room ? got : room);
@@ -210,7 +231,13 @@ static void stop_job(job_t *j)
 void runner_kill(runner_t *r, const char *sid, const char *id)
 {
     for (job_t *j = r->jobs; j; j = j->next)
-        if (!strcmp(j->sid, sid) && !strcmp(j->id, id)) stop_job(j);
+        if (!j->detached && !strcmp(j->sid, sid) && !strcmp(j->id, id)) stop_job(j);
+}
+
+void runner_stop(job_t *j){stop_job(j);}
+void runner_kill_foreground(runner_t *r)
+{
+    for(job_t *j=r->jobs;j;j=j->next)if(!j->detached)stop_job(j);
 }
 
 void runner_kill_all(runner_t *r)
@@ -263,6 +290,8 @@ job_t *runner_take_finished(runner_t *r, int64_t now)
         bool drained = j->out_done && j->err_done;
         if (!drained && now - j->exit_at < EXIT_GRACE_MS) continue;
         if (j->hjob) TerminateJobObject((HANDLE)j->hjob, 0);
+        join_reader(j->th_out,j->rarg_out);
+        join_reader(j->th_err,j->rarg_err);
         close_handle((HANDLE *)&j->h_in);
         close_handle((HANDLE *)&j->hproc);
         close_handle((HANDLE *)&j->hjob);
@@ -305,7 +334,7 @@ void runner_shutdown(runner_t *r, int grace_ms)
 char *job_result(const job_t *j, bool *ok)
 {
     *ok = false;
-    cJSON *res = j->out_total <= j->out.len ? cJSON_ParseWithLength(j->out.p ? j->out.p : "", j->out.len) : NULL;
+    cJSON *res = runner_result_object(j);
     const cJSON *okv = cJSON_GetObjectItemCaseSensitive(res, "ok");
     const cJSON *content = cJSON_GetObjectItemCaseSensitive(res, "content");
     if (cJSON_IsBool(okv) && cJSON_IsString(content)) {
@@ -316,6 +345,8 @@ char *job_result(const job_t *j, bool *ok)
         return buf_cstr(&b);
     }
     cJSON_Delete(res);
+    if(j->stream && j->stream->failed)
+        return xasprintf("执行器流式协议错误：%s",j->stream->error?j->stream->error:"无完整终态");
     buf_t b = {0};
     char note[128];
     if (j->term_signal) snprintf(note, sizeof note, "执行器被信号 %d 终止", j->term_signal);
@@ -361,6 +392,7 @@ void job_free(job_t *j)
     free(j->res_keys);
     free(j->res_xkeys);
     free(j->lease_id); free(j->lease_spec);
+    runner_stream_destroy(j->stream);
     free(j->sandbox); free(j->sandbox_requested);
     free(j->in);
     buf_free(&j->out);

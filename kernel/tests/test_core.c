@@ -766,6 +766,56 @@ static void test_host_queued_releases_run_slot(void)
     na_core_free(c);
 }
 
+static void test_detach_closes_one_waiter_and_preserves_batch(void)
+{
+    na_core *c=mk(2);
+    na_event input_event={.type=NA_EV_INPUT,.sid="s1",.run_id="r",.from="tg:1",
+        .mode=NA_MODE_AUTO,.max_parallel_tools=1,.run_timeout_ms=-1};
+    CHECK(na_core_feed(c,0,&input_event)==0);drain(c);
+    na_call calls[]={{.id="shell",.name="Shell",.args="{}",.args_ok=true},
+                     {.id="sibling",.name="Read",.args="{}",.args_ok=true}};
+    turn(c,10,"s1",NA_TURN_TOOL_USE,calls,2);drain(c);
+    na_event started={.type=NA_EV_CALL_STARTED,.sid="s1",.run_id="r",.turn_id=1,.id="shell",
+        .started_timeout_ms=31536000000LL};
+    CHECK(na_core_feed(c,20,&started)==0);
+    CHECK(na_core_next_deadline(c)==31536000020LL);
+    na_event detach={.type=NA_EV_CALL_DETACHED,.sid="s1",.run_id="wrong",.turn_id=1,.id="shell",.content="backgrounded"};
+    CHECK(na_core_feed(c,30,&detach)<0);EXPECT(c,"");
+    detach.run_id="r";
+    CHECK(na_core_feed(c,30,&detach)==0);
+    EXPECT(c,"RESULT(shell,ok,backgrounded) EXEC(sibling,Read,5000)");
+    CHECK(na_core_feed(c,31,&detach)<0);EXPECT(c,"");
+    na_event late={.type=NA_EV_TOOL_DONE,.sid="s1",.run_id="r",.turn_id=1,.id="shell",.ok=true,.content="late completed"};
+    CHECK(na_core_feed(c,32,&late)<0);EXPECT(c,"");
+    tool_done(c,40,"s1","sibling",true,"sibling done");
+    EXPECT(c,"RESULT(sibling,ok,sibling done) MODEL(s1)");
+    simple(c,41,NA_EV_MODEL_YIELD,"s1");
+    EXPECT(c,"DONE(budget)"); // handoff never resets the C model-step budget
+    na_core_free(c);
+
+    c=mk(16);input_mode(c,0,"s1","tg:1",NA_MODE_AUTO);drain(c);
+    turn(c,10,"s1",NA_TURN_TOOL_USE,calls,2);drain(c);
+    detach.run_id=NULL;
+    CHECK(na_core_feed(c,20,&detach)==0);drain(c);
+    simple(c,30,NA_EV_RESET,NULL);
+    const char *reset=drain(c);
+    CHECK(!strstr(reset,"KILL(shell)") && strstr(reset,"KILL(sibling)"));
+    na_core_free(c);
+}
+static void test_queued_ack_timeout_retires_host_request(void)
+{
+    na_core_config cfg={.tools=tools,.ntools=6,.sandbox=true,.queued_timeout_ms=1000,
+        .run_timeout_ms=600000};
+    na_core *c=na_core_new(&cfg);input(c,0,"s1","tg:1");drain(c);
+    na_call call={.id="queued",.name="Read",.args="{}",.args_ok=true};
+    turn(c,10,"s1",NA_TURN_TOOL_USE,&call,1);drain(c);
+    na_event queued={.type=NA_EV_CALL_QUEUED,.sid="s1",.id="queued"};
+    CHECK(na_core_feed(c,20,&queued)==0);
+    simple(c,1020,NA_EV_TICK,NULL);
+    EXPECT(c,"KILL(queued) RESULT(queued,err,排队超时：一直没等到执行槽，未执行) MODEL(s1)");
+    na_core_free(c);
+}
+
 static void test_queued_timeout(void)
 {
     na_core_config cfg = { .tools = tools, .ntools = 6, .sandbox = true, .max_steps = 16,
@@ -949,6 +999,8 @@ int main(void)
     test_parallel_limit_queues();
     test_resource_locks();
     test_host_queued_state();
+    test_detach_closes_one_waiter_and_preserves_batch();
+    test_queued_ack_timeout_retires_host_request();
     test_host_queued_releases_run_slot();
     test_sandbox_off_vs_missing();
     test_queued_timeout();

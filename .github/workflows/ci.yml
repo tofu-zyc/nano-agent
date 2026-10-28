@@ -61,6 +61,8 @@ jobs:
             kernel/build/nano-kernel.exe
             kernel/build/test_runner.exe
             kernel/build/test_exec_stream.exe
+            kernel/build/test_job_io.exe
+            kernel/build/test_job_manager.exe
             build/tools/rg/windows-x86_64.exe
             scripts/install-kernel.ps1
           if-no-files-found: error
@@ -112,6 +114,10 @@ jobs:
           .\kernel\build\test_runner.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\kernel\build\test_exec_stream.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\kernel\build\test_job_io.exe $env:TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\kernel\build\test_job_manager.exe $env:TEMP
       - name: Windows 执行器
         run: python kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg/windows-x86_64.exe
       - name: Windows 安装（含任务计划程序）

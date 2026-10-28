@@ -667,6 +667,16 @@ def t_resource_domains(gw):
         assert open(target).read()=="after-shell",(scope,first,open(target).read())
 
 
+@case("宿主逐帧读取流式执行器，大输出只保留终态预览")
+def t_streamed_host(gw):
+    command = "python3 -c 'import sys; sys.stdout.write(\"x\"*1048576+\"stream-end\")'"
+    gw.send(t="run",id="streamed-host",req={"tool":"Shell","args":{"command":command,"timeout":20},
+        "dirs":[WORK],"write":True,"sandbox":"off","stream":1,"job_id":"j_host_fixture","max_output":4096})
+    result=gw.expect("run_result",id="streamed-host",ok=True)
+    assert "stream-end" in result["content"] and len(result["content"].encode())<8192,result
+    assert result["sandbox"]["effective"]=="none",result
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -1019,7 +1029,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_streamed_host, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理
