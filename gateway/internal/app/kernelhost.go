@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,9 +26,19 @@ func (k kernelHost) call(ctx context.Context, m proto.Msg, cancel string) (proto
 	a := k.a
 	a.mu.Lock()
 	a.hostSeq++
-	m.ID = fmt.Sprintf("h%d", a.hostSeq)
+	m.ID = fmt.Sprintf("h%s-%d", a.dispatchBoot, a.hostSeq)
 	ch := make(chan proto.Msg, 1)
-	a.hostWaits[m.ID] = hostWait{node: k.node, ch: ch}
+	wait := hostWait{node: k.node, ch: ch, started: func() { host.Started(ctx) }}
+	if m.T == proto.TRun {
+		var req struct {
+			Tool   string           `json:"tool"`
+			Origin *proto.LeaseSpec `json:"origin"`
+		}
+		if json.Unmarshal(m.Req, &req) == nil {
+			wait.tool, wait.origin = req.Tool, req.Origin
+		}
+	}
+	a.hostWaits[m.ID] = wait
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
@@ -101,8 +112,11 @@ func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File)
 
 // hostWait 是一个等内核回复的请求
 type hostWait struct {
-	node string
-	ch   chan proto.Msg
+	started func()
+	tool    string
+	origin  *proto.LeaseSpec
+	node    string
+	ch      chan proto.Msg
 }
 
 // hostReply 处理内核的 run_result / ls_result。调用方持有锁。

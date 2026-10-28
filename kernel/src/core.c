@@ -250,6 +250,16 @@ static decision decide(bool sandbox, bool sandbox_off, na_mode mode, na_tool_kin
  * 资源键、且其中至少一方是独占的，就不能同时跑。空键表示不和别人抢东西（比如
  * 纯网络查询），两边都是共享锁时可以并行。 */
 
+bool na_resource_overlap(const char *a, size_t na, const char *b, size_t nb)
+{
+    if (!a || !b || !na || !nb) return false;
+    if (na == nb && !memcmp(a, b, na)) return true;
+    if (na < 4 || nb < 4 || memcmp(a, "dir:", 4) || memcmp(b, "dir:", 4)) return false;
+    if (na > nb) { const char *tmp = a; a = b; b = tmp; size_t n = na; na = nb; nb = n; }
+    if (memcmp(a, b, na)) return false;
+    return a[na - 1] == '/' || a[na - 1] == '\\' || b[na] == '/' || b[na] == '\\';
+}
+
 /* 两组键有没有交集（都是逗号分隔的资源键） */
 static bool keys_share(const char *a, const char *b)
 {
@@ -261,7 +271,7 @@ static bool keys_share(const char *a, const char *b)
             for (const char *q = b; *q;) {
                 const char *f = strchr(q, ',');
                 size_t m = f ? (size_t)(f - q) : strlen(q);
-                if (m == n && !strncmp(p, q, n)) return true;
+                if (na_resource_overlap(p, n, q, m)) return true;
                 q += m + (f ? 1 : 0);
             }
         }
@@ -281,10 +291,12 @@ static bool calls_conflict(const call_t *a, const call_t *b)
     return false;
 }
 
-/* 已经发给宿主的调用占着执行槽（包括宿主那边还在排队等资源的），没发出去的不占 */
+/* Dispatch handshakes reserve a bounded slot until the host acknowledges.
+ * An acknowledged queued call owns no execution slot; the host/Gateway arbiter
+ * enforces the real per-run/machine limits before reporting CALL_STARTED. */
 static bool call_holds_slot(const call_t *k)
 {
-    return k->sent && k->st != CALL_DONE;
+    return k->sent && (k->st == CALL_DISPATCHED || k->st == CALL_RUNNING);
 }
 
 static int run_slots_used(const run_t *r)
@@ -487,8 +499,10 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->deadline = run_ms > 0 ? now + run_ms : -1;
     r->approval_timeout_ms = ev->approval_timeout_ms ? ev->approval_timeout_ms : c->cfg.approval_timeout_ms;
     r->max_steps = ev->max_steps ? ev->max_steps : c->cfg.max_steps;
-    r->parallel_limit = ev->max_parallel_tools ? ev->max_parallel_tools
+    r->parallel_limit = ev->max_parallel_tools > 0 ? ev->max_parallel_tools
                        : c->cfg.max_parallel_tools_per_run > 0 ? c->cfg.max_parallel_tools_per_run : DEF_MAX_PARALLEL;
+    if (c->cfg.max_parallel_tools_per_run > 0 && r->parallel_limit > c->cfg.max_parallel_tools_per_run)
+        r->parallel_limit = c->cfg.max_parallel_tools_per_run;
     r->queued_limit = c->cfg.max_queued_calls_per_run > 0 ? c->cfg.max_queued_calls_per_run : DEF_MAX_QUEUED;
     r->dispatch_timeout_ms = c->cfg.dispatch_timeout_ms > 0 ? c->cfg.dispatch_timeout_ms : DEF_DISPATCH_TIMEOUT_MS;
     r->queued_timeout_ms = c->cfg.queued_timeout_ms;
@@ -645,6 +659,7 @@ static int on_call_queued(na_core *c, int64_t now, const na_event *ev)
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     k->st = CALL_QUEUED;
     k->deadline = r->queued_timeout_ms > 0 ? now + r->queued_timeout_ms : -1;
+    dispatch(c, now, r);
     return 0;
 }
 
@@ -696,7 +711,8 @@ static int on_tool_done(na_core *c, int64_t now, const na_event *ev)
     if (r && !same_run(r, ev)) return -1;
     call_t *k = r ? find_call(r, ev->id) : NULL;
     /* 超时或取消之后才到的结果；跨轮次、跨 run 的迟到结果也在这里被挡住 */
-    if (!k || (k->st != CALL_RUNNING && k->st != CALL_DISPATCHED)) return -1;
+    if (!k || (k->st != CALL_RUNNING && k->st != CALL_DISPATCHED &&
+               !(k->st == CALL_QUEUED && k->sent))) return -1;
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     na_cmd *reply=result(c, r, k, ev->ok, ev->content ? ev->content : "");
     reply->execution=dupstr(ev->execution);

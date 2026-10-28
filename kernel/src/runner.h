@@ -19,6 +19,7 @@ typedef struct job {
     char   *run_id;                /* 完整调用身份：哪个 run、哪一轮（宿主填，job_free 释放） */
     int     turn_id;
     char   *res_keys, *res_xkeys;  /* 这个任务占着的资源键：运行期间挡住别的冲突调用 */
+    char   *lease_id, *lease_spec;
     char   *sandbox_requested;
     char   *sandbox;               /* 启动时的沙箱模式快照（auto / on / off） */
     int     kind, tag;             /* 调用方自己定义的任务类型和附加信息 */

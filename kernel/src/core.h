@@ -162,6 +162,9 @@ typedef struct na_cmd {
     struct na_cmd *next;
 } na_cmd;
 
+/* Namespace-aware resource intersection, including overlapping directories. */
+bool na_resource_overlap(const char *a, size_t na, const char *b, size_t nb);
+
 typedef struct na_core na_core;
 
 na_core *na_core_new(const na_core_config *cfg);

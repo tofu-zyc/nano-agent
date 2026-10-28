@@ -70,6 +70,21 @@ const char *plat_arch(void)
 #endif
 }
 
+int plat_random_bytes(void *out, size_t n)
+{
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t offset = 0;
+    while (offset < n) {
+        ssize_t got = read(fd, (char *)out + offset, n - offset);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) { close(fd); return -1; }
+        offset += (size_t)got;
+    }
+    close(fd);
+    return 0;
+}
+
 int64_t plat_now_ms(void)
 {
     struct timespec ts;

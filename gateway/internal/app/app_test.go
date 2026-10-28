@@ -199,7 +199,7 @@ func setup(t *testing.T) *env {
 		Tools: []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 	k.expect(proto.TWelcome)
 	waitNode(a, "test", true)
-	t.Cleanup(func() { cancel(); conn.Close(); a.forkWG.Wait(); a.mu.Lock(); a.mu.Unlock() })
+	t.Cleanup(func() { cancel(); conn.Close(); a.Wait(); a.mu.Lock(); a.mu.Unlock() })
 	return &env{a: a, ch: ch, k: k, llm: rec, hosts: hosts, dir: dir, sid: mainSID}
 }
 

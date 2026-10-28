@@ -322,6 +322,7 @@ func main() {
 		stop()
 	}
 	log.Info("退出")
+	a.Wait()
 	if kernelDone != nil {
 		<-kernelDone
 	}

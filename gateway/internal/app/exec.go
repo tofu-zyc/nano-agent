@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/proto"
@@ -23,16 +24,81 @@ import (
 
 // execTool 处理内核的 exec。调用方持有锁。
 func (a *App) execTool(node string, s *sess, m *proto.Msg) {
+	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(s.run.from) {
+		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID, OK: proto.Bool(false), Content: "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态"})
+		return
+	}
+	// Gateway state/delivery operations join the same per-run arbiter as native
+	// processes. Without this, four state calls plus four node calls could run
+	// concurrently after the node acknowledged its queued calls.
+	switch m.Name {
+	case "Session", "Schedule", "Message", "SendFile", "FollowUp", "Agenda", "Idea", "Mind", "Diary", knowledgeLabel, "Skill", "Gateway", "GatewayAdmin":
+		r := s.run
+		if r.execs == nil {
+			r.execs = map[string]context.CancelFunc{}
+		}
+		lease := a.gatewayLeaseRequest(s, m, "gateway:tools", nil, []string{"state:" + a.execAgentID(s.sid)})
+		ctx, cancel := context.WithCancel(a.ctx)
+		r.execs[m.ID] = cancel
+		a.execQueued(node, m)
+		copied := *m
+		copied.Args = append(json.RawMessage(nil), m.Args...)
+		go func() {
+			release, err := a.acquireExecution(ctx, lease)
+			if err == nil {
+				a.executionLeaseStarted(lease)
+			}
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if err != nil {
+				delete(r.execs, m.ID)
+				a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: m.SID, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID, OK: proto.Bool(false), Content: err.Error()})
+				cancel()
+				return
+			}
+			if s.run != r || ctx.Err() != nil {
+				go release(false)
+				cancel()
+				return
+			}
+			var once sync.Once
+			a.execToolNow(node, s, &copied, func() {
+				once.Do(func() {
+					cancel()
+					go func() {
+						a.mu.Lock()
+						delete(r.execs, m.ID)
+						a.mu.Unlock()
+						release(false)
+					}()
+				})
+			})
+		}()
+		return
+	}
+	a.execToolNow(node, s, m, nil)
+}
+
+func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) {
 	r := s.run
-	// 交给网关执行的调用也要让内核知道“真的开始了”，执行时限从那之后才走
-	a.execStarted(node, m)
+	// Synchronous Gateway operations start here. Remote execution, network and
+	// MCP report started only after their own queue/approval and real admission.
+	switch m.Name {
+	case "Read", "Write", "Edit", "Grep", "Fetch", "Shell", "WebSearch", "WebFetch":
+		a.execQueued(node, m)
+	default:
+		if _, _, external := mcp.SplitExposed(m.Name); external {
+			a.execQueued(node, m)
+		} else {
+			a.execStarted(node, m)
+		}
+	}
 	reply := func(ok bool, content string) {
+		if completed != nil {
+			completed()
+		}
 		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID,
 			OK: proto.Bool(ok), Content: content})
-	}
-	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(r.from) {
-		reply(false, "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态")
-		return
 	}
 	if m.Name == "WebSearch" || m.Name == "WebFetch" {
 		a.webTool(s, m, reply)
@@ -206,8 +272,13 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	if sandbox == "" {
 		sandbox = "auto"
 	}
+	priority := 0
+	if r.inner || a.isBranchSID(s.sid) {
+		priority = 10
+	}
+	origin := proto.LeaseSpec{SID: s.sid, RunID: r.runID, TurnID: r.turnID, CallID: m.ID, Agent: a.execAgentID(s.sid), Name: m.Name, Priority: priority}
 	req, _ := json.Marshal(map[string]any{
-		"tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
+		"origin": origin, "tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
 		"tmp_key": s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,
 		"sandbox": sandbox, // 在别的机器上执行时，那台机器按这个模式准备执行器
 	})
@@ -216,13 +287,45 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 		timeout = 10 * time.Minute
 	}
 	// 内核自己也计时，超时会发 exec_cancel；这里多留一点余量兜底
-	ctx, cancel := context.WithTimeout(a.ctx, timeout+10*time.Second)
+	var lease dispatch.Request
+	ctx, cancel := context.WithCancel(a.ctx)
+	ctx = host.WithStarted(ctx, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.AfterFunc(timeout, cancel)
+		context.AfterFunc(ctx, func() { timer.Stop() })
+		if lease.ID != "" {
+			a.executionLeaseStarted(lease)
+		}
+		a.mu.Lock()
+		if s.run == r {
+			a.execStarted(node, m)
+		}
+		a.mu.Unlock()
+	})
+	if _, managedByNode := h.(kernelHost); !managedByNode {
+		// A direct/SSH executor cannot attest canonical paths before launching.
+		// Protect the machine file domain, shared by every native C file call,
+		// rather than trusting unverified path aliases supplied over this route.
+		lease = a.gatewayLeaseRequest(s, m, mt.ws.Host, nil, []string{"machine:files"})
+		lease.Windows = mt.os == "windows"
+	}
 	r.execs[m.ID] = cancel
 	a.log.Info("在 "+mt.ws.Host+" 上执行", "sid", s.sid, "tool", m.Name, "id", m.ID, "kernel", node)
-	// 真的开始在这台机器上执行了：先告诉内核，执行时限从那之后算
-	a.execStarted(node, m)
 	go func() {
-		res := h.Exec(ctx, append(req, '\n'))
+		var res host.Result
+		if lease.ID != "" {
+			release, err := a.acquireExecution(ctx, lease)
+			if err != nil {
+				res = host.Result{Content: err.Error()}
+			} else {
+				res = h.Exec(ctx, append(req, '\n'))
+				release(res.Lost)
+			}
+		} else {
+			res = h.Exec(ctx, append(req, '\n'))
+		}
 		cancel()
 		a.mu.Lock()
 		delete(r.execs, m.ID)

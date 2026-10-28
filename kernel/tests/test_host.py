@@ -34,6 +34,7 @@ class Gateway:
         self.auto_approve = False
         self.landlock = 0
         self.approved = set()
+        self.started = {}
         # v11：网关收到 exec 后先回一条 exec_started（真的开始执行了）
         self.send_started = True
 
@@ -60,6 +61,9 @@ class Gateway:
         msg = json.loads(line)
         if msg.get("t") == "ping":
             self.send(t="pong")
+            return self.recv(timeout)
+        if msg.get("t") in ("tool_started", "run_started"):
+            self.started[(msg.get("sid"),msg.get("run_id"),msg.get("turn_id"),msg.get("id"))] = msg
             return self.recv(timeout)
         if self.send_started and msg.get("t") == "exec":
             self.send(t="exec_started", sid=msg["sid"], id=msg["id"],
@@ -642,6 +646,27 @@ def t_oversized_wire_batch(gw):
     assert not os.path.exists(os.path.join(WORK,"must-not-write"))
 
 
+@case("重叠挂载和 off Shell 的真实资源域不能绕过机器锁")
+def t_resource_domains(gw):
+    for scope in ("overlap","off-machine"):
+        sub=os.path.join(WORK,"resource-sub")
+        target_dir=sub if scope=="overlap" else os.path.join(T,"resource-other")
+        os.makedirs(sub,exist_ok=True);os.makedirs(target_dir,exist_ok=True)
+        marker=os.path.join(WORK,"resource-started-"+scope)
+        target=os.path.join(target_dir,"result.txt")
+        for p in (marker,target):
+            if os.path.exists(p):os.unlink(p)
+        command=f"echo started > '{marker}'; sleep 0.3; echo original > '{target}'"
+        gw.send(t="run",id="resource-shell-"+scope,req={"tool":"Shell","args":{"command":command},"dirs":[WORK],"write":True,"sandbox":"off" if scope=="off-machine" else "auto"})
+        deadline=time.monotonic()+3
+        while not os.path.exists(marker) and time.monotonic()<deadline:time.sleep(0.01)
+        assert os.path.exists(marker),"shell did not start"
+        gw.send(t="run",id="resource-write-"+scope,req={"tool":"Write","args":{"path":"./result.txt","content":"after-shell"},"dirs":[target_dir],"write":True,"sandbox":"auto"})
+        first=gw.expect("run_result",id="resource-shell-"+scope,ok=True)
+        gw.expect("run_result",id="resource-write-"+scope,ok=True)
+        assert open(target).read()=="after-shell",(scope,first,open(target).read())
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -994,7 +1019,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理

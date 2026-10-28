@@ -49,6 +49,13 @@
     <p class="p-note p-small">更新会备份旧版本，新版本起不来自动退回；接入的电脑上的内核会自动换成同一个版本。检查更新和下载走下面的「默认代理」。</p>
   </div>
 
+  {#if ov.storage_issues?.length}
+    <div class="p-err"><b>存储恢复需要处理</b>
+      {#each ov.storage_issues as issue}<p>{issue.scope}：{issue.error}</p>{/each}
+    </div>
+  {/if}
+  {#if ov.execution?.error}<div class="p-err">执行记录保存失败：{ov.execution.error}</div>{/if}
+
   {#if pending.length}
     <div class="p-warn">
       有 {pending.length} 项改动要重启网关才生效：{pending.map((f) => f.label).join('、')}。上面点「重启网关」，网页里的修改会保留。

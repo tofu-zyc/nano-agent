@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	Runtime   Runtime   `toml:"runtime" json:"runtime"`
 	Agent     Agent     `toml:"agent" json:"agent"`
 	Search    Search    `toml:"search" json:"search"`
 	Kernel    Kernel    `toml:"kernel" json:"kernel"`
@@ -363,6 +364,7 @@ func (c *Config) applyEnv() {
 }
 
 func (c *Config) applyDefaults() {
+	c.Runtime = c.Runtime.Defaults()
 	if c.Agent.MaxSteps == nil {
 		n := DefaultMaxSteps
 		c.Agent.MaxSteps = &n
@@ -428,6 +430,9 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
+	if err := c.Runtime.Validate(); err != nil {
+		errs = append(errs, err)
+	}
 	if n := c.Agent.Steps(); n < 0 || n > 100000 {
 		errs = append(errs, errors.New("agent.max_steps：每条消息最多请求模型几次，0 表示不限，最多 100000"))
 	}

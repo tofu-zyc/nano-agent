@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/llm"
@@ -64,16 +65,18 @@ func (a *App) SetManagedKernel(name string) {
 
 // KernelInfo 是一个在线的内核。
 type KernelInfo struct {
-	Node     string   `json:"node"`
-	OS       string   `json:"os,omitempty"`
-	Arch     string   `json:"arch,omitempty"`
-	Version  string   `json:"version,omitempty"`
-	Proto    int      `json:"proto,omitempty"` // 内核说的协议版本（旧内核先放进来、随后自动更新）
-	Landlock int      `json:"landlock"`        // 0 表示没有沙箱
-	Tools    []string `json:"tools"`
-	Since    int64    `json:"since"`
-	Local    bool     `json:"local"`             // 和网关在同一台机器上
-	Managed  bool     `json:"managed,omitempty"` // 网关自己启动的本机内核
+	NodeEpoch   string   `json:"node_epoch,omitempty"`
+	LeasesReady bool     `json:"leases_ready"`
+	Node        string   `json:"node"`
+	OS          string   `json:"os,omitempty"`
+	Arch        string   `json:"arch,omitempty"`
+	Version     string   `json:"version,omitempty"`
+	Proto       int      `json:"proto,omitempty"` // 内核说的协议版本（旧内核先放进来、随后自动更新）
+	Landlock    int      `json:"landlock"`        // 0 表示没有沙箱
+	Tools       []string `json:"tools"`
+	Since       int64    `json:"since"`
+	Local       bool     `json:"local"`             // 和网关在同一台机器上
+	Managed     bool     `json:"managed,omitempty"` // 网关自己启动的本机内核
 	// 能力集合（协议 v11）：按机器协商，缺能力时不暴露相应参数
 	Features map[string]int `json:"features,omitempty"`
 	// SandboxMode 是这台机器请求的沙箱模式（auto / on / off），SandboxEffective 是实际生效的程度
@@ -185,7 +188,7 @@ func (a *App) Skills() []skills.Skill {
 
 func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.mu.Lock()
-	n := &node{info: KernelInfo{Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
+	n := &node{info: KernelInfo{NodeEpoch: hello.NodeEpoch, LeasesReady: hello.Feature("machine_leases") == 0, Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
 		Proto: hello.V, Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
@@ -270,6 +273,9 @@ func (a *App) KernelDown(name string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	machine := a.machineOf(name)
+	if n := a.nodes[name]; n != nil && n.info.NodeEpoch != "" && a.dispatcher != nil {
+		a.dispatcher.Submit(dispatch.Command{Action: "disconnect", Owner: name + "/" + n.info.NodeEpoch})
+	}
 	delete(a.nodes, name)
 	if machine != host.LocalName || a.localKernel() == "" {
 		a.mindMachineChanged(machine, false)

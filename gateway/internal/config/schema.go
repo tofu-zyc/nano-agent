@@ -40,6 +40,14 @@ var Nodes = []Node{
 
 // Fields 是全部可以在网页里查看、修改的配置项，按节点排列（同一节点里按小标题第一次出现的顺序分节）。
 var Fields = []Field{
+	{Key: "runtime.max_calls_per_turn", Group: "gateway", Section: "并行与队列", Label: "每次生成的调用上限", Type: "int", Restart: true, Advanced: true, Help: "一次模型返回最多接受多少工具调用；超过上限整批拒绝，不执行其中一部分。 默认 32；修改后重启生效。"},
+	{Key: "runtime.max_active_runs_per_node", Group: "gateway", Section: "并行与队列", Label: "每个内核的活动任务上限", Type: "int", Restart: true, Advanced: true, Help: "达到上限后保留在网关有界队列，按会话轮转和等待时间调度；节点自己的硬上限仍优先。 默认 16；修改后重启生效。"},
+	{Key: "runtime.max_parallel_tools_per_run", Group: "gateway", Section: "并行与队列", Label: "每个任务的并行工具数", Type: "int", Restart: true, Advanced: true, Help: "只计实际运行；排队、审批不占槽，转后台后继续占机器槽。 默认 4；修改后重启生效。"},
+	{Key: "runtime.max_active_execs_per_machine", Group: "gateway", Section: "并行与队列", Label: "每台机器的执行槽", Type: "int", Restart: true, Advanced: true, Help: "真实执行器总数，包含后台命令和 Hook；至少 2，预留一个 Hook 槽。 默认 8；修改后重启生效。"},
+	{Key: "runtime.max_parallel_shells_per_machine", Group: "gateway", Section: "并行与队列", Label: "每台机器的并行命令数", Type: "int", Restart: true, Advanced: true, Help: "还须满足资源锁和执行槽，不根据模型自报只读放松限制。 默认 2；修改后重启生效。"},
+	{Key: "runtime.max_background_jobs_per_agent", Group: "gateway", Section: "并行与队列", Label: "每个 agent 的后台任务上限", Type: "int", Restart: true, Advanced: true, Help: "后台任务仍占真实执行槽和资源锁。 默认 4；修改后重启生效。"},
+	{Key: "runtime.max_live_jobs_per_machine", Group: "gateway", Section: "并行与队列", Label: "每台机器的未结束任务上限", Type: "int", Restart: true, Advanced: true, Help: "包括前台、后台、待启动调用；超出时明确拒绝新调用。 默认 16；修改后重启生效。"},
+	{Key: "runtime.max_queued_calls_per_run", Group: "gateway", Section: "并行与队列", Label: "每个任务的排队调用上限", Type: "int", Restart: true, Advanced: true, Help: "限制已接受、尚未实际启动的调用。 默认 32；修改后重启生效。"},
 	// ---- Agent：每条消息怎么跑、谁能用、怎么回复 ----
 	{Key: "agent.max_steps", Group: "agent", Section: "每条消息", Label: "工具调用轮数上限", Type: "int",
 		Help:     "一条消息里最多请求模型几次（模型每调一轮工具算一次），到了就先停下，发「继续」接着做。0 表示不限，默认 200",
@@ -54,7 +62,7 @@ var Fields = []Field{
 		Help:     "一次读文件、执行命令的输出超过这么多就截断（保留开头和结尾，模型可以分段再读），默认 64",
 		Keywords: "输出 截断 output"},
 	{Key: "sandbox.mode", Group: "agent", Section: "权限", Label: "执行隔离（沙箱）", Type: "enum", Options: []string{"auto", "on", "off"},
-		Help: "和审批策略分开：auto 用机器上可用的隔离，没有完整隔离时保留旧行为（Shell 要审批）；on 要求完整隔离，机器给不了就明确失败；off 明确关闭执行隔离（不套 Landlock / seccomp），按当前系统用户身份执行，文件工具的路径权限和审批规则照旧。执行节点自己的 kernel.conf 里的 sandbox 更严时以节点为准",
+		Help:     "和审批策略分开：auto 用机器上可用的隔离，没有完整隔离时保留旧行为（Shell 要审批）；on 要求完整隔离，机器给不了就明确失败；off 明确关闭执行隔离（不套 Landlock / seccomp），按当前系统用户身份执行，文件工具的路径权限和审批规则照旧。执行节点自己的 kernel.conf 里的 sandbox 更严时以节点为准",
 		Keywords: "沙箱 隔离 sandbox landlock seccomp 关闭沙箱"},
 	{Key: "workspace.mode", Group: "agent", Section: "权限", Label: "默认权限模式", Type: "enum", Options: []string{"full", "auto", "ask", "readonly"},
 		Help: "新会话用的权限模式（每个会话可以在自己的节点里、或者发 /mode 单独改）。full：放行，所有工具直接执行、不审批；auto：工作目录内全部直接执行；ask：写文件、执行命令前要批准；readonly：只读。拟人型 agent 没单独设置时用 full", Keywords: "yolo 审批 放行 权限 模式"},

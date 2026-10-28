@@ -364,6 +364,7 @@ void job_free(job_t *j)
     free(j->run_id);
     free(j->res_keys);
     free(j->res_xkeys);
+    free(j->lease_id); free(j->lease_spec);
     free(j->sandbox); free(j->sandbox_requested);
     free(j->in);
     buf_free(&j->out);

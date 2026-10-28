@@ -34,6 +34,7 @@ void   plat_args_free(char **v, int n);
 const char *plat_os(void);     /* linux / macos / windows */
 const char *plat_arch(void);   /* x86_64 / arm64 / riscv64 */
 int64_t plat_now_ms(void);
+int plat_random_bytes(void *out, size_t n);
 void plat_sleep_ms(int ms);
 
 /* 自己、主目录、主机名。返回 malloc 的 UTF-8 字符串。 */

@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -232,6 +233,12 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 	if err == nil && !validNode(hello.Node) {
 		err = fmt.Errorf("内核的名字 %q 不能用：不能为空、不能有空白和冒号，最长 64 个字（在 kernel.conf 里设 node）", hello.Node)
 	}
+	if err == nil && hello.Feature("machine_leases") > 0 {
+		decoded, decodeErr := hex.DecodeString(hello.NodeEpoch)
+		if decodeErr != nil || len(decoded) != 16 {
+			err = errors.New("machine_leases 需要 128 位 node_epoch 启动身份")
+		}
+	}
 	if err == nil && !trusted {
 		switch {
 		case hello.Token == "" && hello.Pair:
@@ -281,7 +288,11 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 		}
 	}()
 
-	h.send(c, proto.Msg{T: proto.TWelcome, V: proto.Version})
+	welcome := proto.Msg{T: proto.TWelcome, V: proto.Version}
+	if handler, ok := h.h.(interface{ LeaseProtocol() int }); ok && hello.Feature("machine_leases") > 0 {
+		welcome.Features = map[string]json.RawMessage{"machine_leases": json.RawMessage(fmt.Sprint(handler.LeaseProtocol()))}
+	}
+	h.send(c, welcome)
 	h.log.Info("内核已连接", "node", node, "tools", len(hello.Tools), "remote", remote)
 	h.h.KernelUp(node, hello, local)
 

@@ -26,6 +26,7 @@ type fakeHost struct {
 }
 
 func (f *fakeHost) Exec(ctx context.Context, req []byte) host.Result {
+	host.Started(ctx)
 	var m map[string]any
 	json.Unmarshal(req, &m)
 	f.mu.Lock()

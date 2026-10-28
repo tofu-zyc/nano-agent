@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/kernel"
@@ -99,6 +101,13 @@ var helpText = func() string {
 }()
 
 type App struct {
+	runtimeLimits config.Runtime
+	runWaitSerial uint64
+	dispatcher    *dispatch.Engine
+	dispatchErr   error
+	dispatchBoot  string
+	dispatchWait  map[string]func(dispatch.Change)
+
 	forkWG            sync.WaitGroup
 	forkWork          map[string]chan struct{}
 	forkSlots         chan struct{}
@@ -202,6 +211,9 @@ type sess struct {
 	idleCompacted       bool
 	deleteAfter         bool
 	deleteArchivesAfter bool
+	runQueueSerial      uint64
+	runQueueNode        string
+	runQueuedAt         time.Time
 	queue               []queued
 	run                 *run
 	resetAfter          bool           // run 结束后清空上下文（/reset 时正好有任务在跑）
@@ -237,7 +249,8 @@ type queued struct {
 	ep      endpoint
 	who     string
 	trigger bool
-	inner   bool // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
+	ticket  uint64 // immutable queue admission order; cleared together with this entry
+	inner   bool   // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -406,6 +419,14 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 			store.RecordStorageIssue(recovery.name, err)
 			a.log.Error("会话存储恢复未完成，保留现场", "stage", recovery.name, "err", err)
 		}
+	}
+	a.runtimeLimits = cfg.Runtime.Defaults()
+	a.dispatchBoot = randHex(16)
+	a.dispatchWait = map[string]func(dispatch.Change){}
+	a.dispatcher, a.dispatchErr = dispatch.Open(ctx, filepath.Join(store.Dir(), "runtime", "leases.json"), a.runtimeLimits.Dispatch(), a.leaseChanged)
+	if a.dispatchErr != nil {
+		store.RecordStorageIssue("execution_leases", a.dispatchErr)
+		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
 	}
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -787,6 +808,10 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			return
 		}
 	}
+	if !a.queueFits(s, m) {
+		a.deliver(ep, "等待处理的消息已达上限，这条尚未接收。请等当前任务结束后再发。", "")
+		return
+	}
 	s.queue = append(s.queue, queued{m: m, ep: ep, who: who})
 	if s.run == nil && !s.compacting {
 		a.startRun(s)
@@ -905,6 +930,12 @@ func (a *App) startRun(s *sess) {
 	if len(s.queue) == 0 || s.run != nil || s.compacting {
 		return
 	}
+	if s.queue[0].ticket == 0 {
+		a.runWaitSerial++
+		s.queue[0].ticket = a.runWaitSerial
+		s.runQueuedAt = time.Now()
+	}
+	s.runQueueSerial = s.queue[0].ticket
 	head := s.queue[0]
 	if err := a.store.Check(s.sid); err != nil {
 		a.publish(events.Event{T: "say", SID: s.sid, Text: err.Error()})
@@ -950,6 +981,13 @@ func (a *App) startRun(s *sess) {
 			node = k // HOME 模式必须在网关本机执行
 		}
 	}
+	s.runQueueNode = node
+	if !a.runCapacity(s, node) {
+		return
+	}
+	if n := a.nodes[node]; n != nil && n.info.Features["machine_leases"] > 0 && !n.info.LeasesReady {
+		return
+	}
 	sandboxMode := a.sandboxModeFor(s.sid)
 	a.freezeSandboxRoute(&rt, sandboxMode)
 	if err := sandboxRouteError(sandboxMode, rt); err != nil {
@@ -990,6 +1028,8 @@ func (a *App) startRun(s *sess) {
 	}
 	batch := s.queue[:n]
 	s.queue = slices.Clone(s.queue[n:])
+	s.runQueueSerial = 0
+	s.runQueueNode = ""
 
 	texts := make([]string, len(batch))
 	for i, q := range batch {
@@ -1163,7 +1203,10 @@ func (a *App) startRun(s *sess) {
 	r.mode = mode
 	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
-		SandboxMode: r.sandboxMode}
+		SandboxMode: r.sandboxMode, OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
+	if r.inner || a.isBranchSID(s.sid) {
+		in.Priority = 10
+	}
 	// 每条消息的上限都由网关决定（拓扑图里改），内核的 kernel.conf 只在连着旧网关时兜底
 	ag := a.limitsOf(s.sid)
 	in.MaxSteps = wireLimit(ag.Steps)
@@ -1424,6 +1467,15 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.leaseMessage(node, m) {
+		return
+	}
+	if m.T == proto.TRunStarted {
+		if wait, ok := a.hostWaits[m.ID]; ok && wait.node == node && wait.started != nil {
+			go wait.started()
+		}
+		return
+	}
 	if m.T == proto.TLsResult || m.T == proto.TRunResult {
 		a.hostReply(node, m)
 		return
@@ -1477,7 +1529,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		s.run.tool = m.Name
 		a.publish(events.Event{T: "tool_queued", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID, Name: m.Name, Text: m.Text,
 			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
-	case proto.TExecStarted:
+	case proto.TToolStarted, proto.TExecStarted:
 		a.emitToolState(s, m, "running")
 		a.publish(events.Event{T: "tool_started", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID,
 			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
@@ -1691,7 +1743,7 @@ func (a *App) finish(s *sess, status, detail string) {
 		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
 	}
 	s.lastActivity = a.now()
-	a.startRun(s)
+	a.pumpRuns()
 	if s.run == nil && a.isBranchSID(s.sid) {
 		a.store.UnloadHistory(s.sid)
 	} else if s.run == nil && !isCronSID(s.sid) {
@@ -1859,9 +1911,9 @@ func (a *App) generateModel(s *sess) {
 			return
 		}
 		if res.Reason == llm.ReasonToolUse {
-			limit := 32
+			limit := a.runtimeLimits.MaxCallsPerTurn
 			if n := a.nodes[r.node]; n != nil && n.info.Features["max_calls_per_turn"] > 0 {
-				limit = min(32, n.info.Features["max_calls_per_turn"])
+				limit = min(limit, n.info.Features["max_calls_per_turn"])
 			}
 			if why := validateProposedCalls(res.Calls, limit); why != "" {
 				proposals := res.Calls
@@ -1983,4 +2035,13 @@ func wireMs(d time.Duration) int {
 		return -1
 	}
 	return int(d / time.Millisecond)
+}
+
+// Wait joins durable workers after the App context has been cancelled. Call it
+// before re-exec or releasing the data directory; an in-progress sync may finish.
+func (a *App) Wait() {
+	if a.dispatcher != nil {
+		<-a.dispatcher.Done()
+	}
+	a.forkWG.Wait()
 }

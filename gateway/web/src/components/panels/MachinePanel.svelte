@@ -19,6 +19,9 @@
   const localKernel = $derived(store.ov?.kernels.find((k) => k.managed));
   // 挂在这台机器上跑的 MCP 服务（machine 写的是那台内核的名字）
   const mcpHere = $derived((store.ov?.mcp ?? []).filter((x) => x.machine && (x.machine === name || (m?.kernels ?? []).includes(x.machine))));
+  const leases = $derived((store.ov?.execution?.leases ?? []).filter((x)=>x.machine===name));
+  const executionStates:Record<string,string>={queued:'排队中',granted:'已获执行槽',running:'执行中',cancelling:'正在停止',unknown:'等待核对'};
+  const waitReasons:Record<string,string>={resource:'资源被占用',node_slots:'节点执行槽',machine_slots:'机器执行槽',shell_slots:'命令执行槽',run_slots:'当前任务并行上限',reconcile:'等待执行状态核对'};
   let browsing = $state(false);
   let editing = $state(false);
   let busy = $state(false);
@@ -77,6 +80,21 @@
       <div class="p-row"><span class="p-k">配对</span><span class="p-grow">{new Date(paired.since).toLocaleDateString()} 配对 · 从 {paired.addr} 连来</span></div>
     {/if}
   </div>
+
+  {#if store.ov?.execution?.error}<div class="p-err">执行记录未能保存：{store.ov.execution.error}</div>{/if}
+  {#if leases.length}
+    <h5 class="p-h">执行和资源占用 · {leases.length}</h5>
+    <div class="p-card">
+      {#each leases as lease (lease.id)}
+        <div class="p-row"><b>{lease.name || lease.call_id}</b><span class="p-grow">{executionStates[lease.state] ?? lease.state}{lease.background?' · 后台':''}</span><code>{lease.sid}</code></div>
+        {#if lease.wait_for}<p class="p-note">{waitReasons[lease.wait_for] ?? lease.wait_for}{lease.holder?' · 占用者 '+lease.holder:''}</p>{/if}
+        {#if lease.state==='unknown'}<p class="p-warn">执行状态尚未确认，继续保留执行槽和资源，节点重连后核对。</p>{/if}
+        <details><summary class="p-small muted">调用身份和资源</summary><pre class="detail">{lease.run_id} / {lease.turn_id} / {lease.call_id}
+共享：{(lease.shared??[]).join('、') || '无'}
+独占：{(lease.exclusive??[]).join('、') || '无'}</pre></details>
+      {/each}
+    </div>
+  {/if}
 
   {#if conn}
     <h5 class="p-h">SSH 连接</h5>

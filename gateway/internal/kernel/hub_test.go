@@ -245,3 +245,37 @@ func TestOldKernelCanConnect(t *testing.T) {
 	}
 	c2.Close()
 }
+
+type leasedHandler struct{ recHandler }
+
+func (*leasedHandler) LeaseProtocol() int { return 1 }
+func TestMachineLeaseNegotiationRequiresValidBootIdentity(t *testing.T) {
+	for _, epoch := range []string{"", "other/boot", "abc", "00112233445566778899aabbccddeeff"} {
+		t.Run(epoch, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rec := &leasedHandler{}
+			h := NewHub("tok", rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			server, client := net.Pipe()
+			defer client.Close()
+			h.Attach(ctx, server, true)
+			hello := proto.Msg{T: proto.THello, V: proto.Version, Node: "node", NodeEpoch: epoch,
+				Features: map[string]json.RawMessage{"machine_leases": json.RawMessage("1")}}
+			if err := json.NewEncoder(client).Encode(hello); err != nil {
+				t.Fatal(err)
+			}
+			client.SetReadDeadline(time.Now().Add(time.Second))
+			var reply proto.Msg
+			if err := json.NewDecoder(client).Decode(&reply); err != nil {
+				t.Fatal(err)
+			}
+			if len(epoch) == 32 {
+				if reply.T != proto.TWelcome || reply.Feature("machine_leases") != 1 {
+					t.Fatalf("capability not negotiated: %+v", reply)
+				}
+			} else if reply.T != proto.TError {
+				t.Fatalf("invalid boot identity admitted: %+v", reply)
+			}
+		})
+	}
+}

@@ -14,7 +14,7 @@ export type ChannelStatus = { state: string; identity?: string; error?: string; 
 export type ChannelInfo = { name: string; enabled: boolean; status: ChannelStatus };
 
 // 一个在线的内核（agent）。local 表示它和网关在同一台机器上，managed 表示是网关自己启动的
-export type KernelInfo = { sandbox_mode?: string; sandbox_effective?: string; features?: Record<string,number>; node: string; os?: string; arch?: string; version?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
+export type KernelInfo = { sandbox_mode?: string; sandbox_effective?: string; features?: Record<string,number>; node: string; node_epoch?:string; leases_ready?:boolean; os?: string; arch?: string; version?: string; landlock: number; tools: string[]; since: number; local: boolean; managed?: boolean };
 
 // 技能放在网关上
 export type SkillInfo = { name: string; description: string; dir: string };
@@ -171,7 +171,14 @@ export type MCPInfo = {
   last_error_at?: number;
 };
 
+export type ExecutionLease = {
+  id:string; name?:string; owner:string; machine:string; sid:string; run_id:string; turn_id:number; call_id:string;
+  agent:string; state:'queued'|'granted'|'running'|'cancelling'|'unknown'; background:boolean;
+  shared?:string[]; exclusive?:string[]; wait_for?:string; holder?:string;
+};
+export type ExecutionInfo = { limits:Record<string,number>; leases:ExecutionLease[]; error?:string };
 export type Overview = {
+  execution?:ExecutionInfo;
   gateway: { started: number; kernel_listen: string; web_listen: string; config_dir: string; data_dir: string; env_proxy?: string };
   runtime?: RuntimeStatus;
   kernels: KernelInfo[];

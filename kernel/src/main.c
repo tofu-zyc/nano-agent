@@ -63,6 +63,8 @@ typedef struct execq {
     char  *sandbox;                /* 启动时用的沙箱模式 */
     int    turn_id;
     int    kind;                   /* JOB_TOOL / JOB_HOST */
+    char *lease_id, *lease_spec;
+    bool lease_asked, lease_granted;
     cJSON *req;
     struct execq *next;
 } execq_t;
@@ -87,6 +89,10 @@ typedef struct {
     int             sb_mode;     /* 本机请求的沙箱模式：SB_AUTO / SB_ON / SB_OFF */
     int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
+    bool leasing, lease_synced;
+    char node_epoch[33];
+    unsigned long long lease_seq;
+    int64_t next_lease_sync;
     char           *exec_real;   /* 执行器的真实路径，它不能落在工作目录里 */
     na_core        *core;
     runner_t        runner;
@@ -137,6 +143,7 @@ static void send_hello(kernel_t *k)
     cJSON_AddStringToObject(m, "token", k->conf.token);
     if (!*k->conf.token) cJSON_AddBoolToObject(m, "pair", true);
     cJSON_AddStringToObject(m, "node", k->conf.node);
+    cJSON_AddStringToObject(m, "node_epoch", k->node_epoch);
     cJSON_AddStringToObject(m, "os", plat_os());
     cJSON_AddStringToObject(m, "arch", plat_arch());
     cJSON_AddStringToObject(m, "version", NA_VERSION);
@@ -149,6 +156,8 @@ static void send_hello(kernel_t *k)
     /* 能力集合：网关按机器分别协商，缺能力时不暴露相应参数 */
     cJSON *ft = cJSON_AddObjectToObject(m, "features");
     cJSON_AddNumberToObject(ft, "call_identity", 1);
+    cJSON_AddNumberToObject(ft, "machine_leases", 1);
+    cJSON_AddNumberToObject(ft, "max_parallel_shells", k->conf.max_parallel_shells);
     cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
     cJSON_AddNumberToObject(ft, "max_calls_per_turn", 32);
     cJSON_AddNumberToObject(ft, "user_interjection", 1);   /* 认识 model_yield：插话后的重规划也由内核数步数 */
@@ -515,8 +524,9 @@ static char *res_path(const char *base, const char *rel)
 {
     if (!rel || !*rel) return NULL;
     char *expanded = plat_expand_home(rel);
-    char *full = plat_is_abs(expanded) ? xstrdup(expanded)
-               : base && *base ? plat_join(base, expanded) : xstrdup(expanded);
+    char *expanded_base = base ? plat_expand_home(base) : NULL;
+    char *full = plat_abspath(expanded_base, expanded);
+    free(expanded_base);
     free(expanded);
     char *real = plat_canonical(full);
     if (real) { free(full); return real; }
@@ -542,22 +552,23 @@ static void res_add(buf_t *b, const char *cls, const char *value)
  * 关键约定：**文件操作在所在的工作目录上取共享锁，Shell 在目录上取独占锁**。
  * 两条规则合起来才挡得住“Shell 和 Write 同时改同一个文件”——只比对文件名是挡不住的，
  * 因为 Shell 的参数里根本看不出它要动哪个文件。 */
-static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, buf_t *shared, buf_t *xkeys)
+static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, bool broad, buf_t *shared, buf_t *xkeys)
 {
     const cJSON *dirs = cJSON_GetObjectItemCaseSensitive(ws, "dirs");
     const char *base = NULL;
     const cJSON *first = cJSON_GetArrayItem(dirs, 0);
     if (cJSON_IsString(first)) base = first->valuestring;
     const char *given = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(args, "path"));
+    char *home = base ? NULL : plat_home();
+    if (!base) base = home;
     char *path = res_path(base, given);
 
     if (!strcmp(tool, "Shell")) {
         /* 一般 Shell 没法靠字符串证明没有副作用：对涉及的每个工作目录持独占锁；
          * 提权或范围不明时扩大到机器级的文件资源。模型自报“只读”不放松这里的锁。 */
-        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"))) {
+        res_add(shared, "machine", "files");
+        if (broad || cJSON_GetArraySize(dirs) == 0 || cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "elevated"))) {
             res_add(xkeys, "machine", "files");
-            /* 提权 Shell 也可能动任何文件：所有文件操作都持 machine 共享锁，才挡得住 */
-            res_add(shared, "machine", "files");
         } else {
             const cJSON *it;
             cJSON_ArrayForEach(it, dirs) {
@@ -591,6 +602,12 @@ static void call_resource(const char *tool, const cJSON *args, const cJSON *ws, 
         }
         if (path) res_add(shared, "file", path);
     }
+    if (path && strcmp(tool, "Shell")) {
+        char *parent = plat_dirname(path);
+        res_add(shared, "dir", parent);
+        free(parent);
+    }
+    free(home);
     free(path);
 }
 
@@ -608,7 +625,19 @@ static bool keys_intersect(const char *a, const char *b)
             for (const char *q = b; *q;) {
                 const char *f = strchr(q, ',');
                 size_t len = f ? (size_t)(f - q) : strlen(q);
-                if (len == n && !strncmp(p, q, n)) return true;
+                if (na_resource_overlap(p, n, q, len)) return true;
+#if NA_WINDOWS
+                if (n > 5 && len > 5 && ((!memcmp(p, "dir:", 4) && !memcmp(q, "dir:", 4)) ||
+                                        (!memcmp(p, "file:", 5) && !memcmp(q, "file:", 5)))) {
+                    bool directory = !memcmp(p, "dir:", 4);
+                    size_t prefix = directory ? 4 : 5;
+                    char *left = xasprintf("%.*s", (int)(n - prefix), p + prefix);
+                    char *right = xasprintf("%.*s", (int)(len - prefix), q + prefix);
+                    bool same = directory ? plat_inside(left, right) || plat_inside(right, left) : plat_path_eq(left, right);
+                    free(left); free(right);
+                    if (same) return true;
+                }
+#endif
                 q += len + (f ? 1 : 0);
             }
         }
@@ -739,11 +768,85 @@ static int exec_slots_used(const kernel_t *k)
     return (int)runner_count(&k->runner);
 }
 
+static void lease_send(kernel_t *k, const char *type, const char *id)
+{
+    if (!k->leasing || !id) return;
+    cJSON *m = msg_new(type, NULL);
+    cJSON_AddStringToObject(m, "lease_id", id);
+    cJSON_AddStringToObject(m, "node_epoch", k->node_epoch);
+    link_send(&k->link, m);
+}
+
+static cJSON *lease_spec(kernel_t *k, const execq_t *q)
+{
+    cJSON *spec = cJSON_CreateObject();
+    const cJSON *origin = cJSON_GetObjectItemCaseSensitive(q->req, "origin");
+    cJSON_AddStringToObject(spec, "lease_id", q->lease_id);
+    const char *sid = sget(origin, "sid");
+    cJSON_AddStringToObject(spec, "sid", sid && *sid ? sid : q->sid && *q->sid ? q->sid : "node-host");
+    cJSON_AddStringToObject(spec, "run_id", sget(origin, "run_id") ? sget(origin, "run_id") : q->run_id);
+    const cJSON *turn = cJSON_GetObjectItemCaseSensitive(origin, "turn_id");
+    cJSON_AddNumberToObject(spec, "turn_id", cJSON_IsNumber(turn) ? turn->valueint : q->turn_id);
+    cJSON_AddStringToObject(spec, "call_id", sget(origin, "call_id") ? sget(origin, "call_id") : q->id);
+    if (sget(origin, "agent")) cJSON_AddStringToObject(spec, "agent", sget(origin, "agent"));
+    const cJSON *priority = cJSON_GetObjectItemCaseSensitive(origin, "priority");
+    if (cJSON_IsNumber(priority)) cJSON_AddNumberToObject(spec, "priority", priority->valueint);
+    cJSON_AddStringToObject(spec, "name", q->name);
+    cJSON_AddStringToObject(spec, "res_keys", q->res_keys);
+    cJSON_AddStringToObject(spec, "res_xkeys", q->res_xkeys);
+    cJSON_AddStringToObject(spec, "state", "queued");
+    if (q->kind == JOB_HOST) cJSON_AddStringToObject(spec, "host_id", q->id);
+    (void)k;
+    return spec;
+}
+
+static void lease_ask(kernel_t *k, execq_t *q)
+{
+    if (!k->leasing || !k->lease_synced || q->lease_asked) return;
+    cJSON *m = msg_new("lease_acquire", q->sid);
+    cJSON_AddStringToObject(m, "id", q->id);
+    cJSON_AddStringToObject(m, "run_id", q->run_id);
+    cJSON_AddNumberToObject(m, "turn_id", q->turn_id);
+    cJSON_AddStringToObject(m, "lease_id", q->lease_id);
+    cJSON_AddStringToObject(m, "node_epoch", k->node_epoch);
+    cJSON_AddItemToObject(m, "lease", cJSON_Parse(q->lease_spec));
+    q->lease_asked = true;
+    link_send(&k->link, m);
+}
+
+static void lease_sync(kernel_t *k, int64_t now)
+{
+    cJSON *m = msg_new("lease_sync", NULL);
+    cJSON_AddStringToObject(m, "node_epoch", k->node_epoch);
+    cJSON *items = cJSON_AddArrayToObject(m, "leases");
+    for (job_t *j = k->runner.jobs; j; j = j->next) {
+        if (!j->lease_id) {
+            j->lease_id = xasprintf("l%s-%llu", k->node_epoch, ++k->lease_seq);
+            execq_t q = { .lease_id=j->lease_id, .sid=j->sid, .run_id=j->run_id, .turn_id=j->turn_id,
+                          .id=j->id, .name=j->name, .res_keys=j->res_keys, .res_xkeys=j->res_xkeys, .kind=j->kind };
+            cJSON *spec = lease_spec(k, &q);
+            j->lease_spec = cJSON_PrintUnformatted(spec);
+            cJSON_Delete(spec);
+        }
+        cJSON *item = cJSON_Parse(j->lease_spec);
+        cJSON_DeleteItemFromObjectCaseSensitive(item, "state");
+        cJSON_AddStringToObject(item, "state", j->killed || j->exited ? "cancelling" : "running");
+        cJSON_AddItemToArray(items, item);
+    }
+    for (execq_t *q = k->execq; q; q = q->next) {
+        if (!q->lease_id) continue;
+        cJSON_AddItemToArray(items, cJSON_Parse(q->lease_spec));
+    }
+    link_send(&k->link, m);
+    k->next_lease_sync = now + 5000;
+}
+
 static void execq_free(execq_t *q)
 {
     if (!q) return;
     free(q->sid); free(q->run_id); free(q->id); free(q->name);
     free(q->res_keys); free(q->res_xkeys); free(q->sandbox);
+    free(q->lease_id); free(q->lease_spec);
     cJSON_Delete(q->req);
     free(q);
 }
@@ -768,6 +871,7 @@ static bool execq_drop(kernel_t *k, const char *sid, const char *id)
         execq_t *q = *pp;
         if (strcmp(q->sid, sid ? sid : "") || strcmp(q->id, id ? id : "")) continue;
         *pp = q->next;
+        lease_send(k, "lease_release", q->lease_id);
         execq_free(q);
         return true;
     }
@@ -779,6 +883,7 @@ static void execq_clear(kernel_t *k)
     while (k->execq) {
         execq_t *q = k->execq;
         k->execq = q->next;
+        lease_send(k, "lease_release", q->lease_id);
         execq_free(q);
     }
     k->nshells = 0;
@@ -787,11 +892,13 @@ static void execq_clear(kernel_t *k)
 /* 有了空槽就从队头挑第一个资源也拿得到的启动起来（不能插队：总是从头扫） */
 static void pump_execq(kernel_t *k, int64_t now)
 {
+    if (k->leasing && !k->lease_synced) return;
     for (;;) {
         if (exec_slots_used(k) >= k->conf.max_execs) return;
         execq_t *pick = NULL;
         for (execq_t **pp = &k->execq; *pp; pp = &(*pp)->next) {
             execq_t *q = *pp;
+            if (k->leasing && !q->lease_granted) { lease_ask(k, q); continue; }
             if (is_shell_tool(q->name) && k->nshells >= k->conf.max_parallel_shells) continue;
             if (res_busy(k, q->res_keys, q->res_xkeys)) continue;
             *pp = q->next;
@@ -804,11 +911,16 @@ static void pump_execq(kernel_t *k, int64_t now)
                               pick->kind, pick->sandbox, pick->res_keys, pick->res_xkeys, err, sizeof err);
         pick->req = NULL;   /* spawn_exec 接管了（成功失败都由它释放） */
         if (j) {
+            j->lease_id = pick->lease_id ? xstrdup(pick->lease_id) : NULL;
+            j->lease_spec = pick->lease_spec ? xstrdup(pick->lease_spec) : NULL;
+            lease_send(k, "lease_started", j->lease_id);
             j->tag = is_shell_tool(pick->name) ? 1 : 0;
             if (j->tag) k->nshells++;
             log_info("执行 %s（%s）", pick->name, pick->id);
             if (pick->kind == JOB_TOOL) call_started(k, pick->sid, pick->run_id, pick->turn_id, pick->id, now);
+            else { cJSON *m=msg_new("run_started",NULL); cJSON_AddStringToObject(m,"id",pick->id); link_send(&k->link,m); }
         } else {
+            lease_send(k, "lease_release", pick->lease_id);
             log_warn("无法执行 %s：%s", pick->name, err);
             if (pick->kind == JOB_TOOL) tool_done(k, pick->sid, pick->run_id, pick->turn_id, pick->id, false, err, now);
             else send_run_result(k, pick->id, false, err);
@@ -852,7 +964,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
     }
     bool has_slot = exec_slots_used(k) < k->conf.max_execs &&
                     (!shell || k->nshells < k->conf.max_parallel_shells);
-    if (has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
+    if (!k->leasing && has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
         job_t *j = spawn_exec(k, req, sid, run_id, turn_id, id, name, kind, sandbox, res_keys, res_xkeys,
                               err, errlen);
         if (!j) return false;
@@ -860,6 +972,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
         if (shell) k->nshells++;
         log_info("执行 %s（%s）", name, id);
         if (kind == JOB_TOOL) call_started(k, sid, run_id, turn_id, id, now);
+        else { cJSON *m=msg_new("run_started",NULL); cJSON_AddStringToObject(m,"id",id); link_send(&k->link,m); }
         return true;
     }
     if (exec_live(k) >= k->conf.max_live_jobs) {
@@ -879,12 +992,19 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
     q->res_keys = xstrdup(res_keys ? res_keys : "");
     q->res_xkeys = xstrdup(res_xkeys ? res_xkeys : "");
     q->req = req;
+    if (k->leasing) {
+        q->lease_id = xasprintf("l%s-%llu", k->node_epoch, ++k->lease_seq);
+        cJSON *spec = lease_spec(k, q);
+        q->lease_spec = cJSON_PrintUnformatted(spec);
+        cJSON_Delete(spec);
+    }
     execq_t **pp = &k->execq;
     while (*pp) pp = &(*pp)->next;
     *pp = q;
     /* 状态机那边从“派发等待”转成“排队”：执行时限还没开始走 */
     if (kind == JOB_TOOL) call_queued(k, sid, run_id, turn_id, id, name, now);
     log_info("%s（%s）在等执行槽或资源", name, id);
+    if (k->leasing) lease_ask(k, q);
     return true;
 }
 
@@ -921,9 +1041,12 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
     bool admitted = false;
     /* 资源键和这一轮的沙箱模式：参数还在手上时先算好（后面 args 会被搬进请求对象） */
     buf_t shared_keys = {0}, xkeys = {0};
-    if (ws) call_resource(c->name, args, ws, &shared_keys, &xkeys);
     const char *sandbox = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(pol, "sandbox"));
     if (ws && sget(ws, "sandbox_mode")) sandbox = sget(ws, "sandbox_mode");
+    if (ws) {
+        const char *effective = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local")) ? effective_sandbox(k, sandbox) : sandbox;
+        call_resource(c->name, args, ws, effective && !strcmp(effective, "off"), &shared_keys, &xkeys);
+    }
     if (ws) {
         cJSON_DeleteItemFromObjectCaseSensitive(args, "workspace");
         if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ws, "local"))) {
@@ -951,6 +1074,14 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         cJSON_AddItemToObject(req, "args", args);
         args = NULL;
         cJSON_AddStringToObject(req, "tmp_key", c->sid);
+        cJSON *origin = cJSON_AddObjectToObject(req, "origin");
+        cJSON_AddStringToObject(origin, "sid", c->sid);
+        cJSON_AddStringToObject(origin, "run_id", c->run_id ? c->run_id : "");
+        cJSON_AddNumberToObject(origin, "turn_id", c->turn_id);
+        cJSON_AddStringToObject(origin, "call_id", c->id);
+        if (sget(pol, "owner_agent")) cJSON_AddStringToObject(origin, "agent", sget(pol, "owner_agent"));
+        const cJSON *priority = cJSON_GetObjectItemCaseSensitive(pol, "priority");
+        cJSON_AddNumberToObject(origin, "priority", cJSON_IsNumber(priority) ? priority->valueint : 0);
         cJSON_AddNumberToObject(req, "max_output", (double)max_output);
         admitted = exec_admit(k, req, c->sid, c->run_id, c->turn_id, c->id, c->name, JOB_TOOL, sandbox,
                               shared_keys.len ? buf_cstr(&shared_keys) : "",
@@ -992,8 +1123,8 @@ static void handle_run(kernel_t *k, const cJSON *m, int64_t now)
     const cJSON *dirs = cJSON_GetObjectItemCaseSensitive(req, "dirs");
     cJSON_AddItemToObject(ws, "dirs", cJSON_IsArray(dirs) ? cJSON_Duplicate(dirs, 1) : cJSON_CreateArray());
     buf_t shared = {0}, xkeys = {0};
-    if (cJSON_IsObject(args)) call_resource(tool, args, ws, &shared, &xkeys);
     const char *sandbox = sget(req, "sandbox");
+    if (cJSON_IsObject(args)) call_resource(tool, args, ws, !strcmp(effective_sandbox(k, sandbox), "off"), &shared, &xkeys);
     bool ok = exec_admit(k, cJSON_Duplicate(req, 1), "", "", 0, id, tool, JOB_HOST, sandbox,
                          shared.len ? buf_cstr(&shared) : "", xkeys.len ? buf_cstr(&xkeys) : "",
                          now, err, sizeof err);
@@ -1210,6 +1341,8 @@ static void pump(kernel_t *k, int64_t now)
                 /* 交给网关执行的：请网关停下 */
                 m = msg_new("exec_cancel", c->sid);
                 cJSON_AddStringToObject(m, "id", c->id);
+                cJSON_AddStringToObject(m, "run_id", c->run_id ? c->run_id : "");
+                cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
                 gw_free(g);
             } else if (!execq_drop(k, c->sid, c->id)) {
                 runner_kill(&k->runner, c->sid, c->id);
@@ -1325,6 +1458,9 @@ static char *build_policy(const cJSON *m, na_mode mode, const char *sandbox)
         cJSON_AddNumberToObject(p, "max_output", mo->valuedouble);
     /* 这一轮最终的沙箱模式：执行时按它交给执行器，也决定“没有隔离时要不要审批” */
     cJSON_AddStringToObject(p, "sandbox", sandbox && *sandbox ? sandbox : "auto");
+    if (sget(m, "owner_agent")) cJSON_AddStringToObject(p, "owner_agent", sget(m, "owner_agent"));
+    const cJSON *priority = cJSON_GetObjectItemCaseSensitive(m, "priority");
+    if (cJSON_IsNumber(priority)) cJSON_AddNumberToObject(p, "priority", priority->valueint);
     char *s = cJSON_PrintUnformatted(p);
     cJSON_Delete(p);
     return s;
@@ -1379,11 +1515,53 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         const cJSON *gv = cJSON_GetObjectItemCaseSensitive(m, "v");
         k->gw_ver = cJSON_IsNumber(gv) ? gv->valueint : 10;
         log_info("网关已接受连接（协议 v%d）", k->gw_ver);
+        const cJSON *features = cJSON_GetObjectItemCaseSensitive(m, "features");
+        const cJSON *leases = cJSON_GetObjectItemCaseSensitive(features, "machine_leases");
+        k->leasing = cJSON_IsNumber(leases) && leases->valueint >= 1;
+        k->lease_synced = !k->leasing;
+        if (k->leasing) lease_sync(k, now);
         set_state(k, "connected", NULL, NULL);
         if (k->update_deadline) {
             update_confirm();
             k->update_deadline = 0;
             log_info("更新到 %s 成功", NA_VERSION);
+        }
+        return;
+    }
+    if (!strcmp(t, "lease_synced")) {
+        if (!sget(m, "node_epoch") || strcmp(sget(m, "node_epoch"), k->node_epoch)) return;
+        k->lease_synced = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "ok"));
+        if (k->lease_synced) {
+            set_state(k, "connected", NULL, NULL);
+            for (execq_t *q = k->execq; q; q = q->next) { q->lease_asked = false; q->lease_granted = false; lease_ask(k, q); }
+            pump_execq(k, now);
+        } else set_state(k, "blocked", sget(m, "detail"), "lease_sync");
+        return;
+    }
+    if (!strcmp(t, "lease_grant") || !strcmp(t, "lease_deny") || !strcmp(t, "lease_queued")) {
+        if (!sget(m, "node_epoch") || strcmp(sget(m, "node_epoch"), k->node_epoch)) return;
+        const char *id = sget(m, "lease_id");
+        if (!id) return;
+        execq_t **pp = &k->execq;
+        while (*pp && (!(*pp)->lease_id || strcmp((*pp)->lease_id, id))) pp = &(*pp)->next;
+        if (!*pp) {
+            for (job_t *j = k->runner.jobs; j; j = j->next) if (j->lease_id && !strcmp(j->lease_id, id)) return;
+            if (!strcmp(t, "lease_grant")) lease_send(k, "lease_release", id);
+            return;
+        }
+        execq_t *q = *pp;
+        if (!strcmp(t, "lease_grant")) { q->lease_granted = true; pump_execq(k, now); }
+        else if (!strcmp(t, "lease_deny")) {
+            *pp = q->next;
+            if (q->kind == JOB_TOOL) tool_done(k, q->sid, q->run_id, q->turn_id, q->id, false, sget(m, "detail"), now);
+            else send_run_result(k, q->id, false, sget(m, "detail"));
+            execq_free(q);
+        } else if (q->kind == JOB_TOOL) {
+            cJSON *out = msg_new("tool_queued", q->sid);
+            cJSON_AddStringToObject(out, "run_id", q->run_id);cJSON_AddNumberToObject(out, "turn_id", q->turn_id);
+            cJSON_AddStringToObject(out, "id", q->id);cJSON_AddStringToObject(out, "name", q->name);
+            cJSON_AddStringToObject(out, "text", sget(m, "detail") ? sget(m, "detail") : "等执行槽或资源");
+            link_send(&k->link, out);
         }
         return;
     }
@@ -1421,6 +1599,14 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     }
     if (!strcmp(t, "ls")) {
         handle_ls(k, m);
+        return;
+    }
+    if (!strcmp(t,"exec_queued")) {
+        const char *sid=sget(m,"sid"), *id=sget(m,"id"), *run_id=sget(m,"run_id");
+        const cJSON *v=cJSON_GetObjectItemCaseSensitive(m,"turn_id");
+        int turn_id=cJSON_IsNumber(v)?v->valueint:0;
+        gwjob_t *g=gw_find(k,sid,run_id,turn_id,id);
+        if (g) call_queued(k,g->sid,g->run_id,g->turn_id,g->id,"",now);
         return;
     }
     if (!strcmp(t, "exec_started")) {
@@ -1586,7 +1772,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
                     calls[i].sandbox = mode == SB_OFF ? NA_SB_OFF : landlock > 0 ? NA_SB_YES : NA_SB_NO;
                     /* 并发分类：按真工具、真参数算，交给状态机排队 */
                     buf_t shared = {0}, xkeys = {0};
-                    call_resource(calls[i].name, args, ws, &shared, &xkeys);
+                    call_resource(calls[i].name, args, ws, mode == SB_OFF, &shared, &xkeys);
                     if (shared.len) {
                         reskeys[i] = buf_cstr(&shared);
                         calls[i].res_keys = reskeys[i];
@@ -1663,6 +1849,8 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     /* 被拒绝、等确认这些状态比“断开”更有用，留着 */
     if (!strcmp(k->state, "connected") || !k->state[0]) set_state(k, "connecting", why, NULL);
     link_close(&k->link);
+    k->lease_synced = false;
+    k->gw_ver = 0;
     /* 网关那边已经不在了：把它让起的 MCP 进程都收掉，别留在机器上。
        用 reset 不用 shutdown：这一轮主循环后面的 pipes_poll 还拿着这些条目的引用 */
     pipes_reset(&k->pipes);
@@ -1713,6 +1901,7 @@ static void collect_finished(kernel_t *k, int64_t now)
             /* 被终止的（超时、停止、断线）也要让状态机闭合这个调用，不能只等它自己超时 */
             tool_done(k, j->sid, j->run_id, j->turn_id, j->id, false, "已终止", now);
         }
+        lease_send(k, "lease_release", j->lease_id);
         if (j->tag == 1 && k->nshells > 0) k->nshells--;
         job_free(j);
         pump_execq(k, now);   /* 腾出来的槽位给在排队的调用 */
@@ -1740,6 +1929,8 @@ static void loop(kernel_t *k)
 
     while (!g_stop) {
         int64_t now = now_ms();
+        if (k->leasing && !k->lease_synced && k->gw_ver > 0 && k->link.fd != NA_SOCK_NONE && now >= k->next_lease_sync)
+            lease_sync(k, now);
         plat_stat_t stop_st;
         if (k->stop_file && plat_stat(k->stop_file, &stop_st) && stop_st.exists) {
             plat_unlink(k->stop_file);
@@ -1917,6 +2108,9 @@ int main(int argc, char **argv)
     }
     k.link.fd = NA_SOCK_NONE;
     k.backoff = 1000;
+    unsigned char epoch[16];
+    if (plat_random_bytes(epoch, sizeof epoch) < 0) { log_error("无法生成节点启动身份"); return 1; }
+    for (size_t i = 0; i < sizeof epoch; i++) snprintf(k.node_epoch + i * 2, 3, "%02x", epoch[i]);
 
     char err[512];
     if (kconf_load(&k.conf, conf_path, err, sizeof err) < 0 || probe_exec(&k, err, sizeof err) < 0) {

@@ -177,3 +177,40 @@ C hello.features.max_calls_per_turn 声明批次数量上限（当前 32）。Ga
 未接受提案（生成后插话重规划、提案结构无效）可保存到原始消息的 proposed_calls，网页可展开检查；此字段不转换成模型 tool_calls，不伪造执行失败结果。执行结果仍按实际完成顺序写入。工具说明按 bounded_parallel 能力注入稳定系统前缀，prefixVer=9。
 
 平台流式缓存有界：正文和思考各 128 KiB、32 条附注、128 个工具条目；优先回收已经完成的条目，保留在途调用身份。截断指向网页完整原始历史，不改变模型的真实工具结果。
+
+
+### 机器执行租约（machine_leases=1）
+
+C 节点的 hello 增加随机 node_epoch（每次进程启动唯一），features 报 machine_leases=1、
+max_execs 和 max_parallel_shells。Gateway 的 welcome.features.machine_leases=1 才启用；
+旧网关继续走既有节点硬上限。新网关的恢复存储损坏时明确拒绝执行，不降级绕过租约。
+
+每次连接先 lease_sync：携带 node_epoch 和 leases 完整清单（最多 256 条），包括仍运行/停止中
+的执行器以及尚未启动的本机请求。Gateway 可靠保存核对结果，回 lease_synced(ok)，随后才允许
+新 input 和 lease_acquire。重启恢复将未结算租约视为 unknown，保留真实槽和锁；不重放命令。
+当前启动身份的完整清单可以结算已不存在的旧执行；来源不符或损坏的恢复文件保留并显示错误。
+
+每个 lease_acquire 带 lease_id、node_epoch 及完整外层调用身份，lease 包含
+sid/run_id/turn_id/call_id/agent/name/priority/res_keys/res_xkeys，代执行另有 host_id。
+lease_id 由节点启动身份和递增序号组成；Gateway 以实际活动 run 或已登记的 host 请求核验来源，
+不信任节点转抄的 agent、优先级或调用归属。资源来自执行宿主对实际路径的规范化结果；
+共享/独占键仍使用有界 CSV。Gateway 映射同机节点到共同 machine，处理层级目录和 Windows 大小写。
+
+lease_queued(detail) 显示等待资源及占用者；lease_grant 只在持久化成功后发出。节点收到授权仍须
+满足自身硬槽、Shell 槽和资源检查；真实创建进程后发 lease_started，结束并回收进程/输出后发
+lease_release。lease_cancel 只表示正在停止，不能释放仍在执行的资源。重复申请按不可变身份幂等；
+已结算编号不能再次执行。等资源最多 5 分钟；队列和检查点都有数量及字节边界。
+
+exec_queued 是协调内核对 Gateway 排队的确认，停止派发等待时钟并释放 run 运行槽；
+exec_started 才开始执行时限，tool_started 向平台展示完整调用身份。代执行用 run_started(id)
+确认真实进程启动。排队调用的启动失败/拒绝可以直接给终态失败，不伪造 started。
+
+Gateway 直接/SSH 调用及 MCP/网络/网关工具也参与统一 per-run 仲裁。MCP 默认每个服务独占，
+网络操作另有有界槽；网关状态操作按 agent 串行。不能从直接执行器取得启动前的可信路径域时，
+保守占用 machine:files 独占锁，不能用未经核实的路径别名缩小资源。SSH 不明确的连接丢失结果
+保留 unknown，不把无法核实的远端进程当成已经停止。MCP 客户端 RPC 已结束只结算本次请求，
+不宣称外部副作用被撤回或恰好一次。
+
+运行限额在 runtime 配置段中定义，网页设置和示例同步；修改需重启。普通消息队列每会话最多
+32 条、网关总计 256 条/8 MiB（持久插话另有自己的边界）；达到内核活动 run 上限时留在网关，
+按会话轮转，低优先级随等待时间提升。所有模型/工具轮次仍由 C core 决定。

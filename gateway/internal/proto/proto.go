@@ -50,7 +50,8 @@ const (
 	TExecResult = "exec_result" // exec 的结果
 	TRun        = "run"         // 请内核在它的机器上执行一次工具（工作目录在那台机器上，这一轮由别的内核跑）
 	TRunCancel  = "run_cancel"  // 停下 run
-	TSkillPut   = "skill_put"   // 把技能文件放到内核机器的独立技能缓存，run_result.content 返回实际目录
+	TRunStarted = "run_started"
+	TSkillPut   = "skill_put" // 把技能文件放到内核机器的独立技能缓存，run_result.content 返回实际目录
 	// 协议 v10：MCP 服务的 stdio 透传（把 MCP 进程放到别的电脑上跑）
 	TPipeOpen   = "pipe_open"   // 网关 → 内核：起一个子进程
 	TPipeWrite  = "pipe_write"  // 网关 → 内核：往它的 stdin 写一行
@@ -59,13 +60,23 @@ const (
 	TPipeClosed = "pipe_closed" // 内核 → 网关：进程退出了
 
 	// 协议 v11：并行、排队与完整调用身份
-	TToolQueued   = "tool_queued"   // 内核 → 网关：这个调用在等执行槽或等资源
-	TToolStarted  = "tool_started"  // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
-	TExecStarted  = "exec_started"  // 网关 → 内核：交给网关的调用真的开始了
+	TToolQueued   = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
+	TToolStarted  = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
+	TExecStarted  = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
+	TExecQueued   = "exec_queued"
 	TInputPending = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
 	TInputReady   = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
 	TInputCommit  = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
-	TModelYield   = "model_yield"   // 网关 → 内核：这次生成让位给插话，不算错误、不算停止
+	TLeaseAcquire = "lease_acquire"
+	TLeaseGrant   = "lease_grant"
+	TLeaseQueued  = "lease_queued"
+	TLeaseDeny    = "lease_deny"
+	TLeaseStarted = "lease_started"
+	TLeaseRelease = "lease_release"
+	TLeaseCancel  = "lease_cancel"
+	TLeaseSync    = "lease_sync"
+	TLeaseSynced  = "lease_synced"
+	TModelYield   = "model_yield" // 网关 → 内核：这次生成让位给插话，不算错误、不算停止
 
 	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
@@ -97,7 +108,30 @@ const (
 )
 
 // Msg 是所有消息的并集，按 T 区分类型，没用到的字段省略。
+type LeaseSpec struct {
+	LeaseID    string `json:"lease_id"`
+	SID        string `json:"sid"`
+	RunID      string `json:"run_id,omitempty"`
+	TurnID     int    `json:"turn_id,omitempty"`
+	CallID     string `json:"call_id,omitempty"`
+	Agent      string `json:"agent,omitempty"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	Resources  string `json:"res_keys,omitempty"`
+	Exclusive  string `json:"res_xkeys,omitempty"`
+	HostID     string `json:"host_id,omitempty"`
+	Background bool   `json:"background,omitempty"`
+	Priority   int    `json:"priority,omitempty"`
+}
+
 type Msg struct {
+	NodeEpoch  string      `json:"node_epoch,omitempty"`
+	LeaseID    string      `json:"lease_id,omitempty"`
+	Lease      *LeaseSpec  `json:"lease,omitempty"`
+	Leases     []LeaseSpec `json:"leases,omitempty"`
+	OwnerAgent string      `json:"owner_agent,omitempty"`
+	Priority   int         `json:"priority,omitempty"`
+
 	T string `json:"t"`
 
 	// hello / welcome

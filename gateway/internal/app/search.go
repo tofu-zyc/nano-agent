@@ -165,9 +165,25 @@ func (a *App) webTool(s *sess, m *proto.Msg, reply func(bool, string)) {
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	r := s.run
+	lease := a.gatewayLeaseRequest(s, m, "network", nil, nil)
 	r.execs[m.ID] = cancel
 	go func() {
 		defer cancel()
+		release, acquireErr := a.acquireExecution(ctx, lease)
+		if acquireErr != nil {
+			a.mu.Lock()
+			delete(r.execs, m.ID)
+			a.mu.Unlock()
+			reply(false, acquireErr.Error())
+			return
+		}
+		a.executionLeaseStarted(lease)
+		defer release(false)
+		a.mu.Lock()
+		if s.run == r {
+			a.execStarted(r.node, m)
+		}
+		a.mu.Unlock()
 		var text string
 		var err error
 		if m.Name == "WebSearch" {

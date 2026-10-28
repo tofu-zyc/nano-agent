@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/dispatch"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -93,7 +95,13 @@ type ApprovalInfo struct {
 	At     int64  `json:"at"`
 }
 
+type ExecutionInfo struct {
+	Limits config.Runtime   `json:"limits"`
+	Leases []dispatch.Lease `json:"leases"`
+	Error  string           `json:"error,omitempty"`
+}
 type Snapshot struct {
+	Execution     ExecutionInfo          `json:"execution"`
 	StorageIssues []session.StorageIssue `json:"storage_issues"`
 	Started       int64                  `json:"started"`
 	Kernels       []KernelInfo           `json:"kernels"`
@@ -127,6 +135,13 @@ func (a *App) Snapshot() Snapshot {
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })
 	snap.Approvals = a.approvalList()
 	snap.StorageIssues = a.store.StorageIssues()
+	snap.Execution.Limits = a.runtimeLimits
+	if a.dispatcher != nil {
+		cp, problem := a.dispatcher.Snapshot()
+		snap.Execution.Leases, snap.Execution.Error = cp.Leases, problem
+	} else if a.dispatchErr != nil {
+		snap.Execution.Error = a.dispatchErr.Error()
+	}
 	return snap
 }
 

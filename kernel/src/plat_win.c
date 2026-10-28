@@ -140,6 +140,15 @@ const char *plat_arch(void)
 #endif
 }
 
+int plat_random_bytes(void *out, size_t n)
+{
+    HCRYPTPROV provider = 0;
+    if (n > MAXDWORD || !CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) return -1;
+    BOOL ok = CryptGenRandom(provider, (DWORD)n, out);
+    CryptReleaseContext(provider, 0);
+    return ok ? 0 : -1;
+}
+
 int64_t plat_now_ms(void)
 {
     return (int64_t)GetTickCount64();

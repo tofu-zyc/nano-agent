@@ -322,11 +322,27 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	// start 真正发起调用。调用方持有锁：取消函数登记在这一轮上，内核超时或用户停下时
 	// 发来的 exec_cancel 能把它停下来（KernelMsg 的 TExecCancel）
 	start := func() {
-		a.execStarted(r.node, m)
-		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
+		lease := a.gatewayLeaseRequest(s, m, "mcp:"+server, nil, []string{"mcp:" + server})
+		ctx, cancel := context.WithCancel(a.ctx)
 		r.execs[id] = cancel
 		go func() {
 			defer cancel()
+			release, acquireErr := a.acquireExecution(ctx, lease)
+			if acquireErr != nil {
+				a.mu.Lock()
+				delete(r.execs, id)
+				a.mu.Unlock()
+				reply(false, acquireErr.Error())
+				return
+			}
+			a.executionLeaseStarted(lease)
+			timer := time.AfterFunc(10*time.Minute, cancel)
+			defer timer.Stop()
+			a.mu.Lock()
+			if s.run == r {
+				a.execStarted(r.node, m)
+			}
+			a.mu.Unlock()
 			var res *sdkmcp.CallToolResult
 			var err error
 			if desktop {
@@ -334,6 +350,7 @@ func (a *App) mcpCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 			} else {
 				res, err = mg.Call(ctx, server, tool, args)
 			}
+			release(false) // the client RPC has ended; no claim of external side-effect rollback
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			delete(r.execs, id)

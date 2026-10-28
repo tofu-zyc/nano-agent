@@ -17,6 +17,18 @@ token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
 # 本机内核的名字。不要和别的内核同名（同名的会互相顶掉）
 # local_name = "gateway"
 
+# 执行并行与队列；修改后重启生效。节点自身的硬上限仍然有效。
+# 审批/排队不占执行槽，后台命令和 Hook 继续占真实执行槽和资源。
+[runtime]
+max_calls_per_turn = 32
+max_active_runs_per_node = 16
+max_parallel_tools_per_run = 4
+max_active_execs_per_machine = 8
+max_parallel_shells_per_machine = 2
+max_background_jobs_per_agent = 4
+max_live_jobs_per_machine = 16
+max_queued_calls_per_run = 32
+
 [agent]
 # 每条消息怎么跑（每一轮带给内核；内核的 kernel.conf 里不用再写）：
 # 最多请求模型几次（模型调一轮工具算一次），到了就先停下，发“继续”接着做；0 表示不限

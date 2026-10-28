@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -141,6 +142,19 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+type startedKey struct{}
+
+// WithStarted observes the actual process creation, after any queue or probe.
+func WithStarted(ctx context.Context, fn func()) context.Context {
+	var once sync.Once
+	return context.WithValue(ctx, startedKey{}, func() { once.Do(fn) })
+}
+func Started(ctx context.Context) {
+	if fn, ok := ctx.Value(startedKey{}).(func()); ok {
+		fn()
+	}
+}
+
 // run 运行 cmd，把 input 写进它的 stdin。keepOpen 时 stdin 一直开着，直到进程结束或者 ctx 结束
 // （执行器看到 stdin 关闭就停下，ssh 会把 EOF 传给服务器上的执行器）。ctx 结束后过一会儿还没退出就杀掉。
 func run(ctx context.Context, cmd *exec.Cmd, input []byte, keepOpen bool) (out []byte, errOut string, code int, err error) {
@@ -153,6 +167,7 @@ func run(ctx context.Context, cmd *exec.Cmd, input []byte, keepOpen bool) (out [
 	if err := cmd.Start(); err != nil {
 		return nil, "", -1, err
 	}
+	Started(ctx)
 	done := make(chan struct{})
 	go func() {
 		stdin.Write(input)

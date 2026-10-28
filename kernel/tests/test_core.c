@@ -745,6 +745,27 @@ static void test_host_queued_state(void)
 }
 
 /* 排队超时：等不到执行槽的调用以可读的错误结束 */
+static void test_host_queued_releases_run_slot(void)
+{
+    na_core_config cfg = { .tools=tools, .ntools=6, .sandbox=true,
+        .max_parallel_tools_per_run=1, .run_timeout_ms=600000 };
+    na_core *c=na_core_new(&cfg);
+    input(c,0,"s1","tg:1"); drain(c);
+    na_call calls[]={{"blocked","Read","{}",true,NA_SB_DEFAULT,NULL},
+                     {"independent","Read","{}",true,NA_SB_DEFAULT,NULL}};
+    turn(c,10,"s1",NA_TURN_TOOL_USE,calls,2); drain(c);
+    na_event q={.type=NA_EV_CALL_QUEUED,.sid="s1",.id="blocked"};
+    CHECK(na_core_feed(c,20,&q)==0);
+    EXPECT(c,"EXEC(independent,Read,5000)");
+    /* Both calls remain in the original batch barrier, despite no slot being
+       consumed by the acknowledged queue. */
+    tool_done(c,30,"s1","independent",true,"second");
+    EXPECT(c,"RESULT(independent,ok,second)");
+    tool_done(c,40,"s1","blocked",true,"first");
+    EXPECT(c,"RESULT(blocked,ok,first) MODEL(s1)");
+    na_core_free(c);
+}
+
 static void test_queued_timeout(void)
 {
     na_core_config cfg = { .tools = tools, .ntools = 6, .sandbox = true, .max_steps = 16,
@@ -890,6 +911,17 @@ static void test_approval_does_not_hold_slot(void)
     na_core_free(c);
 }
 
+static void test_resource_directory_overlap(void)
+{
+    const char *a = "dir:/work/project", *b = "dir:/work/project/sub", *c = "dir:/work/projects";
+    CHECK(na_resource_overlap(a, strlen(a), b, strlen(b)));
+    CHECK(na_resource_overlap(b, strlen(b), a, strlen(a)));
+    CHECK(!na_resource_overlap(a, strlen(a), c, strlen(c)));
+    CHECK(na_resource_overlap("dir:/", 5, a, strlen(a)));
+    CHECK(!na_resource_overlap("file:/a", 7, "file:/a/sub", 11));
+    CHECK(!na_resource_overlap(NULL, 0, a, strlen(a)));
+}
+
 int main(void)
 {
     test_schedule_policy_and_deadlines();
@@ -917,6 +949,7 @@ int main(void)
     test_parallel_limit_queues();
     test_resource_locks();
     test_host_queued_state();
+    test_host_queued_releases_run_slot();
     test_sandbox_off_vs_missing();
     test_queued_timeout();
     test_dispatch_timeout();
@@ -924,6 +957,7 @@ int main(void)
     test_turn_batch_validation();
     test_queue_limit();
     test_approval_does_not_hold_slot();
+    test_resource_directory_overlap();
     printf("core: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

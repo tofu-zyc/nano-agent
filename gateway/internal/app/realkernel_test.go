@@ -110,7 +110,7 @@ func setupRealKernel(t *testing.T) (*env, *exec.Cmd) {
 		_, _ = cmd.Process.Wait()
 		klog.Close()
 		cancel()
-		a.forkWG.Wait()
+		a.Wait()
 	})
 	// 等真内核连上来（hello 经过真实 hub 解码）
 	for i := 0; i < 5000; i++ {
