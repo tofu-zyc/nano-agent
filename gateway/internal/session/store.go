@@ -508,7 +508,11 @@ func (s *Store) ReadArchive(sid, id string) []Msg {
 	if filepath.Base(id) != id || filepath.Ext(id) != ".jsonl" {
 		return nil
 	}
-	return readMsgs(filepath.Join(s.archiveDir(sid), id), 0)
+	dir, err := s.archiveReadDir(sid)
+	if err != nil {
+		return nil
+	}
+	return readMsgs(filepath.Join(dir, id), 0)
 }
 
 func readMsgs(path string, skip int) []Msg {

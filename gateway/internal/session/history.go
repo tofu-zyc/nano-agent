@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,18 +25,22 @@ func (s *Store) legacyArchiveDir(sid string) string {
 // ArchiveDirPath 是某个会话在新布局里的归档目录（测试和诊断用）。
 func (s *Store) ArchiveDirPath(sid string) string { return s.archiveDir(sid) }
 
-// archiveReadDir 读归档时优先新布局，没有再看旧布局。
-func (s *Store) archiveReadDir(sid string) string {
-	if _, err := os.Stat(s.archiveDir(sid)); err == nil {
-		return s.archiveDir(sid)
+// 所有归档操作使用同一个已发布视图。不能因为目标目录已创建就
+// 暴露部分迁移，也不能在删除归档后回退到保留的旧备份。
+func (s *Store) archiveReadDir(sid string) (string, error) {
+	if s.isDead(sid) {
+		return "", os.ErrNotExist
 	}
-	if _, err := os.Stat(s.legacyArchiveDir(sid)); err == nil {
-		return s.legacyArchiveDir(sid)
+	if _, _, err := s.locate(sid, ".jsonl"); err != nil {
+		return "", err
 	}
-	return s.archiveDir(sid)
+	return s.archiveDir(sid), nil
 }
 func (s *Store) ArchiveReset(sid string, now time.Time) error {
-	file := s.file(sid)
+	file, _, err := s.locate(sid, ".jsonl")
+	if err != nil {
+		return err
+	}
 	dir := s.archiveDir(sid)
 	if _, err := os.Stat(file); err == nil {
 		if err = os.MkdirAll(dir, 0700); err != nil {
@@ -63,73 +69,72 @@ type ArchiveInfo struct {
 }
 
 func (s *Store) Archives(sid string) []ArchiveInfo {
-	entries, _ := os.ReadDir(s.archiveReadDir(sid))
 	out := []ArchiveInfo{}
+	dir, err := s.archiveReadDir(sid)
+	if err != nil {
+		return out
+	}
+	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) != ".jsonl" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(s.archiveReadDir(sid), e.Name()))
+		f, err := os.Open(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
-		n := 0
-		for _, c := range b {
-			if c == '\n' {
-				n++
-			}
+		counter := &lineCounter{}
+		_, copyErr := io.Copy(counter, f)
+		_ = f.Close()
+		info, err := e.Info()
+		if err != nil || copyErr != nil {
+			continue
 		}
-		info, _ := e.Info()
-		out = append(out, ArchiveInfo{e.Name(), n, info.ModTime().Unix()})
+		out = append(out, ArchiveInfo{e.Name(), counter.n, info.ModTime().Unix()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out
 }
 
+type lineCounter struct{ n int }
+
+func (c *lineCounter) Write(b []byte) (int, error) {
+	c.n += bytes.Count(b, []byte{'\n'})
+	return len(b), nil
+}
+
 // ArchiveCount 是所有会话归档的份数
 func (s *Store) ArchiveCount() int {
 	n := 0
-	_ = filepath.WalkDir(filepath.Join(s.dir, "archive"), func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && filepath.Ext(path) == ".jsonl" {
-			n++
-		}
-		return nil
-	})
+	for _, sid := range s.List() {
+		n += len(s.Archives(sid))
+	}
 	return n
 }
 func (s *Store) DeleteArchive(sid, id string) error {
 	if id == "" || filepath.Base(id) != id || filepath.Ext(id) != ".jsonl" {
 		return fmt.Errorf("归档 ID 不合法")
 	}
-	return os.Remove(filepath.Join(s.archiveDir(sid), id))
+	dir, err := s.archiveReadDir(sid)
+	if err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(dir, id))
 }
 func (s *Store) PruneArchives(now time.Time, days int) error {
 	if days == 0 {
 		return nil
 	}
-	// 新旧两个归档根都要清：迁移前旧的、迁移后新的
-	for _, root := range []string{s.dirV1Archive(), s.dirLegacyArchive()} {
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if filepath.Ext(path) == ".jsonl" && info.ModTime().Before(now.AddDate(0, 0, -days)) {
-				return os.Remove(path)
-			}
-			return nil
-		})
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, sid := range s.List() {
+		if _, err := s.archiveReadDir(sid); err != nil {
 			return err
+		}
+		for _, item := range s.Archives(sid) {
+			if time.Unix(item.At, 0).Before(now.AddDate(0, 0, -days)) {
+				if err := s.DeleteArchive(sid, item.ID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
