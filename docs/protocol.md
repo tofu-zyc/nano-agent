@@ -134,10 +134,10 @@ stdin  {"tool":"Shell","args":{"command":"ls"},"dirs":["/home/u/foo"],"write":tr
 stdout {"ok":true,"content":"a.txt\nb.txt\n"}
 ```
 
-- 执行器先套上沙箱（Landlock + seccomp），再执行工具；沙箱启动失败就不执行。
-- 请求写完后 stdin 保持打开。stdin 被关闭或收到 SIGTERM 表示取消：执行器杀掉它启动的命令（整个进程组），不输出结果直接退出。
+- 执行器按最终 auto/on/off 策略准备执行隔离；on 无法满足时失败，off 跳过施加。应用层工具权限独立。
+- 请求写完后 stdin 保持打开。关闭 stdin 表示取消：清理命令进程树；旧模式不输出结果，流式模式给出 cancelled 终态。强制杀死执行器、未收到终态时不能据退出码猜测命令成功。
 - 工作目录不能包含内核的配置目录和执行器本身，内核会在启动执行器之前检查；执行器自己也拒绝包含它自己的目录。
-- `nano-exec --probe` 输出本机的沙箱能力：`{"v":1,"landlock":7,"os":"Linux","arch":"x86_64","rg":true}`。
+- `nano-exec --probe` 输出本机的沙箱能力：`{"v":2,"job_stream":1,"landlock":7,"os":"linux","arch":"x86_64","rg":true,"sandbox_modes":["auto","off","on"]}`。
 
 `Skill` 由网关处理：技能放在网关的技能目录里（`skills.dir`，默认是网关配置文件旁边的 `skills/`），网关读 `SKILL.md` 返回说明，并把附带文件放到各执行机器的独立 `skill-cache/<技能名>-<内容哈希>/`（本机、SSH 服务器网关自己放，别的电脑用 `skill_put`）。回执列出每台机器上的实际完整路径；不能假定 HOME 或 NANO_HOME 一样。缓存不覆盖全局/agent 技能源文件，每次执行只读可见。
 
@@ -214,3 +214,20 @@ Gateway 直接/SSH 调用及 MCP/网络/网关工具也参与统一 per-run 仲�
 运行限额在 runtime 配置段中定义，网页设置和示例同步；修改需重启。普通消息队列每会话最多
 32 条、网关总计 256 条/8 MiB（持久插话另有自己的边界）；达到内核活动 run 上限时留在网关，
 按会话轮转，低优先级随等待时间提升。所有模型/工具轮次仍由 C core 决定。
+
+### 执行器 v2 增量 Shell 协议
+
+probe 的 job_stream=1 表示支持显式请求 stream=1（省略或 0 继续旧的一问一答）。
+Shell 请求同时提供不超过 128 字节的 job_id；执行器在实际创建命令进程后输出 started，
+stdout/stderr 分别读取，按不超过 8 KiB 的原始块进行 base64 编码，每个 JSON 行不超过 16 KiB。
+命令打印的 JSON 也只作为输出数据，不能变成执行器控制消息。所有帧带 job_id 和从 1 单调递增的 seq。
+
+唯一 exit 帧包括 ok/content/exit_code/signal/timed_out/cancelled/sandbox_effective；
+content 是有界预览，原始保留量最多 2 KiB，完整输出通过 output 帧读取。准备失败可直接给失败 exit，
+不能给 started 或成功 exit。流式超时默认 1800 秒；可信请求的 shell_timeout_max 限制最大秒数
+（缺省 86400），timeout=0 只有 allow_no_timeout=true 才允许。旧模式的 120/600 秒规则保持。
+
+C 增量解码器逐帧验证身份、序号、状态顺序、base64 和帧大小，不累计完整执行器输出。
+不完整终态、重复终态、输出越界、成功状态与取消/超时/退出码矛盾都标为协议失败。
+runner 的输出上限在每次启动前冻结；一个大输出调用不会扩大其他任务的上限。
+这项执行器能力不单独表示节点已经提供 JobManager 或后台控制能力，节点须分别协商。

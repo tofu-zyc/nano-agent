@@ -66,7 +66,7 @@ SRCTAR := nano-exec-src.tar.gz
 XHDRS  := src/nexec.h src/sandbox.h src/util.h src/plat.h third_party/cjson/cJSON.h
 
 .DEFAULT_GOAL := all
-.PHONY: all test test-win windows-exec windows-kernel cross-linux cross-macos clean static FORCE
+.PHONY: all test test-win windows-exec windows-kernel windows-tests cross-linux cross-macos clean static FORCE
 
 # 版本号变了才重写 version.h，只有用到它的文件会重新编译
 $(VERSION_H): FORCE
@@ -109,6 +109,22 @@ build/test_core: tests/test_core.c src/core.c src/core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(WARN) $(SAN) -o $@ tests/test_core.c src/core.c
 
+build/test_exec_stream: tests/test_exec_stream.c src/exec_stream.c src/exec_stream.h src/util.c $(PLAT) third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ tests/test_exec_stream.c src/exec_stream.c src/util.c $(PLAT) third_party/cjson/cJSON.c
+
+build/test_runner: tests/test_runner.c $(RUNNER) src/runner.h src/util.c $(PLAT) third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ tests/test_runner.c $(RUNNER) src/util.c $(PLAT) third_party/cjson/cJSON.c
+
+build/test_runner.exe: tests/test_runner.c src/runner_win.c src/runner.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_runner.c src/runner_win.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
+
+build/test_exec_stream.exe: tests/test_exec_stream.c src/exec_stream.c src/exec_stream.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_exec_stream.c src/exec_stream.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
+
+windows-tests: build/test_runner.exe build/test_exec_stream.exe
+
 windows-exec: $(WIN_EXEC)
 windows-kernel: $(WIN_KERNEL)
 
@@ -143,13 +159,15 @@ $(WIN_KERNEL): $(KWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERS
 # Windows 执行器通过 WSL interop 在真实 Windows 上跑；没有 zig 或 rg.exe 时给出提示后跳过
 test-win:
 	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
-	  $(MAKE) --no-print-directory windows-exec windows-kernel && \
+	  $(MAKE) --no-print-directory windows-exec windows-kernel windows-tests && \
 	  { test -f "$(RG_WIN)" || { echo "没有 $(RG_WIN)：先运行 scripts/fetch-rg.sh"; exit 1; }; } && \
-	  python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
+	  ./build/test_runner.exe && ./build/test_exec_stream.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 执行器测试；Windows 上的测试在 CI 的 Windows runner 跑）"; fi
 
-test: build/test_core build/nano-kernel-asan build/nano-exec-asan test-win
+test: build/test_core build/test_runner build/test_exec_stream build/nano-kernel-asan build/nano-exec-asan test-win
 	./build/test_core
+	./build/test_runner
+	./build/test_exec_stream
 	python3 tests/test_exec.py build/nano-exec-asan
 	python3 tests/test_host.py build/nano-kernel-asan build/nano-exec-asan
 

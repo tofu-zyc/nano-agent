@@ -52,13 +52,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
       - name: 交叉编译 Windows 程序
-        run: make -C kernel windows-exec windows-kernel
+        run: make -C kernel windows-exec windows-kernel windows-tests
       - uses: actions/upload-artifact@v4
         with:
           name: windows-bins
           path: |
             kernel/build/nano-exec.exe
             kernel/build/nano-kernel.exe
+            kernel/build/test_runner.exe
+            kernel/build/test_exec_stream.exe
             build/tools/rg/windows-x86_64.exe
             scripts/install-kernel.ps1
           if-no-files-found: error
@@ -105,6 +107,11 @@ jobs:
           python-version: "3.12"
       - name: Windows NTFS 数据流、发布授权与辅助文件恢复
         run: go -C gateway test ./internal/session -run 'TestNTFS|TestAuxiliary|TestRenameAuxiliary|TestW1S23' -count=1
+      - name: Windows 每次执行的独立输出限额
+        run: |
+          .\kernel\build\test_runner.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\kernel\build\test_exec_stream.exe
       - name: Windows 执行器
         run: python kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg/windows-x86_64.exe
       - name: Windows 安装（含任务计划程序）

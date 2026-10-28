@@ -29,6 +29,7 @@ typedef struct job {
     char   *in;                    /* 写给子进程 stdin 的请求 */
     size_t  in_len, in_off;
     buf_t   out, err;
+    size_t  out_cap;               /* frozen before readers start; never shared across calls */
     size_t  out_total, err_total;  /* 实际产生的字节数，超出上限的部分丢弃 */
     bool    exited, killed;
     int     status;                /* POSIX wait 状态；Windows 上不用 */
@@ -44,7 +45,7 @@ typedef struct job {
 
 typedef struct {
     job_t  *jobs;
-    size_t  out_cap;   /* stdout 最多保留多少字节 */
+    size_t  out_cap;   /* default stdout cap, copied into each new job */
     na_wake *wake;     /* Windows 读线程用它唤醒主循环 */
 } runner_t;
 
@@ -60,6 +61,8 @@ int    runner_start(runner_t *r, char *const argv[], const char *sid, const char
 /* 同上，input 可以含任意字节（长度 in_len）；成功返回任务，调用方可以再设 kind / tag / close_in */
 job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                        char *input, size_t in_len, char *err, size_t errlen);
+job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                            char *input, size_t in_len, size_t out_cap, char *err, size_t errlen);
 void   runner_kill(runner_t *r, const char *sid, const char *id);
 void   runner_kill_all(runner_t *r);
 void   runner_reap(runner_t *r, int64_t now);

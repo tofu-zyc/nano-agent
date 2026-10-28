@@ -33,6 +33,10 @@ typedef struct {
     char  *tmp;                   /* 这个会话的临时目录，TMPDIR 指向它 */
     char  *cache;                 /* 各会话共用的缓存目录，XDG_CACHE_HOME 指向它 */
     size_t max_output;
+    const proc_stream *stream;
+    proc_status *process_status;
+    int shell_timeout_max;
+    bool allow_no_timeout;
     bool   watch_stdin;
     char **env;                   /* 子进程的环境变量，以 NULL 结尾 */
 } xctx;

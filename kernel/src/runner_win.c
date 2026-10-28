@@ -24,38 +24,6 @@
 #define EXIT_GRACE_MS  2000
 #define KILL_GRACE_MS  2000
 
-static wchar_t *wdup(const wchar_t *s)
-{
-    size_t n = wcslen(s);
-    wchar_t *p = xmalloc((n + 1) * sizeof *p);
-    memcpy(p, s, (n + 1) * sizeof *p);
-    return p;
-}
-
-static wchar_t *to_w(const char *s)
-{
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    if (n <= 0) return NULL;
-    wchar_t *w = xmalloc((size_t)n * sizeof *w);
-    if (!MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n)) { free(w); return NULL; }
-    return w;
-}
-
-static wchar_t *cmdline_w(char *const argv[])
-{
-    wchar_t *w = to_w(argv[0]);
-    if (!w) return wdup(L"nano-exec.exe");
-    if (!wcschr(w, L' ')) return w;
-    size_t l = wcslen(w);
-    wchar_t *q = xmalloc((l + 3) * sizeof *q);
-    q[0] = L'"';
-    memcpy(q + 1, w, l * sizeof *q);
-    q[l + 1] = L'"';
-    q[l + 2] = 0;
-    free(w);
-    return q;
-}
-
 static void close_handle(HANDLE *h)
 {
     if (*h && *h != INVALID_HANDLE_VALUE) CloseHandle(*h);
@@ -67,6 +35,7 @@ typedef struct {
     HANDLE  h;
     int     which;   /* 1 = stdout, 2 = stderr */
     runner_t *r;
+    volatile LONG stop;
 } reader_arg;
 
 static DWORD WINAPI reader_thread(LPVOID p);
@@ -79,6 +48,12 @@ int runner_start(runner_t *r, char *const argv[], const char *sid, const char *i
 
 job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                        char *input, size_t in_len, char *err, size_t errlen)
+{
+    return runner_start_bounded(r,argv,sid,id,name,input,in_len,r->out_cap,err,errlen);
+}
+
+job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, char *err, size_t errlen)
 {
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL, er_r = NULL, er_w = NULL;
@@ -109,7 +84,7 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     } else {
         si.StartupInfo.cb = sizeof(STARTUPINFO);
     }
-    wchar_t *line = cmdline_w(argv);
+    wchar_t *line = plat_command_line(argv);
     DWORD flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
     if (have_attr) flags |= EXTENDED_STARTUPINFO_PRESENT;
     PROCESS_INFORMATION pi;
@@ -143,6 +118,7 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     CloseHandle(pi.hThread);
 
     job_t *j = xcalloc(1, sizeof *j);
+    j->out_cap=out_cap;
     j->sid = xstrdup(sid);
     j->id = xstrdup(id);
     j->name = xstrdup(name);
@@ -162,6 +138,12 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     j->rarg_err = a2;
     j->th_out = CreateThread(NULL, 0, reader_thread, a1, 0, NULL);
     j->th_err = CreateThread(NULL, 0, reader_thread, a2, 0, NULL);
+    if (!j->th_out || !j->th_err) {
+        snprintf(err,errlen,"创建执行器读取线程失败：错误 %lu",(unsigned long)GetLastError());
+        if(job) TerminateJobObject(job,1); else TerminateProcess(pi.hProcess,1);
+        job_free(j);
+        return NULL;
+    }
 
     size_t off = 0;
     while (off < in_len) {
@@ -199,9 +181,10 @@ static DWORD WINAPI reader_thread(LPVOID p)
     job_t *j = a->job;
     buf_t *b = a->which == 1 ? &j->out : &j->err;
     size_t *total = a->which == 1 ? &j->out_total : &j->err_total;
-    size_t cap = a->which == 1 ? a->r->out_cap : STDERR_CAP;
+    size_t cap = a->which == 1 ? j->out_cap : STDERR_CAP;
     char tmp[16384];
     for (;;) {
+        if (InterlockedCompareExchange(&a->stop,1,1)) break;
         DWORD got = 0;
         if (!ReadFile(a->h, tmp, sizeof tmp, &got, NULL) || !got) break;
         *total += got;
@@ -346,10 +329,23 @@ char *job_result(const job_t *j, bool *ok)
     return buf_cstr(&b);
 }
 
+static void join_reader(void *thread,void *arg)
+{
+    if(!thread) return;
+    reader_arg *reader=arg;
+    InterlockedExchange(&reader->stop,1);
+    // Repeated cancellation covers the small race between checking stop and
+    // entering ReadFile. Never free the reader's job/arguments while it runs.
+    while(WaitForSingleObject((HANDLE)thread,10)==WAIT_TIMEOUT)
+        CancelSynchronousIo((HANDLE)thread);
+}
+
 void job_free(job_t *j)
 {
     if (!j) return;
     close_handle((HANDLE *)&j->h_in);
+    join_reader(j->th_out,j->rarg_out);
+    join_reader(j->th_err,j->rarg_err);
     close_handle((HANDLE *)&j->h_out);
     close_handle((HANDLE *)&j->h_err);
     close_handle((HANDLE *)&j->hproc);

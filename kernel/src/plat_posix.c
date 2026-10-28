@@ -635,20 +635,26 @@ char **plat_build_env(const char *home, const char *tmp, const char *cache)
     return env;
 }
 
-int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
-                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st)
+int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
+                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st, const proc_stream *stream)
 {
     memset(st, 0, sizeof *st);
-    int p[2];
+    st->exit_code=-1;
+    int p[2], ep[2] = {-1,-1};
     if (pipe(p) < 0) {
         buf_puts(out, "创建管道失败：");
         buf_puts(out, strerror(errno));
         return -1;
     }
+    if (stream && pipe(ep)<0) {
+        close(p[0]);close(p[1]);
+        buf_puts(out,"创建 stderr 管道失败");return -1;
+    }
+    if (stream) {set_cloexec(ep[0]);set_cloexec(ep[1]);}
     set_cloexec(p[0]);
     set_cloexec(p[1]);
     if (g_sig[0] < 0) {
-        if (pipe(g_sig) < 0) { close(p[0]); close(p[1]); return -1; }
+        if (pipe(g_sig) < 0) { close(p[0]); close(p[1]); if(stream){close(ep[0]);close(ep[1]);} return -1; }
         set_nonblock(g_sig[0]); set_nonblock(g_sig[1]);
         set_cloexec(g_sig[0]); set_cloexec(g_sig[1]);
         struct sigaction sa;
@@ -667,6 +673,7 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         buf_puts(out, "fork 失败：");
         buf_puts(out, strerror(errno));
         close(p[0]); close(p[1]);
+        if(stream){close(ep[0]);close(ep[1]);}
         return -1;
     }
     if (pid == 0) {
@@ -680,7 +687,7 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         signal(SIGHUP, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
         int dn = open("/dev/null", O_RDONLY);
-        if (dn < 0 || dup2(dn, 0) < 0 || dup2(p[1], 1) < 0 || dup2(p[1], 2) < 0) _exit(127);
+        if (dn < 0 || dup2(dn, 0) < 0 || dup2(p[1], 1) < 0 || dup2(stream ? ep[1] : p[1], 2) < 0) _exit(127);
         if (chdir(cwd) < 0) {
             dprintf(2, "进入目录 %s 失败：%s\n", cwd, strerror(errno));
             _exit(127);
@@ -692,13 +699,15 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
     setpgid(pid, pid);
     close(p[1]);
     set_nonblock(p[0]);
+    if (stream) {close(ep[1]);set_nonblock(ep[0]);}
+    if (stream && stream->started) stream->started(stream->ctx,(int64_t)pid);
 
     capture c = { .head_max = max_output * 3 / 4, .tail_max = max_output / 4 };
-    int64_t deadline = now_ms() + (int64_t)timeout_s * 1000, linger = -1;
-    bool exited = false, open_out = true, cancelled = false;
+    int64_t deadline = timeout_s>0 ? now_ms() + (int64_t)timeout_s * 1000 : INT64_MAX, linger = -1;
+    bool exited = false, open_out = true, open_err = stream!=NULL, cancelled = false;
     char tmp[16384];
 
-    while (open_out || !exited) {
+    while (open_out || open_err || !exited) {
         int64_t now = now_ms();
         if (!exited && now >= deadline) {
             st->timed_out = true;
@@ -706,14 +715,15 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         }
         if (exited && now >= linger) break;
         int64_t until = exited ? linger : deadline;
-        struct pollfd pf[3] = {
+        struct pollfd pf[4] = {
             { .fd = g_sig[0], .events = POLLIN },
             { .fd = open_out ? p[0] : -1, .events = POLLIN },
             { .fd = watch_stdin ? 0 : -1, .events = POLLIN },
+            { .fd = open_err ? ep[0] : -1, .events = POLLIN },
         };
         int wait = (int)(until - now);
         if (wait > 1000) wait = 1000;
-        if (poll(pf, 3, wait) < 0 && errno != EINTR) break;
+        if (poll(pf, 4, wait) < 0 && errno != EINTR) break;
 
         if (pf[0].revents & POLLIN) {
             char s[16];
@@ -728,15 +738,35 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         }
         if (cancelled) {
             kill(-pid, SIGKILL);
-            _exit(2);
+            if (!stream) _exit(2);
+            st->cancelled=true;
+            break;
         }
         if (pf[1].revents & (POLLIN | POLLHUP | POLLERR)) {
             for (int i = 0; i < 16; i++) {
                 ssize_t n = read(p[0], tmp, sizeof tmp);
-                if (n > 0) { cap_add(&c, tmp, (size_t)n); continue; }
+                if (n > 0) {
+                    cap_add(&c,tmp,(size_t)n);
+                    if(stream && stream->output) stream->output(stream->ctx,1,tmp,(size_t)n);
+                    continue;
+                }
                 if (n < 0 && errno == EINTR) continue;
                 if (n < 0 && errno == EAGAIN) break;
                 open_out = false;
+                break;
+            }
+        }
+        if (pf[3].revents & (POLLIN|POLLHUP|POLLERR)) {
+            for (int i=0;i<16;i++) {
+                ssize_t n=read(ep[0],tmp,sizeof tmp);
+                if(n>0) {
+                    cap_add(&c,tmp,(size_t)n);
+                    if(stream && stream->output) stream->output(stream->ctx,2,tmp,(size_t)n);
+                    continue;
+                }
+                if(n<0 && errno==EINTR) continue;
+                if(n<0 && errno==EAGAIN) break;
+                open_err=false;
                 break;
             }
         }
@@ -758,10 +788,18 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         }
     }
     close(p[0]);
+    if(stream) close(ep[0]);
     cap_render(&c, out);
     buf_free(&c.head);
     buf_free(&c.tail);
     return 0;
+}
+
+
+int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
+                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st)
+{
+    return plat_run_proc_stream(argv,cwd,envp,timeout_s,watch_stdin,max_output,out,st,NULL);
 }
 
 int plat_probe(char *const argv[], int timeout_ms, buf_t *out)

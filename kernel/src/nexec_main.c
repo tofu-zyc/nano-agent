@@ -18,7 +18,7 @@
 #include <unistd.h>
 #endif
 
-#define NEXEC_VERSION 1
+#define NEXEC_VERSION 2
 #define REQ_MAX (64u << 20)
 
 #if !NA_WINDOWS
@@ -84,6 +84,60 @@ static void respond(bool ok, const char *content, const char *effective)
     }
     cJSON_free(s);
     cJSON_Delete(r);
+}
+
+/* The command never writes protocol stdout. Raw pipe chunks are split before
+ * base64 encoding, so a frame remains <16 KiB even for arbitrary binary data. */
+typedef struct {
+    const char *job_id, *effective;
+    unsigned long long seq;
+} stream_state;
+
+static void stream_write(stream_state *s,cJSON *frame)
+{
+    cJSON_AddStringToObject(frame,"job_id",s->job_id);
+    cJSON_AddNumberToObject(frame,"seq",(double)++s->seq);
+    char *line=cJSON_PrintUnformatted(frame);
+    if(line){fputs(line,stdout);fputc('\n',stdout);fflush(stdout);}
+    cJSON_free(line);cJSON_Delete(frame);
+}
+static void stream_started(void *ctx,int64_t pid)
+{
+    stream_state *s=ctx;
+    cJSON *m=cJSON_CreateObject();
+    cJSON_AddStringToObject(m,"t","started");
+    cJSON_AddNumberToObject(m,"pid",(double)pid);
+    cJSON_AddStringToObject(m,"sandbox_effective",s->effective);
+    stream_write(s,m);
+}
+static void stream_output(void *ctx,int which,const void *data,size_t n)
+{
+    stream_state *s=ctx;
+    const unsigned char *p=data;
+    while(n){
+        size_t take=n>8192?8192:n;
+        buf_t encoded={0};b64_encode(&encoded,p,take);
+        cJSON *m=cJSON_CreateObject();
+        cJSON_AddStringToObject(m,"t","output");
+        cJSON_AddStringToObject(m,"stream",which==2?"stderr":"stdout");
+        cJSON_AddStringToObject(m,"encoding","base64");
+        cJSON_AddStringToObject(m,"data",buf_cstr(&encoded));
+        stream_write(s,m);buf_free(&encoded);
+        p+=take;n-=take;
+    }
+}
+static void stream_exit(stream_state *s,bool ok,const char *content,const proc_status *st)
+{
+    cJSON *m=cJSON_CreateObject();
+    cJSON_AddStringToObject(m,"t","exit");
+    cJSON_AddBoolToObject(m,"ok",ok);
+    cJSON_AddStringToObject(m,"content",content);
+    cJSON_AddNumberToObject(m,"exit_code",st->exit_code);
+    cJSON_AddNumberToObject(m,"signal",st->term_signal);
+    cJSON_AddBoolToObject(m,"timed_out",st->timed_out);
+    cJSON_AddBoolToObject(m,"cancelled",st->cancelled);
+    cJSON_AddStringToObject(m,"sandbox_effective",s->effective);
+    stream_write(s,m);
 }
 
 /* ---- 准备 ---- */
@@ -321,6 +375,7 @@ static int probe(void)
     char *rg = rg_path(&x);
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "v", NEXEC_VERSION);
+    cJSON_AddNumberToObject(r,"job_stream",1);
     cJSON_AddNumberToObject(r, "landlock", sb_landlock_abi());
     /* 能接受哪些沙箱请求模式：on 只有在有 Landlock 时才真正成立 */
     cJSON *modes = cJSON_AddArrayToObject(r, "sandbox_modes");
@@ -469,12 +524,22 @@ int main(int argc, char **argv)
     for (size_t i = 0; name && i < sizeof TOOLS / sizeof *TOOLS; i++)
         if (!strcmp(TOOLS[i].name, name)) t = &TOOLS[i];
 
+    const cJSON *wire=cJSON_GetObjectItemCaseSensitive(req,"stream");
+    bool streaming=cJSON_IsNumber(wire) && wire->valueint==1;
+    const char *job_id=cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req,"job_id"));
+    stream_state stream={.job_id=job_id && strlen(job_id)<=128?job_id:"",.effective="none"};
+    proc_stream callbacks={.started=stream_started,.output=stream_output,.ctx=&stream};
+    proc_status process={.exit_code=-1};
     buf_t out = {0};
     bool ok = false;
     const char *applied="none";
     xctx x = {0};
     int mode = parse_sandbox(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "sandbox")));
-    if (!t) {
+    if (wire && (!cJSON_IsNumber(wire) || (wire->valuedouble!=0 && wire->valuedouble!=1))) {
+        buf_puts(&out,"不支持的流式执行协议版本");
+    } else if (streaming && (!job_id || !*job_id || strlen(job_id)>128 || !name || strcmp(name,"Shell"))) {
+        buf_puts(&out,"流式执行仅支持 Shell，且需要不超过 128 字节的 job_id");
+    } else if (!t) {
         buf_puts(&out, "未知工具：");
         buf_puts(&out, name ? name : "（空）");
     } else if (args && !cJSON_IsObject(args)) {
@@ -483,12 +548,22 @@ int main(int argc, char **argv)
         buf_puts(&out, "sandbox 只能是 auto、on 或 off");
     } else if (setup(&x, req, mode, &out) == 0 && enter_sandbox(&x, mode, &out) == 0) {
         applied=sb_effective(mode,sb_landlock_abi());
+        stream.effective=applied;
+        x.stream=streaming?&callbacks:NULL;
+        x.process_status=&process;
+        /* A terminal preview has to fit the same 16 KiB wire bound even when
+         * every retained byte requires JSON escaping. Full output is streamed. */
+        if(streaming && x.max_output>2048) x.max_output=2048;
+        const cJSON *maximum=cJSON_GetObjectItemCaseSensitive(req,"shell_timeout_max");
+        x.shell_timeout_max=cJSON_IsNumber(maximum) && maximum->valuedouble>=1 && maximum->valuedouble<=86400*365 ? maximum->valueint : 86400;
+        x.allow_no_timeout=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req,"allow_no_timeout"));
         cJSON *empty = args ? NULL : cJSON_CreateObject();
         ok = t->fn(&x, args ? args : empty, &out);
         cJSON_Delete(empty);
     }
     if (!out.len) buf_puts(&out, "（无输出）");
-    respond(ok, buf_cstr(&out), applied);
+    if(streaming) stream_exit(&stream,ok,buf_cstr(&out),&process);
+    else respond(ok,buf_cstr(&out),applied);
     buf_free(&out);
     xctx_free(&x);
     cJSON_Delete(req);

@@ -426,12 +426,18 @@ def t_skill_cache_symlink():
         ENV.pop("NANO_HOME", None)
 
 
+@case("流式 Shell：实际增量输出、二进制边界与唯一退出结果")
+def t_stream():
+    from test_exec_stream import run_suite
+    run_suite([EXEC],WORK,ENV,None,False,WORK)
+
+
 def main():
     try:
         setup()
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
-                  t_shell, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
+                  t_shell, t_stream, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
                   t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")

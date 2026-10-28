@@ -26,6 +26,10 @@
 /* 进程启动时调用一次：Windows 上初始化 Winsock、把标准输入输出设成二进制/UTF-8 */
 void plat_init(void);
 void plat_shutdown(void);
+#if NA_WINDOWS
+/* Shared Windows argv quoting for both the executor and its supervisor. */
+wchar_t *plat_command_line(char *const argv[]);
+#endif
 
 /* main 收到的参数。Windows 的 argv 是 ANSI 的，中文路径会被切坏；从 GetCommandLineW 重新转成 UTF-8。 */
 char **plat_args(int argc, char **argv, int *n);
@@ -114,6 +118,7 @@ typedef struct {
     int  exit_code;    /* 正常退出时的退出码；被信号结束时无意义 */
     int  term_signal;  /* 被信号结束时的信号编号，0 表示正常退出 */
     bool timed_out;
+    bool cancelled;
 } proc_status;
 
 char *plat_find_in_path(char *const envp[], const char *name);
@@ -126,6 +131,17 @@ char **plat_build_env(const char *home, const char *tmp, const char *cache);
  * 返回 0；无法启动返回 -1。 */
 int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
                   bool watch_stdin, size_t max_output, buf_t *out, proc_status *st);
+
+/* Incremental Shell output. Callbacks are serialized (including on Windows);
+ * data can be arbitrary bytes. The capture adapter remains bounded per call. */
+typedef struct {
+    void (*started)(void *ctx, int64_t pid);
+    void (*output)(void *ctx, int stream, const void *data, size_t n);
+    void *ctx;
+} proc_stream;
+int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
+                          bool watch_stdin, size_t max_output, buf_t *out, proc_status *st,
+                          const proc_stream *stream);
 
 /* 运行一条命令，只收 stdout（内核用 --probe 检查执行器） */
 int plat_probe(char *const argv[], int timeout_ms, buf_t *out);

@@ -46,9 +46,17 @@ bool tool_shell(const xctx *x, const cJSON *a, buf_t *out)
         buf_puts(out, "还没有设置工作目录，Shell 没有地方运行。请让用户先用 /dir add <路径> 添加工作目录");
         return false;
     }
-    int timeout = cJSON_IsNumber(to) ? (int)to->valuedouble : SHELL_DEFAULT_TIMEOUT;
-    if (timeout < 1) timeout = 1;
-    if (timeout > SHELL_MAX_TIMEOUT) timeout = SHELL_MAX_TIMEOUT;
+    int timeout = cJSON_IsNumber(to) && to->valuedouble>=0 && to->valuedouble<=86400*365
+                  ? (int)to->valuedouble : x->stream ? 1800 : SHELL_DEFAULT_TIMEOUT;
+    if (!x->stream && cJSON_IsNumber(to)) {
+        timeout=to->valuedouble<1?1:to->valuedouble>SHELL_MAX_TIMEOUT?SHELL_MAX_TIMEOUT:(int)to->valuedouble;
+    }
+    int maximum=x->stream ? (x->shell_timeout_max>0?x->shell_timeout_max:86400) : SHELL_MAX_TIMEOUT;
+    if (x->stream && timeout==0 && !x->allow_no_timeout) {
+        buf_puts(out,"执行节点未允许不限时任务");return false;
+    }
+    if (!x->stream && timeout<1) timeout=1;
+    if (timeout>maximum) timeout=maximum;
 
     char *exe = plat_shell_exe(x->env);
     char *wrapped = NULL;
@@ -68,14 +76,15 @@ bool tool_shell(const xctx *x, const cJSON *a, buf_t *out)
 #endif
     argv[n] = NULL;
     proc_status st;
-    int rc = plat_run_proc(argv, x->ndirs ? x->dirs[0] : x->home, x->env, timeout,
-                           x->watch_stdin, x->max_output, out, &st);
+    int rc = plat_run_proc_stream(argv, x->ndirs ? x->dirs[0] : x->home, x->env, timeout,
+                           x->watch_stdin, x->max_output, out, &st, x->stream);
+    if (x->process_status) *x->process_status=st;
     free(exe);
     free(wrapped);
     if (rc < 0) return false;
     if (!out->len) buf_puts(out, "（无输出）");
     put_status(out, &st, timeout);
-    return !st.timed_out && st.term_signal == 0 && st.exit_code == 0;
+    return !st.cancelled && !st.timed_out && st.term_signal == 0 && st.exit_code == 0;
 }
 
 /* ---- Grep ---- */

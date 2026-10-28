@@ -719,10 +719,11 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
     job_t *j = NULL;
     if (ok) {
         const cJSON *mo = cJSON_GetObjectItemCaseSensitive(req, "max_output");
-        if (!cJSON_IsNumber(mo))
-            cJSON_AddNumberToObject(req, "max_output", (double)k->conf.max_output);
-        else if ((size_t)mo->valuedouble * 6 + 4096 > k->runner.out_cap)
-            k->runner.out_cap = (size_t)mo->valuedouble * 6 + 4096;   /* 执行器的输出是转义后的 JSON，留足余量 */
+        size_t max_output=cJSON_IsNumber(mo) && mo->valuedouble>=1024 && mo->valuedouble<=(64u<<20)
+                          ? (size_t)mo->valuedouble : k->conf.max_output;
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"max_output");
+        cJSON_AddNumberToObject(req,"max_output",(double)max_output);
+        size_t out_cap=max_output*6+4096; /* JSON escaping, bounded per invocation */
         cJSON_DeleteItemFromObjectCaseSensitive(req, "watch_stdin");
         cJSON_AddBoolToObject(req, "watch_stdin", true);
         /* 这一轮最终的沙箱请求模式：节点自己的 on/off 优先，其余听这一轮的请求。
@@ -733,7 +734,7 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
         char *line = xasprintf("%s\n", body);
         cJSON_free(body);
         char *argv[] = { k->conf.exec, NULL };
-        j = runner_start_ex(&k->runner, argv, sid, id, name, line, strlen(line), err, errlen);
+        j = runner_start_bounded(&k->runner, argv, sid, id, name, line, strlen(line), out_cap, err, errlen);
         if (j) {
             j->run_id = xstrdup(run_id ? run_id : "");
             j->turn_id = turn_id;

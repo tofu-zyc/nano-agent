@@ -30,6 +30,12 @@ int runner_start(runner_t *r, char *const argv[], const char *sid, const char *i
 job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
                        char *input, size_t in_len, char *err, size_t errlen)
 {
+    return runner_start_bounded(r,argv,sid,id,name,input,in_len,r->out_cap,err,errlen);
+}
+
+job_t *runner_start_bounded(runner_t *r, char *const argv[], const char *sid, const char *id, const char *name,
+                       char *input, size_t in_len, size_t out_cap, char *err, size_t errlen)
+{
     int in[2] = { -1, -1 }, out[2] = { -1, -1 }, er[2] = { -1, -1 };
     if (pipe(in) || pipe(out) || pipe(er)) {
         snprintf(err, errlen, "创建管道失败：%s", strerror(errno));
@@ -70,6 +76,7 @@ job_t *runner_start_ex(runner_t *r, char *const argv[], const char *sid, const c
     set_nonblock(er[0]);
 
     job_t *j = xcalloc(1, sizeof *j);
+    j->out_cap=out_cap;
     j->sid = xstrdup(sid);
     j->id = xstrdup(id);
     j->name = xstrdup(name);
@@ -202,7 +209,7 @@ void runner_on_poll(runner_t *r, const na_pollfd *pfds, const pollref_t *refs, s
             }
             break;
         case 1:
-            if (j->fd_out >= 0) drain(&j->fd_out, &j->out, &j->out_total, r->out_cap);
+            if (j->fd_out >= 0) drain(&j->fd_out, &j->out, &j->out_total, j->out_cap);
             break;
         case 2:
             if (j->fd_err >= 0) drain(&j->fd_err, &j->err, &j->err_total, STDERR_CAP);

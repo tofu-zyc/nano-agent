@@ -403,12 +403,21 @@ def t_sandbox_policy():
     assert result["sandbox_effective"]=="none" and not os.path.exists(marker),result
 
 
+def t_stream():
+    try:
+        from test_exec_stream import run_suite
+        run_suite(win_cmd(),WORK_WIN,None,WIN_CWD,True,WORK_LINUX)
+    except Exception as e:
+        FAILS.append("stream: "+str(e))
+        print("  FAIL stream:",e)
+
+
 def main():
     try:
         setup()
         print(f"windows temp：{ROOT_WIN}")
         for t in (t_probe, t_read, t_write, t_edit_crlf, t_fetch, t_escape, t_read_all, t_shell, t_env,
-                  t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics, t_sandbox_policy):
+                  t_stream, t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics, t_sandbox_policy):
             t()
         print(f"exec-win: {len(FAILS)} failures")
         return 1 if FAILS else 0

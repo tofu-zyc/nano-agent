@@ -1066,7 +1066,7 @@ static wchar_t *arg_quoted_copy(wchar_t *out, const wchar_t *a)
     return out;
 }
 
-static wchar_t *make_cmdline(char *const argv[])
+wchar_t *plat_command_line(char *const argv[])
 {
     size_t n = 0;
     for (int i = 0; argv[i]; i++) {
@@ -1110,25 +1110,33 @@ static wchar_t *make_envblock(char *const envp[])
 }
 
 typedef struct {
-    HANDLE proc, thread, job, out_read, out_write, nul_in, nul_out;
+    HANDLE proc, thread, job, out_read, err_read, out_write, nul_in, nul_out;
 } child_t;
 
-static int spawn_child(char *const argv[], const char *cwd, char *const envp[], bool combine,
+static int spawn_child(char *const argv[], const char *cwd, char *const envp[], bool combine, bool separate,
                        child_t *c, char *err, size_t errlen)
 {
     memset(c, 0, sizeof *c);
     c->proc = c->thread = c->job = INVALID_HANDLE_VALUE;
-    c->out_read = c->out_write = c->nul_in = c->nul_out = INVALID_HANDLE_VALUE;
-    wchar_t *line = make_cmdline(argv);
+    c->out_read = c->err_read = c->out_write = c->nul_in = c->nul_out = INVALID_HANDLE_VALUE;
+    wchar_t *line = plat_command_line(argv);
     wchar_t *cw = cwd && *cwd ? to_w(cwd) : NULL;
     wchar_t *env = make_envblock(envp);
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE out_r = INVALID_HANDLE_VALUE, out_w = INVALID_HANDLE_VALUE;
+    HANDLE err_r=INVALID_HANDLE_VALUE, err_w=INVALID_HANDLE_VALUE;
     if (!CreatePipe(&out_r, &out_w, &sa, 0)) {
         set_err(err, errlen, "创建管道失败");
         goto fail;
     }
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    if (separate) {
+        if (!CreatePipe(&err_r,&err_w,&sa,0)) {
+            set_err(err,errlen,"创建 stderr 管道失败");
+            CloseHandle(out_r);CloseHandle(out_w);goto fail;
+        }
+        SetHandleInformation(err_r,HANDLE_FLAG_INHERIT,0);
+    }
     HANDLE nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                                 OPEN_EXISTING, 0, NULL);
     HANDLE nul_out = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
@@ -1140,14 +1148,14 @@ static int spawn_child(char *const argv[], const char *cwd, char *const envp[], 
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = nul_in;
     si.StartupInfo.hStdOutput = out_w;
-    si.StartupInfo.hStdError = combine ? out_w : nul_out;
+    si.StartupInfo.hStdError = separate ? err_w : combine ? out_w : nul_out;
     SIZE_T attr_size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
     si.lpAttributeList = xmalloc(attr_size ? attr_size : 1);
     bool have_attr = attr_size && InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size);
     if (have_attr) {
-        HANDLE keep[3] = { out_w, nul_in, nul_out };
-        SIZE_T keepn = combine ? 2 : 3;
+        HANDLE keep[3] = { out_w, nul_in, separate?err_w:nul_out };
+        SIZE_T keepn = combine && !separate ? 2 : 3;
         UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                                   keep, keepn * sizeof(HANDLE), NULL, NULL);
     } else {
@@ -1168,11 +1176,13 @@ static int spawn_child(char *const argv[], const char *cwd, char *const envp[], 
         if (nul_out != INVALID_HANDLE_VALUE) CloseHandle(nul_out);
         CloseHandle(out_r);
         CloseHandle(out_w);
+        if(separate){CloseHandle(err_r);CloseHandle(err_w);}
         goto fail;
     }
     CloseHandle(nul_in);
     CloseHandle(nul_out);
     CloseHandle(out_w);
+    if(separate) CloseHandle(err_w);
 
     HANDLE job = CreateJobObjectW(NULL, NULL);
     if (job) {
@@ -1191,6 +1201,7 @@ static int spawn_child(char *const argv[], const char *cwd, char *const envp[], 
     c->proc = pi.hProcess;
     c->job = job;
     c->out_read = out_r;
+    c->err_read = err_r;
     free(line);
     free(cw);
     free(env);
@@ -1207,6 +1218,9 @@ typedef struct {
     HANDLE h;
     capture *cap;
     HANDLE done;
+    const proc_stream *stream;
+    int channel;
+    CRITICAL_SECTION *lock;
 } reader_arg;
 
 static DWORD WINAPI reader_thread(LPVOID p)
@@ -1216,26 +1230,23 @@ static DWORD WINAPI reader_thread(LPVOID p)
     for (;;) {
         DWORD got = 0;
         if (!ReadFile(r->h, buf, sizeof buf, &got, NULL) || !got) break;
-        cap_add(r->cap, buf, got);
+        if(r->lock) EnterCriticalSection(r->lock);
+        cap_add(r->cap,buf,got);
+        if(r->stream && r->stream->output) r->stream->output(r->stream->ctx,r->channel,buf,got);
+        if(r->lock) LeaveCriticalSection(r->lock);
     }
     SetEvent(r->done);
     return 0;
 }
 
-typedef struct {
-    volatile LONG *flag;
-    HANDLE ev;
-} watch_arg;
-
-static DWORD WINAPI watch_thread(LPVOID p)
+/* Executor stdin is a pipe owned by its supervisor. Polling EOF avoids a
+ * blocked watcher thread whose stack arguments could outlive this call. */
+static bool input_closed(void)
 {
-    watch_arg *w = p;
-    char buf[256];
-    DWORD got = 0;
-    ReadFile(GetStdHandle(STD_INPUT_HANDLE), buf, sizeof buf, &got, NULL);
-    InterlockedExchange(w->flag, 1);
-    SetEvent(w->ev);
-    return 0;
+    DWORD available=0;
+    if(PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE),NULL,0,NULL,&available,NULL)) return false;
+    DWORD error=GetLastError();
+    return error==ERROR_BROKEN_PIPE || error==ERROR_PIPE_NOT_CONNECTED || error==ERROR_INVALID_HANDLE;
 }
 
 static void kill_child(child_t *c)
@@ -1244,30 +1255,47 @@ static void kill_child(child_t *c)
     else if (c->proc != INVALID_HANDLE_VALUE && c->proc) TerminateProcess(c->proc, 1);
 }
 
-int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
-                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st)
+int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
+                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st, const proc_stream *stream)
 {
     memset(st, 0, sizeof *st);
+    st->exit_code=-1;
     child_t c;
     char err[512] = "";
-    if (spawn_child(argv, cwd, envp, true, &c, err, sizeof err) < 0) {
+    if (spawn_child(argv, cwd, envp, true, stream!=NULL, &c, err, sizeof err) < 0) {
         buf_puts(out, err);
         return -1;
     }
+    if(stream && stream->started) stream->started(stream->ctx,(int64_t)GetProcessId(c.proc));
+    CRITICAL_SECTION output_lock;
+    InitializeCriticalSection(&output_lock);
     capture cap = { .head_max = max_output * 3 / 4, .tail_max = max_output / 4 };
     HANDLE done = CreateEventW(NULL, TRUE, FALSE, NULL);
-    reader_arg ra = { .h = c.out_read, .cap = &cap, .done = done };
+    reader_arg ra = { .h = c.out_read, .cap = &cap, .done = done, .stream=stream, .channel=1, .lock=&output_lock };
     HANDLE rt = CreateThread(NULL, 0, reader_thread, &ra, 0, NULL);
-    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
-    volatile LONG cancelled = 0;
-    HANDLE wt = NULL;
-    watch_arg wa = { .flag = &cancelled, .ev = ev };
-    if (watch_stdin) wt = CreateThread(NULL, 0, watch_thread, &wa, 0, NULL);
-
-    int64_t deadline = plat_now_ms() + (int64_t)timeout_s * 1000;
+    HANDLE err_done=CreateEventW(NULL,TRUE,FALSE,NULL);
+    reader_arg er={.h=c.err_read,.cap=&cap,.done=err_done,.stream=stream,.channel=2,.lock=&output_lock};
+    HANDLE ert=stream?CreateThread(NULL,0,reader_thread,&er,0,NULL):NULL;
+    if (!rt || (stream && !ert)) {
+        /* Starting without an output reader can deadlock the child; terminate
+           and join the readers that did start, before freeing their stack. */
+        kill_child(&c);
+        WaitForSingleObject(c.proc,5000);
+        if(rt) {CancelSynchronousIo(rt);WaitForSingleObject(rt,INFINITE);CloseHandle(rt);}
+        if(ert){CancelSynchronousIo(ert);WaitForSingleObject(ert,INFINITE);CloseHandle(ert);}
+        CloseHandle(c.proc);CloseHandle(c.out_read);
+        if(c.err_read!=INVALID_HANDLE_VALUE)CloseHandle(c.err_read);
+        if(c.job)CloseHandle(c.job);
+        CloseHandle(done);CloseHandle(err_done);
+        DeleteCriticalSection(&output_lock);
+        buf_free(&cap.head);buf_free(&cap.tail);
+        buf_puts(out,"输出读取线程创建失败，命令已停止");
+        return -1;
+    }
+    int64_t deadline = timeout_s>0 ? plat_now_ms() + (int64_t)timeout_s * 1000 : INT64_MAX;
     for (;;) {
         int64_t left = deadline - plat_now_ms();
-        DWORD wait = left <= 0 ? 0 : (left > 1000 ? 1000 : (DWORD)left);
+        DWORD wait = left <= 0 ? 0 : (left > 100 ? 100 : (DWORD)left);
         DWORD r = WaitForSingleObject(c.proc, wait);
         if (r == WAIT_OBJECT_0) {
             DWORD code = 1;
@@ -1275,15 +1303,14 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
             st->exit_code = (int)code;
             break;
         }
-        if (InterlockedCompareExchange(&cancelled, 1, 1) == 1) {
+        if (watch_stdin && input_closed()) {
             kill_child(&c);
+            if(stream){st->cancelled=true;WaitForSingleObject(c.proc,5000);break;}
             CloseHandle(c.proc);
             CloseHandle(c.out_read);
             if (c.job) CloseHandle(c.job);
             if (rt) CloseHandle(rt);
-            if (wt) CloseHandle(wt);
             CloseHandle(done);
-            CloseHandle(ev);
             buf_free(&cap.head);
             buf_free(&cap.tail);
             ExitProcess(2);
@@ -1300,27 +1327,42 @@ int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int t
         CancelSynchronousIo(rt);
         WaitForSingleObject(done, 1000);
     }
+    if(ert && WaitForSingleObject(err_done,2000)==WAIT_TIMEOUT) {
+        CancelSynchronousIo(ert);
+    }
+    /* Reader arguments and shared capture remain live until both threads exit. */
+    if(rt) WaitForSingleObject(rt,INFINITE);
+    if(ert) WaitForSingleObject(ert,INFINITE);
     DWORD code = 0;
     GetExitCodeProcess(c.proc, &code);
     if (!st->timed_out) st->exit_code = (int)code;
     if (c.job) CloseHandle(c.job);
     CloseHandle(c.proc);
     if (c.out_read != INVALID_HANDLE_VALUE) CloseHandle(c.out_read);
+    if (c.err_read != INVALID_HANDLE_VALUE) CloseHandle(c.err_read);
     if (rt) CloseHandle(rt);
-    if (wt) CloseHandle(wt);
+    if (ert) CloseHandle(ert);
     CloseHandle(done);
-    CloseHandle(ev);
+    CloseHandle(err_done);
+    DeleteCriticalSection(&output_lock);
     cap_render(&cap, out);
     buf_free(&cap.head);
     buf_free(&cap.tail);
     return 0;
 }
 
+
+int plat_run_proc(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
+                  bool watch_stdin, size_t max_output, buf_t *out, proc_status *st)
+{
+    return plat_run_proc_stream(argv,cwd,envp,timeout_s,watch_stdin,max_output,out,st,NULL);
+}
+
 int plat_probe(char *const argv[], int timeout_ms, buf_t *out)
 {
     child_t c;
     char err[512] = "";
-    if (spawn_child(argv, NULL, NULL, false, &c, err, sizeof err) < 0) return -1;
+    if (spawn_child(argv, NULL, NULL, false, false, &c, err, sizeof err) < 0) return -1;
     capture cap = { .head_max = 65536, .tail_max = 0 };
     HANDLE done = CreateEventW(NULL, TRUE, FALSE, NULL);
     reader_arg ra = { .h = c.out_read, .cap = &cap, .done = done };
@@ -1599,7 +1641,7 @@ int plat_pid_kill(long pid, bool force)
 
 int plat_system(char *const argv[], bool quiet)
 {
-    wchar_t *line = make_cmdline(argv);
+    wchar_t *line = plat_command_line(argv);
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
@@ -1629,7 +1671,7 @@ int plat_system(char *const argv[], bool quiet)
 
 long plat_spawn_bg(char *const argv[], const char *log)
 {
-    wchar_t *line = make_cmdline(argv);
+    wchar_t *line = plat_command_line(argv);
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                              OPEN_EXISTING, 0, NULL);
