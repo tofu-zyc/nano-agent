@@ -802,7 +802,7 @@ func TestStreamingView(t *testing.T) {
 	if kinds != want {
 		t.Fatalf("events:\n got %s\nwant %s\n%+v", kinds, want, ev)
 	}
-	if ev[1].text != "Shell ls -la" || ev[2].text != "true a.txt（共 2 行）" || ev[3].text != "（mock）工具结果：a.txt\nb.txt\n" {
+	if ev[1].text != "Shell ls -la" || ev[2].text != "true Shell [0/mock-1] a.txt（共 2 行）" || ev[3].text != "（mock）工具结果：a.txt\nb.txt\n" {
 		t.Fatalf("details: %+v", ev)
 	}
 	if !strings.Contains(ev[5].text, "2 次模型调用") || !strings.Contains(ev[5].text, "缓存命中 90%") {

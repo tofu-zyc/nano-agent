@@ -62,6 +62,7 @@ type approvalRef struct {
 
 // askApproval 处理内核的 approve_req。调用方持有锁。
 func (a *App) askApproval(s *sess, m *proto.Msg) {
+	a.emitToolState(s, m, "waiting_approval")
 	a.nextAppr++
 	n := a.nextAppr
 	title, body := callCard(m.Name, m.Args)
@@ -70,7 +71,7 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 		runID: m.RunID, turnID: m.TurnID,
 		card: channel.ApprovalCard{N: n, Title: title, Detail: body, From: m.From}}
 	a.approvals[n] = ap
-	a.publish(events.Event{T: "approval", SID: s.sid, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
+	a.publish(events.Event{T: "approval", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, N: n, ID: m.ID, Name: m.Name, Text: desc, Data: map[string]any{"from": m.From}})
 	text := fmt.Sprintf("⚠️ 需要审批 #%d\n%s\n发起人：%s\n管理员回复 /approve %d 批准，/deny %d 拒绝", n, desc, m.From, n, n)
 	a.publish(events.Event{T: "say", SID: s.sid, Text: text})
 	for _, o := range a.approvalOuts(s) {

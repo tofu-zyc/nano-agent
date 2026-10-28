@@ -24,9 +24,9 @@ import (
 // 收件箱有界（条数 + 字节数），满了就明确回执“未受理”，不静默截断用户的要求。
 // 后台 Job 不参与这里的等待条件：插话只等前台当前边界。
 const (
-	maxInterjections     = 16      // 每个 run 最多收几条待插入的补充
+	maxInterjections     = 16       // 每个 run 最多收几条待插入的补充
 	maxInterjectionBytes = 64 << 10 // 每个 run 待插入的正文合计上限
-	maxInterjectionIDs   = 64      // 记住最近多少个平台消息 ID，用来去重
+	maxInterjectionIDs   = 64       // 记住最近多少个平台消息 ID，用来去重
 )
 
 // interjection 是一条已经受理、还没写进历史的用户补充。
@@ -126,7 +126,7 @@ func (a *App) drainInterjections(s *sess, r *run) bool {
 		SourceIDs: ids,
 		ID:        histID,
 		Sender:    batch[0].who,
-		TS:        a.now().Unix(),   // 和其他历史消息一样用秒；毫秒是接收时间，另记在事件里
+		TS:        a.now().Unix(), // 和其他历史消息一样用秒；毫秒是接收时间，另记在事件里
 	}
 	// 历史里已经有一条（上次写完历史、日志没记 injected 就崩了）：补记，不再追加正文
 	if _, ok := a.store.FindMessage(s.sid, histID, 0); !ok {
@@ -241,8 +241,8 @@ func (a *App) yieldToInterjection(s *sess, r *run, res *llm.Result, u llm.Usage)
 	}
 	// 已经生成出来的正文照常保存：它确实说过了，保留它，不伪装成“已经考虑了后来的补充”。
 	// 注意不带 ToolCalls —— 这批调用没有派发，写进去就没有配对结果了。
-	if strings.TrimSpace(res.Content) != "" || res.Reasoning != "" {
-		msg := session.Msg{Role: "assistant", Content: res.Content, Reasoning: res.Reasoning,
+	if strings.TrimSpace(res.Content) != "" || res.Reasoning != "" || len(res.Calls) > 0 {
+		msg := session.Msg{Role: "assistant", ProposedCalls: res.Calls, RunID: r.runID, TurnID: r.turnID, Content: res.Content, Reasoning: res.Reasoning,
 			Usage: &u, Agent: a.execAgentID(s.sid), TS: a.now().Unix()} // 历史统一用秒
 		if err := a.store.Append(s.sid, msg); err != nil {
 			a.log.Warn("保存生成结果失败", "sid", s.sid, "err", err)

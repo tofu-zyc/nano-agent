@@ -284,12 +284,14 @@ func (s *Store) SnapshotMessages(id string) []Msg {
 	all := readMsgs(filepath.Join(s.snapshotDir(id), "messages.jsonl"), info.Base)
 	cost := int64(cap(all)) * int64(unsafe.Sizeof(Msg{}))
 	for _, m := range all {
-		cost += int64(len(m.Content) + len(m.Reasoning) + len(m.Role) + len(m.ToolCallID) + len(m.Agent) + len(m.Kind) + len(m.ParentRun) + len(m.SourceID) + len(m.Sender) + len(m.ID) + len(m.AgendaID) + len(m.Reason))
+		cost += int64(len(m.RunID) + len(m.Content) + len(m.Reasoning) + len(m.Role) + len(m.ToolCallID) + len(m.Agent) + len(m.Kind) + len(m.ParentRun) + len(m.SourceID) + len(m.Sender) + len(m.ID) + len(m.AgendaID) + len(m.Reason))
 		for _, id := range m.SourceIDs {
 			cost += int64(unsafe.Sizeof(id)) + int64(len(id))
 		}
-		for _, tc := range m.ToolCalls {
-			cost += int64(unsafe.Sizeof(tc)) + int64(len(tc.ID)+len(tc.Type)+len(tc.Function.Name)+len(tc.Function.Arguments))
+		for _, calls := range [][]llm.ToolCall{m.ToolCalls, m.ProposedCalls} {
+			for _, tc := range calls {
+				cost += int64(unsafe.Sizeof(tc)) + int64(len(tc.ID)+len(tc.Type)+len(tc.Function.Name)+len(tc.Function.Arguments))
+			}
 		}
 		for _, at := range m.Images {
 			cost += int64(unsafe.Sizeof(at)) + int64(len(at.ID)+len(at.Name)+len(at.MIME)+len(at.Source))

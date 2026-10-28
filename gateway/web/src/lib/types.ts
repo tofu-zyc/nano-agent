@@ -233,6 +233,7 @@ export type ToolCall = { id: string; type: string; function: { name: string; arg
 
 export type ExecutionIsolation = { requested?: string; mode?: string; effective?: string; reason?: string };
 export type Msg = {
+  run_id?: string; turn_id?: number;
   sandbox?: ExecutionIsolation;
 	 kind?: string;
 	 parent_run_id?: string;
@@ -242,6 +243,7 @@ export type Msg = {
   content?: string;
   images?: Attachment[]; // 用户消息附带的图片；工具（Read）读到、交给模型看的图片
   sent?: Attachment[]; // SendFile 发到聊天里的文件
+  proposed_calls?: ToolCall[];
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   reasoning?: string;
@@ -251,6 +253,7 @@ export type Msg = {
 };
 
 export type Ev = {
+  run_id?: string; turn_id?: number;
   sandbox?: ExecutionIsolation;
   t: string;
   at: number;
@@ -269,7 +272,7 @@ export type LiveItem =
   | { kind: 'user'; text: string; name?: string; via?: string; channel?: string; images?: Attachment[]; at: number }
   | { kind: 'reasoning'; text: string }
   | { kind: 'content'; text: string }
-  | { kind: 'tool'; sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string; media?: Attachment[] }
+  | { kind: 'tool'; run_id?: string; turn_id?: number; state?: string; sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args?: string; ok?: boolean; result?: string; resultDetail?: string; media?: Attachment[] }
   | { kind: 'say'; text: string; at: number };
 
 // 一个 agent 可以覆盖的全局设置：全局值（global）、自己的值（value，null 表示跟随全局）、实际生效的值

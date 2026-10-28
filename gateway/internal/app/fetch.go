@@ -95,6 +95,7 @@ var readImageRe = regexp.MustCompile(`^(.+) 是图片（(PNG|JPEG|GIF|WebP)，(\
 // 调用方持有锁。
 func (a *App) seeImage(s *sess, m *proto.Msg) bool {
 	r := s.run
+	callRun, callTurn := r.runID, r.turnID
 	call, ok := r.callArgs[m.ID]
 	if !ok || call.Name != "Read" || (m.OK != nil && !*m.OK) {
 		return false
@@ -105,7 +106,7 @@ func (a *App) seeImage(s *sess, m *proto.Msg) bool {
 	}
 	p := match[1]
 	appendResult := func(content string, imgs []media.Attachment) {
-		if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Sandbox: m.Sandbox, Content: content, Images: imgs}); err != nil {
+		if err := a.store.Append(s.sid, session.Msg{Role: "tool", RunID: callRun, TurnID: callTurn, ToolCallID: m.ID, Sandbox: m.Sandbox, Content: content, Images: imgs}); err != nil {
 			a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 		}
 	}
@@ -139,7 +140,7 @@ func (a *App) seeImage(s *sess, m *proto.Msg) bool {
 			appendResult(m.Content+"\n（没能把图片拿给你看："+err.Error()+"）", nil)
 		} else {
 			appendResult(m.Content+"\n（图片附在下面，你能直接看到）", []media.Attachment{att})
-			a.publish(events.Event{T: "tool_media", SID: sid, ID: m.ID, Data: map[string]any{"images": []media.Attachment{att}}})
+			a.publish(events.Event{T: "tool_media", SID: sid, RunID: callRun, TurnID: callTurn, ID: m.ID, Data: map[string]any{"images": []media.Attachment{att}}})
 		}
 		r.fetching--
 		if r.fetching == 0 && r.modelWaiting && s.run == r {
@@ -245,7 +246,7 @@ func (a *App) sendFileCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 					a.enqueue(ep, outItem{att: &att, data: data})
 				}
 			}
-			a.publish(events.Event{T: "tool_media", SID: sid, ID: m.ID, Data: map[string]any{"sent": sent}})
+			a.publish(events.Event{T: "tool_media", SID: sid, RunID: r.runID, TurnID: r.turnID, ID: m.ID, Data: map[string]any{"sent": sent}})
 		}
 		a.mu.Unlock()
 		if len(outs) == 0 && len(sent) > 0 {

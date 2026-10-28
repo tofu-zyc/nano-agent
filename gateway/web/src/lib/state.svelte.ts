@@ -79,6 +79,8 @@ class Store {
   ov = $state<Overview | null>(null);
   fields = $state<FieldState[]>([]);
   live = $state<Record<string, LiveItem[]>>({});
+  activeRun = $state<Record<string,string>>({});
+  closedRun = $state<Record<string,string>>({});
   phase = $state<Record<string, string>>({}); // 会话正在做什么：thinking / writing / tool
   log = $state<Ev[]>([]);
   toasts = $state<Toast[]>([]);
@@ -567,10 +569,13 @@ class Store {
         this.reloadAgentsSoon();
         const s = this.session(sid);
         if (e.kind === 'start') {
+          if(e.run_id) this.activeRun[sid]=e.run_id;
           if (s) s.running = true;
           this.phase[sid] = 'thinking';
           if (ov) ov.totals.runs++;
         } else {
+          if(e.run_id && this.activeRun[sid] && this.activeRun[sid]!==e.run_id) break;
+          if(e.run_id) this.closedRun[sid]=e.run_id;
           if (s) s.running = false;
           delete this.phase[sid];
           this.historyTick[sid] = (this.historyTick[sid] ?? 0) + 1;
@@ -593,6 +598,7 @@ class Store {
         }
         break;
       case 'delta': {
+        if(e.run_id && (this.closedRun[sid]===e.run_id || (this.activeRun[sid] && this.activeRun[sid]!==e.run_id))) break;
         const list = this.liveOf(sid);
         const last = list[list.length - 1];
         const kind = e.kind === 'reasoning' ? 'reasoning' : 'content';
@@ -602,12 +608,19 @@ class Store {
         break;
       }
       case 'tool':
-        this.pushLive(sid, { kind: 'tool', id: e.id!, name: e.name!, detail: e.text ?? '', args: e.data });
+        this.pushLive(sid, { kind: 'tool',run_id:e.run_id,turn_id:e.turn_id,state:'accepted', id: e.id!, name: e.name!, detail: e.text ?? '', args: e.data });
         this.phase[sid] = 'tool';
         break;
+      case 'tool_queued':
+      case 'tool_started': {
+        const it=this.live[sid]?.slice().reverse().find(x=>x.kind==='tool'&&x.id===e.id&&(!e.run_id||x.run_id===e.run_id)&&(!e.turn_id||x.turn_id===e.turn_id));
+        if(it?.kind==='tool' && it.ok===undefined) it.state=e.t==='tool_queued'?'queued':'running';
+        break;
+      }
       case 'tool_result': {
-        const it = this.live[sid]?.find((x) => x.kind === 'tool' && x.id === e.id);
+        const it = this.live[sid]?.slice().reverse().find(x => x.kind === 'tool' && x.id === e.id && (!e.run_id || x.run_id === e.run_id) && (!e.turn_id || x.turn_id === e.turn_id));
         if (it && it.kind === 'tool') {
+          it.state='done';
           it.ok = e.ok;
           it.result = e.data;
           it.resultDetail = e.text;
@@ -617,7 +630,7 @@ class Store {
       }
       case 'tool_media': {
         // 工具读到的图片、SendFile 发出去的文件：显示在那个工具卡片下面
-        const it = this.live[sid]?.find((x) => x.kind === 'tool' && x.id === e.id);
+        const it = this.live[sid]?.slice().reverse().find(x => x.kind === 'tool' && x.id === e.id && (!e.run_id || x.run_id === e.run_id) && (!e.turn_id || x.turn_id === e.turn_id));
         if (it && it.kind === 'tool') it.media = [...(it.media ?? []), ...(e.data?.images ?? []), ...(e.data?.sent ?? [])];
         break;
       }
@@ -629,6 +642,8 @@ class Store {
         this.pushLive(sid, { kind: 'say', text: e.text ?? '', at: e.at });
         break;
       case 'approval': {
+        const it=this.live[sid]?.slice().reverse().find(x=>x.kind==='tool'&&x.id===e.id&&(!e.run_id||x.run_id===e.run_id)&&(!e.turn_id||x.turn_id===e.turn_id));
+        if(it?.kind==='tool' && it.ok===undefined)it.state='waiting_approval';
         const ap: Approval = { n: e.n!, sid, id: e.id!, name: e.name!, detail: e.text ?? '', from: e.data?.from ?? '', at: e.at };
         ov?.approvals.push(ap);
         const s = this.session(sid);

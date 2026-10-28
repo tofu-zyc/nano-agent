@@ -26,6 +26,14 @@ jobs:
           cache-dependency-path: gateway/go.sum
       - name: 下载 zig 和 rg
         run: scripts/fetch-zig.sh && scripts/fetch-rg.sh --all
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gateway/web/package-lock.json
+      - name: 网页语义回归与类型检查
+        working-directory: gateway/web
+        run: npm ci --no-audit --no-fund && npm test && npm run check
       - name: make test
         run: make test
       # 网页界面检查：每个配置项都能在拓扑图的节点里找到、改了能保存（make test 里没有浏览器时跳过，这里装上再跑）

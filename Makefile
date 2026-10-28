@@ -10,7 +10,7 @@ gateway: kernel
 
 # 重新构建网页界面（改了 gateway/web 下的前端代码之后；构建结果提交在仓库里，平时不需要 Node）
 web:
-	cd gateway/web && npm install --no-audit --no-fund && npm run check && npm run build
+	cd gateway/web && npm install --no-audit --no-fund && npm run check && npm test && npm run build
 
 # 单元测试 + 宿主层集成测试 + 端到端测试（模型用 mock，不花钱）
 test: all

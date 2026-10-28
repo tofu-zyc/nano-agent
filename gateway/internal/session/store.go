@@ -28,15 +28,18 @@ import (
 
 // Msg 是历史里的一条消息。Reasoning 和 Usage 只保存备查，默认不回传给模型。
 type Msg struct {
-	Role       string             `json:"role"`
-	Content    string             `json:"content,omitempty"`
-	Images     []media.Attachment `json:"images,omitempty"` // 用户消息附带的图片、工具（Read）读到的图片，文件在 data/uploads
-	Sent       []media.Attachment `json:"sent,omitempty"`   // SendFile 发到聊天里的文件：只给人看，不再发给模型
-	ToolCalls  []llm.ToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
-	Reasoning  string             `json:"reasoning,omitempty"`
-	Usage      *llm.Usage         `json:"usage,omitempty"`
-	TS         int64              `json:"ts,omitempty"`
+	RunID         string             `json:"run_id,omitempty"`
+	TurnID        int                `json:"turn_id,omitempty"`
+	Role          string             `json:"role"`
+	Content       string             `json:"content,omitempty"`
+	Images        []media.Attachment `json:"images,omitempty"`         // 用户消息附带的图片、工具（Read）读到的图片，文件在 data/uploads
+	Sent          []media.Attachment `json:"sent,omitempty"`           // SendFile 发到聊天里的文件：只给人看，不再发给模型
+	ProposedCalls []llm.ToolCall     `json:"proposed_calls,omitempty"` // unaccepted proposals, excluded from model context
+	ToolCalls     []llm.ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID    string             `json:"tool_call_id,omitempty"`
+	Reasoning     string             `json:"reasoning,omitempty"`
+	Usage         *llm.Usage         `json:"usage,omitempty"`
+	TS            int64              `json:"ts,omitempty"`
 	// Agent 是产生这条消息的 agent（assistant、tool）。会话中途换过 agent 时，旧消息的来源靠它和后缀
 	// （没有字段的老消息用 Settings.AgentSegments 推断）区分；用户消息没有这个字段。
 	Agent string `json:"agent,omitempty"`

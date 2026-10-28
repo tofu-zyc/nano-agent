@@ -150,6 +150,7 @@ static void send_hello(kernel_t *k)
     cJSON *ft = cJSON_AddObjectToObject(m, "features");
     cJSON_AddNumberToObject(ft, "call_identity", 1);
     cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
+    cJSON_AddNumberToObject(ft, "max_calls_per_turn", 32);
     cJSON_AddNumberToObject(ft, "user_interjection", 1);   /* 认识 model_yield：插话后的重规划也由内核数步数 */
     cJSON_AddNumberToObject(ft, "sandbox_policy", 2);
     cJSON_AddNumberToObject(ft, "max_parallel_tools", k->conf.max_parallel_tools);
@@ -1521,7 +1522,11 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.detail = sget(m, "detail");
         const cJSON *arr = cJSON_GetObjectItemCaseSensitive(m, "calls");
         ncalls = cJSON_IsArray(arr) ? (size_t)cJSON_GetArraySize(arr) : 0;
-        if (ncalls > MAX_CALLS_WIRE) ncalls = MAX_CALLS_WIRE;   /* 防御：一条消息不能把内存撑爆 */
+        if (ncalls > MAX_CALLS_WIRE) {
+            ev.reason = NA_TURN_ERROR;
+            ev.detail = "工具提案超过协议边界，整批没有接受或执行";
+            ncalls = 0;
+        }
         if (ncalls) {
             calls = xcalloc(ncalls, sizeof *calls);
             owned = xcalloc(ncalls * 2, sizeof *owned);   /* 参数文本、预检的错误 */

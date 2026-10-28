@@ -197,7 +197,7 @@ func telegramProcess(s streamSnapshot) string {
 			}
 			switch {
 			case !t.Done:
-				line += "\n   …"
+				line += "\n   … " + toolStateLabel(t.State)
 			case t.OK:
 				line += "\n   ✓ " + html.EscapeString(t.Result)
 			default:

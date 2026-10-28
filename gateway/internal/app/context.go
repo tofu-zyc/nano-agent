@@ -15,7 +15,7 @@ import (
 // prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）、
 // 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 8
+const prefixVer = 9
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -93,6 +93,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}
+	if n := a.nodes[rt.kernel]; len(tools) > 0 && n != nil && n.info.Features["bounded_parallel"] >= 1 {
+		system = strings.TrimSpace(system + "\n\n[工具调度] 相互独立的工具调用可以在同一次响应中一起提出；运行时会按执行槽和资源锁有界调度。结果按调用身份关联，全部结果返回后才继续模型请求。有数据依赖的步骤分到下一次响应，不能假定同批调用按顺序完成。")
+	}
 	// 工具定义用快照保持请求前缀稳定；技能目录/MCP 工具或权限变化会刷新，不必清空聊天。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
 	st := a.store.Settings(sid)
@@ -107,6 +110,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		window = 128000
 	}
 	b, _ := json.Marshal([]any{m.ID, system, tools, a.store.Settings(sid).Summary})
+
 	return system, tools, fmt.Sprintf("%x", sha256.Sum256(b)), window
 }
 

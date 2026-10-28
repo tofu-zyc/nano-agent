@@ -2,10 +2,12 @@ package channel
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // 过程与正文分别保存，平台自己决定折叠和布局。网络请求不占调度锁。
@@ -20,9 +22,78 @@ type streamSnapshot struct {
 
 // toolEntry 是这一轮的一次工具调用
 type toolEntry struct {
-	Name, Detail string
-	Done, OK     bool
-	Result       string
+	Name, Detail  string
+	RunID, CallID string
+	TurnID        int
+	State         string
+	Done, OK      bool
+	Result        string
+}
+
+func toolStateLabel(state string) string {
+	switch state {
+	case "queued":
+		return "排队中"
+	case "waiting_approval":
+		return "等待审批"
+	case "accepted":
+		return "待调度"
+	default:
+		return "执行中"
+	}
+}
+
+func (r *streamRun) trimTools() {
+	for len(r.tools) >= 128 {
+		remove := -1
+		for i := range r.tools {
+			if r.tools[i].Done {
+				remove = i
+				break
+			}
+		}
+		if remove < 0 {
+			return
+		}
+		copy(r.tools[remove:], r.tools[remove+1:])
+		r.tools[len(r.tools)-1] = toolEntry{}
+		r.tools = r.tools[:len(r.tools)-1]
+	}
+}
+
+func (r *streamRun) ToolEvent(event ToolEvent) {
+	r.change(func() {
+		index := -1
+		for i := range r.tools {
+			t := &r.tools[i]
+			if t.RunID == event.RunID && t.TurnID == event.TurnID && t.CallID == event.CallID {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			if event.State != "accepted" {
+				return
+			} // a stale result cannot create a new call
+			r.trimTools()
+			if len(r.tools) >= 128 {
+				return
+			}
+			r.tools = append(r.tools, toolEntry{RunID: event.RunID, TurnID: event.TurnID, CallID: event.CallID, Name: event.Name, Detail: streamClip(strings.TrimSpace(event.Detail), 240)})
+			index = len(r.tools) - 1
+		}
+		t := &r.tools[index]
+		if t.Done {
+			return
+		}
+		t.State = event.State
+		if event.Name != "" {
+			t.Name = event.Name
+		}
+		if event.State == "done" {
+			t.Done, t.OK, t.Result = true, event.OK, streamClip(strings.TrimSpace(event.Detail), 200)
+		}
+	})
 }
 
 // concise：简洁档，只显示正文，处理中只有一行临时状态
@@ -37,19 +108,58 @@ func (s streamSnapshot) fallbackText() string {
 
 // status 是这一轮现在在干什么（给过程区的标题用）
 func (s streamSnapshot) status() string {
-	switch {
-	case s.Closed:
+	if s.Closed {
 		return "完成"
-	case s.Transient != "":
+	}
+	if s.Transient != "" {
 		return s.Transient
-	case len(s.Tools) > 0 && !s.Tools[len(s.Tools)-1].Done:
-		return "正在执行 " + s.Tools[len(s.Tools)-1].Name
-	case s.Content != "":
+	}
+	active := 0
+	label := ""
+	for _, t := range s.Tools {
+		if !t.Done {
+			active++
+			if label == "" {
+				label = toolStateLabel(t.State) + " " + t.Name
+			}
+		}
+	}
+	if active > 1 {
+		return fmt.Sprintf("%s（共 %d 个未完成）", label, active)
+	}
+	if active == 1 {
+		return label
+	}
+	if s.Content != "" {
 		return "正在回复"
-	case s.Reasoning != "":
+	}
+	if s.Reasoning != "" {
 		return "正在思考"
 	}
 	return "处理中"
+}
+
+const streamTextLimit = 128 << 10
+
+func appendStreamText(builder *strings.Builder, text string) {
+	left := streamTextLimit - builder.Len()
+	if left <= 0 {
+		return
+	}
+	if len(text) <= left {
+		builder.WriteString(text)
+		return
+	}
+	const marker = "…（后续内容见网页）"
+	n := left - len(marker)
+	if n < 0 {
+		return
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	builder.WriteString(text[:n])
+	builder.WriteString(marker)
 }
 
 type streamWriter interface {
@@ -101,21 +211,25 @@ func (r *streamRun) SetShow(level string) { r.change(func() { r.show = level }) 
 func (r *streamRun) Status(text string)   { r.change(func() { r.transient = text }) }
 func (r *streamRun) Reasoning(text string) {
 	if text != "" {
-		r.change(func() { r.reasoning.WriteString(text) })
+		r.change(func() { appendStreamText(&r.reasoning, text) })
 	}
 }
 func (r *streamRun) Content(text string) {
 	if text != "" {
-		r.change(func() { r.content.WriteString(text) })
+		r.change(func() { appendStreamText(&r.content, text) })
 	}
 }
 func (r *streamRun) Tool(name, detail string) {
 	r.change(func() {
+		r.trimTools()
+		if len(r.tools) >= 128 {
+			return
+		}
 		r.tools = append(r.tools, toolEntry{Name: name, Detail: streamClip(strings.TrimSpace(detail), 240)})
 	})
 }
 
-// ToolResult 记到第一个还没结果的调用上（并行的几个调用按顺序对上）
+// ToolResult is the legacy serial adapter. Parallel callers use ToolEvent.
 func (r *streamRun) ToolResult(ok bool, detail string) {
 	r.change(func() {
 		for i := range r.tools {
@@ -128,14 +242,20 @@ func (r *streamRun) ToolResult(ok bool, detail string) {
 }
 func (r *streamRun) Note(text string) {
 	if text != "" {
-		r.change(func() { r.notes = append(r.notes, text) })
+		r.change(func() {
+			if len(r.notes) >= 32 {
+				copy(r.notes, r.notes[1:])
+				r.notes = r.notes[:31]
+			}
+			r.notes = append(r.notes, streamClip(text, 1000))
+		})
 	}
 }
 func (r *streamRun) EndMessage() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.closed && r.content.Len() > 0 {
-		r.content.WriteString("\n\n")
+		appendStreamText(&r.content, "\n\n")
 	}
 }
 

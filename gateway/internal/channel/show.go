@@ -57,6 +57,15 @@ func (v *filteredView) ToolResult(ok bool, detail string) {
 		v.RunView.ToolResult(ok, detail)
 	}
 }
+func (v *filteredView) ToolEvent(event ToolEvent) {
+	if v.show == "简洁" {
+		if event.State != "done" {
+			v.status("工具" + toolStateLabel(event.State) + "：" + event.Name)
+		}
+		return
+	}
+	EmitToolEvent(v.RunView, event)
+}
 func (v *filteredView) Note(text string) {
 	if v.show != "简洁" {
 		v.RunView.Note(text)

@@ -167,3 +167,13 @@ hello.features.sandbox_policy=2 支持 workspace 覆盖和逐次执行状态。�
 result / exec_result / run_result 可带 sandbox 对象：requested（原请求）、mode（目标节点最终执行策略）、effective（full / partial / none / unknown）、reason（原因）。此对象来自执行器结果，和 hello 的能力探测分开。核心只在完整调用身份匹配后转发，不改变模型工具正文。Gateway 保存到原始历史并用于工具卡片显示，不将其作为模型参数。
 
 旧执行器未声明 sandbox_modes 时，只兼容 auto；显式 on/off 在执行前失败。旧协调内核不支持所需覆盖时，在模型启动前要求更新；不假装执行了新策略。外部副作用和权限仍以实际执行系统为准，关闭隔离不授予访客工具权限或管理员身份。
+
+### 调用展示和未接受提案（v0.9.0）
+
+Gateway 的工具、排队、开始、结果、附件及审批事件携带 run_id / turn_id / id；原始 assistant 和 tool 历史保存相同身份。CLI、飞书卡片、Telegram 过程消息使用可选 ToolEvent 接口，乱序结果只更新对应调用；旧 RunView 通过文字适配，终态附调用标识。网页使用相同身份索引历史和实时状态，支持模型在下一轮重用 call ID。
+
+C hello.features.max_calls_per_turn 声明批次数量上限（当前 32）。Gateway 在保存正式 tool_calls、发布执行事件前验证数量及 ID；空、重复或过长 ID 整批拒绝，不执行一部分。超出 C 协议硬边界的帧也整批拒绝，不能截取前面若干条执行。真实模型用量仍然结算。
+
+未接受提案（生成后插话重规划、提案结构无效）可保存到原始消息的 proposed_calls，网页可展开检查；此字段不转换成模型 tool_calls，不伪造执行失败结果。执行结果仍按实际完成顺序写入。工具说明按 bounded_parallel 能力注入稳定系统前缀，prefixVer=9。
+
+平台流式缓存有界：正文和思考各 128 KiB、32 条附注、128 个工具条目；优先回收已经完成的条目，保留在途调用身份。截断指向网页完整原始历史，不改变模型的真实工具结果。

@@ -5,8 +5,8 @@
   import Icon from './Icon.svelte';
 
   // media：工具读到的图片（交给模型看了）、SendFile 发出去的文件，一直显示在卡片下面
-  let { name, detail, args = '', ok, result, running = false, media = [], sandbox }: {
-    sandbox?: ExecutionIsolation; name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean; media?: Attachment[];
+  let { name, detail, args = '', ok, result, running = false, media = [], sandbox, callState }: {
+    callState?: string; sandbox?: ExecutionIsolation; name: string; detail: string; args?: string; ok?: boolean; result?: string; running?: boolean; media?: Attachment[];
   } = $props();
   const isImage = (a: Attachment) => /^image\/(png|jpeg|gif|webp)$/.test(a.mime);
   const sizeOf = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
@@ -20,7 +20,7 @@
     <span class="name">{name}</span>
     <span class="detail">{detail}</span>
     {#if running && ok === undefined}
-      <span class="st run"><Icon name="refresh" size={13} /></span>
+      {#if callState === 'waiting_approval'}<span class="lines">等待审批</span>{:else if callState === 'queued'}<span class="lines">排队中</span>{:else if callState === 'accepted'}<span class="lines">待调度</span>{:else}<span class="st run"><Icon name="refresh" size={13} /></span>{/if}
     {:else if ok === false}
       <span class="st err"><Icon name="x" size={13} /></span>
     {:else if ok}

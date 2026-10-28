@@ -148,7 +148,7 @@ func feishuTools(s streamSnapshot) string {
 		}
 		switch {
 		case !t.Done:
-			line += "\n<font color='grey'>　…</font>"
+			line += "\n<font color='grey'>　… " + toolStateLabel(t.State) + "</font>"
 		case t.OK:
 			line += "\n<font color='green'>　✓</font> <font color='grey'>" + fsEscape(streamClip(t.Result, 60)) + "</font>"
 		default:

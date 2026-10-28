@@ -1212,7 +1212,7 @@ func (a *App) startRun(s *sess) {
 	if len(images) > 0 {
 		runData["images"] = images
 	}
-	a.publish(events.Event{T: "run", SID: s.sid, Kind: "start", Text: content, Data: runData})
+	a.publish(events.Event{T: "run", SID: s.sid, RunID: r.runID, Kind: "start", Text: content, Data: runData})
 	if !a.hub.Send(node, in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
@@ -1472,12 +1472,14 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		}
 		a.callModel(s)
 	case proto.TToolQueued:
+		a.emitToolState(s, m, "queued")
 		// 这个调用还在等执行槽或等资源：只更新界面，不占执行结果的位置
 		s.run.tool = m.Name
-		a.publish(events.Event{T: "tool_queued", SID: s.sid, ID: m.ID, Name: m.Name, Text: m.Text,
+		a.publish(events.Event{T: "tool_queued", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID, Name: m.Name, Text: m.Text,
 			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
 	case proto.TExecStarted:
-		a.publish(events.Event{T: "tool_started", SID: s.sid, ID: m.ID,
+		a.emitToolState(s, m, "running")
+		a.publish(events.Event{T: "tool_started", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID,
 			Data: map[string]any{"run_id": m.RunID, "turn_id": m.TurnID}})
 	case proto.TExec:
 		a.execTool(node, s, m)
@@ -1495,7 +1497,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		// Read 读到图片：取过来附上以后再记进历史（fetch.go）
 		if !a.seeImage(s, m) {
 			// MCP 工具返回的图片：模型支持看图时一起发过去
-			if err := a.store.Append(s.sid, session.Msg{Role: "tool", ToolCallID: m.ID, Content: content, Agent: a.execAgentID(s.sid),
+			if err := a.store.Append(s.sid, session.Msg{Role: "tool", RunID: s.run.runID, TurnID: s.run.turnID, ToolCallID: m.ID, Content: content, Agent: a.execAgentID(s.sid),
 				Sent: s.run.sent[m.ID], Images: s.run.images[m.ID], Sandbox: m.Sandbox}); err != nil {
 				a.log.Warn("保存工具结果失败", "sid", s.sid, "err", err)
 			}
@@ -1508,7 +1510,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 			if (o.ep.ch == "tg" || o.ep.ch == "feishu") && redact.Needed(a.cfg.Security.Redact, false, true) {
 				detail = redact.ToolResult(detail, a.knownSecrets())
 			}
-			o.view.ToolResult(m.OK == nil || *m.OK, resultDetail(detail))
+			channel.EmitToolEvent(o.view, channel.ToolEvent{RunID: s.run.runID, TurnID: s.run.turnID, CallID: m.ID, Name: s.run.callArgs[m.ID].Name, State: "done", OK: m.OK == nil || *m.OK, Detail: resultDetail(detail)})
 		}
 		for n, ap := range a.approvals {
 			if ap.sid == s.sid && ap.id == m.ID {
@@ -1519,7 +1521,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 				a.dropApproval(n, why)
 			}
 		}
-		a.publish(events.Event{T: "tool_result", SID: s.sid, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
+		a.publish(events.Event{T: "tool_result", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000), Sandbox: m.Sandbox})
 	case proto.TApproveReq:
 		if s.run.full {
@@ -1602,7 +1604,7 @@ func (a *App) finish(s *sess, status, detail string) {
 			v.Note(usageLine(r, a.now()))
 		}
 	}
-	a.publish(events.Event{T: "run", SID: s.sid, Kind: "end", Text: status, Data: map[string]any{
+	a.publish(events.Event{T: "run", SID: s.sid, RunID: r.runID, Kind: "end", Text: status, Data: map[string]any{
 		"calls": r.calls, "usage": r.usage, "ms": a.now().Sub(r.start).Milliseconds(), "detail": detail}})
 	if r.scheduled != nil {
 		a.completeSchedule(r.scheduled, status == proto.StatusOK, strings.TrimSpace(body+"\n"+note))
@@ -1788,7 +1790,7 @@ func (a *App) generateModel(s *sess) {
 	r.cancelLLM = cancel
 	r.calls++
 	a.totals.ModelCalls++
-	a.publish(events.Event{T: "model", SID: s.sid, Kind: "start",
+	a.publish(events.Event{T: "model", SID: s.sid, RunID: r.runID, TurnID: r.turnID, Kind: "start",
 		Data: map[string]any{"thinking": req.Thinking, "run_id": r.runID, "turn_id": r.turnID,
 			"request_id": reqID, "input_revision": r.injected}})
 
@@ -1797,14 +1799,14 @@ func (a *App) generateModel(s *sess) {
 	contentEmitted := false
 	onDelta := func(d llm.Delta) {
 		if d.Reasoning != "" {
-			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "reasoning", Text: d.Reasoning})
+			bus.Publish(events.Event{T: "delta", SID: sid, RunID: r.runID, TurnID: r.turnID, Kind: "reasoning", Text: d.Reasoning})
 			for _, v := range views {
 				v.Reasoning(d.Reasoning)
 			}
 		}
 		if d.Content != "" {
 			contentEmitted = true
-			bus.Publish(events.Event{T: "delta", SID: sid, Kind: "content", Text: d.Content})
+			bus.Publish(events.Event{T: "delta", SID: sid, RunID: r.runID, TurnID: r.turnID, Kind: "content", Text: d.Content})
 			for _, v := range views {
 				v.Content(d.Content)
 			}
@@ -1835,9 +1837,9 @@ func (a *App) generateModel(s *sess) {
 			v.EndMessage()
 		}
 		if err != nil {
-			a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: "error: " + err.Error()})
+			a.publish(events.Event{T: "model", SID: s.sid, RunID: r.runID, TurnID: r.turnID, Kind: "end", Text: "error: " + err.Error()})
 			a.log.Warn("模型请求失败", "sid", s.sid, "err", err)
-			a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, Reason: proto.ReasonError, Detail: err.Error()})
+			a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID, Reason: proto.ReasonError, Detail: err.Error()})
 			return
 		}
 		u := res.Usage
@@ -1849,12 +1851,29 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 		a.addUsage(r, u)
-		a.publish(events.Event{T: "model", SID: s.sid, Kind: "end", Text: res.Reason,
+		a.publish(events.Event{T: "model", SID: s.sid, RunID: r.runID, TurnID: r.turnID, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
 		// 边界二：生成完整结束（用量已经结算），但还没把结果交给内核。这期间收到的插话要
 		// 在这里处理：不派发这批尚未接受的工具，先写补充再重新规划。
 		if a.yieldToInterjection(s, r, res, u) {
 			return
+		}
+		if res.Reason == llm.ReasonToolUse {
+			limit := 32
+			if n := a.nodes[r.node]; n != nil && n.info.Features["max_calls_per_turn"] > 0 {
+				limit = min(32, n.info.Features["max_calls_per_turn"])
+			}
+			if why := validateProposedCalls(res.Calls, limit); why != "" {
+				proposals := res.Calls
+				if len(proposals) > 256 {
+					proposals = proposals[:256]
+				}
+				if err := a.store.Append(s.sid, session.Msg{Role: "assistant", RunID: r.runID, TurnID: r.turnID, Content: res.Content, Reasoning: res.Reasoning, Usage: &u, Agent: a.execAgentID(s.sid), Kind: "unaccepted_tool_proposal", Reason: why, ProposedCalls: proposals}); err != nil {
+					a.log.Warn("保存未接受提案失败", "err", err)
+				}
+				a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID, Reason: proto.ReasonError, Detail: why})
+				return
+			}
 		}
 		if res.Content != "" {
 			r.streamed = true
@@ -1863,7 +1882,7 @@ func (a *App) generateModel(s *sess) {
 			"prompt_tokens", u.PromptTokens, "cached_tokens", u.CachedTokens,
 			"completion_tokens", u.CompletionTokens, "reasoning_tokens", u.ReasoningTokens,
 			"took", time.Since(start).Round(time.Millisecond))
-		if err := a.store.Append(s.sid, session.Msg{Role: "assistant", Content: res.Content, ToolCalls: res.Calls,
+		if err := a.store.Append(s.sid, session.Msg{Role: "assistant", RunID: r.runID, TurnID: r.turnID, Content: res.Content, ToolCalls: res.Calls,
 			Reasoning: res.Reasoning, Usage: &u, Agent: a.execAgentID(s.sid)}); err != nil {
 			a.log.Warn("保存模型回复失败", "sid", s.sid, "err", err)
 		}
@@ -1886,9 +1905,9 @@ func (a *App) generateModel(s *sess) {
 				turn.Calls = append(turn.Calls, proto.Call{ID: c.ID, Name: c.Function.Name, Args: argsJSON(c.Function.Arguments)})
 				detail := toolDetail(c.Function.Name, c.Function.Arguments)
 				for _, v := range views {
-					v.Tool(c.Function.Name, detail)
+					channel.EmitToolEvent(v, channel.ToolEvent{RunID: r.runID, TurnID: r.turnID, CallID: c.ID, Name: c.Function.Name, State: "accepted", Detail: detail})
 				}
-				a.publish(events.Event{T: "tool", SID: s.sid, ID: c.ID, Name: c.Function.Name, Text: detail,
+				a.publish(events.Event{T: "tool", SID: s.sid, RunID: r.runID, TurnID: r.turnID, ID: c.ID, Name: c.Function.Name, Text: detail,
 					Data: clip(c.Function.Arguments, 4000)})
 			}
 		case llm.ReasonRefused:

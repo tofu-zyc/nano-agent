@@ -634,6 +634,14 @@ def t_workspace_sandbox(gw):
     finish(gw,"sb-remote-policy")
 
 
+@case("超大协议提案整批拒绝，不能截取一部分执行")
+def t_oversized_wire_batch(gw):
+    start_run(gw,"wire-large")
+    gw.send(t="turn",sid="wire-large",reason="tool_use",calls=[{"id":f"c{i}","name":"Write","args":{"path":"must-not-write","content":"unsafe"}} for i in range(257)])
+    gw.expect("done",sid="wire-large",status="error")
+    assert not os.path.exists(os.path.join(WORK,"must-not-write"))
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -986,7 +994,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_reconnect):
                 t(gw)
 
             # 内核退出时，正在跑的命令也要被清理

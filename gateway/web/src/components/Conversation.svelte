@@ -490,6 +490,11 @@
             {#if b.text}
               <div class="md">{@html markdown(b.text)}</div>
             {/if}
+            {#if b.proposed?.length}
+              <details class="think"><summary>未接受的工具提案（未执行）</summary><p>{b.reason || '未提交给执行内核。'}</p>
+                {#each b.proposed as proposal}<p>{proposal.function.name} · {proposal.id}</p><pre>{proposal.function.arguments}</pre>{/each}
+              </details>
+            {/if}
             {#if b.tools.length}
               <div class="tools">
                 {#each b.tools as t}
@@ -543,7 +548,7 @@
           </div>
         {:else if it.kind === 'tool'}
           <div class="msg bot">
-            <ToolCard name={it.name} detail={it.detail} args={it.args} ok={it.ok} result={it.result} media={it.media} sandbox={it.sandbox} running />
+            <ToolCard name={it.name} detail={it.detail} args={it.args} ok={it.ok} result={it.result} media={it.media} sandbox={it.sandbox} callState={it.state} running />
           </div>
         {:else if it.kind === 'say' && !it.text.startsWith('⚠️ 需要审批')}
           <div class="sys say"><Icon name="bot" size={13} />{it.text}</div>

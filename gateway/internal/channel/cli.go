@@ -414,3 +414,13 @@ func (r *cliRun) Close() {
 	r.end()
 	r.closed = true
 }
+
+func (r *cliRun) ToolEvent(event ToolEvent) {
+	label := fmt.Sprintf("%s [%d/%s]", event.Name, event.TurnID, event.CallID)
+	switch event.State {
+	case "accepted":
+		r.Tool(label, event.Detail)
+	case "done":
+		r.ToolResult(event.OK, label+" "+event.Detail)
+	}
+}

@@ -10,6 +10,8 @@ import (
 
 // Event 是一条事件。T 是类型，其余字段按类型取用，没用到的省略。
 type Event struct {
+	RunID   string         `json:"run_id,omitempty"`
+	TurnID  int            `json:"turn_id,omitempty"`
 	Sandbox *proto.Sandbox `json:"sandbox,omitempty"`
 	T       string         `json:"t"`
 	At      int64          `json:"at"` // 毫秒时间戳

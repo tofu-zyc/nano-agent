@@ -1,5 +1,5 @@
 // 把会话历史整理成对话视图要显示的块
-import type { Attachment, Msg, Usage, ExecutionIsolation } from './types';
+import type { Attachment, Msg, Usage, ExecutionIsolation, ToolCall } from './types';
 import { parseUser, type NoteKind } from './format';
 
 export type ToolView = { sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args: string; ok?: boolean; result?: string; media?: Attachment[] };
@@ -9,7 +9,7 @@ export type Block =
   | { type: 'note'; kind: NoteKind; text: string }
   | { type: 'wake'; text: string; episode?: boolean; ts?: number; reason?: string }
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
-  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; ts?: number; sender?: string; agent?: string; proactive?: boolean; reason?: string; episode?: string; agenda?: string };
+  | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; proposed?: ToolCall[]; ts?: number; sender?: string; agent?: string; proactive?: boolean; reason?: string; episode?: string; agenda?: string };
 
 export function toolDetail(name: string, args: string): string {
   let a: Record<string, any>;
@@ -46,6 +46,7 @@ export function prettyArgs(args: string): string {
 export function buildBlocks(history: Msg[], inner = false, room = false): Block[] {
   const out: Block[] = [];
   const byId = new Map<string, ToolView>();
+  const key=(m:Msg,id:string)=>JSON.stringify([m.run_id || '',m.turn_id || 0,id]);
   for (const m of history) {
     if (m.role === 'user' && inner) {
       // 内心活动、整理记忆：没有人在说话，“用户消息”都是网关放的说明，整段显示
@@ -62,15 +63,15 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
     } else if (m.role === 'assistant') {
       const tools: ToolView[] = (m.tool_calls ?? []).map((c) => {
         const t: ToolView = { id: c.id, name: c.function.name, args: c.function.arguments, detail: toolDetail(c.function.name, c.function.arguments) };
-        byId.set(c.id, t);
+        byId.set(key(m,c.id), t);
         return t;
       });
       const speaker = room ? parseUser(m.content ?? '') : undefined;
       out.push({ type: 'assistant', text: speaker?.text ?? m.content ?? '', sender: speaker?.sender, agent: m.agent,
-        reasoning: m.reasoning, usage: m.usage, tools, ts: m.ts, proactive: m.kind === 'proactive', reason: m.reason, episode: m.parent_run_id, agenda: m.agenda_id });
+        reasoning: m.reasoning, usage: m.usage, tools, proposed:m.proposed_calls, ts: m.ts, proactive: m.kind === 'proactive', reason: m.reason, episode: m.parent_run_id, agenda: m.agenda_id });
     } else if (m.role === 'tool') {
-      const t = byId.get(m.tool_call_id ?? '');
-      if (t) {
+      const t = byId.get(key(m,m.tool_call_id ?? ''));
+      if (t && t.result === undefined) {
         let c = m.content ?? '';
         t.ok = !c.startsWith('[执行失败] ');
         if (!t.ok) c = c.slice('[执行失败] '.length);
