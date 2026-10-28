@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -352,105 +353,6 @@ func (s *Store) hasLegacy(sid string) bool {
 	return false
 }
 
-// promote 把一个会话的旧文件升级到新布局：逐项校验、复制、回读比对，最后写激活标记。
-// 只复制不删旧文件；任何一项失败都不写标记，下次进来还会重试。
-func (s *Store) promote(sid string) error {
-	// 已经提升过：旧文件只是备份，不再做首次导入（否则重置/删除会被重放复活）
-	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
-		return nil
-	}
-	if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
-		return nil
-	}
-	// 旧备份的自动升级也必须消费世代错误：身份读不出来或已经开过新一代时，
-	// 不能把旧文件重新提升成权威数据。
-	gen, err := s.readGen(sid)
-	if err != nil {
-		return fmt.Errorf("%w：旧会话的世代状态不可读：%v", errLegacyUnauthorized, err)
-	}
-	if gen > 0 {
-		return fmt.Errorf("%w：旧会话已经开过第 %d 代，旧备份不能自动升级", errLegacyUnauthorized, gen)
-	}
-	copyOne := func(src, dst string, check func(io.Reader) error) error {
-		sf, err := os.Open(src)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		checkErr := check(sf)
-		sf.Close()
-		if checkErr != nil {
-			return fmt.Errorf("%s 内容无法校验：%w", src, checkErr)
-		}
-		if _, err := os.Stat(dst); err == nil {
-			same, err := sameFileContent(src, dst)
-			if err != nil {
-				return err
-			}
-			if same {
-				return nil // 已经复制过
-			}
-			return fmt.Errorf("%s 与 %s 内容不同，保留双方等待人工核对", src, dst)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("读目标 %s 失败：%w", dst, err)
-		}
-		if _, err := copyFileVersion(src, dst); err != nil {
-			return err
-		}
-		same, err := sameFileContent(src, dst)
-		if err != nil {
-			return err
-		}
-		if !same {
-			return fmt.Errorf("写 %s 后内容与源不一致", dst)
-		}
-		return nil
-	}
-	ln := LegacyKey(sid)
-	for _, item := range []struct {
-		suffix string
-		check  func(io.Reader) error
-	}{
-		{".jsonl", jsonlCheckReader},
-		{".settings.json", jsonCheckReader},
-		{".branch.json", jsonCheckReader},
-	} {
-		if err := copyOne(filepath.Join(s.dirLegacySessions(), ln+item.suffix),
-			s.newPath(sid, item.suffix), item.check); err != nil {
-			return err
-		}
-	}
-	oldArch := filepath.Join(s.dirLegacyArchive(), legacyArchiveKey(sid))
-	if entries, err := os.ReadDir(oldArch); err == nil {
-		newArch := filepath.Join(s.dirV1Archive(), Key(sid))
-		if err := os.MkdirAll(newArch, 0o700); err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			if err := copyOne(filepath.Join(oldArch, e.Name()), filepath.Join(newArch, e.Name()), jsonlCheckReader); err != nil {
-				return err
-			}
-		}
-	}
-	if err := s.rememberLongKey(sid); err != nil {
-		return err
-	}
-	// 最后写激活标记：所有东西都校验并提交到位，这个会话才算搬到新布局
-	if err := os.MkdirAll(filepath.Dir(s.activeMarker(sid)), 0o700); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(s.activeMarker(sid), []byte(Key(sid))); err != nil {
-		return err
-	}
-	s.legacyActive(sid)
-	return nil
-}
-
 // legacyActive 标记内存里这个会话已经升级过（避免每次访问都 stat 旧目录）。
 func (s *Store) legacyActive(sid string) {
 	if s.promoted == nil {
@@ -461,27 +363,48 @@ func (s *Store) legacyActive(sid string) {
 
 // ---- 迁移 ----
 
-// MigrationItem 是单个文件的迁移阶段记录。
+// MigrationItem 是单个文件的迁移阶段记录。它是 promotion 操作记录在本次迁移报告里的
+// 投影：包含 operation_id、完整文件身份、长度与 sha256，归档文件也逐项列出。
 type MigrationItem struct {
-	SID    string `json:"sid"`
-	Kind   string `json:"kind"` // history | settings | branch | archive
-	Source string `json:"source"`
-	Target string `json:"target"`
-	Stage  string `json:"stage"` // copied | verified | conflict | failed
-	Bytes  int64  `json:"bytes"`
+	SID         string `json:"sid"`
+	OperationID string `json:"operation_id,omitempty"`
+	Kind        string `json:"kind"` // history | settings | branch | archive
+	Name        string `json:"name,omitempty"`
+	Source      string `json:"source"`
+	Target      string `json:"target"`
+	Stage       string `json:"stage"` // planned | copying | verified | conflict | failed
+	Bytes       int64  `json:"bytes"`
+	Sum         string `json:"sum,omitempty"`
 }
 
-// MigrationRecord 是一次迁移的真实结果。
+// MigrationRecord 是一次迁移的真实结果。恢复不依赖这份末尾汇总；每个会话的
+// v1/promotions/<key>.json 才是可续办的逐项清单。
 type MigrationRecord struct {
 	Version int             `json:"version"`
 	At      int64           `json:"at"`
 	Items   []MigrationItem `json:"items"`
 }
 
-// Migrate 把旧布局升级到新布局。只复制不删旧文件；逐项记录阶段；
-// 清单提交失败会作为错误返回（调用方不能把部分完成当成成功）。
+func (s *Store) migrationItems(op promoteOp) []MigrationItem {
+	var out []MigrationItem
+	for _, item := range op.Items {
+		src, dst, err := s.promoteItemPaths(op.SID, item)
+		if err != nil {
+			continue
+		}
+		out = append(out, MigrationItem{
+			SID: op.SID, OperationID: op.OperationID, Kind: item.Kind, Name: item.Name,
+			Source: src, Target: dst, Stage: item.Stage, Bytes: item.Len, Sum: item.Sum,
+		})
+	}
+	return out
+}
+
+// Migrate 把旧布局升级到新布局。只复制不删旧文件；每个会话通过 promoteSession
+// 在处理前登记清单、逐项更新阶段。末尾写 migration.json 只是本次运行报告，
+// 中断恢复由 promote / ResumePromotions 读取 v1/promotions 下的逐项记录完成。
 func (s *Store) Migrate() (MigrationRecord, error) {
-	rec := MigrationRecord{Version: 1, At: time.Now().Unix()}
+	rec := MigrationRecord{Version: 2, At: time.Now().Unix()}
 	sids := map[string]bool{}
 	for _, k := range []struct{ dir, suffix string }{
 		{s.dirLegacySessions(), ".jsonl"},
@@ -514,24 +437,17 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 		if _, err := os.Stat(s.deletedMarker(sid)); err == nil {
 			continue
 		}
-		if err := s.promote(sid); err != nil {
-			rec.Items = append(rec.Items, MigrationItem{SID: sid, Stage: "conflict"})
+		op, err := s.promoteSession(sid)
+		items := s.migrationItems(op)
+		rec.Items = append(rec.Items, items...)
+		if err != nil {
+			if len(items) == 0 {
+				rec.Items = append(rec.Items, MigrationItem{SID: sid, OperationID: op.OperationID,
+					Stage: "conflict"})
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
-			continue
-		}
-		ln := LegacyKey(sid)
-		for _, item := range []struct{ suffix, kind string }{
-			{".jsonl", "history"}, {".settings.json", "settings"}, {".branch.json", "branch"},
-		} {
-			src := filepath.Join(s.dirLegacySessions(), ln+item.suffix)
-			st, err := os.Stat(src)
-			if err != nil {
-				continue
-			}
-			rec.Items = append(rec.Items, MigrationItem{SID: sid, Kind: item.kind, Source: src,
-				Target: s.newPath(sid, item.suffix), Stage: "verified", Bytes: st.Size()})
 		}
 	}
 	b, _ := json.MarshalIndent(rec, "", "  ")
@@ -608,13 +524,14 @@ func jsonlCheckReader(r io.Reader) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 64<<20)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
 			continue
 		}
-		var v any
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			return err
+		// json.Valid 只做语法校验，不把每条消息反序列化成 map / 字符串，
+		// 大历史的逐条校验不会按整份文件累计分配。
+		if !json.Valid(line) {
+			return fmt.Errorf("JSONL 行不是合法 JSON")
 		}
 	}
 	return sc.Err()

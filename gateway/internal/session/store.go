@@ -78,6 +78,8 @@ func New(dir string) (*Store, error) {
 		filepath.Join(dir, "v1", "rev"),
 		filepath.Join(dir, "v1", "renames"),
 		filepath.Join(dir, "v1", "renames", "settled"),
+		filepath.Join(dir, "v1", "promotions"),
+		filepath.Join(dir, "v1", "promotions", "settled"),
 		filepath.Join(dir, "v1", "staging"),
 		filepath.Join(dir, "v1", "orphan"),
 		filepath.Join(dir, "v1", "archive"),
@@ -202,10 +204,10 @@ func (s *Store) renameOpFile(from, to string) string {
 	return filepath.Join(s.dirV1(), "renames", Key(from)+"-"+Key(to)+".json")
 }
 
-func newRenameOperationID() (string, error) {
+func newOperationID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("生成改名操作 ID 失败：%w", err)
+		return "", fmt.Errorf("生成操作 ID 失败：%w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
 }
@@ -887,7 +889,7 @@ func (s *Store) Rename(from, to string) error {
 		if err != nil {
 			return err
 		}
-		id, err := newRenameOperationID()
+		id, err := newOperationID()
 		if err != nil {
 			return err
 		}

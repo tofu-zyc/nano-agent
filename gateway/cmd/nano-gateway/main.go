@@ -138,9 +138,12 @@ func main() {
 		log.Error("打开数据目录失败", "dir", cfg.Session.DataDir, "err", err)
 		os.Exit(1)
 	}
-	// 上次没做完的改名按阶段续上（启动路径，不能让用户知道操作文件才能恢复）
+	// 上次没做完的改名 / 旧布局提升按逐项清单续上（启动路径，不能让用户知道操作文件才能恢复）
 	if err := store.ResumeRenames(); err != nil {
 		log.Error("恢复未完成的会话改名失败", "err", err)
+	}
+	if err := store.ResumePromotions(); err != nil {
+		log.Error("恢复未完成的旧会话提升失败", "err", err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.Persona.Dir, "default.md")); err != nil {
 		log.Warn("没有找到默认人格文件，将不带系统提示词", "file", filepath.Join(cfg.Persona.Dir, "default.md"))
