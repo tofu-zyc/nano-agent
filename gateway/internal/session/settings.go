@@ -176,7 +176,7 @@ func (s *Store) List() []string {
 		if !e.IsDir() {
 			continue
 		}
-		if sid, ok := resolveLegacyName(e.Name()); ok {
+		if sid, ok := resolveLegacyArchiveName(e.Name()); ok {
 			add(sid)
 		}
 	}

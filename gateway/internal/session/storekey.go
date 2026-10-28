@@ -295,6 +295,15 @@ func resolveLegacyName(name string) (string, bool) {
 	return sid, true
 }
 
+func resolveLegacyArchiveName(name string) (string, bool) {
+	for _, sid := range []string{".", ".."} {
+		if name == legacyArchiveKey(sid) {
+			return sid, true
+		}
+	}
+	return resolveLegacyName(name)
+}
+
 // ---- 权威定位 ----
 
 // locate 返回会话某一类文件的权威位置和是否存在。
@@ -440,7 +449,7 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 		if !e.IsDir() {
 			continue
 		}
-		if sid, ok := resolveLegacyName(e.Name()); ok {
+		if sid, ok := resolveLegacyArchiveName(e.Name()); ok {
 			sids[sid] = true
 		}
 	}
@@ -501,7 +510,7 @@ func (s *Store) HasLegacyKeys() bool {
 		if !e.IsDir() {
 			continue
 		}
-		if sid, ok := resolveLegacyName(e.Name()); ok && live(sid) {
+		if sid, ok := resolveLegacyArchiveName(e.Name()); ok && live(sid) {
 			return true
 		}
 	}

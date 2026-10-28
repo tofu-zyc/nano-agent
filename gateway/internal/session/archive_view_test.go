@@ -13,6 +13,9 @@ func TestLegacyArchiveListingAndReadUseSameView(t *testing.T) {
 	sid := ".."
 	old := filepath.Join(s.legacyArchiveDir(sid), "old.jsonl")
 	writeFile(t, old, `{"role":"user","content":"archived original"}`+"\n")
+	if ids := s.List(); len(ids) != 1 || ids[0] != sid {
+		t.Fatalf("archive SID decoded with wrong legacy rule: %v", ids)
+	}
 	// An existing but empty destination is not a completed migration.
 	if err := os.MkdirAll(s.archiveDir(sid), 0700); err != nil {
 		t.Fatal(err)
