@@ -61,7 +61,8 @@ type Store struct {
 	hist     map[string][]Msg // 从 Settings.Base 开始的历史
 	settings map[string]Settings
 	branches map[string]BranchMeta // 分支元信息（按需从磁盘加载）
-	promoted map[string]bool       // 已经升级到新布局的会话（W1）
+	issues   map[string]string
+	promoted map[string]bool // 已经升级到新布局的会话（W1）
 
 	snapCacheMu sync.Mutex
 	snapCache   map[string][]Msg // 快照只读缓存（有上限，空闲分支不各留一份）
@@ -128,7 +129,7 @@ func (s *Store) targetHasOurContent(to string, op renameOp, suffixes []string) e
 		}
 		return fmt.Errorf("提交点已过但目标内容与记录不一致（%s），保留双方等待人工核对", suffix)
 	}
-	return nil
+	return s.publishRenameAssets(op, s.renameStagingDir(op.From, op.To), true)
 }
 
 // renameStagingDir 是这笔改名私有的暂存目录：没提交之前普通定位看不到它。
@@ -180,6 +181,7 @@ type renameOp struct {
 	ToGen       int64                 `json:"to_gen,omitempty"`
 	ToRev       int64                 `json:"to_rev,omitempty"`
 	Files       map[string]renameFile `json:"files,omitempty"`
+	Assets      []renameAsset         `json:"assets,omitempty"`
 }
 
 // renameFile 是一个文件在复制时的内容版本（长度 + sha256）。
@@ -335,7 +337,7 @@ func (s *Store) validateRenameSource(op renameOp, suffixes []string) error {
 			return err
 		}
 	}
-	return nil
+	return s.validateRenameAssets(op, s.renameStagingDir(op.From, op.To), true)
 }
 
 // validateRenameStaging 核对暂存副本齐全且与记录一致。记录里有、暂存里没了，
@@ -347,7 +349,7 @@ func (s *Store) validateRenameStaging(op renameOp, staging string) error {
 			return err
 		}
 	}
-	return nil
+	return s.validateRenameAssets(op, staging, false)
 }
 
 // publishRenameTarget 把暂存副本发布到目标。目标已激活过（重试）时，只接受
@@ -389,7 +391,7 @@ func (s *Store) publishRenameTarget(op renameOp, staging string, suffixes []stri
 			return fmt.Errorf("发布后的目标内容与记录不一致（%s），保留双方等待人工核对", suffix)
 		}
 	}
-	return nil
+	return s.publishRenameAssets(op, staging, false)
 }
 
 // Dir 是数据目录。
@@ -466,18 +468,11 @@ func (s *Store) legacyPath(sid, suffix string) string {
 	return filepath.Join(s.dirLegacySessions(), LegacyKey(sid)+suffix)
 }
 
-// readFileFor 读会话某一类文件：先走权威定位；升级失败时退回旧位置继续读，绝不在这里新建。
+// readFileFor never falls back across a failed publication decision.
 func (s *Store) readFileFor(sid, suffix string) (string, bool) {
 	p, ok, err := s.locate(sid, suffix)
 	if err != nil {
-		if errors.Is(err, errLegacyUnauthorized) {
-			return p, false // 旧备份已失去自动授权，不能退回旧路径继续读
-		}
-		if lp := s.legacyPath(sid, suffix); lp != "" {
-			if _, statErr := os.Stat(lp); statErr == nil {
-				return lp, true
-			}
-		}
+		s.RecordStorageIssue(sid, err)
 		return p, false
 	}
 	return p, ok
@@ -879,10 +874,25 @@ func (s *Store) Exists(sid string) bool {
 	if _, err := os.Stat(s.activeMarker(sid)); err == nil {
 		return true // 刚重置过：没有文件但会话仍然存在
 	}
+	for _, kind := range []string{"persona", "interjections"} {
+		rec, has, err := s.readAsset(kind, sid)
+		if err != nil {
+			s.RecordStorageIssue(sid, err)
+			continue
+		}
+		if !has {
+			continue
+		}
+		if _, exists, err := s.AuxiliaryPath(kind, s.assetRoot(rec.Root), rec.Extension, sid, false); err != nil {
+			s.RecordStorageIssue(sid, err)
+		} else if exists {
+			return true
+		}
+	}
 	return false
 }
 
-// Rename 把会话的历史和设置换一个 ID（升级旧数据用）。新 ID 不能已经存在。
+// Rename 把会话的历史、设置和已发布的辅助文件换一个 ID（升级旧数据用）。新 ID 不能已经存在。
 //
 // 恢复协议（版本 2）：operation_id 绑定双方世代 / 上下文版本；提交前先落盘
 // committing 意图，来源墓碑带 operation_id。恢复时先核对这份授权仍然有效，
@@ -965,8 +975,12 @@ func (s *Store) Rename(from, to string) error {
 		if err != nil {
 			return err
 		}
-		op = renameOp{Version: 2, OperationID: id, From: from, To: to, Stage: "started",
-			FromGen: gen, FromRev: rev, ToGen: toGen, ToRev: toRev, Files: map[string]renameFile{}}
+		assets, err := s.planRenameAssets(from, to)
+		if err != nil {
+			return err
+		}
+		op = renameOp{Version: 3, OperationID: id, From: from, To: to, Stage: "started",
+			FromGen: gen, FromRev: rev, ToGen: toGen, ToRev: toRev, Files: map[string]renameFile{}, Assets: assets}
 		if err := writeOp(); err != nil {
 			return err
 		}
@@ -1008,6 +1022,9 @@ func (s *Store) Rename(from, to string) error {
 				return fmt.Errorf("复制改名源文件失败（%s）：%w", suffix, err)
 			}
 			op.Files[suffix] = meta
+		}
+		if err := s.copyRenameAssets(op, staging); err != nil {
+			return err
 		}
 		op.Stage = "copied"
 		if err := writeOp(); err != nil {
@@ -1101,6 +1118,9 @@ func (s *Store) Rename(from, to string) error {
 	}
 	if stage != "committed" {
 		return fmt.Errorf("改名操作停在未知状态 %q（保留现场）", stage)
+	}
+	if err := s.finalizeRenameAssets(op); err != nil {
+		return err
 	}
 	// committed：只做清理。源如果已经开了新一代，这些路径属于新代，绝不能删。
 	gen, gerr := s.readGen(from)

@@ -111,15 +111,27 @@ func MatchPreset(text string) (Preset, bool) {
 
 // Write 把人格正文写进人格目录里的文件（先写临时文件再改名）。
 func (l *Loader) Write(name, text string) error {
-	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
-		return errors.New("人格文件名不合法：" + name)
-	}
-	if err := os.MkdirAll(l.dir, 0o755); err != nil {
+	path, err := l.ResolveName(name, true)
+	if err != nil {
 		return err
 	}
-	path := filepath.Join(l.dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write([]byte(text))
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -127,10 +139,17 @@ func (l *Loader) Write(name, text string) error {
 
 // Remove 删掉人格目录里的文件（本来就没有不算错）。
 func (l *Loader) Remove(name string) error {
-	if name == "" || name == "default.md" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+	if name == "default.md" {
 		return errors.New("不能删除这个人格文件：" + name)
 	}
-	err := os.Remove(filepath.Join(l.dir, name))
+	path, err := l.ResolveName(name, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = os.Remove(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

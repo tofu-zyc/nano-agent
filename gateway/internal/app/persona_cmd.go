@@ -47,6 +47,10 @@ func (a *App) cmdPersona(c in, arg string) {
 		return
 	}
 	name := persona.FileFor(c.s.sid)
+	if _, _, err := a.store.AuxiliaryPath("persona", a.persona.Dir(), ".md", c.s.sid, true); err != nil {
+		a.answer(c, "没能定位会话人格："+err.Error())
+		return
+	}
 	if arg == "default" || arg == "默认" {
 		if err := a.persona.Remove(name); err != nil {
 			a.answer(c, "没改成："+err.Error())

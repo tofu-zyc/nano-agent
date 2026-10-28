@@ -25,7 +25,12 @@
   const current = $derived(items.find((i) => i.name === name));
   const same = (a: string, b: string) => a.trim() === b.trim();
   const matched = $derived(presets.find((p) => same(p.text, text)));
-  const sidOf = (n: string) => (n === 'default.md' ? '' : decodeURIComponent(n.replace(/\.md$/, '')));
+  const sidOf = (n: string) => {
+    if (n === 'default.md') return '';
+    return items.find(i => i.name === n)?.sid
+      ?? store.ov?.sessions?.find(s => s.persona_file === n)?.sid
+      ?? n.replace(/\.md$/, '');
+  };
   const titleOf = (n: string) => {
     if (agentId) return agentName + ' 的人格';
     if (n === 'default.md') return '默认人格';

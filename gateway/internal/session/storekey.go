@@ -344,6 +344,9 @@ func (s *Store) locate(sid, suffix string) (string, bool, error) {
 		return np, false, err
 	}
 	if s.hasLegacy(sid) {
+		if err := s.claimLegacySID(s.dirLegacySessions(), sid); err != nil {
+			return np, false, err
+		}
 		// 旧会话：必须完整提升并提交激活标记，未完成之前一律失败，不能拿半成品当数据
 		if err := s.promote(sid); err != nil {
 			return np, false, fmt.Errorf("把旧会话数据升级到新布局失败：%w", err)
@@ -431,17 +434,25 @@ func (s *Store) migrationItems(op promoteOp) []MigrationItem {
 func (s *Store) Migrate() (MigrationRecord, error) {
 	rec := MigrationRecord{Version: 2, At: time.Now().Unix()}
 	sids := map[string]bool{}
+	names, scanErr := LegacyFiles(s.dirLegacySessions())
+	if scanErr != nil {
+		return rec, scanErr
+	}
 	for _, k := range []struct{ dir, suffix string }{
 		{s.dirLegacySessions(), ".jsonl"},
 		{s.dirLegacySessions(), ".settings.json"},
 		{s.dirLegacySessions(), ".branch.json"},
 	} {
-		for _, e := range mustReadDir(k.dir) {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), k.suffix) {
+		for _, name := range names {
+			if !strings.HasSuffix(name, k.suffix) {
 				continue
 			}
-			if sid, ok := resolveLegacyName(strings.TrimSuffix(e.Name(), k.suffix)); ok {
-				sids[sid] = true
+			if sid, ok := resolveLegacyName(strings.TrimSuffix(name, k.suffix)); ok {
+				owner, err := s.preferredLegacySID(s.dirLegacySessions(), sid)
+				if err != nil {
+					return rec, err
+				}
+				sids[owner] = true
 			}
 		}
 	}
@@ -450,10 +461,37 @@ func (s *Store) Migrate() (MigrationRecord, error) {
 			continue
 		}
 		if sid, ok := resolveLegacyArchiveName(e.Name()); ok {
-			sids[sid] = true
+			owner, err := s.preferredLegacySID(s.dirLegacySessions(), sid)
+			if err != nil {
+				return rec, err
+			}
+			sids[owner] = true
 		}
 	}
 	var firstErr error
+	for _, name := range names {
+		if !(strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".new") || strings.HasSuffix(name, ".bak")) {
+			continue
+		}
+		src := filepath.Join(s.dirLegacySessions(), name)
+		n, sum, err := hashFile(src)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		id := sha256.Sum256([]byte(src))
+		dst, err := s.retainLegacyBackup("candidates", hex.EncodeToString(id[:16]), "content.bak", src, renameFile{Len: n, Sum: sum})
+		stage := "preserved"
+		if err != nil {
+			stage = "conflict"
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		rec.Items = append(rec.Items, MigrationItem{Kind: "candidate", Name: name, Source: src, Target: dst, Stage: stage, Bytes: n, Sum: sum})
+	}
 	for sid := range sids {
 		// active 是备份、deleted 是墓碑：都不是“待迁移”
 		if _, err := os.Stat(s.activeMarker(sid)); err == nil {
@@ -493,11 +531,11 @@ func (s *Store) HasLegacyKeys() bool {
 		}
 		return true
 	}
-	for _, e := range mustReadDir(s.dirLegacySessions()) {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
+	names, err := LegacyFiles(s.dirLegacySessions())
+	if err != nil {
+		return true
+	}
+	for _, name := range names {
 		for _, suffix := range []string{".jsonl", ".settings.json", ".branch.json"} {
 			if strings.HasSuffix(name, suffix) {
 				if sid, ok := resolveLegacyName(strings.TrimSuffix(name, suffix)); ok && live(sid) {

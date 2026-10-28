@@ -43,6 +43,12 @@
     <Rail />
     <div class="main">
       <TopBar />
+      {#if store.ov.storage_issues?.length}
+        <details class="storage-issues">
+          <summary>有 {store.ov.storage_issues.length} 项数据恢复需要处理，原文件已保留</summary>
+          {#each store.ov.storage_issues as issue}<p><b>{issue.scope}</b>：{issue.error}</p>{/each}
+        </details>
+      {/if}
       <div class="stage">
         {#if store.route.view === 'sessions'}
           <Sessions />
@@ -73,6 +79,8 @@
 {/if}
 
 <style>
+  .storage-issues { padding: 8px 16px; background: color-mix(in srgb, var(--accent) 12%, var(--bg)); max-height: 180px; overflow: auto; }
+  .storage-issues p { margin: 8px 0; overflow-wrap: anywhere; }
   .shell {
     display: flex;
     height: 100%;

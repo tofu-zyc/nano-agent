@@ -95,6 +95,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Windows NTFS 数据流、发布授权与辅助文件恢复
+        run: go -C gateway test ./internal/session -run 'TestNTFS|TestAuxiliary|TestRenameAuxiliary|TestW1S23' -count=1
       - name: Windows 执行器
         run: python kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg/windows-x86_64.exe
       - name: Windows 安装（含任务计划程序）

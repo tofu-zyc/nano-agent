@@ -56,7 +56,7 @@ func TestWriteRemove(t *testing.T) {
 	if err := l.Write(name, p.Text); err != nil {
 		t.Fatal(err)
 	}
-	if text, path := l.For("tg:-100123"); filepath.Base(path) != name || !strings.Contains(text, "大肥鱼") {
+	if text, path := l.For("tg:-100123"); path != filepath.Join(dir, name) || !strings.Contains(text, "大肥鱼") {
 		t.Fatalf("For: %q %q", path, text)
 	}
 	if err := l.Remove(name); err != nil {

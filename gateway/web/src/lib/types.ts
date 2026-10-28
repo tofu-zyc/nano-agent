@@ -186,6 +186,7 @@ export type Overview = {
   channels: ChannelInfo[];
   sessions: SessionInfo[] | null;
   approvals: Approval[];
+  storage_issues?: { scope: string; error: string }[];
   totals: Totals;
   machines: MachineInfo[];
   workspaces: WorkspaceInfo[];

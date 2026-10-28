@@ -189,6 +189,9 @@ func checkedFileVersion(path string, check func(io.Reader) error) (renameFile, e
 }
 
 func (s *Store) planPromotion(sid string) ([]promoteItem, error) {
+	if err := s.claimLegacySID(s.dirLegacySessions(), sid); err != nil {
+		return nil, err
+	}
 	var items []promoteItem
 	ln := LegacyKey(sid)
 	for _, def := range []struct {
@@ -467,6 +470,9 @@ func (s *Store) promoteSession(sid string) (promoteOp, error) {
 		if !ok {
 			cerr := s.markPromoteConflict(&op, i, "源文件在提升期间被改写")
 			return op, cerr
+		}
+		if _, err := s.retainLegacyBackup("sessions", op.OperationID, item.Kind+"-"+Key(item.Name)+".bak", src, planned); err != nil {
+			return op, err
 		}
 		if _, err := os.Stat(dst); err == nil {
 			ok, err := versionMatches(dst, planned)

@@ -394,6 +394,29 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		desktopGates:   map[string]chan struct{}{},
 		desktopUsed:    map[string]map[string]bool{},
 	}
+	for _, recovery := range []struct {
+		name string
+		run  func() error
+	}{
+		{"renames", store.ResumeRenames}, {"promotions", store.ResumePromotions},
+		{"migration", func() error { _, err := store.Migrate(); return err }},
+	} {
+		if err := recovery.run(); err != nil {
+			store.RecordStorageIssue(recovery.name, err)
+			a.log.Error("会话存储恢复未完成，保留现场", "stage", recovery.name, "err", err)
+		}
+	}
+	if a.persona != nil {
+		a.persona.BindSessions(store)
+		if err := store.MigrateAuxiliary("persona", a.persona.Dir(), ".md"); err != nil {
+			store.RecordStorageIssue("persona", err)
+			a.log.Error("会话人格迁移未完成，保留现场", "err", err)
+		}
+	}
+	if err := store.MigrateAuxiliary("interjections", a.journalDir(), ".jsonl"); err != nil {
+		store.RecordStorageIssue("interjections", err)
+		a.log.Error("插话日志迁移未完成，保留现场", "err", err)
+	}
 	a.migrate()
 	a.loadEndpoints()
 	a.recoverForksLocked()
@@ -879,6 +902,12 @@ func (a *App) startRun(s *sess) {
 		return
 	}
 	head := s.queue[0]
+	if err := a.store.Check(s.sid); err != nil {
+		a.publish(events.Event{T: "say", SID: s.sid, Text: err.Error()})
+		a.deliver(head.ep, err.Error(), "")
+		s.queue = nil
+		return
+	}
 	// 排队期间（例如压缩时）收到的内心留言也必须开启独立片段，
 	// 不能从 startRun 的普通聊天入口接回旧上下文。
 	if isLifeSID(s.sid) && !head.inner && a.agentOf(s.sid).Life() {

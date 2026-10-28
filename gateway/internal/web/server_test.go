@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,17 @@ func TestPersonas(t *testing.T) {
 	}
 	if code, _ := c.do("DELETE", "/api/personas/default.md", nil, true); code != 400 {
 		t.Fatalf("默认人格不能删：%d", code)
+	}
+	canonical := filepath.ToSlash(persona.FileFor("tg:-100"))
+	canonicalURL := "/api/personas/" + url.PathEscape(canonical)
+	if code, out := c.do("GET", canonicalURL, nil, false); code != 200 || out["text"] != "群里的人格" {
+		t.Fatalf("canonical read: %d %v", code, out)
+	}
+	if code, _ := c.do("PUT", canonicalURL, map[string]string{"text": "canonical update"}, true); code != 200 {
+		t.Fatalf("canonical write: %d", code)
+	}
+	if code, out := c.do("GET", "/api/personas/tg%3A-100.md", nil, false); code != 200 || out["text"] != "canonical update" {
+		t.Fatalf("legacy alias: %d %v", code, out)
 	}
 	code, out = c.do("GET", "/api/persona-presets", nil, false)
 	presets, _ := out["items"].([]any)

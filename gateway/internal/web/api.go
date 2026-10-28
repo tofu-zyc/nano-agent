@@ -3,15 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -450,50 +444,10 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 
 // ---- 人格 ----
 
-var personaName = regexp.MustCompile(`^[A-Za-z0-9._:%@-]+\.md$`)
-
-func (s *Server) personaPath(name string) (string, error) {
-	if !personaName.MatchString(name) || strings.Contains(name, "..") {
-		return "", errors.New("文件名不合法")
-	}
-	return filepath.Join(s.persona.Dir(), name), nil
-}
+func (s *Server) personaPath(name string) (string, error) { return s.persona.ResolveName(name, false) }
 
 func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
-	type item struct {
-		Name     string   `json:"name"`
-		SID      string   `json:"sid,omitempty"` // 会话专属人格对应的会话
-		Size     int64    `json:"size"`
-		Mod      int64    `json:"mod"`
-		Sessions []string `json:"sessions"` // 正在用它的会话
-	}
-	entries, _ := os.ReadDir(s.persona.Dir())
-	items := []item{}
-	idx := map[string]int{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		it := item{Name: e.Name(), Size: info.Size(), Mod: info.ModTime().UnixMilli(), Sessions: []string{}}
-		if e.Name() != "default.md" {
-			if sid, err := url.PathUnescape(strings.TrimSuffix(e.Name(), ".md")); err == nil {
-				it.SID = sid
-			}
-		}
-		idx[it.Name] = len(items)
-		items = append(items, it)
-	}
-	for _, si := range s.app.Snapshot().Sessions {
-		if i, ok := idx[si.Persona]; ok {
-			items[i].Sessions = append(items[i].Sessions, si.SID)
-		}
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].Name == "default.md" && items[j].Name != "default.md" })
-	writeJSON(w, map[string]any{"dir": s.persona.Dir(), "items": items})
+	writeJSON(w, map[string]any{"dir": s.persona.Dir(), "items": s.app.PersonaFiles()})
 }
 
 // listPersonaPresets：程序自带的人格预设，网页上“套用预设”用。
@@ -502,59 +456,31 @@ func (s *Server) listPersonaPresets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPersona(w http.ResponseWriter, r *http.Request) {
-	path, err := s.personaPath(r.PathValue("name"))
+	text, err := s.app.PersonaFileText(r.PathValue("name"))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusNotFound, "人格文件不可读取："+err.Error())
 		return
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "没有这个人格文件")
-		return
-	}
-	writeJSON(w, map[string]string{"name": r.PathValue("name"), "text": string(b)})
+	writeJSON(w, map[string]string{"name": r.PathValue("name"), "text": text})
 }
-
 func (s *Server) putPersona(w http.ResponseWriter, r *http.Request) {
-	path, err := s.personaPath(r.PathValue("name"))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	var req struct {
 		Text string `json:"text"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	if err := s.app.WritePersonaFile(r.PathValue("name"), req.Text); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(req.Text), 0o644); err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.app.Bus().Publish(events.Event{T: "persona", Name: r.PathValue("name")})
 	writeJSON(w, map[string]bool{"ok": true})
 }
-
 func (s *Server) deletePersona(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	path, err := s.personaPath(name)
-	if err != nil || name == "default.md" {
-		writeErr(w, http.StatusBadRequest, "默认人格不能删除")
+	if err := s.app.RemovePersonaFile(r.PathValue("name")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := os.Remove(path); err != nil {
-		writeErr(w, http.StatusNotFound, "没有这个人格文件")
-		return
-	}
-	s.app.Bus().Publish(events.Event{T: "persona", Name: name})
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

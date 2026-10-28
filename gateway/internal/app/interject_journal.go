@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
+	"nano-agent/gateway/internal/session"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,8 +76,8 @@ func definitiveOutcome(outcome string) bool {
 type journalRec struct {
 	V          int                `json:"v"`
 	Kind       string             `json:"kind"`
-	Seq        int64              `json:"seq,omitempty"`   // 接收序号（head 里是高水位）
-	ID         string             `json:"id,omitempty"`    // 稳定 interjection_id
+	Seq        int64              `json:"seq,omitempty"`    // 接收序号（head 里是高水位）
+	ID         string             `json:"id,omitempty"`     // 稳定 interjection_id
 	MsgID      string             `json:"msg_id,omitempty"` // 平台原始消息 ID（和内部 ID 分开）
 	Dedup      string             `json:"dedup,omitempty"`
 	Text       string             `json:"text,omitempty"`
@@ -117,7 +117,7 @@ func (a *App) journalDir() string {
 }
 
 func (a *App) journalPath(sid string) string {
-	return filepath.Join(a.journalDir(), url.PathEscape(sid)+".jsonl")
+	return session.AuxiliaryFile(a.journalDir(), sid, ".jsonl")
 }
 
 // openJournal 打开（必要时创建）会话日志。调用方持有锁。
@@ -126,13 +126,19 @@ func (a *App) journalPath(sid string) string {
 // 把整条新记录拼坏）；中间损坏则把日志标成 broken，后续追加一律失败，
 // 由调用方明确告诉发送者"没有受理"，而不是假装受理成功。
 func (a *App) openJournal(sid string) (*interjectionJournal, error) {
+	if err := a.ctx.Err(); err != nil {
+		return nil, err
+	}
+	p, _, pathErr := a.store.AuxiliaryPath("interjections", a.journalDir(), ".jsonl", sid, true)
+	if pathErr != nil {
+		return nil, pathErr
+	}
 	if j := a.journals[sid]; j != nil {
 		return j, nil
 	}
 	if err := os.MkdirAll(a.journalDir(), 0o700); err != nil {
 		return nil, err
 	}
-	p := a.journalPath(sid)
 	j := &interjectionJournal{path: p, dedup: map[string]string{}}
 	recs, good, err := readJournal(p)
 	if err != nil {

@@ -161,11 +161,28 @@ func (s *Store) List() []string {
 		{s.dirV1Sessions(), s.resolveNewKey},
 		{s.dirLegacySessions(), resolveLegacyName},
 	} {
-		for _, e := range mustReadDir(side.dir) {
-			name := e.Name()
+		names := []string{}
+		if side.dir == s.dirLegacySessions() {
+			names, _ = LegacyFiles(side.dir)
+		} else {
+			for _, e := range mustReadDir(side.dir) {
+				if !e.IsDir() {
+					names = append(names, e.Name())
+				}
+			}
+		}
+		for _, name := range names {
 			for _, suffix := range []string{".settings.json", ".branch.json", ".jsonl"} {
 				if strings.HasSuffix(name, suffix) {
 					if sid, ok := side.resolve(strings.TrimSuffix(name, suffix)); ok {
+						if side.dir == s.dirLegacySessions() {
+							owner, err := s.preferredLegacySID(side.dir, sid)
+							if err != nil {
+								s.RecordStorageIssue(sid, err)
+								continue
+							}
+							sid = owner
+						}
 						add(sid)
 					}
 					break
@@ -187,6 +204,30 @@ func (s *Store) List() []string {
 		}
 		if sid, ok := s.resolveNewKey(e.Name()); ok {
 			add(sid)
+		}
+	}
+	for _, kind := range []string{"persona", "interjections"} {
+		for _, e := range mustReadDir(filepath.Join(s.dirV1(), "assets", kind)) {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			sid, ok := s.resolveNewKey(strings.TrimSuffix(e.Name(), ".json"))
+			if !ok || s.isDead(sid) {
+				continue
+			}
+			rec, has, err := s.readAsset(kind, sid)
+			if err != nil {
+				s.RecordStorageIssue(sid, err)
+				continue
+			}
+			if !has {
+				continue
+			}
+			if _, exists, err := s.AuxiliaryPath(kind, s.assetRoot(rec.Root), rec.Extension, sid, false); err != nil {
+				s.RecordStorageIssue(sid, err)
+			} else if exists {
+				add(sid)
+			}
 		}
 	}
 	return out

@@ -91,13 +91,14 @@ type ApprovalInfo struct {
 }
 
 type Snapshot struct {
-	Started    int64           `json:"started"`
-	Kernels    []KernelInfo    `json:"kernels"`
-	Machines   []MachineInfo   `json:"machines"`
-	Workspaces []WorkspaceInfo `json:"workspaces"`
-	Totals     Totals          `json:"totals"`
-	Sessions   []SessionInfo   `json:"sessions"`
-	Approvals  []ApprovalInfo  `json:"approvals"`
+	StorageIssues []session.StorageIssue `json:"storage_issues"`
+	Started       int64                  `json:"started"`
+	Kernels       []KernelInfo           `json:"kernels"`
+	Machines      []MachineInfo          `json:"machines"`
+	Workspaces    []WorkspaceInfo        `json:"workspaces"`
+	Totals        Totals                 `json:"totals"`
+	Sessions      []SessionInfo          `json:"sessions"`
+	Approvals     []ApprovalInfo         `json:"approvals"`
 }
 
 // Snapshot 返回网关当前的全貌：内核、所有会话（包括只在磁盘上的）、待审批、累计用量。
@@ -122,6 +123,7 @@ func (a *App) Snapshot() Snapshot {
 	}
 	sort.Slice(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].LastAt > snap.Sessions[j].LastAt })
 	snap.Approvals = a.approvalList()
+	snap.StorageIssues = a.store.StorageIssues()
 	return snap
 }
 

@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,29 @@ import (
 // copyBufferSize 是流式复制 / 校验的固定缓冲区。复制和恢复都不能按文件大小分配内存：
 // 历史文件可能很大，整份 ReadFile 在内存紧张时会让恢复自己失败。
 const copyBufferSize = 64 << 10
+
+func (s *Store) retainLegacyBackup(kind, operation, name, source string, version renameFile) (string, error) {
+	path := filepath.Join(s.dirV1(), "legacy-backups", kind, operation, name)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		copied, err := copyFileVersion(source, path)
+		if err != nil {
+			return path, err
+		}
+		if !sameVersion(copied, version) {
+			return path, errors.New("保留备份期间来源变化")
+		}
+	} else if err != nil {
+		return path, err
+	}
+	if ok, err := versionMatches(path, version); err != nil || !ok {
+		return path, errors.New("保留备份校验失败，保留双方")
+	}
+	metadata, _ := json.Marshal(map[string]any{"version": 1, "source": source, "bytes": version.Len, "sha256": version.Sum, "backup": path})
+	if err := writeFileAtomic(path+".source.json", metadata); err != nil {
+		return path, err
+	}
+	return path, nil
+}
 
 func hashReader(r io.Reader) (int64, string, error) {
 	h := sha256.New()
