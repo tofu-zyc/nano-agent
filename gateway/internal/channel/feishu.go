@@ -133,6 +133,9 @@ func (f *Feishu) Run(ctx context.Context, h Handler) error {
 				select {
 				case f.queue <- m:
 				default:
+					if m.Action == ActionJob {
+						toast = "操作队列已满，请稍后使用 /jobs 查看"
+					}
 				}
 			}
 			return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: toast}}, nil
@@ -456,6 +459,12 @@ func cardAction(ev *callback.CardActionTriggerEvent) (Message, string) {
 	val := func(k string) string { v, _ := e.Action.Value[k].(string); return v }
 	m := Message{ChatID: e.Context.OpenChatID, SenderID: e.Operator.OpenID, Mentioned: true}
 	switch val(fsAction) {
+	case ActionJob:
+		if !validJobButton(val("token")) {
+			return Message{}, "任务操作已过期，请用 /jobs 查看"
+		}
+		m.Action, m.Text, m.MsgID = ActionJob, val("token"), e.Context.OpenMessageID
+		return m, "操作已收到，正在核验任务与权限"
 	case "stop":
 		m.Action = ActionStop
 		return m, "正在停止…"

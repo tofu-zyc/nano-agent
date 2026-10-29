@@ -9,6 +9,7 @@ import (
 // Runtime is frozen at Gateway startup. Changing these settings requires a
 // restart, keeping the C policy and durable machine arbiter on one set of limits.
 type Runtime struct {
+	LongCallHintSeconds         int `toml:"long_call_hint_seconds" json:"long_call_hint_seconds"`
 	MaxCallsPerTurn             int `toml:"max_calls_per_turn" json:"max_calls_per_turn"`
 	MaxActiveRunsPerNode        int `toml:"max_active_runs_per_node" json:"max_active_runs_per_node"`
 	MaxParallelToolsPerRun      int `toml:"max_parallel_tools_per_run" json:"max_parallel_tools_per_run"`
@@ -20,6 +21,9 @@ type Runtime struct {
 }
 
 func (r Runtime) Defaults() Runtime {
+	if r.LongCallHintSeconds == 0 {
+		r.LongCallHintSeconds = 10
+	}
 	if r.MaxCallsPerTurn == 0 {
 		r.MaxCallsPerTurn = 32
 	}
@@ -48,6 +52,9 @@ func (r Runtime) Defaults() Runtime {
 }
 func (r Runtime) Validate() error {
 	r = r.Defaults()
+	if r.LongCallHintSeconds < 1 || r.LongCallHintSeconds > 3600 {
+		return fmt.Errorf("runtime.long_call_hint_seconds 需在 1–3600 之间")
+	}
 	if r.MaxCallsPerTurn < 1 || r.MaxCallsPerTurn > 32 {
 		return fmt.Errorf("runtime.max_calls_per_turn 需在 1–32 之间")
 	}

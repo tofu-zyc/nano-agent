@@ -145,8 +145,9 @@
       <dt>任务</dt><dd>{selected.job_id}</dd>
       <dt>来源</dt><dd>{selected.agent} · {selected.origin_sid}</dd>
       <dt>调用</dt><dd>{selected.origin_run_id} / {selected.origin_turn_id} / {selected.origin_call_id}</dd>
-      <dt>执行</dt><dd>{selected.node} · {selected.background ? '后台' : '前台'} · {selected.execution}</dd>
-      <dt>实际隔离</dt><dd>{selected.sandbox_effective || '尚无执行回执'}</dd>
+      <dt>执行</dt><dd>{selected.node} · {selected.background ? '后台' : '前台'}</dd>
+      <dt>原设定</dt><dd>{({ foreground: '前台等待', background: '直接后台', auto: '超时转后台' } as Record<string, string>)[selected.execution] ?? selected.execution}</dd>
+      <dt>实际隔离</dt><dd>{({ off: '已关闭隔离', none: '未施加隔离', full: '完整隔离', partial: '部分隔离' } as Record<string, string>)[selected.sandbox_effective ?? ''] ?? selected.sandbox_effective ?? '尚无执行回执'}</dd>
     </dl>
     {#if selected.silent}<p class="muted">安静任务：状态更新不会切换聊天窗口或向主聊天推送。</p>{/if}
     {#if selected.status === 'unknown'}<p class="error">执行结果未知，相关执行名额和资源占用仍保留。</p>{/if}

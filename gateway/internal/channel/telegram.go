@@ -408,6 +408,8 @@ func (t *Telegram) download(ctx context.Context, fileID, name string) (media.Att
 func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) {
 	action, text, toast := "", "", ""
 	switch {
+	case validJobButton(q.Data):
+		action, text, toast = ActionJob, q.Data, "操作已收到，正在核验任务与权限"
 	case q.Data == tgStopData:
 		action, toast = ActionStop, "正在停止…"
 	case strings.HasPrefix(q.Data, tgApprovePref):
@@ -417,12 +419,19 @@ func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) 
 			action, toast = ActionApprove, "已批准"
 		}
 	}
-	go func() {
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ack := func() {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		t.call(cctx, "answerCallbackQuery", map[string]any{"callback_query_id": q.ID, "text": toast}, nil)
-	}()
-	if action == "" || q.Message == nil || q.From.IsBot || q.Message.Chat.Type != "private" {
+		if err := t.call(cctx, "answerCallbackQuery", map[string]any{"callback_query_id": q.ID, "text": toast}, nil); err != nil {
+			t.log.Warn("按钮回执失败", "err", err)
+		}
+	}
+	if action == ActionJob {
+		ack()
+	} else {
+		go ack()
+	}
+	if action == "" || q.Message == nil || q.From.IsBot || (q.Message.Chat.Type != "private" && action != ActionJob) {
 		return
 	}
 	name := strings.TrimSpace(q.From.FirstName + " " + q.From.LastName)
@@ -434,6 +443,8 @@ func (t *Telegram) onButton(ctx context.Context, q *tgCallbackQuery, h Handler) 
 		Text:       text,
 		Mentioned:  true,
 		Action:     action,
+		MsgID:      strconv.FormatInt(q.Message.MessageID, 10),
+		Group:      q.Message.Chat.Type != "private",
 	})
 }
 

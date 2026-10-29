@@ -40,6 +40,7 @@ var Nodes = []Node{
 
 // Fields 是全部可以在网页里查看、修改的配置项，按节点排列（同一节点里按小标题第一次出现的顺序分节）。
 var Fields = []Field{
+	{Key: "runtime.long_call_hint_seconds", Group: "gateway", Section: "并行与队列", Label: "前台命令提示秒数", Type: "int", Restart: true, Advanced: true, Help: "命令实际开始执行后达到此秒数仍未结束，只提示一次；排队时间不计入，不受过程显示档位影响。默认 10，范围 1–3600；修改后重启生效。"},
 	{Key: "runtime.max_calls_per_turn", Group: "gateway", Section: "并行与队列", Label: "每次生成的调用上限", Type: "int", Restart: true, Advanced: true, Help: "一次模型返回最多接受多少工具调用；超过上限整批拒绝，不执行其中一部分。 默认 32；修改后重启生效。"},
 	{Key: "runtime.max_active_runs_per_node", Group: "gateway", Section: "并行与队列", Label: "每个内核的活动任务上限", Type: "int", Restart: true, Advanced: true, Help: "达到上限后保留在网关有界队列，按会话轮转和等待时间调度；节点自己的硬上限仍优先。 默认 16；修改后重启生效。"},
 	{Key: "runtime.max_parallel_tools_per_run", Group: "gateway", Section: "并行与队列", Label: "每个任务的并行工具数", Type: "int", Restart: true, Advanced: true, Help: "只计实际运行；排队、审批不占槽，转后台后继续占机器槽。 默认 4；修改后重启生效。"},

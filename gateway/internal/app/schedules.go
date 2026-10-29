@@ -287,6 +287,7 @@ func (a *App) scheduleLoop() {
 func (a *App) ScheduleTick() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.jobHintTick()
 	if a.schedulesErr != nil || a.schedules == nil || a.ctx.Err() != nil {
 		return
 	}

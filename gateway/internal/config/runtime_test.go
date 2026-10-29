@@ -4,10 +4,10 @@ import "testing"
 
 func TestRuntimeSettingsAreBoundedAndRestarted(t *testing.T) {
 	r := (Runtime{}).Defaults()
-	if r.MaxCallsPerTurn != 32 || r.MaxActiveRunsPerNode != 16 || r.Dispatch().Slots != 8 || r.Dispatch().HookReserve != 1 {
+	if r.LongCallHintSeconds != 10 || r.MaxCallsPerTurn != 32 || r.MaxActiveRunsPerNode != 16 || r.Dispatch().Slots != 8 || r.Dispatch().HookReserve != 1 {
 		t.Fatal(r)
 	}
-	for _, bad := range []Runtime{{MaxCallsPerTurn: 33}, {MaxActiveRunsPerNode: 257}, {MaxParallelToolsPerRun: -1}, {MaxActiveExecsPerMachine: 1}, {MaxActiveExecsPerMachine: 20, MaxLiveJobsPerMachine: 16}} {
+	for _, bad := range []Runtime{{LongCallHintSeconds: -1}, {LongCallHintSeconds: 3601}, {MaxCallsPerTurn: 33}, {MaxActiveRunsPerNode: 257}, {MaxParallelToolsPerRun: -1}, {MaxActiveExecsPerMachine: 1}, {MaxActiveExecsPerMachine: 20, MaxLiveJobsPerMachine: 16}} {
 		if err := bad.Validate(); err == nil {
 			t.Fatalf("invalid settings: %+v", bad)
 		}

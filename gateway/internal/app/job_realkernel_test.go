@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/proto"
@@ -277,6 +278,7 @@ func TestRealCNativeSilentBranchJobRetainsIdentityAfterRun(t *testing.T) {
 }
 
 type jobToolModel struct {
+	execution          string
 	command, workspace string
 	mu                 sync.Mutex
 	jobID              string
@@ -321,7 +323,11 @@ func (m *jobToolModel) Chat(_ context.Context, req llm.Request, _ func(llm.Delta
 				Function: llm.FunctionCall{Name: "Job", Arguments: string(raw)}}}}, nil
 		}
 	}
-	raw, _ := json.Marshal(map[string]string{"command": m.command, "workspace": m.workspace, "execution": "background"})
+	execution := m.execution
+	if execution == "" {
+		execution = "background"
+	}
+	raw, _ := json.Marshal(map[string]string{"command": m.command, "workspace": m.workspace, "execution": execution})
 	return &llm.Result{Reason: llm.ReasonToolUse, Calls: []llm.ToolCall{{ID: "job-shell", Type: "function",
 		Function: llm.FunctionCall{Name: "Shell", Arguments: string(raw)}}}}, nil
 }
@@ -362,5 +368,76 @@ func TestRealCJobToolAndGatewayCancel(t *testing.T) {
 	result, err = e.a.JobAction(context.Background(), "fake:u1", e.sid, JobRequest{Action: "wait", JobID: jobID, WaitMS: 5000})
 	if err != nil || result.Job == nil || result.Job.Status != "cancelled" {
 		t.Fatal(result, err)
+	}
+}
+
+func TestRealCForegroundHintButtonDetachesSameExecution(t *testing.T) {
+	e, _ := setupRealKernel(t, func(a *App) kernel.Handler { return &jobContractHandler{App: a, observed: make(chan proto.Msg, 128)} })
+	work := filepath.Join(e.dir, "home", "hint-button")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gate, marker := filepath.Join(work, "release"), filepath.Join(work, "launches")
+	e.a.mu.Lock()
+	nodeName := ""
+	for name := range e.a.nodes {
+		nodeName = name
+		break
+	}
+	ws := Workspace{ID: "hint-work", Host: e.a.machineOf(nodeName), Path: work, SandboxMode: "off"}
+	e.a.wss = []Workspace{ws}
+	st := e.a.store.Settings(e.sid)
+	st.Mode = "full"
+	st.WorkspacesSet = true
+	st.Workspaces = []string{ws.ID}
+	err := e.a.store.SaveSettings(e.sid, st)
+	e.a.llm = &jobToolModel{execution: "foreground", workspace: ws.Label(),
+		command: "printf launch >> '" + marker + "'; while [ ! -f '" + gate + "' ]; do sleep 0.02; done; printf completed"}
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	presenter := &jobPresenterCh{fakeCh: e.ch, cards: make(chan channel.JobCard, 8), updates: make(chan channel.JobCard, 8)}
+	e.a.AddChannel(presenter)
+	e.say("Start a foreground command and keep it running")
+	var info JobInfo
+	waitJobHint(t, e, "native", func() bool {
+		for _, watch := range e.a.jobHints {
+			info = watch.info
+			return true
+		}
+		return false
+	})
+	before, ok := e.a.jobEvents.Job(info.Node, info.JobID)
+	if !ok || before.Receipt.PID <= 0 {
+		t.Fatal("no real running PID", before)
+	}
+	advanceHint(e, 10*time.Second)
+	var card channel.JobCard
+	select {
+	case card = <-presenter.cards:
+	case <-time.After(2 * time.Second):
+		t.Fatal("native foreground had no hint")
+	}
+	waitJobHint(t, e, info.JobID, func() bool {
+		p := e.a.jobCards[jobCardKey(info, endpoint{"fake", "c1"})]
+		return p != nil && p.ref != ""
+	})
+	e.a.OnMessage(presenter, channel.Message{ChatID: "c1", SenderID: "u1", Action: channel.ActionJob, Text: card.Buttons[0].Token, MsgID: "job-card"})
+	e.ch.wait(t, "Job tool path completed")
+	after, ok := e.a.jobEvents.Job(info.Node, info.JobID)
+	if !ok || !after.Receipt.Background || after.Receipt.PID != before.Receipt.PID {
+		t.Fatal("button restarted or lost execution", before, after)
+	}
+	if err := os.WriteFile(gate, []byte("go"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.a.JobAction(context.Background(), "fake:u1", e.sid, JobRequest{Action: "wait", Node: info.Node, JobID: info.JobID, WaitMS: 5000})
+	if err != nil || result.Job == nil || result.Job.Status != "succeeded" {
+		t.Fatal(result, err)
+	}
+	launched, err := os.ReadFile(marker)
+	if err != nil || string(launched) != "launch" {
+		t.Fatal("command executed more than once", string(launched), err)
 	}
 }

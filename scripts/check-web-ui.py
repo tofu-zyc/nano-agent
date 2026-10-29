@@ -132,6 +132,93 @@ def api(page, method, path, body=None):
         return r["status"], r["body"]
 
 
+
+def check_jobs(page, url):
+    """UI event/HTTP races use deterministic responses; Go tests cover the node wire."""
+    import base64
+    jp = page.context.new_page()
+    errors, actions = [], []
+    jp.on("pageerror", lambda e: errors.append(str(e)))
+    jp.add_init_script("""
+      const Native = window.EventSource;
+      window.EventSource = class extends Native {
+        constructor(...args) { super(...args); window.__jobsEvents = this; }
+      };
+    """)
+    job = {"node": "ui-node", "job_id": "j_ui-1", "revision": 2, "agent": "default",
+           "created_by": "web:local", "origin_sid": "main", "origin_run_id": "r-ui",
+           "origin_turn_id": 1, "origin_call_id": "shell-1", "status": "running",
+           "execution": "foreground", "background": False, "silent": True, "online": True,
+           "created_at": 100, "started_at": 101, "sandbox_effective": "off",
+           "output_cursor": 10, "output_gap": False}
+    bytes_out = "中文🙂".encode()
+
+    def jobs_api(route):
+        req = route.request
+        if req.method == "GET":
+            result = {"jobs": [job]}
+        else:
+            args = req.post_data_json
+            action = args.get("action", "status")
+            actions.append(action)
+            # A stale response deliberately follows the newer SSE terminal.
+            result = {"job": dict(job, revision=1)}
+            if action == "output":
+                cursor = args.get("cursor", 0)
+                end = 2 if cursor == 0 else len(bytes_out)
+                result["output"] = {"chunks": [{"cursor": cursor, "next_cursor": end,
+                    "stream": "stdout", "data": base64.b64encode(bytes_out[cursor:end]).decode()}],
+                    "next_cursor": end, "output_cursor": len(bytes_out), "truncated_before": 0, "gap": False}
+            if action in ("detach", "cancel"):
+                result.update({"accepted": True, "action": action})
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(result))
+
+    jp.route("**/api/jobs**", jobs_api)
+    try:
+        jp.goto(url + "#/sessions/main")
+        jp.wait_for_selector(".conv")
+        jp.wait_for_function("() => !!window.__jobsEvents?.onmessage")
+        jp.click(".top .jobs")
+        jp.wait_for_selector(".insp .job")
+        if not jp.url.endswith("#/sessions/main"):
+            fail("任务面板切换了当前聊天")
+        jp.click(".insp .job")
+        jp.get_by_role("button", name="读取日志", exact=True).click()
+        jp.wait_for_function("() => document.querySelector('.insp .detail')?.textContent.includes('日志游标 2')")
+        jp.get_by_role("button", name="读取日志", exact=True).click()
+        jp.wait_for_function("() => document.querySelector('.insp pre')?.textContent === '中文🙂'")
+        before = jp.locator(".conv").inner_text()
+        toast_count = jp.locator(".toasts .toast").count()
+        jp.get_by_role("button", name="转后台", exact=True).click()
+        jp.wait_for_function("() => document.querySelector('.insp .detail')?.textContent.includes('操作已受理')")
+        terminal = dict(job, revision=4, status="succeeded", background=True)
+        jp.evaluate("j => window.__jobsEvents.onmessage({data: JSON.stringify({t:'job', data:j})})", terminal)
+        jp.wait_for_function("() => document.querySelector('.insp .detail h4')?.textContent.includes('已完成')")
+        jp.get_by_role("button", name="查询状态", exact=True).click()
+        jp.wait_for_function("() => ![...document.querySelectorAll('.insp .detail button')].some(b => b.textContent === '查询状态' && b.disabled)")
+        if "已完成" not in jp.locator(".insp .detail h4").inner_text():
+            fail("迟到的 HTTP 状态覆盖了任务终态")
+        if not jp.get_by_role("button", name="转后台", exact=True).is_disabled():
+            fail("完成任务仍提供转后台操作")
+        if jp.locator(".conv").inner_text() != before or jp.locator(".toasts .toast").count() != toast_count:
+            fail("安静任务的状态事件推送到了聊天或全局通知")
+        if not jp.url.endswith("#/sessions/main"):
+            fail("任务状态更新改变了当前聊天")
+        jp.screenshot(path=os.path.join(SHOTS, "jobs.png"))
+        # Explicit deep links can open the same actual panel.
+        jp.goto(url + "#/jobs/j_ui-1?node=ui-node")
+        jp.wait_for_selector(".insp .detail")
+        if jp.locator(".insp header h3").inner_text() != "执行任务":
+            fail("任务链接没有打开实际任务面板")
+        if actions.count("output") != 2 or "detach" not in actions or "status" not in actions:
+            fail("任务按钮没有请求实际控制接口")
+        if errors:
+            fail("任务面板浏览器错误：" + "; ".join(errors))
+        else:
+            ok("任务面板：真实控件、跨页中文日志、迟到状态、安静零推送、保持聊天与直接链接")
+    finally:
+        jp.close()
+
 def fields(page):
     return {f["key"]: f for f in api(page, "GET", "/api/config")[1]["fields"]}
 
@@ -161,6 +248,10 @@ def run(page, url, nano):
     page.fill("input[type=password]", PASSWORD)
     page.keyboard.press("Enter")
     page.wait_for_selector("g.node.gateway", timeout=15000)
+    if os.environ.get("NANO_UI_JOBS_ONLY") == "1":
+        check_jobs(page, url)
+        return
+    check_jobs(page, url)
     # 节点有 0.45 秒的淡入：等它们真的画出来再截图，免得截到空白
     page.wait_for_function(
         "() => { const n = document.querySelector('g.node.agent'); return n && getComputedStyle(n).opacity === '1'; }",

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/redact"
 )
 
 func jobTool() proto.ToolSpec {
@@ -185,6 +186,9 @@ func (a *App) cmdJobs(c in, command, arg string) {
 			text = renderJobResponse(result)
 		}
 		a.mu.Lock()
+		if redact.Needed(a.cfg.Security.Redact, false, c.ep.ch != "web" && c.ep.ch != "cli") {
+			text = redact.ToolResult(text, a.knownSecrets())
+		}
 		a.answer(c, text)
 		a.mu.Unlock()
 	}()

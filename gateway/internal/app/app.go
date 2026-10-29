@@ -179,6 +179,9 @@ type App struct {
 	clients        map[string]modelClient
 	media          *media.Store               // 用户发来的图片（data/uploads），nil 时不接图片
 	chans          map[string]channel.Channel // 按名字找渠道：渠道重启后换成新的对象，会话照常能用
+	jobHints       map[string]*jobHint
+	jobCards       map[string]*jobPresentation
+	jobButtons     map[string]jobButtonAction
 	outboxes       map[string]chan outItem
 	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
 	wss            []Workspace       // 工作目录列表（workspaces.go）
@@ -381,6 +384,7 @@ func (r *run) addOut(ep endpoint) {
 }
 
 type outItem struct {
+	job     func(context.Context) // bounded task-card I/O on the existing channel sender
 	ch      channel.Channel
 	chatID  string
 	text    string
@@ -437,6 +441,9 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		store.RecordStorageIssue("execution_leases", a.dispatchErr)
 		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
 	}
+	a.jobHints = map[string]*jobHint{}
+	a.jobCards = map[string]*jobPresentation{}
+	a.jobButtons = map[string]jobButtonAction{}
 	a.jobPersist = map[string]*jobPersistence{}
 	a.jobControls = map[string]jobControlWait{}
 	a.jobCompletions = map[string]jobCompletionWait{}
@@ -506,7 +513,13 @@ func (a *App) AddChannel(ch channel.Channel) {
 	q := make(chan outItem, 256)
 	a.outboxes[name] = q
 	go func() {
-		for it := range q {
+		for {
+			var it outItem
+			select {
+			case <-a.ctx.Done():
+				return
+			case it = <-q:
+			}
 			if it.delay > 0 {
 				select {
 				case <-time.After(it.delay):
@@ -515,6 +528,13 @@ func (a *App) AddChannel(ch channel.Channel) {
 				}
 			}
 			ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
+			if it.job != nil {
+				jobCtx, jobCancel := context.WithTimeout(ctx, 15*time.Second)
+				it.job(jobCtx)
+				jobCancel()
+				cancel()
+				continue
+			}
 			if it.att != nil {
 				if err := sendMedia(ctx, it.ch, it.chatID, *it.att, it.data); err != nil {
 					a.log.Warn("发送文件失败", "channel", name, "chat", it.chatID, "file", it.att.Name, "err", err)
@@ -625,6 +645,10 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	}
 	if !a.allowed(ep.key()) {
 		a.log.Info("忽略不在白名单里的聊天", "chat", ep.key(), "from", who)
+		return
+	}
+	if m.Action == channel.ActionJob {
+		a.jobButton(ch, ep, m, who)
 		return
 	}
 	if m.Action == channel.ActionRecall {
@@ -873,17 +897,19 @@ func (a *App) deliver(ep endpoint, text, replyTo string) {
 // deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
 func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
 
-func (a *App) enqueue(ep endpoint, it outItem) {
+func (a *App) enqueue(ep endpoint, it outItem) bool {
 	ch := a.chans[ep.ch]
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
-		return
+		return false
 	}
 	it.ch, it.chatID = ch, ep.chat
 	select {
 	case a.outboxes[ep.ch] <- it:
+		return true
 	default:
 		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
+		return false
 	}
 }
 

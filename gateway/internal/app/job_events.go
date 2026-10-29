@@ -111,6 +111,7 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 	if terminal && current {
 		a.hub.Send(nodeName, proto.Msg{T: proto.TEventsAck, NodeEpoch: epoch, JobID: j.Receipt.JobID, EventSeq: j.Receipt.LastEventSeq})
 	}
+	a.observeJobPresentation(a.jobInfo(eventlog.JobRecord{Job: j}))
 	a.publish(events.Event{T: "job", Name: nodeName, ID: j.Receipt.JobID, Data: a.jobInfo(eventlog.JobRecord{Job: j})})
 	if lease != nil && current {
 		a.leaseMessage(nodeName, lease)

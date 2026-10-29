@@ -20,6 +20,7 @@ token  = "换成一串随机字符，和 kernel.conf 里的 token 一致"
 # 执行并行与队列；修改后重启生效。节点自身的硬上限仍然有效。
 # 审批/排队不占执行槽，后台命令和 Hook 继续占真实执行槽和资源。
 [runtime]
+long_call_hint_seconds = 10 # 实际开始执行后只提示一次，不包含排队时间
 max_calls_per_turn = 32
 max_active_runs_per_node = 16
 max_parallel_tools_per_run = 4
