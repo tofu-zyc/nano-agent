@@ -632,3 +632,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestSilentBranchMessageNeverReachesTheSourceChat`（假内核 + 确定性模型：分支跑一轮，模型第一次就调 `Message {to: chat:main}` → `TExecResult` 明确失败且带「安静分支」→ 假渠道 `sent` 通道里什么都没有 → 来源会话历史里既没有这句话也没有分支结论 → 结论确实留在分支历史里）。
 
 未做：安静分支里 `Schedule`/`FollowUp` 仍然可以给未来排期（它们不直接对外发声，到点后的那一轮自己也会带安静策略）；这一点没有额外的测试。
+
+### P6 人工锁定与阈值迟滞（§7.3 / §12.4）
+
+`MindProfile.pinned` 是人工锁定的数值（`interest`、`novelty` 1–5，`priority` 0–10 的整数）：锁定期间模型自己在 `Idea` 工具里提的同类数值会被替换成锁定值，并在回执里写明「新颖按锁定值 2」，不会悄悄改掉模型的提议；`/autonomy lock <字段>=<值>` / `/autonomy unlock <字段>` 由管理员操作，`/autonomy` 列表和网页 agent 节点都显示当前锁定。阈值加了迟滞：真越过阈值报一次之后卸下，回落 `<阈值 - 3` 才重新装上，在阈值附近来回不会反复刷事件——`Dimension.Armed` 只在「真越过」或「落够了」两处改变，中间区间保持原状。
+
+验证：`TestPinnedNumbersAndThresholdHysteresis`（锁定/解锁、越界与非整数被拒、解锁只生效一次、越过报一次 → 迟滞期间不再报 → 回落重新装上后再报）；`TestPinnedNoveltyOverridesTheIdeaToolProposal`（`/autonomy lock novelty=2` 之后 Idea 工具存的想法的 novelty 是 2、兴趣仍是模型给的 4、回执说明锁定；`unlock` 之后模型的值重新生效）；全量 `go test`、`go vet`、网页 check/build 通过。
+
+未做：`Agenda` 工具里模型提的 `priority` 还没有接入锁定覆盖（只覆盖了 `Idea` 的 interest/novelty）；锁定没有 revision 冲突检测（同一时刻两个人改，后写的赢）。

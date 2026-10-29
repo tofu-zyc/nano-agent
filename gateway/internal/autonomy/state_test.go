@@ -556,3 +556,62 @@ func TestMindProfileWeightsDimensionsAndDrift(t *testing.T) {
 		}
 	}
 }
+
+func TestPinnedNumbersAndThresholdHysteresis(t *testing.T) {
+	s := New()
+	if err := s.SetPin("novelty", 2, 0); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := s.Profile().Pin("novelty"); !ok || v != 2 {
+		t.Fatalf("锁定没生效：%v %v", v, ok)
+	}
+	for _, bad := range []struct {
+		field string
+		value float64
+	}{{"novelty", 0}, {"interest", 6}, {"priority", 11}, {"novelty", 2.5}, {"unknown", 1}} {
+		if err := s.SetPin(bad.field, bad.value, 0); err == nil {
+			t.Fatalf("%s=%v 应该被拒绝", bad.field, bad.value)
+		}
+	}
+	if !s.ClearPin("novelty", 0) || s.ClearPin("novelty", 0) {
+		t.Fatal("解锁应该只生效一次")
+	}
+	// 迟滞：越过阈值报一次，回落到阈值下 hysteresis 之内不重新装，掉够了才再报
+	armed := true
+	d := Dimension{Enabled: true, Value: 54, Baseline: 90, Min: 0, Max: 100, Drift: 10, Threshold: 55, Armed: &armed}
+	if err := s.SetDimension("focus", d, 0); err != nil {
+		t.Fatal(err)
+	}
+	first := false
+	for _, c := range s.DriftDimensions(0) {
+		if c.Name == "focus" && c.Crossed() {
+			first = true
+		}
+	}
+	if !first {
+		t.Fatal("第一次越过阈值没有报")
+	}
+	for _, c := range s.DriftDimensions(0) {
+		if c.Name == "focus" && c.Crossed() {
+			t.Fatalf("迟滞没起作用：%+v", c)
+		}
+	}
+	// 人工把值放回阈值以下足够多，重新装上之后还能再报
+	armed = true
+	d = s.Profile().Dimensions["focus"]
+	d.Value, d.Armed = 50, nil
+	if err := s.SetDimension("focus", d, 0); err != nil {
+		t.Fatal(err)
+	}
+	fired := false
+	for i := 0; i < 3 && !fired; i++ {
+		for _, c := range s.DriftDimensions(0) {
+			if c.Name == "focus" && c.Crossed() {
+				fired = true
+			}
+		}
+	}
+	if !fired {
+		t.Fatal("回落重新装上之后没有再次报阈值")
+	}
+}

@@ -39,6 +39,8 @@ type Dimension struct {
 	Max       float64 `json:"max"`
 	Drift     float64 `json:"drift,omitempty"`     // 每次结算向基线靠多少（0–10）
 	Threshold float64 `json:"threshold,omitempty"` // 越过它发一条 mind.threshold_crossed（0 表示不设）
+	// Armed 是阈值迟滞的另一半：报过一次就不再报，等值回落到阈值以下 hysteresis 才重新装上
+	Armed *bool `json:"armed,omitempty"`
 }
 
 // MindProfile 是保存下来的一份档案；Preset 只说明它是从哪个预设来的，改过就是 custom。
@@ -46,10 +48,14 @@ type MindProfile struct {
 	Preset     string               `json:"preset,omitempty"`
 	Weights    ScoreWeights         `json:"weights"`
 	Dimensions map[string]Dimension `json:"dimensions,omitempty"`
-	Updated    int64                `json:"updated,omitempty"`
+	// Pinned 是人工锁定的数值：模型的提议会被替换成这里的值（设计 §7.3 / §12.4）
+	Pinned  map[string]float64 `json:"pinned,omitempty"`
+	Updated int64              `json:"updated,omitempty"`
 }
 
-func defaultWeights() ScoreWeights { return ScoreWeights{Interest: 1, Novelty: 1, Cost: 0, CostScale: 30} }
+func defaultWeights() ScoreWeights {
+	return ScoreWeights{Interest: 1, Novelty: 1, Cost: 0, CostScale: 30}
+}
 
 // presetProfile 把预设展开成可以查看的具体数值（不做隐藏的档位）。
 func presetProfile(name string) MindProfile {
@@ -208,10 +214,11 @@ func (s *State) DriftDimensions(now int64) []DimensionChange {
 		if next == d.Value {
 			continue
 		}
-		before := d.Value
+		before, armedBefore := d.Value, d.IsArmed()
 		d.Value = next
+		d.afterCrossing(before)
 		p.Dimensions[name] = d
-		changed = append(changed, DimensionChange{Name: name, From: before, To: next, Threshold: d.Threshold})
+		changed = append(changed, DimensionChange{Name: name, From: before, To: next, Threshold: d.Threshold, Armed: armedBefore})
 	}
 	if len(changed) > 0 {
 		p.Updated = now
@@ -227,11 +234,12 @@ type DimensionChange struct {
 	From      float64
 	To        float64
 	Threshold float64
+	Armed     bool
 }
 
 // Crossed 表示这次变化是否越过了阈值（只报向上穿过，避免回落时也刷事件）。
 func (c DimensionChange) Crossed() bool {
-	return c.Threshold > 0 && c.From < c.Threshold && c.To >= c.Threshold
+	return c.Armed && c.Threshold > 0 && c.From < c.Threshold && c.To >= c.Threshold
 }
 
 func containsString(list []string, want string) bool {
@@ -241,4 +249,68 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// PinFields 是允许人工锁定的数值：想法和目标的打分输入。
+var PinFields = []string{"interest", "novelty", "priority"}
+
+// thresholdHysteresis 是阈值迟滞的回落幅度：掉回阈值以下这么多点才重新装上。
+const thresholdHysteresis = 3
+
+// SetPin 锁定一个数值：之后模型自己提的同类数值会被替换成它。
+func (s *State) SetPin(field string, value float64, now int64) error {
+	if !containsString(PinFields, field) {
+		return errors.New("可以锁定的字段：interest、novelty、priority")
+	}
+	low, high := 1.0, 5.0
+	if field == "priority" {
+		low, high = 0, 10
+	}
+	if math.IsNaN(value) || value < low || value > high || value != math.Trunc(value) {
+		return fmt.Errorf("%s 只能是 %g–%g 的整数", field, low, high)
+	}
+	p := s.Profile()
+	if p.Pinned == nil {
+		p.Pinned = map[string]float64{}
+	}
+	p.Pinned[field] = value
+	p.Updated = now
+	s.MindProfile = p
+	s.Touch()
+	return nil
+}
+
+// ClearPin 解除锁定，模型自己提的数值重新生效。
+func (s *State) ClearPin(field string, now int64) bool {
+	p := s.Profile()
+	if _, ok := p.Pinned[field]; !ok {
+		return false
+	}
+	delete(p.Pinned, field)
+	p.Updated = now
+	s.MindProfile = p
+	s.Touch()
+	return true
+}
+
+// Pin 返回某个字段的人工锁定值；没有锁定返回 ok=false。
+func (p MindProfile) Pin(field string) (float64, bool) {
+	v, ok := p.Pinned[field]
+	return v, ok
+}
+
+// Armed 报告这个维度现在能不能报阈值（默认装上）。
+func (d Dimension) IsArmed() bool { return d.Armed == nil || *d.Armed }
+
+// afterCrossing 更新迟滞状态：真越过阈值才卸下；回落到阈值以下 hysteresis 才重新装上，
+// 在阈值附近来回但没真越过的时候保持原来的状态，不会提前把迟滞拆掉。
+func (d *Dimension) afterCrossing(from float64) {
+	switch {
+	case d.Threshold > 0 && from < d.Threshold && d.Value >= d.Threshold:
+		armed := false
+		d.Armed = &armed
+	case d.Threshold > 0 && d.Value <= d.Threshold-thresholdHysteresis:
+		armed := true
+		d.Armed = &armed
+	}
 }

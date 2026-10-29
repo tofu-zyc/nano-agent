@@ -1023,6 +1023,17 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			p := st.Profile()
 			fmt.Fprintf(&b, "心智档案：%s；权重 兴趣 %.1f / 新颖 %.1f / 成本 %.1f（参照 %d 分钟）\n", p.Preset, p.Weights.Interest, p.Weights.Novelty, p.Weights.Cost, p.Weights.CostScale)
 			b.WriteString(profileLine(p) + "\n")
+			if len(p.Pinned) > 0 {
+				var pins []string
+				for _, field := range autonomy.PinFields {
+					if v, ok := p.Pin(field); ok {
+						pins = append(pins, fmt.Sprintf("%s=%g（锁定）", field, v))
+					}
+				}
+				if len(pins) > 0 {
+					b.WriteString("人工锁定：" + strings.Join(pins, " · ") + "\n")
+				}
+			}
 		}
 		fmt.Fprintf(&b, "今天用了 %d token", v.Budget.Tokens)
 		if v.Budget.Limit > 0 {
@@ -1080,6 +1091,39 @@ func (a *App) cmdAutonomy(c in, arg string) {
 		b += "\n/autonomy preset balanced|curious|focused · /autonomy weight novelty=2 · /autonomy dimension focus value=80 threshold=90 enabled=true"
 		a.answer(c, b)
 	default:
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "lock "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能锁定心智数值")
+				return
+			}
+			field, raw, ok := strings.Cut(strings.TrimSpace(rest), "=")
+			value, convErr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if !ok || convErr != nil {
+				a.answer(c, "用法：/autonomy lock novelty=3（interest / novelty 1–5，priority 0–10）")
+				return
+			}
+			if err := st.SetPin(strings.ToLower(strings.TrimSpace(field)), value, now.Unix()); err != nil {
+				a.answer(c, "没锁上："+err.Error())
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, fmt.Sprintf("%s 锁定为 %g：模型之后自己提的同类数值会被替换成它，直到 /autonomy unlock %s。", field, value, field))
+			return
+		}
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "unlock "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能解锁心智数值")
+				return
+			}
+			field := strings.ToLower(strings.TrimSpace(rest))
+			if !st.ClearPin(field, now.Unix()) {
+				a.answer(c, field+" 本来就没有锁定")
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, field+" 解锁了，模型自己提的数值重新生效。")
+			return
+		}
 		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "preset "); ok {
 			if !a.isAdmin(c.who) {
 				a.answer(c, "只有管理员能改心智档案")
@@ -1193,6 +1237,6 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			a.answer(c, fmt.Sprintf("%s 的 %s 改成 %g 了。想法按兴趣+新颖排序，目标按优先级排序，下一次挑选就会用新值。", id, field, value))
 			return
 		}
-		a.answer(c, "用法：/autonomy [pause | resume | wake | set <编号> <字段>=<数值>]")
+		a.answer(c, "用法：/autonomy [pause | resume | wake | profile | set <编号> <字段>=<数值> | preset <名字> | weight <字段>=<值> | dimension <名字> <字段>=<值> | lock <字段>=<值> | unlock <字段>]")
 	}
 }

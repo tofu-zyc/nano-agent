@@ -684,3 +684,37 @@ func TestMindThresholdCrossedReachesAHook(t *testing.T) {
 		t.Fatalf("维度没有漂移：%.1f", classes.Value)
 	}
 }
+
+func TestPinnedNoveltyOverridesTheIdeaToolProposal(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	sid := lifeSID("default")
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	e.say("/autonomy lock novelty=2")
+	e.ch.wait(t, "锁定为 2")
+	out, err := e.a.ideaCall(sid, []byte(`{"action":"add","text":"读一本讲分布式共识的书","source":"聊天里提到的","interest":4,"novelty":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "新颖按锁定值 2") {
+		t.Fatalf("没有说明锁定的影响：%s", out)
+	}
+	e.a.mu.Lock()
+	ideas := e.a.mind("default").OpenIdeas(e.a.now())
+	e.a.mu.Unlock()
+	if len(ideas) != 1 || ideas[0].Novelty != 2 || ideas[0].Interest != 4 {
+		t.Fatalf("锁定的新颖没有覆盖模型的提议：%+v", ideas)
+	}
+	e.say("/autonomy unlock novelty")
+	e.ch.wait(t, "解锁了")
+	out, err = e.a.ideaCall(sid, []byte(`{"action":"add","text":"第二个想法","source":"聊天里提到的","interest":3,"novelty":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "锁定值") {
+		t.Fatalf("解锁之后还在覆盖：%s", out)
+	}
+}

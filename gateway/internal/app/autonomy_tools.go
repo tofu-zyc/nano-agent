@@ -231,13 +231,21 @@ func (a *App) ideaCall(sid string, raw []byte) (string, error) {
 		}
 		return strings.TrimSpace(b.String()), nil
 	case "add":
+		// 人工锁定的数值覆盖模型的提议（设计 §7.3）：锁定期间想法按用户给的值排序
+		note := ""
+		if v, ok := st.Profile().Pin("interest"); ok && int(v) != x.Interest {
+			x.Interest, note = int(v), note+"兴趣按锁定值 "+fmt.Sprint(int(v))+"。"
+		}
+		if v, ok := st.Profile().Pin("novelty"); ok && int(v) != x.Novelty {
+			x.Novelty, note = int(v), note+"新颖按锁定值 "+fmt.Sprint(int(v))+"。"
+		}
 		it, err := st.AddIdea(autonomy.Idea{Text: x.Text, Source: x.Source, Interest: x.Interest, Novelty: x.Novelty,
 			CostMinutes: x.CostMinutes}, now, 7*24*time.Hour)
 		if err != nil {
 			return "", err
 		}
 		a.afterMindChange(st, ag, now)
-		return "记下了想法 " + it.ID + "：" + it.Text, nil
+		return "记下了想法 " + it.ID + "：" + it.Text + note, nil
 	case "schedule":
 		at, err := autonomy.ParseWhen(x.When, now, a.loc)
 		if err != nil {

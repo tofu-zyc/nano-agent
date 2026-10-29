@@ -357,7 +357,7 @@ export type LedgerUsage = { day: string; tz?: string; source: string; starts: nu
 // 心智档案（设计 §7.2 / §7.3）：候选权重、可选维度与阈值
 export type ScoreWeights = { interest: number; novelty: number; cost: number; cost_scale: number };
 export type MindDimension = { enabled: boolean; value: number; baseline: number; min: number; max: number; drift?: number; threshold?: number };
-export type MindProfile = { preset?: string; weights: ScoreWeights; dimensions?: Record<string, MindDimension>; updated?: number };
+export type MindProfile = { preset?: string; weights: ScoreWeights; dimensions?: Record<string, MindDimension>; pinned?: Record<string, number>; updated?: number };
 
 // 一个 agent 的自主活动概况（网页的 agent 节点）
 export type AutonomyView = {

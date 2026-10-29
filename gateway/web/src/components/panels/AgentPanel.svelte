@@ -347,6 +347,9 @@
               <label class="num" title="成本权重（0–5）">成本<input type="number" min="0" max="5" step="0.5" value={auto.profile.weights.cost} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'cost', value: +e.currentTarget.value })}/></label>
               <label class="num" title="成本参照分钟数（1–480）">参照<input type="number" min="1" max="480" value={auto.profile.weights.cost_scale} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'cost_scale', value: +e.currentTarget.value })}/></label>
             </div>
+            {#if auto.profile.pinned && Object.keys(auto.profile.pinned).length}
+              <p class="p-note p-small">人工锁定：{Object.entries(auto.profile.pinned).map(([k, v]) => k + '=' + v).join(' · ')}（模型自己提的值会被替换成它）</p>
+            {/if}
             {#each ['curiosity', 'social_drive', 'focus', 'energy'] as dim (dim)}
               {@const d = auto.profile.dimensions?.[dim]}
               <div class="p-row">
