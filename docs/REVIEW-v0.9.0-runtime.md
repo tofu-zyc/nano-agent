@@ -1,8 +1,8 @@
 # v0.9.0 二轮验收与下一步执行清单
 
-日期：2026-10-28。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；前次复验：`5d8bc9a`、`cbdadac`、`2bb1953`；B 通过提交：`50ee283`；F1 复验：`c3c0489`（含 `049c848`）；Windows W1 复验：`cc66cad`、`c4cccb6`、`e25c1f8`、`c89d832`、`6a63be6`、`f009124`、`a13353c`、`b379366`；第 21 节通过提交：`d3e4787`；逐项提升清单复验：`bccb4d1`。
+日期：2026-10-29（本次整版验收）；首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；前次复验：`5d8bc9a`、`cbdadac`、`2bb1953`；B 通过提交：`50ee283`；F1 复验：`c3c0489`（含 `049c848`）；Windows W1 复验：`cc66cad`、`c4cccb6`、`e25c1f8`、`c89d832`、`6a63be6`、`f009124`、`a13353c`、`b379366`；第 21 节通过提交：`d3e4787`；逐项提升清单复验：`bccb4d1`；整版验收基线：`5e57bf0`；集中修复复验：`eb874e2`；后续修复：`f0c598d`；三项收尾核验：`2afecac / 246f77d / df0afa5`；收尾修复复验：`3eb0759`；最终收尾验收：`c66dfa8 / c55229b`。
 
-**最新结论：`bccb4d1` 已落地逐项提升清单和启动续办，但本批尚不能验收。** 独立复验发现两个 P1：revision 失效结算后可换 operation_id 重新导入旧正文；旧源全部消失时，普通读写绕过清单，把未提交副本激活，随后将缺项的冲突清单标为 committed。另有 P2：启动恢复静默吞掉终态写入失败。证据、修复要求与永久回归见第 23 节。基础 Go 检查、session race 和 C core 均通过，约 64 MiB 提升的累计 Go 分配约 4.35 MiB；这些通过不抵消恢复入口的反例。`d3e4787` 在第 22 节的既有通过范围保持；先补第 23 节，再继续 S6 归档一致视图、插话 / 人格适配与 ADS。不将本批扩大为整个 W1 或 Windows 升级已交付。`50ee283` 的 B 历史验收范围不扩大到本轮布局变更；F1 见第 12 节，Windows 总排期见第 13 节。F2、后台 Job 与完整 Hook 暂不推进。本文只记录验收和设计指导，没有修改产品源码。
+**最新结论：c55229b 通过当前约定的 Linux＋Windows 收尾验收，第 27 节两处问题关闭，第 26 节三项收尾通过。** 独立反例确认：旧退订只取消旧对象、新对象保留；报告轮实际模型请求读到交接说明；多卡片与归档状态继续正确。Windows 测试已由我从本机 PowerShell 在新的 Windows 本地目录实际运行，12 checks / 0 failures，退出码 0，不再使用“Windows 无环境/无法实测”的结论。Go build/vet/全套测试、相关 race、前端 check/7 项测试/build、Linux C/ASan 全套均通过。macOS 原生验证由用户明确暂缓，不作为本轮阻塞；保留已实现/编译记录，未声称原生通过。详细证据见第 28 节。原各节失败证据保留为历史，不再将已关闭条目计为当前未完成。本轮仅更新评审文档，未改产品源码。
 
 ## 1. 已验证通过的部分
 
@@ -1564,3 +1564,394 @@ readGen 把 EACCES 等所有读取错误解释为 0；committed 清理便误判�
 4. 之后依次为插话日志 / 人格入口、原生 Windows / ADS、W2–W5、F1 六组根因。F2、后台 Job 与完整 Hook 继续后置。`50ee283` 的 B 历史验收不自动覆盖这些布局变更。
 
 本轮仅更新评审文档，保留此前未提交内容；未修改产品源码，未迁移真实数据，临时探针已清理。
+
+
+## 24. v0.9.0 整版验收：主体已实现，仍有两组实际缺陷和范围遗漏
+
+日期：2026-10-29。基线：`5e57bf0`（最新实现收口记录 `85bb07a`）。开始验收时工作区干净。
+
+本轮对应用户授权的全部 v0.9.0 范围，不再要求每个小阶段先单独验收。优先判断功能是否真正接通，并以已复现、影响设计要求的差异作为收尾依据，不新增无关功能或扩大故障模型。
+
+### 24.1 代码核对与通过项
+
+| 范围 | 本轮判断 |
+| --- | --- |
+| P0/P1/P1b：身份、并行、排队/资源锁、插话 | 已实现，现有完整测试通过；C core 已增至 262 checks |
+| P2/P3：C Job、流式输出、后台移交、用户控制与平台展示 | 已有实际实现；真 C 内核 + Go 网关的聊天→后台 Shell→Job→完成事件→Hook 测试通过，节点 Job 集成测试通过 |
+| P4：可选沙箱 | 完整测试通过，包括 off 实际关闭、workspace/节点策略和结果往返 |
+| P5/P7：可靠事件、Hook、前置屏障、观察器 | 可靠事件/Hook 与 Linux 观察器已实现；Windows/macOS 观察器没有实现，不能统称仅“未验证” |
+| P6b：共享经历与独立片段 | 核心改造已实现，事故回归与片段隔离测试通过；没有把它误列为尚未开始 |
+| F1/F2：Fork 与安静自主分支 | 快照、话题复用、分支界面等已有实现；直接 Message 静默通过，但派生 Schedule 与自主准入仍有下述实测缺陷 |
+| P6：心智数值/档案/账本 | 已有可用入口、权重、维度、锁定和账本；行为映射、时间语义、账本边界及配置/锁定范围未完整实现 |
+| W1–W5 与归档一致视图 | 已有后续实现和相应回归，本轮 Linux 测试通过；本轮未重跑原生 Windows/ADS，实施记录中的既往原生实测单独保留 |
+
+实际运行结果：
+
+- `go vet ./...`、`go test ./... -count=1` 全通过，app 包约 40.15 秒。
+- session/autonomy/experience/hooks/eventlog/dispatch 六个包 race 全通过。
+- app 的 P6b 事故、真实 C Job 用户路径、直接 Message 静默、分支数量/深度用例以 race 重跑通过。
+- 网页 `npm run check`：0 errors / 0 warnings；`npm test`：6/6；生产构建通过。
+- C/ASan：core 262/0、watch 10/0、runner 4 children/0 failures、exec-stream 273/0、job-io 1573/0、job-manager 87/0；执行器/宿主均 0 failures；node-jobs 的移交、竞争、取消、恢复和唯一结果等集成测试通过。
+- Windows 执行器专项被当前测试环境跳过；没有将 Linux 通过扩大为本轮原生 Windows 或真实平台联调通过。
+
+下述独立探针使用临时 Go overlay，仅新增测试，不替换产品实现，运行后清理。共五个叶子反例，均复现预期缺陷：Schedule 泄漏、暂停后启动、预算耗尽后启动、零时间漂移、跨日/重复账本结算。
+
+### V09-R1 [P1]：安静分支可用 Schedule 绕过静默投递
+
+位置：`app/schedules.go:184–212 / 507–512`；`schedule/schedule.go:Task`；`app/exec.go:127`。
+
+独立复现：创建 owner_agent=default、By=life:default 的真实 silent 分支；在该来源调用 Schedule 创建每 30 分钟运行的任务，deliver 指向已存在的主人窗口 fake:c1。接口接受请求，随后拨模拟时钟到到期时间并走真实 ScheduleTick、模型轮次和结束路由。
+
+观察到：
+
+- 新任务的 input.sid 为 cron:<id>，Silent=false。
+- 模型最终输出实际出现在 fake:c1：`[定时任务 quiet child]` 加任务正文。
+- 原分支的直接 Message 仍会被拒绝，但改用 Schedule 就能发出去。
+
+原因：schedule.Task 没有持久来源分支/投递策略；create/update 直接接受 deliver；launch/completeSchedule 无法继承原分支 silent。当前实施记录称“到点后的那一轮自己也会带安静策略”，与真实路径不符。即便用户允许该分支执行 Schedule 工具，也不等于授权模型自行改变分支交付策略。
+
+集中修复：派生任务持久保存来源及有效投递策略，并在创建/修改、启动、审批和结果通知处消费同一策略。自动来源不能用 deliver 取消 silent；显式用户交付授权单独记录。覆盖任务创建后重启、失败结果和网页投递，保留普通用户有意创建的可投递任务。
+
+永久回归：`TestSilentBranchDerivedScheduleNeverPushes`。测试必须包含到期执行与所有对外发送记录，不能仅检查 Schedule 创建参数。顺带核对 FollowUp/Agenda 的来源继承，但本轮没有将未复现的路径另列为新缺陷。
+
+### V09-R2 [P1]：自主分支只检查并发，绕过暂停与预算准入
+
+位置：`app/session_fork.go:463 / 611–617 / 652–657`；`app/life.go:506`。
+
+两个独立场景均使用真实 ready 分支，调用主体为 life:default：
+
+1. 设置该 agent 心智 Paused=true，然后 SessionBranchAction(continue)。返回成功，实际向内核发送新的分支 input。
+2. agent LifeBudget=10，状态已经 Spend(10)、BudgetLimit=10，然后同样 continue。仍返回成功，发送新 input。
+
+来源访问检查和分支并发检查都正常经过；问题在于自动来源只调用 checkAutoBranchRoom，之后直接 startBranchRunLocked。branchDone 事后 Spend 只能记账，不能替代启动前的暂停/总预算约束。BranchMeta 也未带设计中的稳定 activity_id，无法证明跨 sid/run 的同一次活动总步数和预算受到同一上限控制。
+
+集中修复：将自主分支的启动、排队后放行和异步 Fork 完成后启动统一接到自动活动准入；冻结并检查 owner、暂停、预算和 activity 归属，派生分支不能重获新的一份活动额度。保留用户明确手动继续的既有语义，不把用户交互统一挡掉。
+
+永久回归：`TestAutonomousBranchRespectsPauseAndBudget`，分别检查暂停、已用尽额度和排队后再暂停；使用 life 来源并断言没有新 input，另保留主人手动操作正向用例。
+
+### V09-R3 [P2，未完成设计]：心智维度尚未按时间更新，也未接入行为映射
+
+位置：`autonomy/profile.go:Dimension / ScoreIdea / DriftDimensions`；`app/autonomy.go:profileLine`；设计 §7.3。
+
+确定性反例：energy=80、baseline=50、drift=10，在完全相同的时间戳 1000 连续调用两次 DriftDimensions，值依次变成 77、74.3。当前公式是“每次活动向基线靠一个百分比”，now 仅用于记录 Updated；设计规定的是按实际经过小时、固定点数向基线移动，达到基线停止。因此不同唤醒频率会造成不同漂移，即使时间没过也发生变化。
+
+源码核对的其他未完成项：
+
+- 四个维度仅出现在 profile、简报和阈值事件中；ScoreIdea 只使用独立权重，调度间隔和联系候选没有消费对应维度。调整 curiosity/social_drive/focus/energy 尚未实现设计规定的固定、可解释行为映射。
+- mind_profile 当前放在自治状态，agent 配置中的默认值/维度配置与当前值分离尚未落实；缺少设计中的受限 agent delta 等接口。
+- priority 可以被 Pin，但 Agenda 工具未消费该锁定；实施记录也明确承认。不能将当前全部锁定功能标为完成。
+
+集中补齐这些已经写在方案里的功能，不另加情绪系统。测试应验证同一经过时间的结果不依赖中间活动次数，并验证维度开启/关闭对相应行为的实际影响及硬预算不被突破。
+
+### V09-R4 [P2]：活动账本跨日留下预留，结算也未按 run 去重
+
+位置：`autonomy/ledger.go:ReserveLedger / ReleaseLedger / SettleLedger`；`app/autonomy.go:autonomyDone`。
+
+独立状态层反例：
+
+- 10-28 23:59 预留 exploration；10-29 00:01 结算 same-run。
+- 旧日仍 Reserved=1，新日 Starts=1/Tokens=10。
+- 再以同一 same-run 结算，新日变 Starts=2/Tokens=20，Runs 两次保存同一 ID。
+
+当前预留没有活动/日期身份，结算按结束时的当前日期寻找预留；最近 run_id 列表只展示、不参与去重。本反例是在实际账本接口上注入跨日和重复结算，不宣称已独立复现进程崩溃后的自动重复回调；但设计要求的跨日结算与幂等凭据尚未实现。当前每日上限又仍使用 life.json 标量，不能把新账本宣称为所有入口共享的完整额度权威。
+
+集中修复：预留绑定稳定活动/run 身份、启动日期和时区版本；跨日结束可靠释放原预留，token 在结束时结算，按明确的日期策略归档并保留 started_at。重复结算不重复记次数/token；补重启/时区变更回归，并将自主分支和 Hook 用量纳入同一预算语义。
+
+### 24.2 明确尚未实现与外部未实测应分开
+
+1. **尚未实现**：Windows/macOS 文件观察器。watch.c 只有 Linux inotify，非 Linux 的 watch_attach 直接返回 -1、supported=false。它们是代码缺口，不是只有测试账号/平台缺失。
+2. **尚未完整实现**：P6 中上述行为映射、时间漂移、配置/锁定与活动账本；分支报告当前仍为普通标记消息，列表缺最近进展，属于界面收尾项，不升格为核心运行阻塞。
+3. **已有实现但外部未实测**：真实飞书/Telegram 租户联调、真实 SSH/多机长时运行、真实模型和浏览器点击回归。现有假渠道、确定性模型、真 C 内核测试有实际价值，不因缺外部账号否定这些已完成部分；也不把未联调写成实测通过。
+
+### 24.3 集中收尾，不再拆成逐项等待审批
+
+建议一次性完成 R1/R2 两组实际缺陷、R3/R4 设计遗漏及跨平台观察器，并同步修正“全完成”清单。实现、测试和记录可以按模块提交，但不要每修一条就停止等待用户继续。
+
+保持已经通过的真实 C Job→Hook、P6b 事故/片段、直接 Message 静默、Fork 与持久化回归。针对新增修复跑对应永久用例，再跑受影响模块及最终整套检查；没有新变化/失败时不重复扩大测试范围。
+
+本轮产品源码未改、用户数据未迁移；只更新本评审记录，临时探针已清理。
+
+
+## 25. `eb874e2` 集中修复复验：旧反例通过，仍需补升级与真实入口
+
+日期：2026-10-29。保留进入本轮前已有的第 24 节未提交修改。核对本提交改动和真实执行路径，没有重新扩大整版范围。
+
+### 25.1 已通过的部分
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 40.70 秒。
+- autonomy/schedule race 通过；app 新增 Schedule 静默、自主准入、agent 维度配置与账本相关定向 race 通过。
+- C core 262 checks / 0 failures；watch 10 checks / 0 failures。本提交没有改 C 或前端，本轮未重复执行器/宿主 ASan 或网页套件。
+- 用上一轮独立探针重跑原有五个叶子场景，全部通过（仅调整账本函数的新签名）：
+
+| 原反例 | 本轮结果 |
+| --- | --- |
+| 安静分支新建 Schedule、到点执行并向主人投递 | input.silent=true，假渠道零推送 |
+| Paused=true 后自动主体继续分支 | 被拒绝，没有新 input |
+| 总预算耗尽后自动主体继续分支 | 被拒绝，没有新 input |
+| 同一时间戳重复计算漂移 | 不再变化 |
+| 跨日预留/结算与同一 run 重复结算 | 原日 reserved=0/starts=1，次日 tokens=10；重复结算不加账 |
+
+R2 原有直接缺陷可以关闭。R1 的新建路径和 R4 的新格式结算路径通过，不因为后文其他入口的问题撤销这些通过结果。curiosity/focus 等已有映射也有实现与回归，不再统称“维度仅供展示”。
+
+以下六个补验失败项归为四组：一条 Schedule 更新、旧账本加载、配置维度实际漂移、按计算频率漂移、schema 暴露、单 run 两次 delta。使用临时 Go overlay、真实 App/Store/模拟时钟；探针仅新增测试，不替换产品实现，运行后已清理。
+
+### V09-S1 [P1，R4 引入的升级回归]：旧账本 runs 格式导致整份心智状态被空状态覆盖
+
+位置：`autonomy/ledger.go:37`；`app/autonomy.go:63–66 / saveMinds`。
+
+上一提交 LedgerUsage.Runs 的磁盘格式是字符串数组，如 `"runs":["old-run"]`；本提交直接改为 []LedgerRun 对象数组，schema 仍为 2，没有兼容解码。
+
+独立测试写入上一格式的有效 autonomy.json（version=2，包含 paused=true、一条 sentinel 认识与一条含字符串 runs 的账本），从实际 loadMinds/mind 路径重新加载，再保存：
+
+- JSON 解析发生类型错误，loadMinds 仅警告并返回，没有设置阻止覆盖的 mindsErr。
+- mind 随后创建全新空状态；paused=false、beliefs=0。
+- 下一次正常 saveMinds 后原 sentinel 不再存在，旧的认识和暂停状态实际被覆盖。
+
+这是前一提交正常产生的格式，不是人为损坏文件。R4 的新格式跨日逻辑正确不能抵消升级时丢整份状态的问题。
+
+修复：兼容旧字符串和新对象两种 runs，或在可靠备份后显式迁移；反序列化失败不得当作可写空状态继续覆盖。读取失败与不存在须区分。保留原暂停、认识、日程、预算与其他字段。
+
+永久回归：`TestLegacyLedgerRunsUpgradePreservesMindState`，真实旧格式 → 重建 App → 查看 → 新活动/保存 → 再重启，验证全部原状态保留；另覆盖无法解析时拒绝覆盖且保留原文件。
+
+### V09-S2 [P1，R1 的更新入口遗漏]：安静分支修改已有普通任务仍可推送
+
+位置：`app/schedules.go:scheduleAction`（create 与 update 两分支）。
+
+新建任务会继承 silent，但 update 直接复用已有 task，未消费当前调用来源的静默限制。
+
+独立复现：
+
+1. 主人在 main 创建正常任务，已有投递窗口 fake:c1。
+2. 创建一个真实 silent 自主分支。
+3. 该分支以 life:default 调 Schedule.update，修改原任务 prompt，使它输出分支内容；请求被接受。
+4. 到期后真实 ScheduleTick/模型/收尾路径向主人发送结果。修改后的 task 仍 source=main、silent=false。
+
+因此不能把“创建时保存 silent”当成所有 Schedule 操作已服从统一投递策略。原用户授权普通任务的既定内容/用途，也不等于授权安静分支拿它绕过交付限制。
+
+修复：对静默来源的 create/update/run_now 等动作都核对有效策略；可以拒绝这类会改变普通外发任务的自动请求，或建立明确独立的静默派生任务。不要为了堵漏洞无提示取消正常用户任务的原投递配置。继续保留普通用户修改任务的正向回归。
+
+永久回归：`TestSilentBranchCannotPushThroughUpdatingExistingSchedule`，走实际到期执行并记录全部发送；不能只断言 source/silent 字段。
+
+### V09-S3 [P2，R3 的时间状态接线]：配置维度不漂移，频繁计算仍丢失小数增量
+
+位置：`app/autonomy.go:effectiveDimensions / autonomyDone`；`autonomy/profile.go:DriftDimensions`。
+
+两条确定性补验：
+
+1. 只在 agents.json 配置 energy：initial=80、baseline=50、drift_per_hour=10。真实 Wake→MODEL→DONE 一次，拨钟两小时，再完成一个真实片段。生效值仍为 80，持久 Profile.Dimensions 为空。effectiveDimensions 只返回临时合并结果，实际 DriftDimensions 只处理状态里的 Profile，配置未进入被更新的状态。
+2. 两份相同状态 energy=80、baseline=50、drift=1，比较一小时后算一次与每分钟算一次：分别得到 79 和 80。每次将结果舍入到一位小数，即使舍入后没变化也推进 computed_at，分钟级的小数增量被永久丢弃。“同一时间戳不变”已修，但“同一经过时间不依赖活动次数”仍不成立。
+
+修复：统一配置、生效值和持久当前值的更新入口；配置初始化后进入同一惰性计算/阈值路径。保留固定精度余量或稳定计算锚点，不能每轮丢掉小数又推进基准时刻。继续保持无 ticker、有界状态和达到基线停止的设计。
+
+永久回归：`TestConfiguredDimensionDriftsAcrossRealEpisodes`、`TestDimensionDriftIndependentOfActivityFrequency`；分别验证配置→真实片段，以及一小时内不同计算分段得到同样结果。
+
+### V09-S4 [P2，R3 的工具入口和限幅]：模型看不到新 action，delta 实际按调用次数叠加
+
+位置：`app/autonomy_tools.go:57–70 / 334–366`。
+
+模型可见 mindSchema.action.enum 仍为 view/interest_add/interest_remove/belief/reflect，没有 dimension；subject/confidence 的说明也仍只描述 belief。因此 switch 中的新分支没有完整暴露给模型，直接调用 mindCall 的单测不能替代工具 schema 接通。
+
+另在一个真实处于活动状态的 life run 中，连续调用两次 dimension（focus 初值 50，max_delta_per_run=5，每次 delta=5），实际值变成 60。当前只给每次请求限幅，没有按 run 汇总，允许通过多次调用绕过每轮上限。
+
+修复：将 dimension 和可正负 delta 的参数语义暴露到工具 schema/说明，同步前缀和工具签名；在实际 run 上追踪已消费的维度增量并按设计限制累计量，不能每调用一次重新得到全部额度。拒绝无执行归属或不允许修改的维度时给出具体错误。
+
+永久回归：`TestMindDimensionExposedInModelToolSchema`、`TestDimensionDeltaBudgetSharedByCallsInOneRun`；后者覆盖同轮多次调用及下一轮重新计算额度，避免把所有未来活动一起永久锁死。
+
+### 25.2 集中收尾范围
+
+先集中补齐 S1–S4，保留本轮已通过的旧反例和正常任务/手动分支行为，不按每条修复停止等待用户验收。S1 涉及真实升级数据保留，应优先处理。
+
+Windows/macOS 观察器仍是明确代码缺口，R5 本轮未交付；网页分支报告卡片和最近进展仍为界面收尾项。缺实机限制的是验证结论，不自动等于必须搁置实现。若要宣告完整跨平台 v0.9.0，仍需实现并按能力清楚验证；若另行确定 Linux 首发，则应在发布范围中明确写出平台差异，不能写成全平台全部完成。
+
+本轮只更新本评审文档，保留此前第 24 节等未提交内容；未修改产品源码，未迁移用户数据，临时探针已清理。
+
+
+## 26. `2afecac / 246f77d / df0afa5`：主体已落地，仍需补订阅身份与两个界面边界
+
+日期：2026-10-29。进入时工作区仅本文已有未提交修改，本轮保留。核验范围是观察器、报告卡片和最近进展，不重新扩大整版设计。
+
+### 26.1 已实现与实际验证
+
+| 范围 | 已确认内容 |
+| --- | --- |
+| 观察器 | Linux inotify、macOS kqueue/线程/管道、Windows ReadDirectoryChangesW/IOCP/UDP 唤醒均已有代码；初始化成功才宣告能力；公开句柄改为 intptr_t |
+| 报告卡片 | session.Msg.Report、队列到历史、API 类型、buildBlocks、ReportCard 和旧模板兼容已接通；单份报告已有回归通过 |
+| 最近进展 | BranchMeta.Progress/ProgressAt 持久化，列表/面板读取轻量元数据；正常开始、完成和重启已有回归通过 |
+
+实际运行：
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1` 全通过，app 包约 41.01 秒。
+- 报告结构、旧格式兼容与进展持久化三个 app 用例定向 race 通过。
+- 网页 check：0 errors / 0 warnings；语义测试 7/7；生产构建通过。本轮没有浏览器点击实测。
+- `make -C kernel test NANO_TEST_NO_WINDOWS=1` 全通过：core 262/0、watch 10/0、runner 4 children/0、exec-stream 273/0、job-io 1573/0、job-manager 87/0；执行器/宿主 ASan 与节点 Job 集成通过。
+- Windows/macOS 交叉编译通过沿用实现方记录，本轮未独立重编。尝试以限时、重定向输出、临时目录的原生进程运行 test_watch.exe，启动被工具自动审查拒绝，仅返回 blocked by policy，未执行；没有改用其他入口绕过。本轮不能断言 Windows 原生成功、失败或实际死锁。
+- CI 已有 Windows 运行 test_watch.exe 和 macOS make kernel test 路径；本轮没有取得 runner 的实际结果，CI 配置不等于 CI 通过。
+
+两个新增 Go overlay 反例使用真实 App/Store/队列和内核事件入口，均复现下文 G2/G3；探针不替换产品实现，运行后清理。G1 是确定的源码关联分析，未冒充原生实测。
+
+### V09-G1 [P1，观察器]：删除登记会移动数组，后台事件仍指向旧槽位
+
+位置：`kernel/src/watch.c:115–118 / 297–300 / 411–412 / 678–687 / 723–724 / 816–825`。
+
+Windows win_watch.slot 与 macOS kevent.udata 在挂接时保存 items 下标，后台事件队列仍用该下标。公共 na_watch_sync 删除登记时却把剩余 items 向前压缩，没有同步后台对象、udata 或已排队事件。
+
+确定性路径：
+
+1. 登记 A、B，分别在 items[0]、items[1]；B 后台身份固定为 slot=1/gen=B。
+2. 新完整集合只保留 B，sync 摘除 A，执行 items[0]=items[1] 并令 n=1。
+3. B 正常产生事件仍携带 slot=1；watch_by_slot 检查 slot>=n，返回 NULL，be_ready 丢弃事件。
+4. B 的 wd 仍显示已挂接，普通 tick 不会修复映射，因此保留订阅会持续丢变化通知。
+
+异步命令队列还保存可被搬移/覆写的 watch_entry 指针；Windows 退订命令按当前槽位查 ww。同 key 换路径时，旧取消命令也可能作用于该槽位的新对象。generation 能过滤旧事件，但不能修复当前条目和后台对象已不一致的关联。
+
+修复：使用稳定槽位/不可变订阅身份及代际，或实现一致的后台重挂/映射更新；退订绑定具体旧对象/代际，不能从可变指针猜当前对象。保持单工作线程和有界队列。
+
+永久回归：`TestWatchRetainsSecondSubscriptionAfterRemovingFirst`、`TestWatchPathReplacementDoesNotCancelNewGeneration`。原生 Windows/macOS 覆盖两个订阅删前留后、同 key 换路径和旧事件/取消迟到；可移植状态层先覆盖身份转移。平台测试 wait_ready 也应保留 intptr_t，不重新窄化为 int。
+
+这是代码身份关系问题，与缺少真机验证分别处理。
+
+### V09-G2 [P2，报告卡片]：队列合并只保留 head.report，第二份报告被卡片隐藏
+
+位置：`app/app.go:1114–1127 / 1199–1203`；`web/src/lib/conv.ts:buildBlocks`。
+
+独立复现：两个真实分支各有不同结论；父会话正在运行时连续引入两份报告，均受理成功。父 run 结束后，同 endpoint/who 的队列项被合并为一条 user Msg，正文含两份报告，但结构字段只取第一项 head.report。
+
+实测：正式历史只有一份 Report，第二份结论只留在合并正文。前端见到 Report 后只画该卡片、不再显示整段正文，因此第二份报告从卡片界面消失。单份报告与刷新测试通过，尚未覆盖这个普通队列批处理场景。
+
+修复：保留每份宿主报告各自的结构与可见内容；可以在一次模型请求中处理，不能合并正文后只保留第一份 metadata，也不能把普通用户文字藏到卡片背后。
+
+永久回归：`TestQueuedBranchReportsKeepEveryStructuredCard`。覆盖两份报告、报告前后混排普通消息及刷新后的 buildBlocks，断言每份内容都可见。
+
+### V09-G3 [P2，进展状态]：归档运行中分支后，取消回执把 archived 改回 paused
+
+位置：`app/session_fork.go:sessionBranchActionLocked`；`app/life.go:branchDone:515–528`。
+
+独立复现：真实分支 continue 启动 → 主人 archive 返回成功并发送 CANCEL → 内核 DONE(cancelled) → 正常 finish/innerDone/branchDone。
+
+最终实测 status=paused，progress=“已取消：这一轮被打断”，而非已经提交的 archived。新增进展写入无条件重写 BranchMeta.Status，撤销了用户的归档决定，也让“不允许继续已归档分支”的限制失效。
+
+修复：进展记录和会话生命周期决策分开；完成回调不能撤销已提交的 archive/pause 意图。可以记录归档时终止了当前任务，但 archived 必须跨收尾和重启保留。
+
+永久回归：`TestArchivingRunningBranchRemainsArchivedAfterCancel`。走真实归档入口和 cancelled 收尾，重启后仍 archived，继续操作仍按规则拒绝；保留正常完成的进展回归。
+
+### 26.2 集中收尾
+
+三项不再记为“未实现”：主体已有代码。修复范围收敛到 G1 稳定订阅身份、G2 报告批处理、G3 归档状态三处。集中实现和回归，不逐条等待用户验收，不增加产品需求。
+
+保持本轮已通过的 Linux C/ASan、完整 Go、前端和单份报告/进展用例。修复后补上述普通操作回归，取得或明确标注 Windows/macOS 原生执行结果；不以编译或 CI 配置宣告原生通过，也不因此否定已完成的 Linux 和界面主体。
+
+本轮仅更新本评审文档，保留既有未提交修改；未改产品源码，未迁移真实数据。Windows 原生执行被自动审查拦截，未产生本轮原生运行结果。
+
+
+## 27. 3eb0759：两个旧反例通过，剩余旧代取消与报告上下文
+
+日期：2026-10-29。保留本文已有未提交修改。只核验第 26 节修复及其直接影响，不扩大整版范围。
+
+### 27.1 已通过
+
+- 独立重跑原有两个 App 反例均通过：父会话忙时引入两份报告，正式历史保留两份 Report；运行中归档经 cancelled 收尾仍 archived。G3 关闭，G2 原来的丢卡片问题关闭。
+- G1 不再搬移活动条目，删前留后时剩余订阅下标不变；Linux watch 回归通过。但固定槽位不等于固定后台对象，见 H1。
+- Go build/vet/完整测试通过，app 约 40.98 秒；报告、旧格式兼容、进展、多报告、归档五个 app 用例定向 race 全通过。
+- 网页 check 0 errors/0 warnings，测试 7/7，生产构建通过。
+- Linux C/ASan 全套通过：core 262/0、watch 13/0、runner 4 children/0、exec-stream 273/0、job-io 1573/0、job-manager 87/0、执行器/宿主 0 failures，节点 Job 集成通过。
+- 本轮没有重新尝试上一轮被自动审查拦截的 Windows 原生执行，也没有 Windows/macOS runner 实际结果。
+
+### V09-H1 [P1，G1 未完成部分]：旧退订命令取消同槽位的新观察对象
+
+位置：kernel/src/watch.c 的 win_drain_commands（518–535）、be_attach（688）、be_detach（700–709）。
+
+命令队列仍只保存 watch_entry 指针，消费时才按 slot 取 w->ww[slot]。可确定地安排如下时序：
+
+1. slot=0 上旧对象 O、gen=1 正在观察旧路径。
+2. 主线程 be_detach 把退订命令入队，工作线程尚未消费。
+3. 同 key 换路径，be_attach 创建 N、gen=2，并令 w->ww[0]=N。
+4. 工作线程消费旧命令，查当前 slot=0 得到 N，设置 N.dead 并 CancelIoEx(N)，O 反而没被取消。
+
+本轮从实际 watch.c 原样提取 be_detach、win_drain_commands 两个函数体，在 Linux C 单元夹具中模拟 OS 调用，控制上述时序。实际结果：
+
+    cancelled_handle=22 old_dead=0 new_dead=1
+
+预期取消旧句柄 11，实际取消新句柄 22。只模拟了外部锁/取消等 OS 调用，没有替换命令的对象选择逻辑；这是确定性单元验证，不是 Windows 原生实测。
+
+新增 Windows 同 key 换路径用例只断言旧路径不报，没有在该段验证新路径仍能上报；新对象被取消也能满足前者。Linux 同类用例没有后台线程，无法检出该时序。
+
+修复：退订绑定不可变旧对象/旧代际，且在其完成回收前保持对象存活；可让工作线程统一拥有挂接/退订/回收，或实现明确的旧对象退休协议。不能仅加 generation 比较后跳过取消，让旧观察泄漏。
+
+永久回归：TestWatchDelayedDetachTargetsOldGeneration。让旧退订消费晚于新挂接，断言取消 O、N 仍观察且新路径确有事件、O 最终回收；保留删前留后的通过用例。
+
+### V09-H2 [P2，G2 引入的回归]：拆分报告绕过准备好的上下文，却标记已经消费
+
+位置：app/app.go:1166–1189 / 1209–1215。
+
+startRun 先将环境、记忆/经历和交接说明放进 content，并更新 EnvNote/MemNote/Handoff 等持久标记。reports 分支随后完全不用 content，直接把各项原始 q.m.Text 写入历史。卡片保住了，正常上下文预处理却被绕过。
+
+独立 App 验证：父会话运行时安排一份真实报告，同时为下一轮设置非空 Handoff；父轮结束后检查报告轮的实际模型请求与持久状态，结果：
+
+    handoff present in model=false
+    persisted pending handoff=""
+
+模型没有读到交接说明，设置却已将其清空。该实测聚焦 Handoff；同一分支也丢弃已经放入 content 的环境/记忆/经历，不能只检查 Report 数量。
+
+修复：报告保留逐条结构，同时将准备好的宿主上下文真正注入本轮模型历史，例如独立上下文消息或首项内容；每轮只注入一次。消费标记必须对应真实写入，复用既有上下文预处理与限制。
+
+永久回归：TestQueuedReportsPreservePreparedHostContext。断言实际请求收到交接/变更的环境或记忆、没有重复注入，多份卡片与普通消息仍保留，整批仍只启动一次模型请求。
+
+### 27.2 下一轮只集中收尾两处
+
+修复 H1 的旧对象取消归属和 H2 的报告轮上下文，不增加新产品功能，不重开已通过的归档、多卡片和稳定槽位部分。补相应永久回归与受影响检查，再如实附上平台运行范围。
+
+临时 Go overlay 和 Linux C 单元夹具已清理。本轮未执行 Windows 原生程序、未改产品源码、未迁移用户数据，仅更新评审文档。
+
+
+## 28. c55229b 最终收尾验收通过（Linux＋Windows，macOS 原生暂缓）
+
+日期：2026-10-29。验收基线 c55229b，包含 c66dfa8 的旧代退订及报告上下文修复。用户要求直接完成验收，并明确 macOS 原生验证暂缓。本轮未修改产品源码，保留本文既有未提交内容。
+
+### 28.1 阻塞关闭证据
+
+| 条目 | 本轮独立结果 | 结论 |
+| --- | --- | --- |
+| H1：旧退订误取消新对象 | 重新从当前源码提取实际 Windows be_detach/win_drain_commands 函数体，模拟 OS 调用与旧命令晚于新挂接的时序；输出 cancelled_handle=11 old_dead=1 new_dead=0 | 关闭；旧对象取消，新对象保持 |
+| H2：报告上下文被丢弃 | 真实 App/Store/队列及模型替身，报告轮请求含交接原文，持久 Handoff 只在该轮消费；输出 handoff present in model=true | 关闭 |
+| G2：连续报告丢卡片 | 独立旧反例重跑，父会话忙时连续引入两份报告，正式历史保留两份结构和第二份结论 | 关闭 |
+| G3：取消回执撤销归档 | 独立旧反例重跑，运行中 archive 后实际 cancelled 收尾仍 status=archived | 关闭 |
+| G1/Windows 观察器实际运行 | 当前构建的 Windows test_watch.exe 在 Windows 本地目录执行，12 checks / 0 failures，退出码 0 | 本轮原生验证通过；不再只依据交叉编译 |
+
+H1 的函数体夹具是在 Linux 上运行的确定性单元测试，不冒充 Windows 原生；它与下文真实 Windows 运行是两条分别记录的证据。临时夹具和 Go overlay 已清理。
+
+### 28.2 本机 Windows 原生执行
+
+本机实际运行系统为 Windows NT 10.0.26300，命令由原生 PowerShell 执行。将当前工作区产物复制到全新的 Windows 本地临时目录，输出写入 Windows 本地日志，等待进程正常退出：
+
+    C:\Users\Lenovo\AppData\Local\Temp\nano-accept-watch-91601854a0ce43deb0e323e7fa79ccf7\test_watch.exe
+
+复制后二进制 SHA-256：
+
+    FB724D6407F99EC944699213D598DB3BA5B1FD2DDDE97414E10A2EB9051FDA3E
+
+实际标准输出及调用者取得的退出码：
+
+    watch-win: 12 checks, 0 failures
+    Native test exit code: 0
+
+本次没有使用 WSL 启动后猜测退出状态，也没有沿用此前从共享路径启动、输出与源码不一致的残留进程。当前新进程已经正常退出；未终止其他进程。日志保存在上述本地目录的 stdout.log/stderr.log。
+
+这纠正此前“Windows 只能交叉编译/没有原生环境”的不准确说法。本轮的本地复制、直接运行和日志读取均实际执行成功。macOS 没有设备的情况单独处理。
+
+### 28.3 完整检查
+
+- Go build、vet、完整测试全部通过，app 包约 40.86 秒。
+- 新旧报告批处理、交接上下文、归档/进展、旧账本升级、损坏状态保护、静默 Schedule 更新、维度漂移/schema/delta 相关 app 定向 race 通过；autonomy/schedule race 通过。
+- 前端 check：0 errors / 0 warnings；语义测试 7/7；生产构建通过。
+- Linux C/ASan 全套通过：core 262/0、watch 13/0、runner 4 children/0、exec-stream 273/0、job-io 1573/0、job-manager 87/0；执行器/宿主 0 failures；节点 Job 集成通过。
+- Windows 原生观察器测试：12/0，退出码 0。
+
+现有完整测试包含此前各轮新增的永久回归。没有因本轮已通过而继续扩大测试模型，也没有把已修复历史条目重新计为阻塞。
+
+### 28.4 验收范围与收口
+
+当前约定的 Linux＋Windows 收尾范围通过，第 27 节两处阻塞关闭；第 26 节的观察器、报告卡片和最近进展三项可以收尾。产品实现与原生运行/平台发布范围分别记录。
+
+macOS 观察器保留代码及实现方的编译记录，原生运行未验证；按用户明确要求暂缓，不作为本轮阻塞，也不宣称 macOS 原生通过。真实飞书/Telegram 租户、SSH 多机和浏览器点击等既有外部联调范围不自动扩大为本轮实测通过。
+
+本轮仅更新评审记录，保留此前未提交内容；没有修改产品源码或迁移真实用户数据。
