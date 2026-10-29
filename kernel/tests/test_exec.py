@@ -16,7 +16,7 @@ import time
 
 EXEC = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./nano-exec")
 FAILS = []
-T = tempfile.mkdtemp(prefix="na-exec-")
+T = os.path.realpath(tempfile.mkdtemp(prefix="na-exec-"))  # macOS 的 /tmp 是符号链接：realpath 后路径判断才对得上
 HOME = os.path.join(T, "home")
 WORK = os.path.join(T, "work")
 OTHER = os.path.join(T, "other")

@@ -18,7 +18,7 @@ import time
 KERNEL = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./nano-kernel")
 EXEC = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "./nano-exec")
 FAILS = []
-T = tempfile.mkdtemp(prefix="na-host-")
+T = os.path.realpath(tempfile.mkdtemp(prefix="na-host-"))  # macOS 的 /tmp 是符号链接：realpath 后工作目录判断才对得上
 WORK = os.path.join(T, "work")
 
 
