@@ -234,13 +234,14 @@
 
 | 阶段 | 内容 | 说明 |
 | --- | --- | --- |
-| P2 | C JobManager、流式 Shell、原地 detach、`Job` 工具与 `/jobs /bg /job` | 未开始。`Shell` 仍是一次一行结果，没有后台任务语义 |
+| P2 | C JobManager、流式 Shell、原地 detach、`Job` 工具与 `/jobs /bg /job` | C 节点持久执行/原地移交已实现并有真实进程验证；Gateway Job 索引、用户命令、渠道及完整对账继续实施，尚未协商启用 |
 | P3 | 飞书 / Telegram 任务卡片、断线对账、SSH 能力降级 | 依赖 P2 |
 | P5 | 可靠事件、后置 Hook、notify / command / agent、临时会话 | 未开始 |
 | P7 | 前置 Hook、C 文件观察、多平台 I/O 与性能收敛 | 未开始 |
 | — | 会话 Fork（设计文档 §8，2026-10-27 新增） | 未开始（下一步 C，优先于 P2/P5） |
 | — | 插话收件箱的持久恢复 | 已完成（见上，含三轮验收修复 B1–B6） |
 | — | 心智数值配置、行为维度与阈值预设（设计文档 §7.2 / §7.3） | 未开始 |
+| P6b | 内心活动与外界会话共用一份经历：经历记录、按片段运行的内心活动、聊天不再叫醒内心、心智状态清理（设计文档 §14，2026-10-28 新增） | 未开始；F2 以它为前提 |
 
 设计文档 §3.1 里还有几项**已知简化**：
 
@@ -250,3 +251,271 @@
 - 插话的 `input_pending / input_ready / input_commit` 三次握手没有启用：现在的实现在网关侧
   的两个边界完成同样的事，效果一致（详见 `interject.go` 的注释）。C 侧只保留
   `model_yield` 等消息常量，等 P2 一起接线。
+
+## 2026-10-28 全范围续作记录（进行中）
+
+本次授权覆盖整个 v0.9.0，不再沿用旧评审的阶段停工限制。已重新通读设计（含第 14 节与 12.6）、实施记录及评审，核对真实代码；现有文档修改保留。用户要求不使用子代理，后续由单个主代理实施。
+
+依赖与工作清单：
+
+- [x] W1 第 23 节 AB1–AB3：旧来源持久撤权、未提交副本的统一定位门禁、提交归属与完整清单核对、恢复结算错误传播。
+- [x] S6：归档列举、读取、计数、删除、清理使用同一已发布视图；旧归档特殊名称使用独立反解规则，冲突保留双方，备份不作活动数据。
+- [x] P6b 核心：经历派生索引、真实结果写入、聊天不触发心智事件/自动认识/十分钟唤醒、schema 2 与版本备份、独立片段、按权限和变化注入 `[经历]`、主动消息来源、经历接口、网页分段和经历卡、技能及 prefixVer。
+- [ ] P6b 补充整合：Fork/自主分支经历、全部平台显示及网页浏览器回归、完整生命周期与故障验证。
+- [x] W1 辅助入口、ADS 枚举/保留备份/可恢复迁移及 W2–W5 实现；原生 Windows 专项通过，W5 原问题未复现，只交付诊断。
+- [x] F1 六组：权限/锁、虚拟历史、完整快照版本、恢复与发布、真实界面缓存及 100 闲置分支内存验证。
+- [ ] P0/P1/P1b 补全：公平性、资源域、调用身份展示与能力协商、插话协议边界。
+- [ ] P2/P3：C JobManager、流式执行、原地后台化、日志/重连/取消/槽锁、命令/网页/平台按钮。
+- [x] P4：agent/workspace 沙箱覆盖与所有目标执行链，含实际 requested/mode/effective 回执及原生 Windows 验证。
+- [ ] P5/P7：可靠事件、完整 Hook、四种目标、前置屏障、deadline、文件观察及资源回收。
+- [ ] P6：统一活动账本、数值配置/预设/权重/维度/漂移/delta/锁定/阈值。
+- [ ] F2：按话题复用持久自主分支、共享预算、统一 silent、报告入口及主聊天零推送。
+- [ ] 最终：Go vet/全套测试/race、C/ASan、前端、真实协议、并行输出/Job/Hook/100分支内存实测、协议/API/示例/使用文档与提交清单。
+
+已完成提交：`3c0c792`（AB1–AB3）、`26423c0`（S6）、`6da5b93`（旧归档名称）。P6b 的实现由后续独立提交记录。
+
+本次已运行：`go test ./... -count=1` 与 `go vet ./...` 通过；session/autonomy/experience race 通过，P6b/Life/Autonomy 专项 race 通过；网页 `npm run check` 和 `npm run build` 通过。事故回归使用主动重复未闭合请求的确定性模型，实际经 Knowledge 写两条记忆、reset、推进时钟、手动唤醒、第二次片段；验证没有十分钟聊天唤醒、不重复写记忆、新请求仅系统前缀和当前片段、原始片段均保留。
+
+恢复说明：提升失效资格保存在 `v1/promotions/<key>.revoked`，未提交/冲突计划阻止普通读写发布副本，显式新上下文先隔离旧副本。经历保存在 `experience/<agent-key>.jsonl`，尾部半条截回完整边界，中间损坏冻结追加并显示错误；最多 500 条/30 天，检查点保留序号高水位。autonomy schema 1 首次升级前保留 `.schema1.bak`，未来版本拒绝覆盖。经历是派生索引，写入失败不撤销真实聊天结果，不宣称与历史跨文件事务。
+
+尚未实测真实飞书/Telegram、远程 SSH、Windows/ADS、断电持久性及整版性能；上述专项通过不扩大为这些范围或 v0.9.0 全部交付。
+
+### 本次 Windows 后续实测
+
+P6b 核心提交为 `4884dea`。随后完成 W2 的 `plat_getenv_utf8`（不存在/空值/读取失败区分，Windows 宽字符动态读取）、W3 的 Windows `time/tzdata`、W4 的 `.exe` 与真实文件身份识别及安装/自动应用分离、W5 的目录失败诊断。W5 返回阶段、实际 UTF-8 路径、Win32 错误码、当前/父进程完整性 RID、父进程与执行器路径和执行器 SHA-256；未设置完整性标签、未修改权限模型。
+
+本轮确实在原生 Windows 跑过执行器整套（0 failures），包含中文/空格/非 BMP NANO_HOME 的 Read/Write/Shell 与 tmp/cache，以及目录故障的非零原生错误、可取得的完整性 RID 和 SHA-256 与实际二进制比对。独立 Windows 网关最终 exe 在不存在的 GOROOT/ZONEINFO 下通过 Asia/Shanghai、America/New_York 配置检查，非法时区被拒绝；原生测试检查夏令时偏移差异与安装布局/文件别名。真实 Linux 网关 + Windows C 节点跨机 E2E 17 项通过，技能缓存实际写在中文/空格/非 BMP 根目录。夹具先前把工具进度当作整轮结束而偶发插话，已改成等终态用量行后再发下一条顺序请求，审批控制仍立即发送。
+
+最新 C core 205 checks / 0 failures；受改动影响的执行器与宿主 ASan 串行测试均 0 failures；Go vet 与更新专项通过，前端检查/构建通过。CI 增加 Windows 最终 exe 离线时区和安装识别回归。这里的 Windows 实测不包含旧 ADS 迁移、完整安装升级包测试或此前 Low Integrity 报告的原机器归因。
+
+### Fork 底座续作
+
+`bbe35fe` 修正命令重复加锁、来源/目标授权和主体+来源绑定的幂等范围；模型工具只能创建 silent 分支。`a61c6f3` 改为固定文件描述符与字节边界的虚拟历史读租约（继承快照+独立尾部），最多 32 个待复制、2 个实际复制者，哈希/复制/校验不占 App 总锁。历史撤回改为原子替换，旧描述符继续指向原边界；嵌套、压缩、撤回、重置共享虚拟坐标。指纹含完整适用设置、persona、Summary/Base/Omitted、来源与真实消息字节；Ready 从冻结值构造设置，先提交设置/操作后发布元数据，目标世代/revision 变化会撤销发布授权。
+
+ForkOp 先可靠预留 branch_sid，旧版缺失关联按 operation_id 对账；pending 恢复若无可确认边界则显式 needs_attention，不拿最新上下文替代，不重放旧工具；已保存 snapshot_ready 可续办发布。模型整批工具闭合、插话落盘后即能固定边界；取消/异常不会 ready。分支固定 owner_agent，查看/列表/操作统一访问范围。真实 C 内核 + Go 网关测试同时执行 Session.fork 和兄弟 Skill，快照内两条调用与两个结果严格配对。
+
+网页概览只读轻量快照统计/尾部，不加载闲置分支 History/context；用户打开单个分支按需计算上下文再卸载，维护/完成时释放闲置历史和设置缓存；共享快照缓存核算工具参数、附件和结构开销。100 个闲置分支（同一约 4.2 MB 来源、刷新真实 App.Snapshot、逐个打开 History）无 race 实测：累计 Go 分配 75,419,624 字节、GC 后活跃堆增量 195,152 字节、共享缓存账面 4,550,308 字节；该测试进程 RSS 51,280 kB、PSS 49,965 kB。进程指标包含 Go 测试宿主，不等于新增常驻内存；race 进程的较高 RSS 单独记录，不与无 race 数据混算。
+
+上述源代码和永久回归已提交；Fork/快照/恢复专项 race、真实 C 并行边界、完整 Go 测试与 vet 通过。F2 统一 silent/自主预算/话题复用/完整界面仍继续实施；后台 Job、Hook、心智完整配置、W1 辅助入口与 ADS 尚未交付，不把本节当作 v0.9.0 全部完成。
+
+- W1 辅助存储与 ADS：人格/持久插话改用规范键及共同世代/版本授权；辅助文件参与可恢复重命名，pending 副本不能由普通写入发布，reset 可撤权。启动盘点恢复、可见迁移备份、ADS 枚举、未确认候选备份、Windows 大小写归属和既有绑定识别已实现。新增网页恢复错误、执行前存储检查和迁移说明 docs/STORAGE-v0.9.0.md。相对根引用通过整个安装目录搬迁回归。全量 Go 测试/vet、定向 race、网页 check/build 通过；原生 Windows 运行 ADS/辅助文件/重命名恢复/reset 撤销/身份归属测试通过。真实用户数据目录未迁移，不能据此声称用户迁移已完成。
+
+- P4 隔离覆盖链补齐：全局→agent→workspace；运行开始冻结目标策略，模型参数和协调内核帧不能覆盖；目标节点 on 强制施加，节点 off 与请求 on 冲突明确失败。旧目标执行器缺少 sandbox_modes 时拒绝显式 on/off，旧协调内核缺少所需能力时在模型启动前失败。sandbox_policy 升至 2。逐次结果回传 requested/mode/effective/reason，写历史、网页调用卡片，和能力探测分开。配置/schema、agent 设置、工作目录添加/修改、GatewayAdmin、/sandbox、会话/节点面板与说明已同步；prefixVer=8。off 允许包含自身的工作目录，应用层路径权限照旧；补修 Windows 绝对 Unicode 路径和含自身判断。
+  - 验证：全量 Go test/vet；针对隔离/Host/配置/100 分支查询的 race；C core 205/0、Linux 执行器与宿主 ASan 全套 0 failures（含新 workspace 覆盖、状态往返、节点 on/off 部署规则）；Windows C 交叉构建通过，真实 Windows auto/off=none、on 失败无副作用通过。Windows 原执行器全套的已有用例全部通过，新用例首次暴露测试 helper 缺参数，修复 helper 后单独重跑该新用例通过。原生 Windows Go Unicode 工作目录与大小写/分隔符包含判断通过。网页 check/build 通过。没有将 Windows 编译等同于真实运行验证。
+
+- P0 平台关联与提案边界：新增可选 ToolEvent，CLI/飞书/Telegram/过滤层及网页按 run+turn+call 身份更新，乱序完成和跨轮复用 ID 正确；实时排队、开始、审批状态接通。工具历史、附件、SSE 保留身份，迟到模型正文不会写进后续网页 run。平台缓冲限额：正文/思考各 128 KiB、notes 32、tools 128，保留未完成项。修复异步取图在下一轮 model 已抵达时误用新 turn_id。未接受工具提案改为独立 proposed_calls 查看，正式模型历史没有孤立 tool_calls；空/重复/过长 ID、超过 32 调用整批未接受、无部分执行，C 超硬边界不再截取。prefixVer=9，仅对声明 bounded_parallel 的内核注入并行说明。
+  - 新增 Go 模型替身验证提案整批拒绝、用量结算和历史重建；渠道验证乱序、重用 ID、重复终态、4000 次调用/输出下有界状态及渲染；网页新增无额外依赖的 Node 内建语义测试并接 CI；C 宿主 ASan 验证超大协议提案不执行任何部分。定向 race、网页 test/check/build 通过。P0 的机器级 Gateway 租约、公平优先级和完整资源域仍需继续；未将本批声明为整个 P0 已完成。
+
+
+### 统一执行租约与 run 接纳续作
+
+新增有界 dispatch 调度器和单个持久化工作者；按会话轮转、用户优先与等待加权，统一每 run、
+同机多节点、Shell、资源域和后台容量。文件域处理重叠目录、点段、符号链接和 Windows 路径比较；
+off/提权/作用域不明的 Shell 取机器文件域独占。Hook 保留分区已在调度器验证，Hook 处理器仍待交付。
+
+授权执行前先同步保存租约；磁盘工作不占 App 总锁。C 节点启动身份由系统随机数生成，握手协商、
+完整清单核对之后才放行新执行；断线/恢复保留 unknown，不自动重放。校验原 run/turn/call、固定 agent
+与 host RPC 归属；代执行编号包含网关启动身份，防止重启后复用。网关直接执行、SSH、MCP、网络及
+网关状态工具也进入同一 per-run 仲裁；不能核实路径别名的直接/SSH路径采用机器域保守串行。
+MCP 默认服务串行，结束 RPC 不宣称外部副作用回滚。SSH 执行连接丢失保留未知占用。
+
+排队不占 C run 运行槽，实际进程启动后才计执行时限。修复已有的宿主排队后启动失败不能被 core
+接受、导致整批卡住的问题；排队失败直接闭合，既不伪造 started，也不跳过同批其他调用。
+网关的活动 run 按节点硬上限接纳，普通消息每会话 32 条、总计 256 条/8 MiB；等待消息保留，
+完成后按会话轮转。runtime 配置、示例、网页设置/API/类型与机器资源占用卡片接通，改变限额需重启。
+补齐概览对 storage_issues 的传递；新增 App.Wait，取消后等待持久工作者结束再退出/重新执行。
+
+验证：完整 Go test/vet 通过；调度器持久恢复/授权失败/公平性/锁与取消、网关接纳/排队/执行时限、
+MCP 及真实 C 往返的 race 通过；C core 215/0，Linux 宿主 ASan 全套 0 failures；
+网页语义测试/check/build 通过；Windows 内核和执行器构建后，真实 Linux 网关 + 原生 Windows
+节点 E2E 17 项通过（包含文件、Shell、CRLF、Unicode 自定义根和技能缓存）。
+
+这批是共享调度/持久租约层，不代表后台 Job、Hook、完整心智配置或 F2 已完成。仍需继续实现
+C JobManager、流式输出/原地移交与所有渠道操作，再接可靠 Hook、统一活动账本和 silent 分支。
+
+
+### P2 流式执行底座续作（JobManager 与渠道仍在实施）
+
+执行器 v2 增加 job_stream=1，显式 stream=1 时真实启动后给 started，stdout/stderr 分别增量输出，
+8 KiB 原始块/base64、16 KiB 帧上限，保留唯一 exit 与取消/超时/退出码/实际隔离回执。
+终态只含最多 2 KiB 原始预览；完整二进制输出经过流式帧。默认 30 分钟，0 仅在可信请求显式允许
+不限时时有效；旧模式继续一问一答及 120/600 秒规则。
+
+新增 C 增量解码器，验证序号、完整 job_id、base64、状态次序和唯一终态；中断或半条不会伪装成功。
+runner 改为每个调用独立冻结输出上限。原生测试还发现 Windows runner 原来只传 argv[0]，已复用平台的
+完整 Windows 参数引用；读取线程在释放 Job/参数前停止并等待退出，避免清理时引用已释放内存。
+
+已接入现有 Linux/Windows 测试和 CI：真实执行器在命令仍阻塞于门控文件时交付输出；验证任意
+0–255 字节共 256 KiB 无损、命令伪造 JSON 仍是数据、终态有界、超时/取消与允许的不限时；
+真实 wire 帧再交给 C 解码器核对。C decoder 273 checks/0；实际三个进程分别保留自己的输出上限，
+Linux ASan 与原生 Windows runner 均 3 children/0。执行器的 Linux ASan/原生 Windows 整套通过；
+宿主 ASan 整套通过。最终更新后的完整 C 检查（含 Windows 执行器、Linux 执行器/宿主 ASan、core、runner、decoder）全部通过。
+
+尚未宣称后台化或 Job 工具完成；接下来把流解码接入节点 JobManager 的有界日志、可靠所有权变更和
+资源租约，再接命令、网页和平台操作。缺少 JobManager 的节点继续使用原来的前台 Shell。
+
+
+### P2 C 宿主与持久生命周期续作（仍未完成整条用户路径）
+
+C runner 已接入逐帧解码；Linux poll 和 Windows stdout 读线程都不再累计完整流式输出，
+只缓存终态帧。真实 C 宿主测试执行 1 MiB 输出命令后，按唯一 run_result 取得有界预览；
+实际四个子进程的独立限额/增量结果在 Linux ASan 与原生 Windows 都通过。
+
+新增单个有界 C Job I/O 工作者：队列 128、日志只用前 112 个位置、状态操作保留容量；
+每个任务最多四个 512 KiB 日志段，二进制游标读取最多 64 KiB/64 块，写入缺口显式标记。
+元数据保存先刷日志再持久发布；Linux 同步文件及目录，Windows 使用已 flush 的原子替换。
+重启后 queued/preparing 变 interrupted，其余非终态变 unknown，不重放保存的命令；
+未来版本或损坏身份冻结恢复并保留原文件。恢复及记录数量最多 256，I/O 在节点 poll 外。
+
+C JobManager 的创建、启动授权、真实启动观察、移交保存、终态保存和读取已接持久工作者。
+保存失败不能发布后台所有权；移交保存与结束竞争由同一生命周期队列闭合。C core 增加
+独立 detach 事件，只闭合原等待关系，不取消真实进程；保留批次屏障和原模型步数预算。
+重置不再给已完成调用发 KILL；宿主排队超时则会取消仍受理的请求，防止失败后又启动。
+
+已验证：Job I/O 在 Linux ASan 与原生 Windows 均 1573 checks/0（含 4 MiB 无损轮转段、
+饱和队列与缺口、游标读取、写入失败、重建与未来版本保留）；Job 生命周期 49 checks/0，
+覆盖先完成/先移交和持久失败；C core 最新 232 checks/0。
+仍需把生命周期接到真实节点的创建/取消/移交、网关租约后台化与对账、Job 工具/命令和各渠道，
+并完成完成事件与 Hook。现有 Gateway 尚未协商开启后台 Job，不把这些底座测试当作用户路径通过。
+
+
+- 后台容量移交补为两步：prepare 持久预留容量但不释放前台预算，节点保存所有权后才 commit；
+  失败 abort 保持原前台关系。lease_detach 能力、完整执行者/请求身份、成功/失败响应已接 Gateway；
+  调度器保存/恢复和真实 Hub 往返 race 通过。尚待 C 节点发送此流程及 Job 工具/界面整体接通。
+- 最新底座验证：完整 C 测试及全量 Go test/vet 通过；修正旧 MCP 停止夹具的同步，工具取消回执后等待实际 run 结束再开始下一次独立调用，race 重复 15 次通过。覆盖 Windows 原生执行器、Linux ASan、core 232、stream decoder 273、runner 4 个真实子进程、Job I/O 1573、Job 生命周期 49。
+
+### P2 C 节点实际执行链（Gateway 用户入口仍在实施）
+
+真实节点现在先可靠保存每个 Shell，再申请租约和本机槽；starting 保存后才创建流式执行器，
+started 从真实子进程观察产生并冻结实际执行期限。background 可在未取得槽时可靠移交 queued，
+auto 使用独立 yield 时钟；手动 detach、取消、输出读取和状态查询通过 job_control 接通。
+保存后台所有权→提交租约后台化→原调用唯一结果；完成和移交竞争不启动第二条命令，也不返回两条结果。
+断开 Gateway 不停止已移交任务；已移交排队项也保留原顺序。自动更新遇到活动 Job 明确延后。
+终态及其 ACK 均持久化，未确认回执至少一次补发。重启恢复不重放命令，unknown 保留槽和锁。
+
+实际进程测试覆盖 Linux ASan 和原生 Windows：13 个 host 请求，加 C 模型循环内 Shell 后台化与
+Read 的双调用批次；包含排队/自动/手动移交、容量拒绝、退出与提交 ACK 竞争、运行/排队取消、
+断线重连同 PID、原 run 结束后 Job 继续、节点重建 unknown/interrupted、ACK 和输出尾部保存。
+Linux 再用错误协议夹具验证重复、截断或缺失终态都不能发布成功。测试发现并修复队列在节点退出时
+未释放的内存、未取得真实资源就过早保存 starting，以及恢复时用空尾部覆盖已保存日志摘要。
+新增永久 CI 路径，Windows 用实际原生内核和执行器，不以交叉编译代替运行。
+
+全量 Go test/vet、相关协议/完成证据 race 通过；完整 C 测试通过，随后改动的协议终态校验又经
+Linux ASan 与原生 Windows 节点专项验证。后台/queued/unknown 等回执不能作为任务完成凭据。
+这仍不是 P2/P3 全部完成：Gateway 尚未协商 job_manager；需继续任务索引/权限、可靠重连终态证明
+与租约归属对账、旧回执回收、Job 工具、命令及全部平台入口，然后完成可靠 Hook、统一活动预算和 F2。
+
+- Job 对账续作：租约保存固定 job_id；跨节点启动只认领完整身份/资源一致的 unknown 或持久终态证明。
+  leases 与 lease_receipts 独立有界，unknown/遗漏的 Job 保留槽和锁，旧活动清单不能恢复已结算调用；
+  整份清单先验证再发布。节点仍在保存的 detach_request 保留后台容量预留，恢复已发布后台状态可
+  完成原移交。覆盖排队/保存中/已发布/取消/终态/重复回执/拒绝部分改写的 race 和真实 Hub 往返。
+  最新全量 Go test/vet、Linux ASan 节点以及原生 Windows 节点路径均通过。Gateway Job 索引、
+  可靠事件处理和用户入口仍继续实施，尚未对 App 开启 job_manager。
+
+- C Job 记录回收已接实际节点：240 条触发，按最旧且已确认的确定终态回收到 224 条；I/O 工作者
+  删除成功才释放身份与日志槽，unknown 和待确认回执不淘汰。阻止回收时新增日志读取、重复删除或
+  直接释放未提交记录，删除失败限频退避；避免每次选择复制 256 份输出。Linux ASan/原生 Windows
+  生命周期最新各 62 checks/0；两个真实平台均从磁盘重建 240 条任务，确认最旧已 ACK 记录回收、
+  最新记录保留、pending 和已 ACK 的 unknown 保留。更新后的节点 13 host 请求和原生双工具批次通过。
+
+- C/Go 实际协议契约：Go 增加完整 Job/结果/二进制游标类型，job_data 与旧管道字符串 data 分离；
+  真实 Hub 解码、后台回执、原调用取消后任务继续、状态/日志、唯一完成事件和持久 ACK 的 race 通过。
+  协商必须同时具备 job_stream/machine_leases/lease_detach 和处理器能力，生产 App 尚未开启。
+- 复现并修复长命令叠加控制字符输出导致终态元数据超限而无法闭合：初始元数据限 28 KiB，
+  提前预留终态空间，预览限 2 KiB（完整日志不变）；超限在执行前明确拒绝。Linux ASan 与原生
+  Windows 生命周期各 73 checks/0。协议改动后的节点专项、全量 Go test/vet 与相关 race 均通过。
+
+- 可靠事件单写者 journal 已实现并经 Linux race 与原生 Windows 验证：Job+终态原子落盘，
+  准入时预留终态位置和字节，规则匹配+固定 revision 投递原子保存；完整校验、半条恢复、
+  同文件快照替换、磁盘失败冻结确认、队列排空、silent 继承和因果限制。事件正文回收后保留
+  Job 终态身份或来源确认游标，乱序有界，旧正文不能重投激活；Windows CI 加入同套测试。
+  详见 docs/RUNTIME-events.md。这是可靠日志模块，尚需继续 App 准入/确认与用户入口接线，
+  不以此宣称整个 Job 或 Hook 功能交付。
+
+- Gateway 已接可靠 Job 索引：首次核对真实 C 调用/host wait、固定 creator/silent 和完整资源；
+  索引及终态名额保存成功前，lease_acquire 有界等待，失败不取得执行授权；终态与事件一起
+  落盘后才 ACK。来源失效或换 ID 的副本不凭节点自报激活，恢复问题进入可见存储诊断。
+  creator/silent 进入 C policy、Job origin、持久租约和重连身份核验。
+- 新增实际 C 模型循环→安静持久分支→后台任务→原 run 结束→原命令完成→可靠事件的专项：
+  native Job 保留 creator/silent，主聊天零推送；Gateway 自动 ACK 与真实磁盘重建通过。
+  全量 Go test/vet、App/dispatch/eventlog 相关 race 通过；Linux ASan 与原生 Windows 节点
+  13 host 请求、原生双工具批次和 240 条恢复回收继续通过，并验证 native policy 的 silent 来源。
+  生产 App 尚未开启 job_manager，继续任务工具、命令和平台入口；完整 Hook、统一活动账本与 F2 仍未全部交付。
+
+- Job 统一用户控制入口已实现：权限范围、只读限制、离线状态、日志游标、最多 10 秒事件驱动等待、
+  取消与原地 detach；控制/等待各 128 个、取消后清理，不取消真实执行来结束查询。
+  Job 工具按 job_control_tool 协商，C 路由到 Gateway；/jobs、/bg、/job、/stop <job_id>
+  直接处理，不进入模型消息队列。列表只复制有界元信息，分页游标不暴露不可见任务。
+  prefixVer=10；仅 Job status/wait 的 succeeded 可作完成证据，其余查询及受理回执不算。
+- 真实 C 模型循环已跑通 Shell 后台化→Job 查询→原会话结束→Gateway 取消/等待；命令、权限、
+  跨 agent 隔离、离线、错误 epoch、取消清理、分页与完成凭据的 race 通过。全量 Go test/vet
+  及相关 race 通过；节点专项继续覆盖 Linux ASan 和原生 Windows。
+  仍继续网页/API/平台卡片与长调用入口，尚未打开生产 job_manager；完整 Hook、心智配置和 F2 继续实施。
+
+- 网页执行任务面板已接统一 Job 控制入口：顶栏/搜索/任务链接、分页元信息、实际日志游标、
+  事件驱动短等、取消和转后台；保留当前聊天，silent 状态变化不发聊天通知、不自动跳转。
+  仅保留 200 条任务、200 条近期状态及 128K 日志字符，关闭面板撤销订阅和定时合并。
+  SSE 改用 JobInfo 投影，不传命令/资源/结果正文；API 严格限制参数和正文。
+- 真实 HTTP→Hub→节点 NDJSON 验证输出/移交/取消、可靠终态 ACK 和 SSE，并从磁盘重建
+  初始索引；登录/请求保护、离线、分页与参数回归通过。网页 UTF-8 跨页、终态防倒退测试、
+  类型检查和生产构建通过；web 包 race/vet 通过。继续长调用提示、飞书/Telegram 控件、
+  SSH 能力降级与其余 Hook/心智/F2；生产 App 尚未打开后台协商。
+
+- 长调用提示与 JobPresenter 已接实际持久运行状态：默认实际运行 10 秒，只提示一次、不计排队，
+  不受过程显示档位影响；runtime.long_call_hint_seconds 已进入配置示例/schema。
+  飞书卡片/Telegram inline keyboard 与无按钮命令共用同一任务身份；26 字节令牌绑定原卡片、
+  渠道对象/agent/Job/来源会话，点击当前授权，重复操作合并、终态撤销无效按钮、重启令牌失效。
+  有界发送队列执行慢 I/O，合并卡片更新、有限重试，来源失效和过期回收。
+- 真实 C/Go 前台 Shell→模拟时钟提示→实际按钮 detach→原 run 结束→原 PID 完成的 race 通过，
+  单次启动标记只有一份；同时覆盖慢卡片不占 App 总锁、原身份/消息/操作者、重复点击、
+  terminal/过期/换渠道与 silent 零推送。两平台模拟 API 与回调测试通过；
+  全量 Go test/vet、相关 race 通过，真实账号凭据与卡片权限未实测。
+- 网页补入浏览器回归：实际日志/转后台/查询控件、跨页中文与表情、HTTP/SSE 终态竞态、
+  silent 主聊天/通知零变化、保留聊天与直接链接均通过，截图 build/ui-check/jobs.png。
+  仍继续生产 Shell 能力和 SSH 降级、可靠 Hook、完整拟人配置/统一账本及 F2，未宣告全版本交付。
+
+- /stop all 已接停止当前前台及本人在同一来源会话发起的活动 Job；管理员也不扩大本人范围。
+  最多 16 个取消组、每组 4 个工作者，重复请求合并，报告受理/未确认而非假称已退出；
+  /job logs 别名接原日志游标。异步命令与按钮共用原渠道/agent 投递校验，换渠道不转发旧结果。
+  真实控制往返的 scope/重复/缓存回收 race 通过，全量 Go test/vet 通过。
+- 复现并修复 Job base64 日志分片绕过现有模型工具脱敏：有界合并页内分片后脱敏再编码，
+  保留原始游标跨度，标记模型视图 redacted；原始历史/日志 API 不改写。
+  实际模型请求替身验证 always/off 及原历史，覆盖跨分片密钥、长/短私钥与无敏感内容字节保持；
+  App/redact 相关 race、全量 Go test/vet 通过。后续完整范围继续，未打开生产后台协商。
+
+- 复现并修复跨机器前台 Job 的计时传递缺口：目标节点给出的实际时限原先在 Gateway/
+  协调 C 内核之间丢失，且 lease_started 先到会装上旧 610 秒计时器。
+  从同一可靠 Job 和固定 host wait 验证策略，合并两种真实开始信号，一次通知；
+  明确 Job 身份后不再用旧 Gateway 工具看门狗，64 位毫秒进入协商后的 C started 事件。
+  内核超时说明也使用实际时限；run 总预算、前台取消和旧无标签执行保持原有语义。
+- 新宿主回归在旧 C 二进制复现失败，更新后按实际 1 秒时限闭合，完整宿主 ASan 与
+  C core（232 checks/0）通过。Go 覆盖不匹配来源/时限、lease/run 信号竞争、
+  1800 秒、0 不限及一年时限、旧通知，以及真实 C/Go Job/提示相关 race。
+  全量 Go test/vet 通过；原生 Windows 新节点的 13 host、native 双调用、Job 工具、
+  重连/重建与 240 条记录回收继续通过。Windows 未单独实测异机 1 秒超时分支。
+  Shell 目标能力、配置迁移、SSH 后台及完整 Hook/心智/F2 等剩余范围继续推进。
+
+- 执行节点硬时限已接实际链路：kernel.conf.max_job_timeout 默认 86400 秒，
+  0 才允许显式不限时；受管理/流式请求不能通过顶层参数提高部署上限。
+  新能力进入 hello 与网页节点显示，旧非流式 120/600 秒规则保留。
+  yield_after_ms 非整数/越界/错误类型均在 Job 登记前拒绝，避免悄悄使用另一种等待时间。
+- 实际流式命令试图提高上限仍于部署的 3 秒超时，未经允许的不限时在启动前失败；
+  完整 Linux 宿主 ASan 通过。JobManager Linux ASan/原生 Windows 均 87 checks/0，
+  两平台节点的 13 host、原生双调用、Job 工具、重连/恢复/240 条记录回收通过。
+  网页类型检查和生产构建通过。网关默认值/配置迁移/SSH 链路与完整 Hook/心智/F2 继续。
+
+### Hook 可靠规则与派发基础（2026-10-29）
+
+已接入同日志规则修订、固定创建操作身份、删除墓碑、一次性认领与成功停用；新增有界派发、按对象去抖、有限重试和不安全动作恢复为 uncertain。格式 2 首次写规则前流式保留 v1 备份。go test -race ./internal/hooks ./internal/eventlog -count=1 通过。此项是运行基础，实际 App 处理器与管理入口仍在接通，不能视为完整 Hook 交付。
+
+### Hook 实际处理入口与一次性到期（2026-10-29）
+
+已连接 App 的 Hook 工具、HTTP、网页规则面板、斜杠命令；notify/短命令/C agent 四种目标接通。权限上限、工具集、工作目录和窗口凭据指纹固定，当前权限撤销会暂停，临时缓存完成及异常退出均卸载。新增 C 子进程有界事件 stdin、实际执行器能力检查、脚本摘要与只读版本缓存、一次性 deadline 最小堆、持久冷却与速率、完成事件有界保留、运行对话入口，prefixVer=11。相关五个 Go 包全量 race 与 go vet 通过；Linux 执行器 ASan、Windows 原生执行器各 0 failures，包含事件 stdin；实际 Go→C 短命令、临时 C 协议、安静事件无源聊天推送、规则权限与 CAS 测试通过；网页实际 CRUD 与到期派发浏览器回归 0 failures，类型检查 0 errors/0 warnings，构建通过。前置 C 屏障、原生文件观察、message.received 对账、统一拟人活动账本和 F2 仍待后续模块完成，未把本提交视为完整版本交付。
+
+### 前置 Hook 屏障（P7 第一批）
+
+C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `hook_check`，收到 `hook_result` 再决定审批或排队；上限 2 秒，超时或失败都收尾为未执行，判断只能追加审批。网关 `hooks.Engine.Check` 复用既有命令 worker 和有界队列（满则明确拒绝），按 priority、id 执行 `tool.before` 规则，投递标 `preflight` 且不自动重放；内核缺 `hook_check` 能力时该会话直接失败。网页事件面板在事件只有 `tool.before` 时固定 command 并给出 decision 下拉，投递列表显示「前置检查」标签。
+
+验证：`go build/vet/test ./...` 通过；`go test -race ./internal/hooks ./internal/app` 通过；`kernel/build/test_core` 262 checks / 0 failures；Linux ASan 宿主 `test_host.py` 0 failures；网页 `npm run check`/`test`/`build` 通过。
+
+未做：文件观察器、`message.received` 生产者、macOS/Windows 观察器。模型可见的工具说明未变，`prefixVer` 仍为 11。

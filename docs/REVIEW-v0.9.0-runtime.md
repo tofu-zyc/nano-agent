@@ -1,8 +1,8 @@
 # v0.9.0 二轮验收与下一步执行清单
 
-日期：2026-10-27。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；前次复验：`5d8bc9a`、`cbdadac`；最新复验：`2bb1953`。
+日期：2026-10-28。首次审查基线：`05e995e`，此前修复提交：`32c97fc`；执行链复验：`8093f20`；持久收件箱首次验收：`33673fd`（含 `7f48078`）；前次复验：`5d8bc9a`、`cbdadac`、`2bb1953`；B 通过提交：`50ee283`；F1 复验：`c3c0489`（含 `049c848`）；Windows W1 复验：`cc66cad`、`c4cccb6`、`e25c1f8`、`c89d832`、`6a63be6`、`f009124`、`a13353c`、`b379366`；第 21 节通过提交：`d3e4787`；逐项提升清单复验：`bccb4d1`。
 
-**最新结论：`2bb1953` 已通过第 9 节四个反例的独立复验，但停止失败重试、重置清理失败仍有问题，新增历史回查也有整份加载导致的内存增长，B 暂不通过。** 当前结果与修复要求见第 10 节。第 2 节的 R1–R4 已在 `8093f20` 复验通过，保留原始问题用于追踪。第 3 节其他衔接项继续按实际范围跟踪；B 的原始恢复约束见第 6 节。本文记录验收和指导，没有修改产品源码。
+**最新结论：`bccb4d1` 已落地逐项提升清单和启动续办，但本批尚不能验收。** 独立复验发现两个 P1：revision 失效结算后可换 operation_id 重新导入旧正文；旧源全部消失时，普通读写绕过清单，把未提交副本激活，随后将缺项的冲突清单标为 committed。另有 P2：启动恢复静默吞掉终态写入失败。证据、修复要求与永久回归见第 23 节。基础 Go 检查、session race 和 C core 均通过，约 64 MiB 提升的累计 Go 分配约 4.35 MiB；这些通过不抵消恢复入口的反例。`d3e4787` 在第 22 节的既有通过范围保持；先补第 23 节，再继续 S6 归档一致视图、插话 / 人格适配与 ADS。不将本批扩大为整个 W1 或 Windows 升级已交付。`50ee283` 的 B 历史验收范围不扩大到本轮布局变更；F1 见第 12 节，Windows 总排期见第 13 节。F2、后台 Job 与完整 Hook 暂不推进。本文只记录验收和设计指导，没有修改产品源码。
 
 ## 1. 已验证通过的部分
 
@@ -487,7 +487,9 @@ FindMessage 和 FindMessageBySource 改为扫描全部 s.History(sid)，解决�
 本轮证明了进程重启与真实部分写入回退的上述行为；未进行断电、真实 Sync 失败或检查点目录持久化的故障注入，不扩大为这些场景已验收。B 验收通过后，仍按第 4 节 C 开始安静的持久 Fork，agent 循环继续使用 C 内核。
 
 
-## 10. `2bb1953` 复验：正常路径通过，失败收尾与内存回查待修
+## 10. `2bb1953` 复验记录
+
+本节三个场景已在 `50ee283` 复验通过；最新验收结论和下一步见第 11 节。
 
 ### 10.1 已通过的范围
 
@@ -550,3 +552,1015 @@ findInArchive 使用 `all := s.loadFrom(sid, 0)`，先把当前正式文件的�
 先修上述两个 P1，并在同一小步把新增回查改成流式或有界索引，持续保留此前所有通过场景。停止失败重试、重置各阶段失败和低内存回查完成后再复验 B；通过后进入第 4 节 C 的安静持久 Fork。
 
 本轮只更新验收文档，产品源码未修改。未做断电或真实 Sync 失败注入，不将本轮通过结果扩大到这些边界。
+
+
+## 11. `50ee283` 复验：B 通过，进入 Fork 存储与显式入口
+
+### 11.1 独立验证结果
+
+重新运行 `go vet ./...`、`go test ./... -count=1`，全部通过，app 包约 24.24 秒；重新运行 C core，205 checks / 0 failures。此次没有 C 源码改动，未重复运行执行器 / 宿主 ASan 套件。
+
+使用临时 Go overlay 重跑第 10 节的真实反例：
+
+| 项目 | 独立复验结果 |
+| --- | --- |
+| 停止失效写入连续失败 | 从普通 `/stop` 入口重试五次，每次确认 cancel 发出；inbox 始终 1 条，稳定 ID 和字节数不变；修复日志后停止成功，重启不恢复 |
+| 活动重置历史清理失败 | 文件占住实际归档目录，收到“清空上下文失败”，重启后历史仍在，说明与实际状态一致 |
+| 空闲重置历史清理失败 | 同样制造归档错误，收到“清空上下文时出错”，历史保留 |
+| 流式历史回查 | 目标位于 Base 之前，当前有效窗口仅 1 条；ID 与 SourceIDs 均可查到，存在多条匹配时返回最后一条 |
+| 回查期间存活堆 | 在扫描中的匹配回调处 GC 后采样，4 MiB 前缀约增加 0.068 MiB，16 MiB 前缀约增加 0.063 MiB；不再随整份前缀大小线性增长 |
+
+本轮没有发现阻塞上述 B 交付范围的新问题。结合已有完整回归及历次反例，持久收件箱 B 通过验收，下一阶段按既定设计推进。
+
+验证范围是 Linux / WSL 下的代码、真实存储、进程重建和已注入的文件错误；没有进行断电、真实 Sync 失败、真实飞书 / Telegram 或 Windows 实机验证，不把本次通过扩展为这些场景的耐久性或平台认证。
+
+### 11.2 非阻塞：加强永久内存回归的夹具与采样
+
+当前 `TestArchiveLookupDoesNotLoadWholeHistory` 把目标消息放在长历史末尾；Compact 后目标可能仍在有效 History，查找会在内存直接命中。该测试也只在回查返回后 GC 再比较 HeapAlloc，无法测出“扫描时整份加载、返回后释放”的临时峰值。
+
+本次已用独立补验把目标放到 Base 之前，并在扫描回调执行期间采样，确认产品实现符合流式与低内存要求，因此这项测试改进不阻塞 B，也不阻塞开始 Fork。
+
+下一次测试整理时，将永久用例改为相同有效路径：目标明确位于压缩前缀；在查找期间采样或使用能检出旧实现的峰值测量；对比 4 / 16 MiB 前缀；保留最后匹配与 SourceIDs 的正确性断言。此次未修改产品测试文件。
+
+### 11.3 下一步只做 F1：Fork 存储与显式入口
+
+对应设计 `docs/DESIGN-agent-runtime.md` 第 8 节及本文第 4 节 C 第一小步。agent 工具调用循环继续由 C 内核负责；F1 建立持久上下文分支，不另写 Go agent 循环。
+
+交付范围：
+
+1. 持久 Fork 操作：用户显式入口与 Session.fork 工具；记录 request_id / operation_id、parent_sid / root_sid、owner_agent、稳定分叉边界和 branch_sid。重试、断线与重启返回同一个操作和分支。
+2. 不可变上下文快照：分叉点的 Summary、Base、Omitted、有效消息及来源、附件引用和适用设置完整保存。共享只读快照、独立分支尾部；源会话继续追加、压缩、重置或删除，不改变已就绪分支。
+3. 边界闭合：当前模型生成或前台整批工具未完成时等待既定安全边界。同批 Session.fork 先持久预留并返回 pending_boundary，使该调用本身闭合；整批闭合后再发布 ready。源 run 取消或异常结束时持久标识取消 / 待复核，不发布残缺上下文。
+4. 轻量展示：父子关系与操作状态可查询，原聊天窗口保持原绑定。分支记录默认 silent 策略；拟人自主调度和所有投递路径的完整贯通放到 F2 单独验收。
+5. 低内存与回收：流式生成固定边界快照，复制期间不占 App 总锁；小型只读缓存有上限，闲置分支卸载历史；快照与附件引用的释放可对账。
+
+F1 至少通过以下场景再提交验收：
+
+- 空闲 Fork、生成中 Fork、同批工具内 Fork；模型完整结束 / 工具整批闭合前不发布 ready，同批工具内无等待自身结果的死锁。
+- 同一操作重复请求及不同提交点重启，不创建多个分支、不重复发布 ready；未完成操作状态可以检查和恢复。
+- 父会话继续追加、压缩、重置、删除后，分支保留分叉时上下文；附件仍可读取，分支尾部不写回父会话。
+- 多分支复用同一快照，删除一个分支不破坏其他引用；源会话破坏性操作遵守快照读租约。
+- 创建并列出 100 个闲置分支，列表读取轻量元数据，不触发 100 份完整 History / contextInfo 常驻；缓慢磁盘复制期间前台仍可处理其他会话。
+
+F1 验收后再推进 F2：同一拟人 agent 自主创建、继续话题分支；共享心智和额度；以新 sid / run_id 进入原 C 循环；统一 silent 规则覆盖普通回复、工具进度、审批、失败、恢复提示和显式消息工具。最终用记录所有发送行为的假飞书 / Telegram 验证主聊天零推送，用户主动进入分支可查看并继续。
+
+本轮只更新验收文档，没有修改产品源码，没有开始 Fork、后台 Job 或完整 Hook。
+
+
+## 12. F1 `c3c0489` 复验：六组根因，暂不通过
+
+### 12.1 验证范围和已有通过项
+
+本轮基线是 `c3c0489`，存储前置提交 `049c848`。进入本轮时验收文档已有第 11 节的未提交修改；本轮保留该修改并继续追加，未覆盖产品源码。
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.32 秒。
+- 重新编译受本次工具注册改动影响的 C 宿主 ASan 版本；C core 205 checks / 0 failures。
+- 执行器、宿主 ASan 测试串行执行，均为 0 failures。
+- 正常空闲 Fork、未压缩主会话的单层上下文、完成操作重试、简单快照共用等已有测试通过。
+- 另用临时 Go overlay 在真实 App / Store 上运行 12 个反例，全部复现下列问题。overlay 只新增测试，没有替换产品实现；运行后已清理。
+
+### F1-R1 [P1]：用户命令重复加锁，慢快照也会阻塞整个 App
+
+位置：`app.go:OnMessage`；`session_fork.go:115 / 224 / 503`。
+
+两个独立复现：
+
+1. 从真实 OnMessage 入口发送 `/session fork 名称`。OnMessage 已持有 App.mu，cmdSessionFork 再调用会获取同一把锁的 SessionFork，250 ms 内不返回，App 锁也不释放。现有测试全部直接调用 SessionFork，没有覆盖聊天命令。
+2. 在临时目录用受控 FIFO 模拟慢源文件读取，Fork 进入 SnapshotIDFor 后保持读取未完成；另一 goroutine 调用轻量 Branches 也被阻塞，直到释放源文件 I/O。SessionFork 和 endRun 中的 materializeForkLocked 都在 App 总锁内完成哈希和磁盘复制。
+
+修复：已持锁的命令调用内部持锁入口；导出入口才负责加锁。快照按第 8.4 节设计固定字节边界与设置版本，建立读租约，在锁外流式复制；重新入锁核对操作、世代与版本后发布。源文件追加可继续，截断、重置、删除等待对应读租约，不能用 App 总锁替代租约。
+
+永久回归：`TestSessionForkCommandDoesNotDeadlock`、`TestSlowForkSnapshotKeepsOtherSessionsResponsive`，后者同时检查其他会话消息处理及列表响应。
+
+### F1-R2 [P1]：Base 被扣两次，Fork 分支时只复制尾部
+
+位置：`session/branch.go:WriteSnapshot / ReadyBranch / loadBranch`；`session/store.go:load / Archive`。
+
+两个独立复现：
+
+1. 父会话 8 条消息，真实 CommitCompact 将 Base 推到 2，有效窗口为 6 条。SnapshotMessages 已去掉 Base 前缀，ReadyBranch 却仍设置 branch.Base=2，loadBranch 再 skip 2，分支只剩 **4 条**。
+2. 主会话 3 条 → Fork → 分支追加 1 条尾部 → 从该分支再 Fork。源分支有效历史 4 条，新子分支只有 **1 条**。WriteSnapshot / SnapshotIDFor 只读 `s.file(srcSID)`，它对分支只是尾部文件，继承的快照完全没有进入新快照。
+
+修复：统一虚拟历史的坐标约定，明确物理快照条数、快照有效窗口、分支 Base 与尾部偏移；Omitted、Summary、Checkpoint、Undo、Reset、Compact、Archive 都使用该约定。提供可流式读取“继承快照 + 独立尾部”的统一接口，普通与分支来源均用它计算内容版本和生成快照。检查原始历史的接口也要覆盖继承内容。
+
+永久回归：`TestForkPreservesCompactedEffectiveContext`、`TestForkOfBranchPreservesSnapshotAndTail`；逐条比较消息内容、来源、Summary / Omitted，跨重启再比较，并覆盖分支自己的压缩、撤回和重置。
+
+### F1-R3 [P1]：快照 ID 没有包含完整上下文版本，复用旧设置
+
+位置：`session/branch.go:289`。
+
+SnapshotIDFor 当前只纳入 source_sid、Base、generation、Summary 和历史字节，没有纳入 Omitted 与 SnapshotSettings。
+
+独立复现：父会话 Model=A，创建快照；不追加消息，改为 Model=B 并增加 Omitted；再次 Fork。得到相同 snapshot_id，第二个分支实际仍是 **Model=A、Omitted 为空**。这不是两个相同上下文复用，而是不同上下文被合并成同一版本。
+
+修复：对完整、规范序列化的上下文版本做指纹，包含真实消息边界、Summary、Base、Omitted、来源与适用设置及附件引用。哈希与复制针对同一个租约版本；ReadyBranch 从已冻结快照构建适用设置，不能夹带当时又变化的父会话设置。
+
+永久回归：`TestForkSnapshotVersionIncludesSettingsAndOmissions`，分别改变模型、思考、工作目录、模式、Omitted 等而不追加消息，校验分支继承和复用规则。
+
+### F1-R4 [P1]：操作中间提交、恢复和 ready 发布尚未形成闭环
+
+位置：`session_fork.go:183 / 194 / 275`；`app.go:1138`；`session/branch.go:127 / 431`。
+
+四个独立实测：
+
+| 场景 | 实际结果 |
+| --- | --- |
+| ForkOp 已落盘，但把 branch_sid 写回操作文件失败；修复后重启重试 | 同一个 request_id 留下 **2 个分支记录** |
+| pending_boundary 已落盘，重建 App 后重试同一请求 | 返回原 pending，但 pendingForks 为空，没有恢复所有者或后续驱动，永远等待 |
+| 源 run 在所需边界前被 `/stop` 取消 | endRun 无条件 materialize，分支仍发布 **ready** |
+| 分支 settings 写入失败 | ReadyBranch 已先写 ready 元数据；查询与同请求重试仍返回 **ready** |
+
+修复要求：
+
+- 一次操作先持久预留不可变 branch_sid，与 operation_id / request_id / 主体 / 来源范围绑定；重启按操作和分支记录对账，补齐同一个操作，不能再次随机分配。
+- 持久记录来源 run、generation、边界与上下文 revision，恢复未完成状态。旧 run 已不存在时进入明确的取消 / 待复核状态，不能永久 pending，也不能随意用新会话的最新上下文补做。
+- 按真正的模型结束和整批工具结果闭合推进；正常、取消、异常、断线与空闲 compaction 完成分别处理。仅在 endRun 调用一次不足以覆盖所有安全边界。取消 / 异常不能直接 ready。
+- 快照、分支设置、引用和操作结果都成功提交后才发布 ready。失败保留可恢复状态，拒绝 continue / start 操作未就绪分支。持久写入错误必须传播；快照读错误不能都当 EOF，状态文件不能仅凭 Write + Rename 就扩大持久性承诺。
+
+永久回归至少覆盖上述四个中断点，并补真实 C 内核 + Go 网关的 Session / 并行兄弟工具往返，检查快照中 assistant.tool_calls 与 tool results 完整配对。现有同批测试直接伪造 exec / result / done，不能替代这条真实执行链。
+
+### F1-R5 [P1]：Session 工具没有验证来源会话和目标分支的访问范围
+
+位置：`nodes.go:129`；`session_fork.go:126 / 343 / 419`。
+
+独立复现：配置只读访客，从非管理员会话取得模型工具表，确认其中有 Session；调用 Session.fork 并指定 source_sid=main。操作成功，新分支复制了管理员主会话上下文。代码只检查源会话存在，没有验证调用者能否读取它；inspect / continue / pause / archive 也没有对应的目标访问校验。
+
+修复：创建、列举、查看和改变分支状态统一进行调用主体与上下文范围校验。默认允许当前可访问会话及授权分支；跨来源必须有明确授权。相同 agent 身份不自动等于任意用户会话共享。幂等键也绑定主体与来源范围，重试不能用别人的 request_id 取出另一范围的分支；模型参数中的 created_by / delivery 不能成为授权依据。
+
+永久回归：只读访客只能操作授权范围；不能 Fork / 查看 / 暂停管理员或其他用户的分支；另一个主体或来源复用 request_id 时不能拿到旧操作。拟人 life 的合法来源授权另设正向用例，不把“默认放开所有 source_sid”当自助 Fork。
+
+### F1-R6 [P1 / P2]：真实界面路径仍加载 100 份历史，缓存预算漏算内容
+
+位置：`app/query.go:104 / 137`；`session/branch.go:332 / 350 / 365 / 393`；`session/store.go:History`。
+
+两个独立复现：
+
+1. 建立 100 个闲置分支并卸载其历史。新 Branches 接口的确只读元数据，但调用现有网页使用的 App.Snapshot 后，store.hist 中驻留了 **100 份分支历史**。SessionInfo 仍调用 contextInfo / History；现有“列表轻量”测试只检查新接口返回条数，没有覆盖实际页面路径。
+2. 设置快照缓存预算为 1024 字节，加载两个只有工具调用参数的快照。缓存仍持有 **65558 字节参数**，账面两个条目都是 0；预算只计算 Content / Reasoning。默认 New 也没有初始化实际使用的 snapBudget，名义 8 MiB 的 fallback 函数没有参与准入。
+
+修复：网页列表、拓扑、SessionInfo 使用持久轻量统计，不读完整历史；把 UnloadHistory 接到空闲生命周期，限制普通 hist 与快照缓存共同持有的引用。缓存预算覆盖 Msg 切片、ToolCalls / Arguments、附件引用与字符串等真实保留对象，并正确初始化默认预算。活动模型窗口的峰值单独计量。
+
+永久回归覆盖真实 App.Snapshot / SessionInfo、曾经打开后又闲置的分支、工具参数和附件占主要体积的快照；不仅测从未加载过的分支列表。
+
+### 12.2 F1 的下一步范围
+
+先处理访问范围与命令锁，随后统一虚拟历史 / 快照版本，再完成可恢复操作状态机、锁外复制和内存生命周期。每组以独立小提交带永久回归；保持 C 内核驱动模型 / 工具循环。F2 完整静默投递尚未交付，不能将现有 start / continue 入口当作已经通过“安静自主运行”验收；在 F2 贯通前应清楚限制可用范围。
+
+结合下一节 Windows 问题，当前不推进 F2、后台 Job 或完整 Hook；Windows 落盘修复为下一轮最高优先级。
+
+## 13. Windows issue #2：并入下一轮修复方案
+
+### 13.1 核对依据与优先级
+
+已读取 [issue #2](https://github.com/tofu-zyc/nano-agent/issues/2) 及其 [Windows 0.8.0 附件](https://github.com/user-attachments/files/34007129/nano-agent.Windows.md)，对照当前 `c3c0489` 源码，并核对 Microsoft / Go 官方资料。用户提供的已校验 0.8.0 包实测作为 Windows 复现基线；本轮没有重新运行整套官方包复现。
+
+尝试在 Windows 原生临时目录追加验证 ADS 时，执行被工具自动审查拦截，仅返回 blocked by policy，未执行；本轮改用只读源码和官方资料核验，没有修改 Windows 会话或迁移用户数据。
+
+| 顺序 | 项目 | 判断及本轮目标 |
+| --- | --- | --- |
+| W1，P0 | 会话落盘和旧 ADS 数据 | 当前代码仍有同类文件名规则；先止住新增错误写入，再保留、恢复旧数据，覆盖所有会话关联文件 |
+| W2，P1 | 中文 NANO_HOME / 路径 | C 两处 getenv 与 UTF-8 路径接口不一致；统一平台层宽字符读取，不以改控制台代码页代替修复 |
+| W3，P1 | 显式 IANA 时区 | 当前入口未嵌入 tzdata，发布构建也没有 timetzdata；让独立 Windows 包离线可加载时区 |
+| W4，P2 | 更新检查的安装识别与能力说明 | 补 .exe 与正确路径比较，检查新版本与自动应用能力分开；保留当前手动更新策略 |
+| W5，待定位 | Low Integrity 归因 | 现有源码没有主动降低完整性级别的实现，用户复测未重现；先取启动链证据，不安排盲目权限修改 |
+
+W1 优先于新功能；W2 → W3 随后。W4 可作为独立小提交穿插。F1-R1 / R5 属于新功能发布前必须消除的阻塞，与 Windows 修复分别提交和验收。
+
+### W1：统一磁盘键，恢复 ADS，并兼容原 Linux 数据
+
+当前受影响入口：
+
+- `session/store.go:file`：历史；`session/settings.go:settingsFile / List`：设置和枚举。
+- `session/history.go:archiveKey`：归档目录与相关读取 / 清理。
+- `app/interject_journal.go:journalPath`：已回执插话的持久日志。
+- `persona/persona.go:FileFor` 与 `web/api.go` 的人格文件反向解析。
+- `session/branch.go:branchFile / loadBranches`：分支元数据。当前自动 br-* 通常不含冒号，但同一错误编码仍应统一；操作索引、快照引用和恢复不能另用一套磁盘命名解释。
+
+**逻辑 sid 保持原值，仅改变文件系统键。** url.PathEscape 是 URL 编码，不能充当跨平台文件名接口。Windows 还受保留字符、设备名、末尾点 / 空格及大小写规则影响；不能只替换冒号或仅在 Windows 改格式。[Microsoft 文件命名规则](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+
+实现方案：新增统一、带版本的存储键组件，所有上述读 / 写 / List / 反向解析共用；新格式使用带固定前缀的规范 ASCII 编码，确保原始 ID 大小写、字面百分号、中文及不同 UTF-8 字节不会碰撞。可逆编码超出文件名长度时，使用稳定哈希与持久原始 SID 映射，禁止截断 ID。新旧格式由版本或迁移记录明确区分，不能将旧名称恰好长得像新前缀的文件误解码。正常 Linux 旧文件与导出包也要能迁移和读取。
+
+迁移顺序：
+
+1. 在升级启动阶段、恢复模型任务和接收新受理回执之前，盘点正常文件、旧格式键及命名数据流；按原逻辑 sid 建立迁移清单。先提供只读检查结果，保留无法确定归属的项目。
+2. 将每个待处理流和相关普通文件复制为可见备份，记录源位置 / stream 名、逻辑 sid、类型、长度与校验和。NTFS 流的命名规则是 filename:stream:type，普通目录枚举不足以发现历史；使用 Windows 的流枚举 API，不只依赖 ReadDir。[Microsoft File Streams](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams)
+3. 流式复制到新键临时文件，验证 JSON / JSONL、消息 ID、世代、插话序号、Base / Summary / Omitted 和附件引用，持久提交后再激活索引。历史、设置、人格、插话与分支元数据按同一会话一起对账。
+4. 新旧位置都存在时先核验是否相同；不同内容保留双方并报告冲突。旧 settings.tmp / .new 可以是恢复候选，但不能凭文件名或 base 文件时间直接认定它已提交。**不丢弃旧 ADS，也不直接拼接历史 / 日志。**
+5. 迁移清单持久记录阶段、源校验和及目标版本；中断后续做同一项，不重复追加、不复活 withdrawn / discard，不改变逻辑 sid、父子关系或 endpoint 绑定。只在已确认提交后启用新位置；初版保留旧流和备份，不自动清理。
+
+退出条件：在原生 Windows NTFS 上对带冒号的真实渠道 sid 验证写入、重启、枚举、设置、人格、插话回执 / 撤回、归档和 Fork；确认没有新增业务 ADS。覆盖大小写不同 ID、百分号、保留设备名、中文、分隔符、末尾点 / 空格、超长 ID。使用包含旧 ADS 的受控迁移夹具，验证中断恢复、冲突保留、重复执行及 Linux ↔ Windows 导入；全程逐条核对原始数据数量与校验和。
+
+### W2：C 平台层统一环境变量的 Unicode 边界
+
+当前直接入口：`kernel/src/nexec_main.c:219` 的 tmp / cache / skill-cache 根目录；`kernel/src/main.c:1019` 的技能落盘根目录。两者调用 getenv("NANO_HOME")，随后交给按 CP_UTF8 转换的 plat_win 路径函数。plat_home 已用 GetEnvironmentVariableW，证明当前平台层两条来源的编码约定不一致。
+
+新增 `plat_getenv_utf8` 一类明确所有权的接口：Windows 用 GetEnvironmentVariableW 动态取 UTF-16，再转 UTF-8；POSIX 复制 getenv 结果。返回值统一由调用方释放，区分不存在、空值与读取失败；处理缓冲长度变化及转换错误，不静默截断路径。同步审计 C 中其余承载路径的环境变量，替换调用处而非仅修改安装脚本。[GetEnvironmentVariableW](https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-getenvironmentvariablew)、[getenv / _wgetenv](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv)
+
+退出条件：使用当前源码产物在中文 Windows、传统 ANSI 代码页与 UTF-8 环境下测试中文、空格和非 BMP 字符的 NANO_HOME；安装、启动、Read / Write / Shell、技能传输、tmp / cache 创建均落在预期目录，没有乱码同级目录。使用普通用户运行，重装升级保留 gateway.toml / data；Linux 同一平台接口回归通过。保持 C 内核与执行器的实现，不增加常驻辅助进程。
+
+### W3：Windows 网关独立携带时区数据
+
+当前 `config.Validate` 会执行 time.LoadLocation，而 Windows 入口及发布 / CI 构建没有嵌入 tzdata。优先在 Windows 网关 main 的构建文件中引入 `_ "time/tzdata"`，让命令行、配置检查、手动启动和安装后的进程都使用同一后备数据库；不依赖用户装 Go 或启动脚本恰好设置 ZONEINFO。Go 官方说明该包提供嵌入后备数据，二进制体积约增加 450 KB；这不是为 C 内核增加常驻运行时。[Go time/tzdata](https://pkg.go.dev/time/tzdata)
+
+退出条件：在无 Go 工具链 / 无系统 IANA 数据、无 ZONEINFO 的 Windows 测试环境中运行最终发行 exe，Asia/Shanghai 与一个含夏令时的时区可加载；默认本地时区行为正确，非法时区仍明确报错。核对定时任务和每日唤醒计数的日期边界。Linux 测试或交叉编译成功不能替代这一包级测试。
+
+### W4：修安装识别，保持更新能力与实现一致
+
+`gateway/cmd/nano-gateway/update.go:installedExe` 的期望路径缺少 .exe；同文件 installGatewayVersion 已明确拒绝 Windows 自动更新，`service_windows.go` 也拒绝自重启。因此修后缀并不构成自动更新实现。
+
+使用正确可执行文件后缀；比较规范化的实际文件身份，覆盖大小写、中文路径、链接 / junction 等安装路径别名。将“检查最新版本是否成功”“是否发现新版”“是否支持自动应用”“是否为已安装布局”分开。Windows 正常安装应准确识别，同时 Updatable=false 并明确说明手动升级方式，避免修完后缀反而显示可自动更新、点击后才失败。
+
+退出条件：安装包布局、开发目录及路径别名都有对应测试；网络检查成功、已有新版和网络失败分别显示正确状态；重跑手动安装保留配置、数据、密钥及迁移后的索引。Windows 的完整自更新 / 自重启作为独立未来工作，不混入此小修。
+
+### W5：Low Integrity 先收证据，不改变现有权限模型
+
+当前 sandbox_win.c 是空实现，plat_win 的进程创建路径也未发现 SetTokenInformation / CreateRestrictedToken 等主动降权逻辑；这与用户提供的官方包 Medium 复测相符，但不能据此解释报告者机器上的 Low 来源。
+
+下一轮为执行器准备目录失败补充可诊断信息：实际 UTF-8 路径、原生 Windows 错误码、失败阶段，以及可取得的执行器 / 父进程完整性级别和启动方式。核对版本和可执行文件 SHA256、父进程 / 快捷方式 / 计划任务 / 服务入口，构造普通用户的最小复现；不记录整份环境或密钥。
+
+在真实复现定位之前，保持现有沙箱与审批语义，不对整棵 NANO_HOME 或工作目录统一设置 Low 标签，也不把“执行器主动降权”写成已确认根因。诊断项不阻塞已确认的 W1–W4 修复。
+
+### 13.2 下一轮交付与验收顺序
+
+1. **先 W1 的统一键与兼容读取，再交付可恢复的 ADS 迁移**；Windows 数据恢复与新写入一起验收。同步跑 B 的插话回归，稳定消息 ID / 世代语义保持不变。
+2. **W2 → W3**，分别独立提交；用原生 Windows 最终产物跑安装 / 启动 / 工具 / 时区的端到端回归。W4 可独立穿插，W5 保留诊断结论与后续证据。
+3. 修第 12 节 F1 六组根因，先锁与访问范围，再上下文 / 操作状态机，最后锁外复制和内存生命周期。使用统一存储键，避免 F1 修完再留出 Windows 文件名分叉。
+4. 上述通过后再进入 F2 的安静自主分支；后台 Job、完整 Hook 仍在其后。agent 模型 / 工具循环保持 C，迁移和快照采用有界流式 I/O。
+
+每个交付提交说明修改点、是否迁移旧数据、回滚 / 恢复位置、原生 Windows 实测与 Linux 回归结果。明确区分“源码定位”“测试夹具复现”“官方包实测”，不以编译或同进程缓存命中代替落盘、重启与目录枚举验证。本轮仅完成检查和方案整理，未实施产品修复、Windows 数据迁移或权限调整。
+
+
+## 14. W1 第一阶段 `cc66cad` 复验记录
+
+本节记录上轮反例；`c4cccb6` 已通过的范围和当前剩余问题见第 15 节。
+
+### 14.1 本轮范围与验证
+
+此次只验收已经声明交付的普通文件键、兼容读与 Store.MigrateKeys。ADS 枚举 / 恢复、插话写入口和人格文件切换，仍按用户明确列出的未完成部分跟踪；不要求本阶段用未经原生验证的 ADS 实现补齐平台范围。
+
+- 重新运行 `go vet ./...`、`go test ./... -count=1`，全部通过，app 包约 24.30 秒。
+- C core 205 checks / 0 failures。本提交没有 C 源码改动，未重复运行执行器 / 宿主 ASan 套件。
+- 规范 ASCII 键的基本性质及手工调用映射辅助函数的原有回归通过；本轮问题主要在实际写入口、格式归属和切换状态。
+- 临时 Go overlay 在真实 Store、真实旧格式文件及重建 Store 上补充九个反例，全部复现下列问题；不需要 Windows 或 ADS 环境。overlay 只新增测试，没有替换产品实现，运行后已清理。
+- 保留进入本轮前已有的验收文档修改；产品源码及用户数据未改动。
+
+### W1-R1 [P0]：兼容读后直接创建新尾部，重启遮蔽旧历史；删除新文件又会回退复活
+
+位置：`session/store.go:89 / 167 / 320 / 373 / 402`；`session/history.go:ArchiveReset`。
+
+四条已复现的路径：
+
+| 路径 | 实际结果 |
+| --- | --- |
+| 旧键历史 1 条 → 普通 Append 一条 → 重建 Store | 追加成功，内存为 2 条；重启只剩新文件中的 1 条 assistant，旧 user 被遮蔽 |
+| MigrateKeys 完成 → Reset 成功 → 重建 Store | 新文件删除后回退旧备份，旧历史重新出现 |
+| 旧键历史 → 真正调用 Undo | offset 从旧文件算出，但 Truncate 对新文件执行，返回不存在错误 |
+| 仅有旧键历史 → Exists | History / List 能读到，Exists 却是 false，调用方对会话存在性的判断不一致 |
+
+旧原始文件在这些反例中仍保留，没有物理销毁；但正常读取已经丢失前缀、回滚或复活已清空内容，不能作为可部署的兼容方案。
+
+修复：在首次新写入前，对原来完整的已提交会话做可靠提升或完成启动迁移；不能让新位置只有增量却被当作完整历史。引入明确的布局激活 / 会话存在与失效状态：一旦新布局激活，重置、删除后新文件不存在也不能回退旧备份。旧备份只能作为恢复来源，不再是自动活动数据。Append、SaveSettings、Undo、Reset、ArchiveReset、Rename、Exists、按 ID 对账均经过同一个权威定位 / 切换接口，不各自猜测文件存在性。
+
+永久回归至少包括旧会话续写后重启、迁移前后重置 / 删除后重启、真实 Undo、Rename 和 Exists。逐条检查历史内容与来源，不能只测试 History 第一次能读出旧文件。
+
+### W1-R2 [P1]：新前缀与合法旧 sid 歧义，已出现串会话读取
+
+位置：`session/storekey.go:48 / 119`；`session/store.go:89`。
+
+独立复现：旧逻辑 sid 是字面字符串 `v1-61`，其旧文件名就是 `v1-61.jsonl`。List 优先 ParseKey 后把它枚举成 sid=`a`；随后 History("a") 直接把同一物理路径当作 a 的新文件，读到 `v1-61` 的历史。
+
+仅给新编码增加前缀无法区分任意旧名称；本例不是新 Key 算法内部 hash 碰撞。旧字面 `v1h-*` 也可能被误判成缺映射的长键而直接消失。ParseKey 还应验证规范编码形式 / Key(sid) 对应关系。
+
+修复：新布局采用明确隔离的目录命名空间（推荐），或提供能验证文件归属、格式与冲突改址的可靠索引，不能凭前缀猜版本。盘点既有 `cc66cad` 试运行产物和旧文件时，无证据确定格式 / 所属 sid 的内容保留并报告，不自动重命名为另一个会话。物理位置冲突时不能覆写保留的旧文件。
+
+兼容规则要按原数据类型还原：旧历史 / settings 对 `.`、`..` 的规则与旧归档 archiveKey 的特殊处理并不相同；当前一个 LegacyKey 不能冒充所有旧格式。
+
+永久回归：旧字面 v1-* / v1h-* 与新目标同时存在、不同大小写 / 百分号 ID、旧点目录特殊名，以及迁移前后跨会话读取隔离。反解必须有明确格式归属。
+
+### W1-R3 [P1]：长 ID 映射没有接到实际写入口
+
+位置：`session/storekey.go:85`；`session/store.go:Append`；`session/settings.go:SaveSettings`。
+
+rememberLongKey 目前仅由 MigrateKeys 和测试显式调用。正常 Append / SaveSettings 都不调用它。
+
+独立复现：普通 Append 和 SaveSettings 成功保存一个超过 96 字节的新 sid；重建 Store 后 List 返回空，sessions/keys 没有对应映射。按已知 sid 打开可能仍可算出 hash 文件，但会话枚举和恢复失去入口。
+
+修复：真实新写入与创建入口共用长键登记逻辑，映射可靠提交并核验归属后才允许受理成功。映射已有不同或损坏内容时保留现场、返回冲突，不能静默覆盖。后续 journal / persona 接入也共用这一注册与解析接口。
+
+永久回归通过实际 Append、SaveSettings、BeginBranch 等入口创建长 ID，不先手工调用 rememberLongKey；跨重启验证 List、读取、修改、删除及映射写失败不假报受理成功。
+
+### W1-R4 [P1]：归档目录存在不代表迁移完成，归档兼容与逐文件恢复缺失
+
+位置：`session/storekey.go:219 / 231 / 266`；`session/history.go:archiveDir / Archives / ReadArchive`。
+
+两个独立实测：
+
+- 仅有旧归档目录时，Archives 只查新目录，旧归档在兼容读取阶段不可见。
+- 旧目录有两份归档，新目录已经创建但为空（等价于在创建目录后中断）。连续运行两次 MigrateKeys，仍一份都不复制；HasLegacyKeys 还返回 false，因为它不检查归档目录。
+
+修复：按每个归档文件校验和推进状态；目录已存在时继续逐项核对，缺失项补齐、相同项跳过、不同项报告冲突，不能跳过整目录。校验 / 回读 / 持久提交与普通历史一样成立。全部相关文件就绪后才能激活新归档位置。归档读取、删除、计数、清理和 HasLegacyKeys 的范围需与真实布局状态一致，不能遗漏 branch-only / archive-only 等会话。
+
+永久回归覆盖创建目标目录后中断、只复制第一份后中断、目标含冲突、归档损坏、只有旧归档 / 分支元数据时的发现与恢复。保留旧源，不把“目录创建成功”记为整项迁移成功。
+
+### W1-R5 [P1]：清单提交失败被吞掉，存在新文件也不能证明可恢复迁移完成
+
+位置：`session/storekey.go:259 / 285`。
+
+独立复现：让 sessions/keys/migration.json 的提交真实失败，MigrateKeys 仍返回 nil error 和 Moved=[sid]。当前只在末尾重写一份汇总，忽略写入错误；它没有逐项可恢复阶段，也不能依据新文件是否存在判断冲突或切换是否完成。
+
+修复：逐项记录源身份 / 类型 / 校验和、目标、复制 / 核验 / 激活阶段，持久保存真实提交结果；最终概况可以另存，但不能替代恢复记录。清单失败要向调用方传播，含冲突 / 未知状态时明确为部分完成。重复执行重新核验，不因目标存在就跳过。源读取权限错误、目标读取失败等情况不能一律当“目标不存在”。
+
+迁移当前还用 os.ReadFile 整份加载历史及回读比较，jsonlCheck 也对整份内容 Split；后续修复时一并采用有界流式校验、复制和 hash 比较，保留低内存要求。本轮没有对迁移内存单独计量，不把源码检查写成已测峰值。
+
+永久回归覆盖清单写失败、每个阶段中断、冲突保留与重复执行。只有可验证的阶段完成才能报告成功，不能只在干净目录完整跑一次。
+
+### W1-R6 [P1]：迁移已复制插话日志，但原写入口继续写旧位置
+
+位置：`session/storekey.go:162`；`app/interject_journal.go:journalPath`。
+
+用户已明确说明 journal 写入口尚未切换，但 MigrateKeys 已把 interjections 纳入复制目标。
+
+独立复现：旧键日志已有 received(first) → MigrateKeys 创建新键副本 → 按当前 journalPath 的行为再向旧日志追加 received(second)。新日志没有 second，而 HasLegacyKeys 返回 false。此时两个位置已经分叉；将来直接切新入口会遗漏已经回执的 second。
+
+修复：每类文件的写入口与激活步骤必须同步。尚未接入新键的类型只能做备份 / 待迁移候选，不可宣告已切换；切换时先冻结旧写者、复制核验到固定提交边界、可靠激活新位置，再恢复接收。共享解析 / 长键映射与布局状态，避免 journal、persona 和 session 各自择路。迁移完成前保留各类组件的明确状态，不能仅凭一份镜像让 HasLegacyKeys 返回整体完成。
+
+永久回归使用真实 App 受理两条插话，在迁移 / 切换前后重启，检查回执、稳定 ID、世代、撤回和结局；完整覆盖迁移期间继续收到消息的策略，不止检查磁盘上有副本。
+
+### 14.2 下一步收敛顺序
+
+1. 先修本阶段：独立布局归属 + 权威激活 / tombstone 状态，再统一读写 / 删除路径；优先消除续写遮蔽和重置复活。短键的纯编码逻辑可继续复用，不需要因此重写 agent 循环。
+2. 接入真实长键登记，补归档逐项恢复与可靠迁移清单；将上面九个反例落为永久回归。当前产品中 MigrateKeys / HasLegacyKeys 还没有生产调用方，接入启动流程前需明确迁移门禁与受理顺序。
+3. 再把插话与人格适配器并入同一个定位 / 切换协议，避免创建无人维护的新键镜像；阶段回归通过后再做原生 Windows ADS 枚举与迁移。当前明确的 Windows 验收缺口继续保留。
+4. 然后沿第 13 节推进 W2 → W3 → W4，W5 只做诊断；第 12 节 F1 与后续 F2 的既有边界不变。
+
+本轮只更新验收文档，保留原有未提交内容。没有修改产品源码，没有执行真实旧数据迁移，也没有尝试未验证的 Windows ADS 专用实现。
+
+
+## 15. W1 `c4cccb6` 复验记录
+
+本节保留该提交的历史证据。S1–S5 的八组直接反例已在 `e25c1f8` 通过；新的删除重建与重命名失败场景见第 16 节，S6 仍按明确未完成项跟踪。
+
+### 15.1 本轮范围与通过项
+
+按用户声明，仅复验独立命名空间、locate / promote、激活 / 墓碑、长键真实写入及普通归档复制；逐项恢复清单、有界流式迁移、插话 / 人格适配、ADS 以及 W2–W5 不当作已完成。
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.40 秒。
+- C core 205 checks / 0 failures；本提交未改 C，未重复运行执行器 / 宿主 ASan 套件。
+- 独立重跑七组上轮直接反例，均通过：旧会话追加后重启历史完整；提升后仅重启的 Reset / Delete 不回读备份；旧会话真实 Undo；旧字面 v1-61 不串到 a；长 ID 经普通 Append 后可枚举；目标归档目录预先存在时逐份复制；迁移汇总写失败会返回错误。
+- 另补充十个真实文件场景（含迁移重跑的三个分支），复现下列问题。使用临时 Go overlay、真实 Store / 文件和重建 Store，未替换产品实现；测试后已清理，未修改产品源码。
+
+### W1-S1 [P0]：同名归档内容冲突时覆盖目标，导致已有新内容丢失
+
+位置：`session/storekey.go:272`。
+
+当前归档复制只在两边内容相等时跳过；不相等时直接 writeFileAtomic(dst, data)，没有返回冲突。
+
+独立复现：旧归档 `same.jsonl` 为 legacy-copy，新布局同名归档为 valuable-new-copy → Migrate。返回 nil error，新归档已经变成 legacy-copy，原新内容被覆盖。这个观察与“冲突在 promote 里报错”的提交说明不符。
+
+修复：内容不同应保留双方、返回明确冲突并保持未激活 / 待处理状态，不替换任何一方。目标读取失败需区分不存在与未知错误。promote 也会被 locate 的读取路径调用，因此冲突保护必须在复制原语本身实现，不能只在显式 Migrate 外层补判断。
+
+永久回归：`TestArchivePromotionConflictPreservesBothFiles`，比对新旧两份原始字节，验证重复执行和重启后均不覆盖，且没有发布成功激活状态。
+
+### W1-S2 [P0]：Migrate 忽略 active / deleted，把旧备份重新变成活动数据
+
+位置：`session/storekey.go:Migrate / promote / HasLegacyKeys`。
+
+三个独立实测：
+
+| 前置操作 | 再次 Migrate 的实际结果 |
+| --- | --- |
+| 提升完成 → Reset → 重建 Store | 从旧备份重新复制历史，清空内容复活 |
+| 提升完成 → Delete → 重建 Store | 墓碑没有挡住 promote，旧历史重新出现 |
+| 提升完成 → 正常 Append 新消息 → 重建 Store | 把活动新历史与只读旧备份的正常差异报成冲突 |
+
+Migrate 从旧文件枚举所有 sid 后无条件 promote；HasLegacyKeys 只认 active，没有排除 deleted。locate 又先认新文件，导致被重新复制出来的文件优先于墓碑。
+
+修复：所有迁移、发现、读取与写入共用同一份权威状态；active 会话的旧文件是备份，不再重做首次导入，deleted 不能由扫描 / 重放自动恢复。显式创建新代会话与恢复旧备份必须是不同操作，必要时使用 generation / revision。active 与 deleted 同时存在或状态损坏时不能按文件存在性静默选边。清单恢复也要校验状态，不能成为另一条绕过墓碑的通路。
+
+永久回归：`TestMigrationReplayHonorsResetDeleteAndActiveWrites`，分别执行上述三条流程，并检查内容、列表、存在性、状态及重启；删除备份仍保留但不参与自动激活。
+
+### W1-S3 [P1]：未激活半成品可在下一次访问时被当成权威文件
+
+位置：`session/storekey.go:177`；`session/store.go:readFileFor / Delete`。
+
+两个独立实测：
+
+1. 阻断 active 标记写入，第一次 Append 在完整复制后返回提升失败。保持故障不变再次 Append，却成功回执，新消息写入了尚未激活的副本。原因是 locate 一看到目标文件就直接返回，完全绕过最后提交点。
+2. 旧历史合法、旧 settings 损坏；Delete 调用 locate 时提升失败，却把错误当作没有文件而继续。随后 Delete 返回成功，但提升已复制的历史仍在；重启后新文件优先于 deleted 标记，内容依旧可读。
+
+修复：将待提交副本与已发布数据明确分开，未完成 promote 只能恢复 / 失败，不能被普通访问当作已激活。权威状态应能区分新建、提升中、活动、已删除及失败待处理；解析已提交视图与执行迁移共用状态约定，但读取不能绕过提交门禁。Delete / Rename 不得吞掉定位错误；破坏性操作以可靠终态或完整成功为依据，再清理文件，失败如实报告。
+
+永久回归：`TestPromotionRetryCannotBypassActivationFailure`、`TestDeletePropagatesLocatorFailureAndHidesNoPartialData`；加入每个提升步骤及终态提交前后中断点，检查成功回执与真实权威状态一致。
+
+### W1-S4 [P1]：Rename 和 List 没有统一消费失效状态
+
+位置：`session/store.go:434`；`session/settings.go:134`。
+
+两个独立实测：
+
+- 旧会话 Rename 成功后，源 active 标记被移除，没有留下不可再次提升的来源终态。重启后读取旧 sid 又从备份 promote，List 同时出现新旧名称。
+- 提升后的会话 Delete 成功，Exists=false，但 List 仍从旧备份把它枚举出来。当前 add 函数没有检查 tombstone。
+
+修复：Rename 的来源终态、目标登记和文件移动形成一次可恢复操作；旧备份不能再成为第二个活动会话。列表只展示权威状态允许的会话，不能把备份存在当作会话存在。新代的显式重建应更新状态，不与删除墓碑长期矛盾。目标长 ID 的映射、归档与相关元数据也要在 Rename 路径核对；状态写入错误不能忽略。
+
+永久回归：`TestLegacyRenameDoesNotRecreateSourceAfterRestart`、`TestDeletedBackupIsNotListedAsLiveSession`，覆盖短 / 长目标 ID、失败重试及显式重建。
+
+### W1-S5 [P1]：分支元数据实际上仍写在旧根目录
+
+位置：`session/branch.go:109 / 593`。
+
+branchFile 仍是 `<data>/sessions/<Key(sid)>.branch.json`，loadBranches 也只读旧 sessions 根；两者尚未使用新命名空间。
+
+独立复现：BeginBranch(SID=br-owned) 后，`v1/sessions/<key>.branch.json` 不存在，实际写在旧根的 `62722d6f776e6564.branch.json`。List 按旧格式把这个十六进制名字当作逻辑 sid，返回 `62722d6f776e6564`，没有返回 br-owned。
+
+修复：branchFile、save / loadBranches、SetBranch、DeleteBranch 和分支枚举一并接入权威定位及目录格式归属，校验元数据中的 SID 与文件身份。已有旧根十六进制文件、cc66cad 的 v1-* 文件属于需要盘点的中间版本，不能直接当作任意新逻辑会话去迁移；不确定归属保留并报告。
+
+永久回归：`TestBranchMetadataUsesV1NamespaceAndListsRealSID`；通过真实 Fork 创建、重启、列出和删除，断言没有十六进制 / 编码后的幽灵会话，保留其他分支的快照引用。
+
+### W1-S6 [P2，承接明确未完成的 R4]：旧归档能列出，但内容读取仍只查新目录
+
+位置：`session/store.go:ReadArchive`；`session/history.go:Archives / archiveReadDir / ArchiveCount / DeleteArchive`。
+
+独立复现：只有旧归档时，Archives 返回一份条目，但 ReadArchive(sid, id) 返回 0 条，因为后者直接读新 archiveDir。另从源码看，ArchiveCount 仍只遍历旧根，DeleteArchive 只操作新根；归档操作尚未共享同一权威视图。
+
+这部分与用户已列出的 R4 继续工作合并处理，不把它宣称为全部归档已经通过。逐份迁移与清单完成时，同时覆盖列举、读内容、删除、计数和部分复制视图；使用对应类型的旧名称反解器，尤其核对旧点名称的特殊规则。
+
+永久回归：`TestLegacyArchiveListingAndReadUseSameView`，再覆盖未激活副本、新旧同名冲突、重启、计数和删除。
+
+### 15.2 当前最小修复顺序
+
+1. **先修 S1 / S2 两个 P0**：同名不同内容绝不覆盖；迁移重放服从活动 / 删除 / 新代状态。
+2. 修 S3 的发布门禁与错误传播，再统一 S4 的 Rename / List 和 S5 的分支元数据。保持本轮七组已通过场景持续通过。
+3. 继续用户已排定的 R4 / R5：逐项可恢复清单、有界流式复制 / 校验，顺带完成 S6 的整个归档读写视图；再接插话和人格适配。每类新入口切换均要覆盖读取 → 更新 → 清空 / 删除 → 重启 → 再迁移，不只跑“复制后立即重启”。
+4. ADS 仍在受控 Windows runner / 实机验证后交付；不需要等待 Windows 才能修本节已复现的普通文件错误。W2 → W3 → W4、W5 诊断及 F1 / F2 的原顺序保留。
+
+本轮只更新验收文档，保留原有未提交内容；没有修改产品源码或执行用户数据迁移。
+
+
+## 16. W1 `e25c1f8` 复验记录
+
+本节保留 `e25c1f8` 的历史证据。`c89d832` 修复了无清理故障的删除重建、原生分支删除，以及目标激活 / 长键映射失败的基本重试；清理失败、旧分支备份与改名各提交阶段的剩余问题见第 17 节。
+
+### 16.1 本轮通过范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.42 秒。
+- C core 205 checks / 0 failures。本轮未改 C，未重新执行执行器 / 宿主 ASan，不能将提交者报告当成本轮独立复测结果。
+- 独立重跑第 15 节八组直接反例，均通过：归档冲突保留双方；Reset / Delete / 活动追加后三类迁移重放；激活失败连续重试与修复后提升；普通 Rename 后源名称不复活；删除不出现在列表；分支元数据使用新命名空间并还原逻辑 sid。
+- 新增六个失败场景，使用临时 Go overlay、真实 Store / 文件和同目录重建 Store，不替换产品实现。场景归入以下两组根因，尚不能验收为安全升级版本。
+
+### W1-T1 [P0]：删除清理被墓碑挡住，同 sid 重建复活旧内容；分支继承视图还能绕过删除
+
+位置：`session/store.go:Delete / Append / ensureActive / load`、`session/storekey.go:locate`、`session/branch.go:Branch / loadBranches / loadBranch`、`session/settings.go:List`。
+
+Delete 先写 deleted 并移除 active，然后用普通 locate 查找待删文件。locate 看到墓碑就返回不存在，因此这轮删除实际上跳过了历史、设置和分支元数据的物理清理。
+
+随后同 sid 的 Append 虽然拿不到旧上下文，却用 O_APPEND 打开残留旧文件；ensureActive 又新增 active，不处理已有 deleted。当前内存只含新消息，重启后 active 优先，旧正文重新加载；List 则仍过滤 deleted，形成历史可读但列表不可见的矛盾。
+
+独立复现：
+
+| 场景 | 实测结果 |
+| --- | --- |
+| 原生新布局：写旧消息 → Delete → 重建 Store → 同 sid 写新消息 → 再重建 | 写入后的内存只有 1 条；重启后恢复为旧、新共 2 条；列表没有该 sid |
+| 已从旧布局提升：旧备份 + 追加 → Delete → 重建 → 同 sid 写新消息 → 再重建 | 内存只有新消息；重启后 3 条，旧备份内容和删除前追加都出现；列表没有该 sid |
+| preparing 分支 → Store.Delete → 重建 | Branch 仍从残留 branch.json 加载已删除元数据 |
+| ready 分支，继承父快照 → Store.Delete → 重建 | Exists=false、列表无该分支，但 History 仍返回继承的私有上下文 |
+
+最后一条不需要重新创建：loadBranches 没有消费墓碑，loadBranch 直接读共享快照；普通定位门禁不足以保护分支的虚拟历史视图。
+
+修复要求：
+
+1. 分开“已提交可见视图的解析”和“本次删除所拥有的物理资源清理”。二者使用可信 sid / 键身份，但墓碑不能令清理计划变成空集。清理失败应保留可重试记录并如实返回，不能返回已清理成功。
+2. 显式同 sid 重建必须创建干净的新代，先隔离旧代残留，再提交新激活状态；不能把普通 Append 到旧文件当作重建。处理 active / deleted 的一致状态与中断恢复，旧备份仍保持失效，不被新代重新引入。
+3. 墓碑和世代必须约束 History、Branch、Branches、Exists、List 以及内存缓存；分支的快照继承视图也受约束。可以保留其他有效分支引用的共享快照，但不能因此继续授权已删除分支读取。
+
+永久回归：`TestDeleteThenRecreateStartsCleanAfterRestart`（原生 / 提升两路）、`TestDeletedBranchMetadataIsNotReloaded`、`TestDeletedReadyBranchCannotReadInheritedSnapshot`。至少检查“删除 → 重启 → 同 sid 新消息 → 重启”的正文、设置、列表与 Exists 一致性，加入文件清理失败、墓碑提交与新代激活之间的中断点。
+
+### W1-T2 [P1]：Rename 先移动数据，再验证目标提交条件，失败后无法可靠重试
+
+位置：`session/store.go:Rename`、`session/storekey.go:rememberLongKey`。
+
+Rename 在移动源文件以后才写目标 active，再登记长键；没有操作记录来区分自己的半成品与既有目标。
+
+| 故障注入 | 实测结果 |
+| --- | --- |
+| 阻断目标 active 的临时文件写入 | 首次 Rename 报错，但源文件已被移走；修复故障、重建 Store 后重试，返回“目标已存在”，源历史为空 |
+| 目标为长 sid，预先放入损坏的映射文件 | Rename 报映射错误，但目标已经被激活、源历史为空；重启后目标因缺少合法映射未能正常列出，列表仍可显示空的源名称 |
+
+修复要求：先校验目标身份、映射和冲突条件；对文件移动及来源失效 / 目标激活建立可恢复的 from/to 操作记录。失败后应保留可用源，或存在明确可重试 / 回滚的操作；重试应识别自己创建的半成品，不能仅以 Exists(to) 拒绝。目标归档和分支内部 SID / Parent 等引用也需纳入重命名契约，不以“几个文件已改名”代替完整提交。
+
+永久回归：`TestRenameActivationFailureCanResume`、`TestRenameLongKeyFailurePreservesSourceOrRecoveryOp`。覆盖短 / 长目标、每个提交点失败 → 同进程重试 / 重启重试，检查源 / 目标可见性、正文、映射、来源终态与操作状态。
+
+### 16.2 下一步最小顺序
+
+1. 先修 T1：删除、同 sid 新代重建和分支继承视图必须遵守同一失效边界。这是继续铺开新存储入口之前的数据隔离阻塞。
+2. 将 T2 纳入接下来的可恢复操作设计；与计划中的逐项清单一起落实“源身份 / 校验和 / 阶段 / 最终提交”，但 Rename 自身也必须可重试，不能只有迁移复制可恢复。
+3. 继续已排定的逐项迁移清单与有界流式复制，完成第 15 节 S6 的归档列举 / 读取 / 删除 / 计数一致视图，再接插话日志与人格文件。切换每个入口都覆盖删除 / 重建 / 撤回 / 重置 / 重启，不能只测首次读写。
+4. ADS 原生 Windows 验证、W2–W5 和 F1 六组根因仍未完成；F2、后台 Job 与完整 Hook 不提前展开。
+
+本轮只更新验收文档，保留此前未提交内容。未修改产品源码，未执行用户旧数据迁移；临时 overlay 探针已清理。
+
+
+## 17. W1 `c89d832` 复验记录
+
+本节保留 `c89d832` 的历史证据。六个原反例已在 `6a63be6` 独立复验通过，含真实 committed 清理恢复；剩余的写入入口、世代 / 版本绑定与未知阶段问题见第 18 节。
+
+### 17.1 已验证范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.37 秒；包括提交新增的六个永久用例。
+- C core 205 checks / 0 failures。本提交未改 C，未重新运行执行器 / 宿主 ASan；本轮没有扩大到原生 Windows、ADS 或真实断电持久性验收。
+- 使用临时 Go overlay 补充六个独立恢复场景，全部复现失败；均走真实 Store、真实文件与同一数据目录重建。权限故障使用普通 Linux 用户对临时目录撤去写权限，测试后恢复；没有替换产品实现或修改用户数据。
+- 本轮问题仍在第 16 节要求的“清理失败、提交点中断、旧备份失效、重启后可重试”范围内，不能仅凭正常删除和一次激活失败可重试认定 T1 / T2 完成。
+
+### W1-U1 [P0]：新代没有隔离未清理残留，分支备份也没有消费失效状态
+
+位置：`session/store.go:102 / 199 / 553`、`session/branch.go:491 / 503 / 598`。
+
+| 独立场景 | 实测结果与原因 |
+| --- | --- |
+| 原有历史 → 撤去 sessions 目录写权限 → Delete 返回清理失败 → 恢复权限 → 重建 Store → 同 sid Append → 再重建 | Append 成功，但历史包含旧私有正文和新消息共 2 条。Delete 如实报错本身已修好，然而 Append 仍打开旧残留 O_APPEND；ensureActive 只清墓碑，没有清理完成门禁或代际隔离 |
+| 正常 Delete → 撤去 deleted 目录写权限 → 同 sid Append → 恢复权限并重建 | Append 返回 nil，但墓碑没能删除，冷启动 History 为空、Exists=false。ensureActive 对 Remove(deleted) 使用 `_ =`，吞掉真实提交错误 |
+| ready 分支有保留的旧布局 branch.json 备份 → Delete → 重建 → Branch / Branches → 同 sid Append → 再重建 | Branch / Branches 又枚举出旧 ready 元数据；重建后的历史为旧继承快照 + 新正文。loadBranches 仍无条件读旧根，Branch / Branches 也没有墓碑 / 世代过滤 |
+
+第三条在删除后、重建前读取 History 确实返回空，说明 load 中的 isDead 起作用；但元数据枚举绕过它，墓碑一旦被普通 Append 清掉，旧继承关系立即重新授权。因此不能通过“加载历史前补一个 isDead”完成新代边界。
+
+提交报告中的“Branch 与 loadBranches 已统一受墓碑约束”尚不符合实际代码：本提交只改 store.go / storekey.go，Branch 与 loadBranches 没有相应门禁，清掉内存 map 项不等于控制冷启动读取旧备份。
+
+修复要求：
+
+1. 将 deleting / cleanup_pending、deleted、creating、active 及世代放入一份可恢复的权威生命周期记录，或提供有相同保证的状态设计。删除未清理完时可以拒绝重建，或先可靠隔离旧代；绝不能先追加残留文件再取消墓碑。物理存储即使复用路径，也必须先建立空的新代并处理创建提交前后中断。
+2. 新代提交的每个错误都要返回并可恢复；active 与 deleted 更新到一半时不能回成功。读取、普通设置保存和后台收尾不能自行把失效旧代变成活动身份；只有明确的新代创建路径有此权限。
+3. Branch、Branches、Children、loadBranches、缓存和共享快照继承统一消费权威身份 / 世代。只读保留的旧根元数据在旧代失效后永久失去自动授权；同 sid 新代激活也不能恢复旧分支关系。不要通过删除共享快照规避此问题，其他有效分支的引用仍须保留。
+
+永久回归：`TestDeleteCleanupFailureCannotReviveOldData`、`TestRecreateCannotAckWhenTombstoneRemovalFails`、`TestDeletedBranchLegacyBackupMustStayDead`。覆盖同进程 / 重建 Store、正文 / 设置 / 元信息 / 列表 / 存在性，并让迁移重放仍无法复活旧代。
+
+### W1-U2 [P0 / P1]：Rename 有阶段记录但不读取阶段，重试从头覆盖目标，提交后清理又无法恢复
+
+位置：`session/store.go:469–548`、`session/storekey.go:186–213`；真实启动入口见 `app/endpoints.go:migrate`。
+
+当前只以 op 文件存在判断 resuming，没有反序列化 / 校验 From、To、Stage，也没有按阶段选择后续步骤。恢复时仍从头 os.WriteFile(dst, data)，已经发布的目标和未发布副本共用同一路径。
+
+| 独立场景 | 实测结果 |
+| --- | --- |
+| 阻断目标 active 临时文件 → Rename 复制完返回激活失败 → 重建 Store 查目标 | Exists(target)=true，History 返回源正文，未提交副本已被普通定位当成新会话发布；locate 的“无旧文件 + 有新文件”分支绕过操作提交状态 |
+| 阻断源墓碑临时文件 → Rename 已激活目标但返回失败 → 目标 Append 新消息成功 → 修好故障 → 重试 Rename → 重建 | 重试返回 nil，目标已成功受理的新消息消失，只剩源原文。resuming 绕过目标存在检查，随后无条件截断重写，构成 P0 数据丢失 |
+| 先制造激活失败形成真实复制副本 → 修复激活并撤去 sessions 目录写权限 → 重试提交成功、源清理失败 → 恢复权限并重建 → 再重试 | 操作记录已是 committed，但入口先判断 isDead(from)，直接报“源已删除”，清理不能继续，违背错误提示里的“可以重试” |
+
+第一个问题也影响真实启动迁移：App.migrate 先看 Exists(main)，半成品已被视为目标存在时，不会进入 Rename 续办。仅在测试里直接再次调用 Rename，不能证明启动路径可以恢复。
+
+修复要求：
+
+1. 真正读取、校验并驱动操作状态机，持久记录源 / 目标身份和世代、文件集合、长度 / 校验和、阶段。先识别本操作的 committed / cleanup_pending 再判断来源是否失效；提交后的重试只能继续清理，不得重新复制。
+2. 复制写入操作私有 staging，完整验证后才发布目标；所有普通定位 / 枚举入口不得看见未提交副本。恢复入口要连接到真实启动 / locate 路径，不能要求用户知道 op 文件后手工续办。
+3. 目标一旦可接受新消息，恢复不得再截断或覆盖目标。若提交尚未完成，需阻止目标写入，或对世代 / revision 做冲突检查并保留双方；不可假定“记录存在”就仍拥有任意当前目标。回读字节一致不能证明目标没有后来被其他操作更新。
+4. source tombstone、目标发布与内存视图按阶段对账；失败后状态 / 回执一致。Copy、promote、Rename 共用有界复制和冲突保护，但操作级提交不能仅靠逐文件成功替代。清单真正承诺可靠落盘时再落实文件与目录持久化；本轮不把写文件后未 Sync 的阶段记录算作断电保证。
+
+永久回归：`TestPendingRenameMustNotPublishTarget`、`TestRenameRetryPreservesAcceptedTargetMessages`、`TestRenameCommittedCleanupCanResume`。对每个阶段做失败 → 同进程 / 重启恢复，检查已受理正文不丢失、未提交目标不可见、提交后的清理可重试，再经真实 App.migrate 验证启动入口。
+
+### 17.2 下一轮执行顺序与验收门槛
+
+1. 先完成 U1 的删除 / 创建代际边界和分支备份门禁，保持现有六个正常路径用例通过。
+2. 再完成 U2 的 Rename 状态机，尤其是“目标接受新消息后绝不被恢复覆盖”。逐项清单可以与此共用状态与复制原语，但不能先铺开更多存储入口而保留这一覆盖路径。
+3. 随后继续逐项迁移清单、有界流式复制及第 15 节 S6 的归档一致视图，再接插话日志和人格文件。清单至少包含版本、操作身份、源 / 目标归属与世代、每项长度 / 校验和 / 阶段及最终提交；恢复读取清单并核对现状，不能只在末尾输出汇总。
+4. ADS 原生 Windows 验证、W2–W5、F1 六组根因继续保持未完成；F2、后台 Job 和完整 Hook 不提前展开。
+
+本轮只更新验收文档，保留此前未提交内容。没有修改产品源码或执行真实数据迁移；临时 overlay 探针已清理。
+
+
+## 18. W1 `6a63be6` 复验记录
+
+本节保留 `6a63be6` 的历史证据。`f009124` 已通过 V2 两个原反例、V3 和 V4；V1 的两个原反例仍失败，新的文件集合 / 暂存校验与世代格式兼容问题见第 19 节。
+
+### 18.1 本轮证据和通过范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.46 秒；C core 205 checks / 0 failures。本轮 C 未改，未重新运行执行器 / 宿主 ASan，没有扩大为原生 Windows / ADS / 断电验收。
+- 独立重跑第 17 节六个原反例，均通过：删除清理失败后的 Append 隔离、墓碑移除失败不成功回执、旧分支备份门禁、激活失败不发布副本、目标已受理新消息保留、committed 阶段失败后冷启动续办清理。
+- 为保证最后一例真的进入 committed：先阻断源墓碑使目标文件实际发布；修复墓碑，再把 sessions 目录改为只读，使恢复跳过已有目标并提交后在源清理失败；读取 op 确认 stage=committed，再重建 Store 调 ResumeRenames。这个路径通过。
+- 提交中的 `TestRenameCommittedCleanupCanResume` 在新目标文件尚不存在时就将 sessions 目录设为只读，实际可能在发布目标文件时失败，停留 copied；其最终重试通过并不能单独证明 committed 恢复。建议永久用例断言注入点的真实阶段，避免测试名称替代覆盖证据。
+- 另加六个独立失败场景，使用临时 Go overlay、真实 Store / 文件和同目录重建，权限故障按普通 Linux 用户真实注入并恢复。没有替换产品实现；临时探针已清理。
+
+### W1-V1 [P0]：只有 Append 经过新代隔离，SaveSettings 仍可取消墓碑并复活旧代
+
+位置：`session/settings.go:108–133`、`session/store.go:startNewGeneration / ensureActive`。
+
+两个独立失败场景：
+
+| 操作 | 实测结果 |
+| --- | --- |
+| 写旧正文 → sessions 目录只读 → Delete 报清理失败 → 恢复权限、重建 Store → SaveSettings → Append 新消息 → 再重建 | 保存设置绕过 startNewGeneration，ensureActive 清掉墓碑；后续 Append 已看不到删除状态，因此接在残留正文后，冷启动历史包含旧、新 2 条 |
+| ready 分支有旧根元数据备份 → 正常 Delete → 重建 → SaveSettings → 再重建 | 没有生成 gen 标记；旧 branch.json 又被加载，History 重新返回父快照中的私有上下文；不需要 Append 就已复活 |
+
+`v1/gen/<key>` 当前只写固定的 Key(sid)，作用是“旧根备份已失效”的布尔标记。它不是可用于识别具体某一代的 generation ID；更不能让没有经过 startNewGeneration 的写入自动安全。
+
+修复：先定义统一写入前置契约，区分现有代更新、明确新建一代与旧代迟到写入；Append、SaveSettings、分支发布及恢复操作共用它。设置更新不能凭 sid 隐式清墓碑。若允许设置入口明确重建，须先完成隔离和旧根永久失效，再写新设置；普通旧代收尾应带 expected generation 并被拒绝。读取和缓存也使用同一身份，不能靠“每个入口都补一次 Remove 墓碑”拼出生命周期。
+
+永久回归：`TestSaveSettingsCannotReactivateUnisolatedHistory`、`TestSaveSettingsCannotRestoreLegacyBranch`，再经真实 App 设置更新入口验证；与删除 / 重启 / 再迁移组合，确认设置操作不旁路隔离。
+
+### W1-V2 [P0]：Rename 恢复只按阶段和文件存在判断，源 / 目标变化后仍会删除唯一正文
+
+位置：`session/store.go:575–637`。
+
+| 操作 | 实测结果 |
+| --- | --- |
+| 复制到 staging 后阻断目标激活，Rename 报错 → 源 Append 一条新消息成功 → 修复故障、重建并 ResumeRenames | 直接发布旧 staging，随后将源标记删除并清理；新受理的源消息在两个 sid 下均不存在，Resume 返回 nil |
+| sessions 目录只读，Rename 在 ensureActive(target) 成功后发布文件失败 → 恢复权限、重建 → 目标 Append 第一条新消息成功 → ResumeRenames | 目标文件已存在，被无条件跳过；源原上下文没有并入目标，随后源被删除。最终只剩目标的新消息，源唯一正文丢失，Resume 返回 nil |
+
+第二条说明“从覆盖目标改成跳过目标”仍不能成立：文件存在可能表示本操作已完成发布，也可能是另一次写入创建的文件；两者不能按 Stat 成功合并处理。ensureActive 先于文件发布，使失败后的目标成为可写空会话，刚好暴露这个窗口。
+
+修复：
+
+1. 操作绑定源 generation + revision（或可核对的文件身份 / 长度 / 校验和）与目标分配的 generation。源在复制后变化时必须重新取一致快照，或返回冲突并保留源；不能继续删除变化后的源。
+2. 目标提交前整体保持不可读 / 不可写，或使用明确预留状态将后续输入可靠排队 / 拒绝成功回执。若允许并发写，恢复必须有 revision 冲突检测和保留双方的策略，不能把“存在”当成“这就是已发布的那份”。
+3. 私有 staging 的文件集合先完整验证，再发布一致目标视图。发现已有但不属于本操作的目标文件时保留源和目标并报告冲突；仅在证明目标完整承接相应源版本以后失效 / 清理源。
+
+永久回归：`TestRenameRecoveryCannotDropPostCopySourceMessage`、`TestRenameTargetWriteBeforePublishCannotLoseSource`；分别覆盖同进程重试与启动 ResumeRenames，检查两侧所有已受理消息都仍有可靠归属。
+
+### W1-V3 [P0]：committed 清理没有绑定旧代，会删掉同 sid 新代已受理的消息
+
+位置：`session/store.go:639–644`、`session/store.go:startNewGeneration`。
+
+独立复现：先制造上文已验证的真实 committed / 清理失败状态 → 恢复权限并重建 → 源 sid Append 成功创建干净新代 → ResumeRenames → 再重建。恢复返回 nil，却把新代 jsonl 删掉；源 History 为空，目标只有旧源正文，新代已受理消息从两侧都消失。
+
+原因是清理计划仍是 `newPath(from, suffix)`，只拥有逻辑 sid，没有记录所清理的那一代资源；“提交后只做清理”不等于“可以清理现在这个路径上的任何文件”。
+
+修复：给每代持久分配唯一 / 单调身份，并把操作可删除的资源绑定到旧 generation。可将旧代清理资源先移到操作私有目录，或在删除前核对 generation / 文件身份；新代可复用逻辑 sid，但不能继承旧操作的删除授权。若身份已变化，旧操作只清自己的 staging / 旧代隔离资源并结算，不碰当前新代。也可以在旧操作结束前拒绝新代创建，但不能先回执成功再被启动恢复删除。
+
+永久回归：`TestOldCommittedCleanupCannotDeleteNewSourceGeneration`。必须先断言 op.stage=committed，再在源 sid 真实 Append 新代，最后调用启动恢复并检查新代正文、设置和列表仍在。
+
+### W1-V4 [P1，错误阶段会触发破坏性清理]：stage 没有白名单，未知值落入 committed 清理
+
+位置：`session/store.go:545–550 / 575 / 601 / 639`。
+
+独立注入一份 JSON 正确、from/to 匹配、stage=`future-v2` 的操作记录 → ResumeRenames。返回 nil，源原生历史被删，目标没有正文；没有检查 stage 的分支直接落入末尾清理。提交说明中的“校验 stage”尚未实现。
+
+修复：用显式 switch 白名单驱动状态，unknown / 缺失 / 不支持版本均在任何文件变更前报错并保留现场；清理只能从已验证的 committed 分支进入。ResumeRenames 同时校验记录版本、文件名与内容身份、路径归属，读取错误不能默默当作无需恢复；故障操作应隔离并明确报告，不赋予默认删除权限。
+
+永久回归：`TestUnknownRenameStageMustNotDeleteSource`，检查未知 / 缺失 / 过新版本、记录身份不匹配均不修改源、目标及现有操作记录。
+
+### 18.2 下一轮应完成同一份状态契约，而不是逐入口取消墓碑
+
+1. 先落实可持久区分具体一代的会话身份，以及统一的“创建 / 更新 / 失效”写入契约；补齐 V1，保留原六例通过。gen 布尔标记可以保留作兼容信息，但不能代替这一身份。
+2. Rename 记录补齐源 / 目标世代、源版本和每项复制身份，并明确“预留 / 复制 / 验证 / 发布 / 来源失效 / 清理”各阶段的可见性与写入规则。解决 V2 / V3，任何恢复都不能让已成功受理的正文从所有可靠位置消失。
+3. 立即补 V4 的阶段白名单；测试断言真实故障阶段，尤其不能把 copied 的恢复当作 committed 已覆盖。启动恢复成功必须代表身份 / 版本核对完成，遇冲突保留数据并报告，不静默跳过当作完成。
+4. 这套身份 / 版本 / 阶段规则与计划中的逐项迁移清单共用，之后继续有界流式复制、S6 归档一致视图、插话日志和人格适配。不要先把尚未收敛的 ensureActive / 墓碑约定复制到更多入口。
+5. ADS 原生 Windows 验证、W2–W5、F1 六组根因仍未完成；F2、后台 Job 与完整 Hook 保持后置。以上问题均可在当前 Linux 普通文件环境修复和验证，不依赖 ADS 环境。
+
+本轮只更新验收文档，保留此前未提交内容；未修改产品源码、未执行真实旧数据迁移。临时 overlay 探针已清理。
+
+
+## 19. W1 `f009124` 复验记录
+
+本节五个精确失败场景已在 `a13353c` 独立复验通过。X4 的旧格式兼容已改善，但读取失败不能降为 0 的要求仍未完成；当前失败边界见第 20 节。
+
+### 19.1 本轮验证范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.42 秒；C core 205 checks / 0 failures。本提交未改 C，本轮未重跑执行器 / 宿主 ASan，未扩大为原生 Windows / ADS / 断电验收。
+- 独立重跑第 18 节六个原反例：四个通过（已有源历史的追加变化保留 / 冲突、发布窗口中目标新消息与源正文同时保留、真实 committed 清理不碰新代、未知阶段拒绝清理）；两个 SaveSettings 场景仍失败。
+- 额外三个真实 Store / 文件场景均复现失败：复制后原先不存在的源历史文件被创建、staging 中的必需文件缺失、6a63be6 的合法世代标记兼容。
+- 共九个独立叶子场景，四个通过、五个失败。使用临时 Go overlay、真实权限故障及同目录重建 Store；未替换产品实现、未修改用户数据，临时探针已清理。
+
+### W1-X1 [P0，V1 尚未落地]：SaveSettings 实际仍未调用 startNewGeneration
+
+位置：`session/settings.go:108–133`；唯一实际调用仍在 `session/store.go:Append`。
+
+当前实现仍是 locate → 写设置 → ensureActive，没有 startNewGeneration；本提交也没有修改 settings.go。交付报告中的“SaveSettings 与 Append 走同一入口”不符合当前源码。
+
+两个原反例实测结果未变：
+
+1. 删除清理失败、旧正文残留 → 恢复权限、重建 Store → SaveSettings → Append 新消息 → 再重建：历史是旧私有正文 + 新正文共 2 条。
+2. ready 分支保留旧根元数据备份 → 正常 Delete → 重建 → SaveSettings → 再重建：旧分支关系和私有继承快照重新可读。
+
+新增的 `TestSaveSettingsCannotReviveAfterDelete` 只覆盖正常 Delete 已经清理所有文件、没有分支备份的情况，在漏接隔离入口时也会通过，未覆盖本轮阻塞条件。
+
+修复与验收：真正接入统一写入前置契约，在任何设置文件写入或墓碑取消之前，完成新代隔离 / 世代登记，或拒绝不具备明确创建授权的旧代更新。保留第 18 节的两个精确条件，不要用普通“删除后设置保存”替代。永久回归沿用 `TestSaveSettingsCannotReactivateUnisolatedHistory`、`TestSaveSettingsCannotRestoreLegacyBranch`，检查冷启动正文、分支、世代、设置与存在性。
+
+### W1-X2 [P0]：内容版本清单只记录当时存在的文件，新增文件不参加校验却参与清理
+
+位置：`session/store.go:Rename` 中 started / copied 的 op.Files 处理与 committed 清理。
+
+独立复现：源会话只有 settings、没有 jsonl → Rename 复制 settings 后因目标激活失败返回 → 重建 Store，源收到第一条消息并 Append 成功，创建 jsonl → 修复故障、ResumeRenames。恢复返回 nil，源和目标 History 都为空，新受理消息从两侧消失。
+
+原因：op.Files 没有 jsonl 项，copied 阶段 `!tracked` 就跳过，未识别“原本不存在、现在新增”的源变化；末尾却按固定 suffixes 删除 jsonl，删除授权超过实际验证的文件集合。
+
+修复：清单应描述完整受管文件集合的状态，显式记录 present / absent、长度、摘要和归属世代；恢复核对新增、消失及修改三类变化。新出现的文件应使操作冲突 / 重新取一致快照，不能悄悄跳过。清理只针对本操作已验证并完整承接的资源；源 generation 也应在发布前核对，不能只在清理时检查。
+
+永久回归：`TestRenameSourceFileCreatedAfterCopyIsNotLost`，至少覆盖 settings-only 源随后首次收到消息，以及复制后新增设置 / 分支元数据；检查错误回执与双方数据归属，不能只断言现有文件长度未变。
+
+### W1-X3 [P0]：记录了摘要，但发布不校验 staging；必需文件缺失被当成可选文件跳过
+
+位置：`session/store.go:Rename` 的 copied 发布循环，`ReadFile(staged)` 的 ErrNotExist 分支。
+
+独立复现：源有唯一原始正文 → 复制到 staging 后阻断目标激活 → 删除 staging/jsonl（故障现场中的必需副本丢失，源仍完整）→ 修复激活并重建 → ResumeRenames。返回 nil，源被失效并物理清理，目标无正文，唯一原文丢失。
+
+源码还显示实际发布字节未与 op.Files 的长度 / sha256 对账：源版本被验证，不代表暂存字节仍完整。当前目标对比使用的是 staged 的现值，无法证明其仍是清单里的那份副本。
+
+修复：按完整清单验证 staging 文件存在性、长度、摘要及文件集合，必需文件丢失 / 内容不符一律在来源失效前报错保留源。只有清单明确 absent 的文件才能跳过。共享复制原语必须将实际复制、暂存回读与最终目标核验绑定同一份身份和摘要；不能仅向操作记录添加字段而恢复时不消费。
+
+永久回归：`TestMissingStagedFileMustNotDeleteOriginal`，再覆盖暂存截断 / 内容替换 / 目标未知读取错误，验证错误返回、源仍可靠保存、操作现场未被成功清理。
+
+X2 / X3 可以直接纳入用户计划中的逐项清单与公共流式复制原语，一并完成，不需要再维护两套不完整的校验协议。
+
+### W1-X4 [P0]：旧版合法世代标记被读成 0，升级后旧分支备份重新获得授权
+
+位置：`session/storekey.go:readGen / legacyDead / bumpGen`。
+
+6a63be6 在同一个 `v1/gen/<key>` 路径写入的是 `Key(sid)`。新实现按十进制 ParseInt，解析失败返回 0；legacyDead 因而为 false。
+
+独立兼容夹具：保留 ready 分支的旧根元数据备份 → 删除并以同 sid 创建干净新代 → 将 gen 文件置为 6a63be6 实际写入的 Key(sid) 格式 → 重建当前 Store。旧 branch.json 又被加载，History 变成旧私有继承快照 + 新代正文。这是合法旧格式的兼容测试，不是把任意损坏文件当正常输入。
+
+readGen 对读取失败、无效内容同样都返回 0，等于把“身份未知”解释为“从未删除重建”，也可能错误授予旧代清理权限。
+
+修复：区分真正不存在、已识别旧格式、当前版本合法计数、未知 / 损坏 / 读取失败；旧格式迁移后保留非零失效语义。未知状态应拒绝破坏性恢复并保留现场，不能默认第 0 代；世代格式应携带版本与 sid 身份，校验合法范围并处理计数错误。旧操作缺少世代 / 清单字段也不能默认拥有当前第 0 代资源，需明确兼容或报错流程。
+
+永久回归：`TestLegacyGenerationMarkerRemainsInvalidating`，再覆盖读取失败、损坏、负值 / 越界、旧操作缺字段，检查分支继承和清理两条授权链都不会降为 0。
+
+### 19.2 下一轮最小闭环
+
+1. 先补 X1 的真实入口漏接与 X4 的世代旧格式兼容，要求上面两个旧反例和旧格式夹具通过。
+2. 将 X2 / X3 合入逐项迁移清单与有界流式复制：完整文件集合（含 absent）、源 / 目标世代、每项长度 / 摘要、暂存核验、阶段和最终承接证据。恢复真正消费这些字段，发现变化保留源 / 目标与现场并报告。
+3. 保持本轮四个已通过原反例，以及第 17 节的六个反例持续通过；committed 注入须断言真实阶段。不能用静态伪造 committed 记录替代全部提交后恢复场景。
+4. 之后完成 S6 归档一致视图，再接插话日志与人格适配。ADS 原生 Windows 验证、W2–W5、F1 六组根因仍未完成；F2、后台 Job 与完整 Hook 后置。
+
+本轮只更新验收文档，保留此前未提交内容；未修改产品源码或执行真实旧数据迁移。
+
+
+## 20. W1 `a13353c` 复验记录
+
+本节两个直接反例（权限读取错误、真实阶段写失败）已在 `b379366` 独立复验通过；严格格式校验和操作失效归属仍未完成，当前证据见第 21 节。
+
+### 20.1 本轮通过范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.40 秒；C core 205 checks / 0 failures。本提交未改 C，本轮未重跑执行器 / 宿主 ASan，没有扩展到原生 Windows、ADS 或断电持久性验证。
+- 独立通过第 19 节五个精确反例：设置保存前存在删除失败残留；设置保存前存在旧根 ready 分支备份；复制后新增源历史文件；发布前必需 staging 文件缺失；旧格式世代标记下保留旧分支备份。读取 / 更新 / 重建 Store 后均满足相应保留或隔离要求。
+- 额外两个故障边界使用真实 Store / 文件和同目录冷启动，均复现失败。权限故障采用普通 Linux 用户的文件读权限；提交记录写失败用同名临时目录阻断。没有替换产品实现，临时 Go overlay 已清理。
+- 本轮认可上述五条修复落地；不将其扩大为世代错误处理、所有阶段恢复或整个 W1 已通过。
+
+### W1-Y1 [P0，承接 X4 的未完成错误处理]：世代文件不可读仍返回 0，旧操作删除新代
+
+位置：`session/storekey.go:110–141`、`session/store.go:708–713`。
+
+独立复现：
+
+1. 真正完成改名的来源墓碑与 committed 记录，但用只读 sessions 目录令来源清理失败；读取操作记录，确认 stage=committed、from_gen=0。
+2. 修复权限、重建 Store，源 sid Append 成功创建第 1 代，记录当前世代确为 1。
+3. 撤去 gen 文件读权限，重建 Store 后 ResumeRenames；恢复返回 nil。
+4. 恢复 gen 读权限并冷启动，源新代 History 为空，目标只有旧源正文，新代已受理消息从两侧消失。
+
+readGen 把 EACCES 等所有读取错误解释为 0；committed 清理便误判当前路径仍属于 op.FromGen=0，并删除新代文件。这一要求已在第 19 节 X4 明确提出，旧键格式解析修好没有解决它。
+
+当前对空内容返回 0、任意非数字返回 1，也没有区分已识别的旧 Key(sid) 与损坏 / 未知格式。不能通过统一选择一个“保守数字”解决：数字一旦恰好匹配旧操作，就会重新授予删除权限。
+
+修复要求：
+
+- 世代读取返回可区分的结果和 error；只有真正不存在才允许按约定视为初始 0。读取失败、空文件、未知格式、非法范围均不得获得默认世代。
+- 合法旧格式按身份识别并显式兼容，不能把任意非数字都当成第 1 代；计数更新必须在成功读取并验证原值后进行，溢出不得回绕。
+- Rename 的发布 / 清理、bumpGen、legacyDead 与分支旧根授权都消费该错误语义。身份未知时保留受影响文件和操作现场、报告错误，不清理也不重新授权旧备份；不能只给一个调用点补判断。
+
+永久回归：`TestUnreadableGenerationCannotAuthorizeCleanup`，使用真实 committed 故障状态与已成功 Append 的新代；另测空 / 损坏 / 负值 / 越界及合法旧键，检查出错时所有新代文件与操作记录仍在，恢复读取权限后可安全续办。
+
+### W1-Y2 [P1]：来源墓碑成功、阶段记录失败，修好故障后仍无法续办
+
+位置：`session/store.go:627 / 637–638 / 697–703`。
+
+独立复现：先因目标激活失败留下 stage=copied → 修复激活，阻断 op.json.tmp 写入 → 再次 Rename：目标发布和来源墓碑成功，写 committed 阶段失败 → 移除故障并重建 Store → ResumeRenames。恢复报“改名的源文件不见了（.jsonl）”，记录一直停在 copied。
+
+源文件物理上仍在，但普通 locate 按墓碑隐藏来源；恢复重新执行 copied 的源可见性检查，无法识别这是本操作已经完成的来源失效步骤。此例目标正文保留，未观察到正文丢失，因此按 P1 记录为恢复无法完成，区别于 Y1 的数据丢失。
+
+修复要求：把提交意图、目标完整承接证据、来源失效的归属与阶段转换形成可恢复协议。例如先可靠落盘 committing 意图，来源失效记录带 operation_id / generation，再依据这些证据补记 committed；或由一份权威事务记录决定两侧可见性。恢复应核对属于本操作的资源，不将普通读视图的“不可见”当作物理缺失。
+
+不能简单看到 source dead / target exists 就宣布成功：也可能是用户另行删除来源或目标已换代。只有验证本操作的身份、世代、复制版本及失效归属后才能续办；缺少证据的旧记录应保留双方并提供明确处理状态。
+
+永久回归：`TestSourceTombstoneBeforeCommitRecordCanResume`，在原始记录中确认 copied、来源墓碑真实存在、目标正文完整；修复故障后经启动 ResumeRenames 完成，并验证来源不复活、目标正文不变、操作清理结束。再覆盖前后每个阶段写失败及明确用户删除不能被恢复绕过。
+
+### 20.2 下一轮最小顺序
+
+1. 先收敛 Y1 的严格世代读取及调用方处理，保持本轮五个原反例持续通过。
+2. Y2 可以直接合入用户计划的逐项可恢复清单：版本、operation_id、源 / 目标世代、完整文件集合、每项长度 / 摘要、提交意图与失效归属，不再只用 copied / committed 两个独立文件的先后顺序推测结果。
+3. promote / Rename 共用有界流式复制与校验；保持新增 / 消失 / 改写、暂存缺失 / 损坏及目标冲突均保留可靠来源。低内存验证使用真实大文件，不依赖整份 ReadFile；不将哈希字段存在当成恢复核验已完成。
+4. 之后继续 S6 归档一致视图、插话日志 / 人格接入。ADS 原生 Windows 验证、W2–W5 和 F1 六组根因仍未完成，F2、后台 Job、完整 Hook 后置。
+
+本轮只更新验收文档，保留此前未提交内容；没有修改产品源码或迁移真实数据。
+
+
+## 21. W1 `b379366` 复验记录
+
+本节两组 P0、四个精确反例已在 `d3e4787` 独立复验通过；本节保留历史证据。通过范围和后续明确未完成项见第 22 节。
+
+日期：2026-10-28。
+
+### 21.1 已验证通过的范围
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.36 秒；C core 205 checks / 0 failures。本提交未改 C，本轮未重跑执行器 / 宿主 ASan，没有扩大为原生 Windows / ADS / 断电验证。
+- 独立通过第 20 节两个原反例：真实 committed 清理现场中，gen 文件 chmod 000 后恢复报错并保留新代；恢复权限后可续办。真实 Rename 中，来源墓碑已写、op 临时文件写失败后，修复故障、重建 Store 并 ResumeRenames 可以收尾，目标正文不丢。
+- 两条测试均通过实际操作 / 故障产生状态，读取记录确认真实阶段；没有仅靠手工写一份 committed / copied JSON 代替全过程。
+- 额外四个失败场景归为下面两组。使用真实 Store / 临时文件、同目录冷启动及临时 Go overlay，未替换产品实现；探针已清理。
+
+### W1-Z1 [P0，承接 Y1]：格式错误仍映射为可授权的世代，旧操作能删新代
+
+位置：`session/storekey.go:118–127 / bumpGen`、`session/store.go:Rename` 的 committed 清理。
+
+权限错误已修，但空内容仍返回 `(0,nil)`，任意非数字仍返回 `(1,nil)`，并非已完成严格世代解析。
+
+两个独立实测均先产生真实 committed / 清理失败记录，再同 sid 成功 Append 新代：
+
+| 故障现场 | 恢复结果 |
+| --- | --- |
+| 旧操作 from_gen=0，新代真实 gen=1；将 gen 文件截为空文件 | ResumeRenames 返回 nil，将其当作第 0 代；新代已受理消息被删除，两侧均无该消息 |
+| 旧操作 from_gen=1，新代真实 gen=2；将 gen 文件置为未知文本 broken-generation | ResumeRenames 返回 nil，将其当作第 1 代；新代已受理消息被删除 |
+
+这两项是持久元数据损坏时的故障注入，不宣称程序正常写入会产生这些字节；第 19 / 20 节已经明确要求未知格式不得获得默认身份。修权限错误不覆盖可读但无效的文件。
+
+修复要求：
+
+1. 只有文件真正不存在才可按约定视为初始 0；存在但为空、非法 / 过新格式、负值、越界均返回错误。计数增长也要验证上界，不能整数回绕。
+2. 兼容旧键时校验它确实等于当前 sid 的已知旧格式，不能将任意非数字当作旧标记。格式存在歧义时保留现场并明确迁移，不用猜测的数字授予删除权。
+3. 世代解析出错时，Rename 各阶段、bumpGen、legacyDead 和其他旧备份授权均传播或采取不授权的处理；保留源、新代、操作记录。统一读函数已具备 error 返回值，应把格式校验也落实进去。
+
+永久回归：`TestMalformedGenerationCannotAuthorizeCleanup`，包含 empty / unknown 两条真实旧操作与新代分支；同时保留合法旧键和读取权限错误回归。断言错误、新代正文和操作现场均保留，不能只检查 legacyDead 为 true。
+
+### W1-Z2 [P0，承接 Y2 的操作归属要求]：目标删除 / 重置没有使旧改名失效，启动恢复复活旧上下文
+
+位置：`session/store.go:renameOp / Rename / targetHasOurContent / ensureActive`。
+
+两个独立场景都先真实执行 Rename，阻断来源墓碑写入，使目标已发布、记录停在 copied；随后进行明确的新用户操作：
+
+| 后续操作 | 修复故障、重建并 ResumeRenames 的结果 |
+| --- | --- |
+| Delete(target) 返回成功，目标有持久墓碑且内容已清理 | 恢复返回 nil；ensureActive 清掉墓碑，旧源私有上下文重新写入目标，Exists=true |
+| Reset(target) 返回成功，目标 History 已为空 | 恢复返回 nil；目标清空的历史又被 staging 原文填回 |
+
+重置场景也与正常上下文清空入口相关，不能只把问题归为手工编辑操作文件。恢复的是早于删除 / 重置的操作，不能凭旧授权覆盖后来的失效决定。
+
+当前 renameOp 仍只有 From / To / Stage / FromGen / Files，没有目标世代 / 上下文 revision 或来源墓碑的 operation_id 归属。新增 `source dead + target content matches` 分支只证明某些字节存在，不能证明本操作已提交；相同字节也可出现在新代、其他复制操作或用户主动保留的文件中。第 20 节已明确要求不得据此单独认定提交。
+
+修复要求：
+
+1. 为操作分配持久 operation_id，并绑定源 / 目标具体世代、上下文 revision 和失效状态。Delete / Reset / 目标换代要可靠地使更早、涉及该目标的未完成操作失效，或推进一个恢复必须核对的 revision。
+2. copied / committing 的恢复在任何目标激活、文件写入或来源失效之前校验这些状态。普通 ensureActive 不具备取消后续删除墓碑的权限；被失效的旧操作不能创建新代或重放 staging。
+3. 来源墓碑记录应能证明是谁、针对哪一代执行的失效，或由权威事务记录原子决定提交视图。恢复只有在归属、双方世代与目标完整承接证据均成立时才能补 committed；普通用户删除与本操作提交要能区分。
+4. 遇后续失效时保留合法当前状态及必要证据，将旧操作结算为 cancelled / superseded / conflict，不静默发布或清理另一代。不要以一个 source isDead 判断替代提交意图和归属。
+
+永久回归：`TestPendingRenameCannotReviveDeletedTarget`、`TestTargetResetCannotBeUndoneByOldRename`，再覆盖源被用户另行删除、目标换代和内容相同的新代。经真实 Delete / Reset → 冷启动 ResumeRenames 检查目标不复活、来源不被越权清理、操作终态明确；保留真实提交写失败可以安全续办的旧用例。
+
+### 21.2 下一轮收敛门槛
+
+1. 完成 Z1 的严格格式校验；这是现有错误返回接口上的补齐，不能继续默认 0 / 1。
+2. 将 Z2 与逐项清单同时落实：版本 / operation_id / 双方世代与 revision / 完整文件集合 / 长度与摘要 / 提交意图与失效归属 / 终态。恢复时先核对授权仍有效，再消费复制内容；删除与重置是必须纳入的后续事件。
+3. promote / Rename 的公共流式复制可以继续并入这一轮，但流式和哈希核验不能替代操作授权。先让本轮四个反例、旧两例及各类冲突保留场景持续通过，再扩展 S6、插话和人格入口。
+4. ADS 原生 Windows、W2–W5、F1 六组根因仍未完成；F2、后台 Job 与完整 Hook 后置。当前验证范围仍是 Linux 普通文件与进程重启故障恢复。
+
+本轮只更新验收文档，保留此前未提交内容；未修改产品源码或迁移真实数据。
+
+
+## 22. W1 `d3e4787`：第 21 节修复与公共流式复制验收通过
+
+日期：2026-10-28。
+
+### 22.1 结论与独立验证
+
+本批通过。在第 21 节明确要求的严格世代解析、改名操作归属、后续删除 / 重置失效，以及本次新增的流式复制范围内，未发现新的阻塞。此结论覆盖当前新建的 Rename v2 操作；不把它扩大为所有旧格式事务、断电持久性、Windows / ADS 或整个 W1 已交付。
+
+基础检查：
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.35 秒。
+- `go test ./internal/session -race` 通过。
+- C core 205 checks / 0 failures；本提交未改 C，本轮未重新运行执行器 / 宿主 ASan。
+
+独立十个叶子场景全部通过，使用临时 Go overlay、真实 Store / 文件 / 权限故障和同目录冷启动，没有替换产品实现：
+
+| 场景 | 独立观察结果 |
+| --- | --- |
+| 第 0 代旧操作、新第 1 代，世代文件为空 | 恢复明确报错，新代已受理消息和活动操作记录均保留 |
+| 第 1 代旧操作、新第 2 代，世代文件是未知文本 | 恢复明确报错，不再将未知文本默认授予第 1 代清理权 |
+| 目标发布后用户 Delete，随后启动恢复 | 目标墓碑保留、上下文不复活；来源保留；操作结算 superseded 并保留 operation_id |
+| 目标发布后用户 Reset，随后启动恢复 | 目标上下文保持为空；来源不被旧操作清理；superseded 终态可读 |
+| 世代文件 chmod 000，随后恢复权限再续办 | 首次报错且新代保留；修复权限后恢复可以完成，新代仍保留 |
+| 来源墓碑已落盘，写 committed 记录时真实失败 | 记录停在 committing，墓碑 operation_id 与操作记录一致；冷启动正确核验目标并补提交、清理完成 |
+| 用户另行 Delete 来源 | 用户墓碑不会冒充本操作提交，旧操作结算 superseded |
+| 目标 Delete 后同 sid 创建新代并成功接收消息 | 旧改名不能覆盖目标新代，也不能清理来源；superseded 终态正确 |
+| 约 64 MiB 历史改名 | 文件长度及 SHA-256 一致；累计分配符合有界流式路径，详见下文 |
+| 旧归档与新归档同名、内容不同 | Migrate 报冲突，新旧原始字节均保留，没有发布 active 标记 |
+
+涉及真实 committed 的测试均经过“来源墓碑写失败 → 修复 → 来源目录删除权限不足”产生现场，并读取记录确认阶段；提交窗口测试也由实际阶段写失败产生，没有仅手工写 JSON 代替真实边界。
+
+### 22.2 公共流式复制的通过范围
+
+源码确认 `filecopy.go` 提供固定 64 KiB 缓冲的复制、文件摘要、前缀摘要、内容相等及版本核验；promote / Rename 已使用这些原语，目标未知读取错误不会被当作不存在后覆盖。
+
+独立改名文件大小 67,303,500 字节；在改名调用前后读取 Go `TotalAlloc`，累计新增分配 675,096 字节，约 0.64 MiB。源 / 目标长度与 SHA-256 一致。这个数字是本次 Rename 调用的 Go 累计分配，不是进程 RSS 或全部常驻内存；它支持“不按完整历史文件分配”的结论。
+
+`writeFileAtomic` 和公共复制均先 Sync 写入文件，再执行原子改名。本轮验证针对普通文件故障与进程重建，不声称已验证断电后的目录持久性。
+
+### 22.3 需补回未完成清单：promote 的逐项可恢复记录
+
+后续更新：`bccb4d1` 已实现本节所列清单与启动入口，下面保留 `d3e4787` 时的历史证据；当前验收及剩余恢复问题以第 23 节为准，不再把清单描述为尚未编写。
+
+本轮已完成公共流式复制和 Rename v2 的操作记录，旧布局提升仍缺此前排定的逐项迁移清单。用户本轮“未完成项”列表漏列了这一项，需要继续保留。
+
+当前源码证据：`storekey.go:357` 的 promote 仍直接逐项复制 / 校验，最后写 active；`storekey.go:465` 的 MigrationItem 只有 SID / Kind / Source / Target / Stage / Bytes；`Migrate` 在 promote 之后收集结果，最后一次写 `migration.json`（约第 538 行）。没有恢复时读取这份清单并按每项身份 / 摘要 / 阶段核对续办的流程。
+
+因此下一轮先完成该项，再进 S6：
+
+1. 对旧布局提升建立有版本与 operation_id 的操作记录，绑定源 / 目标身份、世代 / revision、完整文件集合（包括归档）、长度 / 摘要与提交阶段。复制和状态提交都共用当前安全原语。
+2. 在处理每项之前可靠登记，复制 / 验证 / 发布后更新可恢复状态；启动或 locate 触发提升时读取记录并核对现状。已存在目标必须依据内容和操作归属复用或报冲突，不能仅按存在性宣告完成。
+3. 新增中断回归：复制完成但状态未记、状态已 verified 后源 / 目标变化、active 提交失败、清单提交失败，以及后续 Delete / Reset / 换代。恢复应保持授权失效、冲突保留双方，不能重新激活旧备份。
+4. 归档的每个文件也要纳入集合与阶段，避免清单只覆盖历史 / 设置 / 分支。随后由 S6 统一列举 / 读取 / 删除 / 计数的权威视图。
+5. 继续验证真实大文件提升的峰值活跃内存，并区分复制缓冲、逐条 JSON 校验的内存与总分配量；保持本轮 Rename 内存与完整性回归通过。
+
+### 22.4 后续顺序
+
+逐项提升迁移清单 → S6 归档一致视图 → 插话日志 / 人格入口接入 → 原生 Windows / ADS 与 W2–W5 → F1 六组根因。F2、后台 Job 与完整 Hook 仍按既定顺序后置。
+
+`50ee283` 的持久插话历史验收范围不自动扩展到之后的存储入口切换；插话与人格接入时须覆盖当前世代 / revision / 失效约定。
+
+本轮只更新验收文档，保留此前未提交内容；未修改产品源码或迁移真实数据，临时探针已清理。
+
+
+## 23. W1 `bccb4d1`：逐项清单已落地，恢复授权仍有两条绕过路径
+
+日期：2026-10-28。
+
+### 23.1 本轮验证范围与通过项
+
+源码确认新增 `promotion.go`，提升计划包含版本、operation_id、SID、双方世代 / revision、历史 / 设置 / 分支 / 每份归档的长度与 SHA-256，以及逐项和整体阶段；复制前登记、复制后核验，最终 active 提交。`ResumePromotions` 已接入网关启动，locate 触发时也会读取活动操作记录。清单不是只在结束时写一次的运行报告，第 22.3 节要求的主体已经实现。
+
+基础检查：
+
+- `go vet ./...`、`go test ./... -count=1` 全部通过，app 包约 24.39 秒。
+- `go test ./internal/session -race` 通过。
+- C core 205 checks / 0 failures。本提交未改 C，本轮未重跑执行器 / 宿主 ASan。
+
+使用临时 Go overlay、真实 Store 和同目录重建独立验证 13 个叶子场景：10 个通过，3 个失败，对应下文两条 P1 和一条 P2。未替换产品实现，也未在仓库增加探针文件。
+
+| 通过场景 | 实际观察 |
+| --- | --- |
+| 历史已复制，设置复制被真实文件故障阻断，另有分支和归档待处理 | 四类文件均在同一清单；修复后冷启动按原 operation_id 续办，目标逐字节一致，旧源保留 |
+| 复制完成、verified 状态尚未记下的恢复窗口 | 在真实中断清单上回退该项状态后重启，按摘要复用目标，不重建操作 |
+| 新增源、移除唯一源、改写源、改写目标四种变化 | ResumePromotions 报错，保留冲突清单与目标字节，不写 active；但只看这一步不足，后续访问反例见 AB2 |
+| active 已提交，settled 目录不可写，随后成功追加消息 | 修复权限后启动续办保留已受理的追加，并补同一个 operation_id 的 committed 终态 |
+| 真实 Delete、成功完成的 Reset、Delete 后同 sid 新代 | 冷启动和后续 History 均不带回旧正文，新代消息保留；本轮并非这三条已通过路径回归 |
+| 约 64 MiB 历史提升 | 67,110,720 字节源 / 目标长度和 SHA-256 一致，Go TotalAlloc 增量 4,557,760 字节，约 4.35 MiB |
+
+上述内存数字是提升调用的 Go 累计分配，不是峰值活跃堆或进程 RSS。逐条 JSONL 校验仍有单行扫描缓冲，本次大文件由重复的约 1 MiB 消息构成；结论是该路径不按整份历史文件分配，不能据此声称所有内存指标已经测完。
+
+### W1-AB1 [P1]：superseded 只撤销一个 operation_id，后续访问可新建计划导入相同旧源
+
+位置：`session/promotion.go:379–384 / 400–416`；`session/storekey.go:321`。
+
+独立复现沿用现有 `TestPromotionAfterRevisionChangeDoesNotReactivate` 的 revision 推进方式，但增加“失效收尾后的第二次冷启动与真实访问”：
+
+1. 通过阻断 active 临时文件创建产生真实 verified 清单，源 / 目标历史均已复制，尚未提交。
+2. 推进 revision，从第 0 版变为第 1 版。
+3. 新建 Store 后 ResumePromotions 正确报旧操作已失效，原操作被移到 settled/superseded。
+4. 再新建 Store、再次恢复、调用 History。此时活动清单已移除，gen 仍为 0、没有 active / 墓碑；promoteSession 的无活动清单分支只阻止 gen > 0，于是按当前 revision 创建全新 operation_id，再把同一旧正文提升为 committed。
+
+独立读取两份终态确认：原 operation_id / revision=0 / superseded 与新 operation_id / revision=1 / committed 同时存在；History 返回旧的 original 正文。不是同一个操作被错误重试，而是换操作 ID 绕过持久失效决定。
+
+边界说明：本反例针对“revision 已推进、尚未发布 active”的中断窗口，使用与产品现有回归相同的 bumpRev 注入；不宣称成功返回的完整 Reset 场景失败，该场景独立通过。当前源码和设计以 revision 提前记录失效，不能在活动记录收尾后丢掉这层授权约束。
+
+修复要求：
+
+- 将旧源在该 SID / 世代下是否仍有自动导入资格持久化到权威状态；superseded 不是仅移除活动 JSON。首次导入、新建空会话和恢复失效操作应能区分。
+- 所有后续默认读取、枚举、Migrate 和 locate 都消费同一资格，不能靠换 operation_id 重获旧源授权；也不能简单禁止全部非零 revision，破坏对尚未提升旧会话的真实 Reset。
+- 用户在失效后发来新消息，如果允许创建干净上下文，应走明确的新上下文提交路径并隔离旧副本；普通消息不等于授权重新导入旧备份。
+
+永久回归：`TestPromotionSupersededRevisionCannotReplanOnLaterAccess`。断言第一次恢复、第二次冷启动、History / Settings / Migrate 与后续新消息均不重新继承失效正文；若允许新建，正文只能含新上下文。不能只验证第一次 Resume 的错误和 superseded 文件存在。
+
+### W1-AB2 [P1]：旧源全部消失时 locate 跳过活动清单，普通 Append 激活未提交副本
+
+位置：`session/storekey.go:321–335`；`session/store.go:539 / 580`；`session/promotion.go:386–390`。
+
+独立复现：
+
+1. 旧会话同时有历史和设置。通过设置目标的临时文件故障让历史项 verified、设置项 copying，设置副本尚不存在，active 尚未提交。
+2. 移除旧历史和旧设置，冷启动 ResumePromotions。它正确发现完整源集合变化，写入 conflict 并报错。
+3. 接着调用真实 History 和 Append。因为 hasLegacy 已为 false，locate 不再读取冲突清单，直接将现有新位置历史当作新会话文件。History 暴露未提交正文；Append 返回 nil 并通过 ensureActive 写入 active，缺失的设置仍未交付。
+4. 再冷启动 ResumePromotions。active 分支没有核对原清单是否具备提交资格，直接把该 conflict 操作结算为 committed；终态里设置项仍是 copying。
+
+实际输出：History 包含 uncommitted copy；AppendError=nil；active 存在；下次恢复 Resume=nil，整体 committed，计划中的 settings 项仍为 copying。此路径把未完成迁移伪装成完整提交，丢掉清单对完整会话集合的保护。
+
+修复要求：
+
+- 权威定位必须先判断“这个新位置由谁创建、是否存在未提交 / 冲突提升”，不能只用旧文件现在还在不在来决定是否需要恢复。没有旧源不等于没有未完成操作。
+- 活动 / 冲突清单未解决前，普通 Append / SaveSettings 不得通过 ensureActive 无提示发布半成品；读取也不得将它冒充完整权威视图。需要允许用户另建时，应显式隔离旧操作与副本。
+- active 不能单独证明任意活动清单已提交。补 committed 应核对提交归属和清单资格，同时保留“确实提交后正常追加新消息”的通过场景；不能要求已提交历史必须与快照字节完全相同而误拒绝合法追加。
+
+永久回归：`TestPromotionMissingSourcesCannotExposePartialTarget`、`TestPromotionConflictCannotBecomeCommittedThroughAppend`。必须走“真实部分复制 → 旧源全部消失 → 冷启动 conflict → 真实读写 → 再冷启动”，断言未提交副本不被普通入口激活、缺项清单不被升级成 committed，并覆盖 SaveSettings 的同一定位路径。
+
+### W1-AB3 [P2]：终态写入失败被恢复入口静默吞掉
+
+位置：`session/promotion.go:375–388 / 519–521`；`ResumePromotions`。
+
+真实 pending 提升后执行 Delete，再让 promotions/settled 目录 chmod 0500。冷启动 ResumePromotions 返回 nil，但活动操作记录仍在，superseded 终态没有写入。根因是调用 settlePromoteOp / finishPromoteCommitted 时使用了 `_ =`，网关启动路径因此无法输出已经准备好的恢复错误日志。
+
+该场景中删除墓碑仍保护数据，本项未观察到正文复活；问题是磁盘结算失败对调用方不可见，不能宣称收尾成功。修复应保留活动记录，向启动恢复传播可重试错误。对于 active 确已提交的数据操作，可以区分“提交已成功、收尾失败”并记录后者，不能因后置终态失败反向撤销已受理消息；本轮 post-commit 追加测试必须继续通过。
+
+永久回归：`TestResumePromotionReportsSettlementFailure`。覆盖 superseded 和已提交收尾，验证首次失败可见、操作现场保留、修复权限后按原 operation_id 完成，不重放旧数据。
+
+### 23.2 下一轮最小范围
+
+1. 先补 AB1 / AB2 的统一授权和发布门禁，修复 AB3 的错误可见性。范围限于本轮逐项清单与既有存储入口，不增加新的产品功能。
+2. 回归同时检查“恢复函数返回什么”和“用户随后读写会发生什么”，至少跨两次冷启动；保留已通过的逐项续办、内容变化冲突、提交后追加、Delete / 成功 Reset / 新代隔离与大文件内存用例。
+3. 以上通过后再进入第 15 节 S6：归档列举 / 读取 / 删除 / 计数统一权威视图，覆盖新旧同名冲突、未提交副本、删除后重启及再迁移。逐份归档已进入本次清单，不再把该部分记成尚未实现。
+4. 之后依次为插话日志 / 人格入口、原生 Windows / ADS、W2–W5、F1 六组根因。F2、后台 Job 与完整 Hook 继续后置。`50ee283` 的 B 历史验收不自动覆盖这些布局变更。
+
+本轮仅更新评审文档，保留此前未提交内容；未修改产品源码，未迁移真实数据，临时探针已清理。

@@ -31,4 +31,12 @@ notify 只替换固定模板变量。command 从标准输入读取最多 4096 �
 
 deadline.at 使用 deadline_at 的 Unix 毫秒值，统一最小堆调度；每个规则修订最多产生一个固定到期事件。停用、一次性消费和重启都不会重新触发同一修订。相同对象的冷却和每分钟最多 16 次触发从持久尝试记录恢复。已完成的事件正文保留每 agent 最近 100 条、最多 7 天；正在处理的投递不被清理，来源游标保留去重能力。来源游标总量最多 4096，达到上限明确暂停接收。
 
-当前模块已连接 Job 终态、run.started/finished、tool.after/failed 与 approval.waiting。前置 C 屏障、文件观察和 message.received 的平台 ID 对账另在后续运行链模块实现，不能仅凭这份配置声明已支持。
+当前模块已连接 Job 终态、run.started/finished、tool.after/failed、approval.waiting 与 tool.before。文件观察和 message.received 的平台 ID 对账仍未实现，不能仅凭这份配置声明已支持。
+
+## 前置屏障（tool.before）
+
+`on` 只能写 `tool.before` 一项，处理器固定为 command，可带 `handler.decision=allow/deny/approval`（缺省 deny）。有 decision 时不启动进程，直接给判断；带 command 时把调用写成事件 JSON 从标准输入送入，标准输出 `{"decision":"allow|deny|approval","summary":"..."}`，格式不合法按失败处理。
+
+同一调用按 priority、再按 id 稳定执行，任一拒绝之后其余规则不再运行。C 内核在调用通过校验之后、审批与排队之前等网关，上限 2 秒，超时按未执行收尾。判断只能追加审批或拒绝，不能把 readonly 放宽成 auto，也不能绕过原有审批；内核不支持 hook_check 时该会话明确失败，不静默跳过。
+
+`on_error` 决定命令失败时的结果：allow 不拦这个调用，deny（默认）拒绝并把理由回给模型。同一次调用的重复判断只读取已记录的结论，不重跑结果不明的命令；失去原调用的投递标为 cancelled 或 uncertain，不自动重放。
