@@ -7,8 +7,8 @@
 
 > **实现状态、验证状态与正式支持范围（2026-10-29 更新）**
 > - **实现状态**：三个平台的文件观察器都已实现（Linux inotify 直接进主循环；macOS kqueue + 一个工作线程 + 管道唤醒；Windows 一个 IOCP 工作线程 + ReadDirectoryChangesW + 回环 UDP 套接字唤醒）。`na_watch_supported()` 只在 `be_init` 成功时为 true，节点据此决定 hello 里宣不宣告 `file_watch`。
-> - **验证状态**：Linux 在 WSL2 上**实际运行**过（`test_watch` 10/10，ASan/UBSan）；Windows 与 macOS 的观察器**编译通过**（zig：`x86_64-windows-gnu`、`aarch64-macos`、`x86_64-macos`），Windows 的原生测试 `tests/test_watch_win.c` 已写并接入 CI 的 windows job，但**本机是通过 WSL 互通跑的，没有得到可信的运行结论**，所以不记为已通过；macOS 没有真机、也没有在本机运行。
-> - **正式支持范围**：v0.9.0 发布按 **Linux 首发**。Windows / macOS 的观察器属于"已实现、按能力宣告、尚未在真机验证"；它们的节点在初始化失败或运行异常时不会宣告能力，能力降级是明确行为。
+> - **验证状态**：Linux 在 WSL2 上实际运行（`test_watch` 13/13，ASan/UBSan）；**Windows 在同一台机器的原生 Windows 上实际运行**（把 `test_watch.exe` 放到 Windows 临时目录执行：12 checks / 0 failures，退出码 0），macOS 两个架构与测试程序**编译通过**（zig `aarch64-macos` / `x86_64-macos`），没有 macOS 真机可运行。
+> - **正式支持范围**：v0.9.0 按 **Linux 首发**发布；Windows 观察器已在本机原生验证可用，macOS 观察器仍是"已实现、按能力宣告、未在真机运行"，节点初始化失败时不宣告能力。
 > - 网关、内核、执行器在代码上是平台无关的；原生 Windows 执行器专项在更早轮次单独通过，不随本条复述。
 
 
@@ -783,7 +783,9 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 
 测试与构建：`tests/test_watch.c` 改成 POSIX 通用（Linux 跑 inotify 溢出用例；macOS 跑重命名用例）；新增 `tests/test_watch_win.c`（目录、明确文件过滤、摘除、resync、关闭回收，带 20 秒看门狗）。Makefile 新增 `build/test_watch.exe`、`mac-check`（zig 交叉编译两个 macOS 架构，只证明能编过），`windows-tests` 和 CI 的 windows job 会构建并运行 `test_watch.exe`，Linux 的 artifact 里也带上它。
 
-**运行结果（本机）**：Linux `test_watch` 10/10 通过；macOS 两个架构与 Windows 目标都编译通过；Windows 原生测试在本机只能通过 WSL 互通启动，没有得到可信的运行结论（互通下输出和退出状态不稳定），因此不记为通过——它会在 CI 的 windows runner 上真实运行。
+**运行结果（本机）**：Linux `test_watch` 13/13；**Windows 原生 `test_watch.exe` 12 checks / 0 failures / 退出码 0**（把 exe 拷到 Windows 临时目录、在 Windows 里执行并重定向日志）；macOS 两个架构与测试程序编译通过。
+
+第一次原生运行是**失败**的（没有任何事件、看门狗超时），根因是 `win_watch` 里 `BYTE buf[4096]` 排在 `bool` 之后，缓冲区地址没有按 DWORD 对齐（偏移 306），`ReadDirectoryChangesW` 返回成功却迟迟不产生完成事件。加上 `_Alignas(8)` 之后事件立即到达，这也是为什么"只编译不运行"会漏掉这个错误。
 
 ## 分支报告卡片
 

@@ -446,7 +446,9 @@ typedef struct win_watch {
     unsigned   gen;
     char       name[256]; /* 明确文件登记时只认这个名字；目录登记为空 */
     bool       dead, pending;
-    BYTE       buf[4096];
+    /* 目录读的缓冲区必须按 DWORD 对齐：结构体里排在 bool 后面会错位，
+     * ReadDirectoryChangesW 会返回成功却迟迟不产生完成事件。 */
+    _Alignas(8) BYTE buf[4096];
 } win_watch;
 
 #define WIN_KEY_STOP ((ULONG_PTR)1)
@@ -685,7 +687,8 @@ static int be_attach(na_watch *w, watch_entry *e)
     ww->slot = slot;
     ww->gen = e->gen;
     if (name) WideCharToMultiByte(CP_UTF8, 0, name, -1, ww->name, sizeof ww->name, NULL, NULL);
-    if (!CreateIoCompletionPort(dir, w->iocp, (ULONG_PTR)ww, 0)) {
+    HANDLE assoc = CreateIoCompletionPort(dir, w->iocp, (ULONG_PTR)ww, 0);
+    if (!assoc) {
         CloseHandle(dir);
         free(ww);
         return -1;
