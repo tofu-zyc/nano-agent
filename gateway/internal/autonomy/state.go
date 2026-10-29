@@ -95,6 +95,9 @@ type State struct {
 	Agenda     []AgendaItem `json:"agenda,omitempty"`
 
 	TopicBranches []TopicBranch `json:"topic_branches,omitempty"`
+	// MindProfile 是心智档案：候选权重、可选维度与阈值（设计 §7.2 / §7.3）
+	MindProfile MindProfile `json:"mind_profile,omitempty"`
+
 	// Ledger 是统一的自主活动账本：按本地自然日、按来源记次数和 token（设计 §7.1）
 	Ledger []LedgerUsage `json:"ledger,omitempty"`
 
@@ -859,8 +862,11 @@ func (s *State) OpenIdeas(now time.Time) []Idea {
 		}
 		out = append(out, x)
 	}
+	// 选择分用心智档案的权重（默认 兴趣 1 / 新颖 1 / 成本 0，和原来的"兴趣+新颖"一致）；
+	// 同分时新的在前，仍然稳定。
+	profile := s.Profile()
 	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i].Interest+out[i].Novelty, out[j].Interest+out[j].Novelty
+		a, b := profile.ScoreIdea(out[i]), profile.ScoreIdea(out[j])
 		if a != b {
 			return a > b
 		}

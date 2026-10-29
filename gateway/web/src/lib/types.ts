@@ -354,6 +354,11 @@ export type AutonomyInterest = { text: string; source: string; at: number };
 // 自主活动账本的一天：按来源分开记次数和 token（设计 §7.1）
 export type LedgerUsage = { day: string; tz?: string; source: string; starts: number; tokens: number; reserved?: number; runs?: string[] };
 
+// 心智档案（设计 §7.2 / §7.3）：候选权重、可选维度与阈值
+export type ScoreWeights = { interest: number; novelty: number; cost: number; cost_scale: number };
+export type MindDimension = { enabled: boolean; value: number; baseline: number; min: number; max: number; drift?: number; threshold?: number };
+export type MindProfile = { preset?: string; weights: ScoreWeights; dimensions?: Record<string, MindDimension>; updated?: number };
+
 // 一个 agent 的自主活动概况（网页的 agent 节点）
 export type AutonomyView = {
   schema_version: number; revision: number; paused: boolean; pause_reason?: string; next_check?: number;
@@ -365,6 +370,7 @@ export type AutonomyView = {
   reflections: { at: number; text: string; change?: string }[];
   beliefs: { subject: string; value: string; source?: string; confidence?: number; at: number }[];
   ledger?: LedgerUsage[]; // 今天的探索/约定/Hook/手动
+  profile?: MindProfile; // 候选权重与可选维度
 };
 
 // agent 长期记忆的概况

@@ -304,7 +304,8 @@ type View struct {
 	Executions    []Execution   `json:"executions"`
 	Reflections   []Reflection  `json:"reflections"`
 	Beliefs       []Belief      `json:"beliefs"`
-	Ledger        []LedgerUsage `json:"ledger"` // 今天的四个来源：探索/约定/Hook/手动
+	Ledger        []LedgerUsage `json:"ledger"`  // 今天的四个来源：探索/约定/Hook/手动
+	Profile       MindProfile   `json:"profile"` // 候选权重与可选维度
 }
 
 // View 整理一份给网页的概况（个数有上限，按时间倒序）。
@@ -313,7 +314,7 @@ func (s *State) View(now time.Time, loc *time.Location, limit int) View {
 	v := View{SchemaVersion: s.SchemaVersion, Revision: s.Revision, Paused: s.Paused, PauseReason: s.PauseReason,
 		Budget: s.Budget, BudgetLeft: s.BudgetLeft(s.Budget.Limit), Self: s.Self,
 		Agenda: s.OpenAgenda(), Intentions: s.ActiveIntentions(), Ideas: s.OpenIdeas(now),
-		Ledger: s.LedgerToday(now, loc)}
+		Ledger: s.LedgerToday(now, loc), Profile: s.Profile()}
 	if s.NextCheck > 0 {
 		v.NextCheck = s.NextCheck * 1000
 	}

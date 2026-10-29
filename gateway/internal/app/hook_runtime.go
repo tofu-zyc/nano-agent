@@ -328,6 +328,34 @@ func (a *App) emitRuntimeEvent(name, sid string, r *run, data any) {
 	}
 }
 
+// emitAgentRuntimeEvent 是 agent 级别的事实（比如心智维度越过阈值），不属于某个聊天会话：
+// 来源会话留空，同一个 agent 的任意 Hook 规则都能匹配，不会被当成某个人私聊里的内容。
+func (a *App) emitAgentRuntimeEvent(name, agent string, data any) {
+	if a.jobEvents == nil {
+		return
+	}
+	raw, _ := json.Marshal(data)
+	if len(raw) > 1024 {
+		raw = json.RawMessage(`{}`)
+	}
+	a.runtimeEventSeq++
+	now := a.now().Unix()
+	event := eventlog.Event{Name: name, SourceID: "gateway", SourceEpoch: a.dispatchBoot, Seq: a.runtimeEventSeq,
+		OccurredAt: now, ObservedAt: now, AgentID: agent, Data: raw}
+	event.ID = eventlog.EventID(event.SourceID, event.SourceEpoch, event.Seq)
+	engine := a.hookEngine
+	if err := a.jobEvents.Submit(eventlog.Transaction{Event: &event}, func(err error) {
+		if err != nil {
+			a.store.RecordStorageIssue("hook_event", err)
+			a.log.Warn("Hook 事件未落盘", "event", name, "err", err)
+		} else if engine != nil {
+			engine.Wake()
+		}
+	}); err != nil {
+		a.store.RecordStorageIssue("hook_event", err)
+	}
+}
+
 // recordMessage 把校验通过的渠道入站消息写成可靠事件。去重键沿用插话日志那套
 // （sid|渠道|聊天窗口|消息ID），在同一个日志里单独占一格：平台重发不会多出一条事件，
 // 已经受理的补充也不会和它互相顶掉。事件先落盘，Hook 只匹配已经提交的事件。

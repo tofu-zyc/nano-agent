@@ -106,6 +106,11 @@
       store.fail(err);
     }
   }
+  // 心智档案：预设、候选权重和可选维度都走同一个 autonomy 接口
+  async function profileAction(action: string, body: Record<string, unknown>) {
+    await autonomy(action, body);
+    store.toast({ kind: 'ok', text: '心智档案已更新，下一次挑选就用新值' }, 2200);
+  }
   async function deferIdea(item: string) {
     await autonomy('defer_idea', { id: item, when: '明天 09:00' });
     store.toast({ kind: 'ok', text: '推迟到明天上午再看' }, 1800);
@@ -324,6 +329,36 @@
                 {/each}
               </ul>
             </details>
+          {/if}
+          {#if auto.profile}
+            <div class="p-sub">心智档案</div>
+            <div class="p-row">
+              <span class="p-grow muted p-small">预设（展开成具体数值，改过就是 custom）</span>
+              <select disabled={busy} value={auto.profile.preset ?? 'balanced'} onchange={(e) => void profileAction('set_preset', { id: e.currentTarget.value })}>
+                <option value="balanced">balanced 均衡</option>
+                <option value="curious">curious 好奇</option>
+                <option value="focused">focused 专注</option>
+                <option value="custom">custom 自定义</option>
+              </select>
+            </div>
+            <div class="p-row">
+              <label class="num" title="兴趣权重（0–5）">兴趣<input type="number" min="0" max="5" step="0.5" value={auto.profile.weights.interest} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'interest', value: +e.currentTarget.value })}/></label>
+              <label class="num" title="新颖权重（0–5）">新颖<input type="number" min="0" max="5" step="0.5" value={auto.profile.weights.novelty} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'novelty', value: +e.currentTarget.value })}/></label>
+              <label class="num" title="成本权重（0–5）">成本<input type="number" min="0" max="5" step="0.5" value={auto.profile.weights.cost} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'cost', value: +e.currentTarget.value })}/></label>
+              <label class="num" title="成本参照分钟数（1–480）">参照<input type="number" min="1" max="480" value={auto.profile.weights.cost_scale} disabled={busy} onchange={(e) => void profileAction('set_weight', { field: 'cost_scale', value: +e.currentTarget.value })}/></label>
+            </div>
+            {#each ['curiosity', 'social_drive', 'focus', 'energy'] as dim (dim)}
+              {@const d = auto.profile.dimensions?.[dim]}
+              <div class="p-row">
+                <label class="p-grow p-small"><input type="checkbox" checked={d?.enabled ?? false} disabled={busy} onchange={(e) => void profileAction('set_dimension', { id: dim, field: 'enabled', value: e.currentTarget.checked ? 1 : 0 })}/> {dim}</label>
+                {#if d}
+                  <label class="num" title="当前值（0–100）">值<input type="number" min="0" max="100" value={d.value} disabled={busy} onchange={(e) => void profileAction('set_dimension', { id: dim, field: 'value', value: +e.currentTarget.value })}/></label>
+                  <label class="num" title="基线（0–100）">基线<input type="number" min="0" max="100" value={d.baseline} disabled={busy} onchange={(e) => void profileAction('set_dimension', { id: dim, field: 'baseline', value: +e.currentTarget.value })}/></label>
+                  <label class="num" title="每次结算向基线靠多少（0–10）">漂移<input type="number" min="0" max="10" value={d.drift ?? 0} disabled={busy} onchange={(e) => void profileAction('set_dimension', { id: dim, field: 'drift', value: +e.currentTarget.value })}/></label>
+                  <label class="num" title="越过它发一条 mind.threshold_crossed（0 表示不设）">阈值<input type="number" min="0" max="100" value={d.threshold ?? 0} disabled={busy} onchange={(e) => void profileAction('set_dimension', { id: dim, field: 'threshold', value: +e.currentTarget.value })}/></label>
+                {/if}
+              </div>
+            {/each}
           {/if}
           <details class="mind-state">
             <summary>心智状态（长期兴趣、认知、反思）</summary>

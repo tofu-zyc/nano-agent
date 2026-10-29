@@ -486,3 +486,73 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 		t.Fatalf("迁移导重了：%+v", row)
 	}
 }
+
+func TestMindProfileWeightsDimensionsAndDrift(t *testing.T) {
+	s := New()
+	now := at(10, 0)
+	// 默认档案复现原来的排序：兴趣+新颖
+	cheap, err := s.AddIdea(Idea{Text: "便宜但一般", Interest: 3, Novelty: 3, CostMinutes: 5, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rich, err := s.AddIdea(Idea{Text: "贵但有意思", Interest: 5, Novelty: 5, CostMinutes: 120, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.OpenIdeas(now); got[0].ID != rich.ID {
+		t.Fatalf("默认权重下排序变了：%+v", got)
+	}
+	// 把成本权重调高、参照分钟数调小：贵的那条排到后面
+	if err := s.SetWeight("cost", 2, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetWeight("cost_scale", 30, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.OpenIdeas(now); got[0].ID != cheap.ID {
+		t.Fatalf("成本权重没有影响挑选：%+v", got)
+	}
+	for _, bad := range []struct {
+		field string
+		value float64
+	}{{"interest", -1}, {"novelty", 6}, {"cost", 9}, {"cost_scale", 0}, {"cost_scale", 12.5}, {"unknown", 1}} {
+		if err := s.SetWeight(bad.field, bad.value, 0); err == nil {
+			t.Fatalf("%s=%v 应该被拒绝", bad.field, bad.value)
+		}
+	}
+	// 预设展开成可查看的具体数值
+	if err := s.SetPreset(PresetFocused, 0); err != nil {
+		t.Fatal(err)
+	}
+	p := s.Profile()
+	if p.Preset != PresetFocused || p.Weights.Cost <= 0 || !p.Dimensions["focus"].Enabled {
+		t.Fatalf("预设没有展开：%+v", p)
+	}
+	if err := s.SetPreset("nope", 0); err == nil {
+		t.Fatal("未知预设应该被拒绝")
+	}
+	// 维度：范围校验、漂移向基线、阈值穿越
+	if err := s.SetDimension("focus", Dimension{Enabled: true, Value: 120, Baseline: 50, Min: 0, Max: 100}, 0); err == nil {
+		t.Fatal("越界的维度值应该被拒绝")
+	}
+	if err := s.SetDimension("mood", Dimension{Enabled: true, Value: 50, Baseline: 50, Min: 0, Max: 100}, 0); err == nil {
+		t.Fatal("未知维度应该被拒绝")
+	}
+	if err := s.SetDimension("focus", Dimension{Enabled: true, Value: 54, Baseline: 75, Min: 0, Max: 100, Drift: 10, Threshold: 55}, 0); err != nil {
+		t.Fatal(err)
+	}
+	crossed := false
+	for _, c := range s.DriftDimensions(0) {
+		if c.Name == "focus" {
+			crossed = c.To > c.From && c.Crossed()
+		}
+	}
+	if !crossed {
+		t.Fatal("focus 漂过阈值没有报")
+	}
+	for _, c := range s.DriftDimensions(0) {
+		if c.Name == "focus" && c.Crossed() {
+			t.Fatalf("已经在阈值之上不该重复报：%+v", c)
+		}
+	}
+}

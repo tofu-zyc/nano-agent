@@ -601,3 +601,13 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestLedgerRecordsSourcesReservesAndRollsDays`（预留/退回/按来源结算/换天不互相覆盖/14 天裁剪/迁移只导一次）与 `TestActivityLedgerSplitsExplorationAndManual`（模拟时钟：一次自主探索 + 一次手动叫醒分别落账、结算后没有残留预留、`/autonomy` 文本显示分项）；全量 `go test`、`go vet`、网页 check/build 通过。
 
 未做：每日上限仍然读 `life.json` 的 `Wakes` 计数（账本记分项、上限沿用旧标量，两者在升级当天靠迁移对齐）；主动联系（Reaches）还没有进账本。
+
+### P6 心智档案：候选权重、可选维度与阈值（§7.2 / §7.3）
+
+`autonomy` 新增 `profile.go`：`MindProfile{preset, weights, dimensions}`。选择分改成 `wi*(interest-1)/4 + wn*(novelty-1)/4 - wc*min(cost/cost_scale,1)`，默认 `1/1/0`（参照 30 分钟）与原来的「兴趣+新颖」排序完全一致；`wi/wn/wc` 0–5、`cost_scale` 1–480 分钟，越界和非整数明确拒绝。预设 `balanced/curious/focused` 展开成可查看的具体数值（改过就是 `custom`），可以恢复默认。维度首版内置 `curiosity/social_drive/focus/energy`：可开关，值/基线 0–100、漂移 0–10、可选阈值；每次活动结算按各自漂移向基线回落，越过阈值的发一条 agent 级可靠事件 `mind.threshold_crossed`（`OriginSID` 留空，同一 agent 的任意 Hook 规则都能匹配），回落不会再刷同一条。
+
+入口：`/autonomy profile` 查看（权重 + 每个维度的开关/值/基线/范围/漂移/阈值），`/autonomy preset <名字>`、`/autonomy weight <字段>=<值>`、`/autonomy dimension <名字> <字段>=<值>` 修改（仅管理员）；网页 agent 节点「心智档案」卡片用同一组 `set_preset/set_weight/set_dimension` 动作；心声简报里加一行「你现在的倾向」，列已启用维度。
+
+验证：`TestMindProfileWeightsDimensionsAndDrift`（默认排序不变、提高成本权重后排序真的翻转、预设展开、权重与维度越界/未知名字被拒、漂移向基线且只报一次阈值）与 `TestMindThresholdCrossedReachesAHook`（命令设维度 → 手动叫醒结算漂移 → `mind.threshold_crossed` 经可靠日志投递给 Hook）；全量 `go test`、`go vet`、网页 check/build 通过。
+
+未做：阈值只报向上穿越，没有迟滞带（多次在阈值附近来回会各报一次）；维度不参与选择分，只出现在简报和阈值事件里。

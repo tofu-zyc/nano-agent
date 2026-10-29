@@ -3,6 +3,7 @@ package app
 // 自主活动的集成测试（模拟时间 + 假模型 + 假内核，走真实的模型请求和工具执行链）。
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/autonomy"
+	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -632,4 +634,53 @@ func TestActivityLedgerSplitsExplorationAndManual(t *testing.T) {
 	e.a.mu.Unlock()
 	e.say("/autonomy")
 	e.ch.wait(t, "约定 0 · Hook 0 · 手动 1")
+}
+
+func TestMindThresholdCrossedReachesAHook(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC))
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	spec := hooks.Spec{Name: "阈值提醒", On: []string{"mind.threshold_crossed"}, Handler: hooks.Handler{Type: "notify", Text: "越过阈值 {{event_name}}"}, Deliver: "none"}
+	view, err := e.a.HookAction(context.Background(), mainSID, "fake:u1", HookRequest{Action: "create", OperationID: "threshold", Spec: &spec})
+	if err != nil || view.Rule == nil {
+		t.Fatal(view, err)
+	}
+	e.say("/autonomy dimension focus enabled=true value=54 baseline=75 drift=10 threshold=55")
+	e.ch.wait(t, "维度 focus 改好了")
+	if err := e.a.Wake("default"); err != nil {
+		t.Fatal(err)
+	}
+	defaultSID := lifeSID("default")
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: defaultSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: defaultSID, Status: proto.StatusOK})
+	waitIdle(t, e, defaultSID)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rows, _ := e.a.jobEvents.Deliveries("", 128)
+		done := false
+		for _, d := range rows {
+			if d.HookID == view.Rule.ID && d.Status == "succeeded" {
+				done = true
+			}
+		}
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("阈值事件没有投递给 Hook（%d 条投递）", len(rows))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	e.a.mu.Lock()
+	classes := e.a.mind("default").Profile().Dimensions["focus"]
+	e.a.mu.Unlock()
+	if classes.Value <= 54 {
+		t.Fatalf("维度没有漂移：%.1f", classes.Value)
+	}
 }

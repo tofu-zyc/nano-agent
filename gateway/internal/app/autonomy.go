@@ -436,6 +436,40 @@ func (a *App) startLife(agentID string, manual bool) error {
 	return a.startMindLocked(ag, st, trig, manual)
 }
 
+// dimensionLabel 是维度的中文名（只用于显示，字段名仍然是 curiosity 这些）。
+func dimensionLabel(name string) string {
+	switch name {
+	case "curiosity":
+		return "好奇"
+	case "social_drive":
+		return "社交"
+	case "focus":
+		return "专注"
+	case "energy":
+		return "精力"
+	}
+	return name
+}
+
+// profileLine 是心声简报和 /autonomy 共用的一行心智档案：权重 + 已启用的维度。
+func profileLine(p autonomy.MindProfile) string {
+	var dims []string
+	for _, name := range autonomy.DimensionNames {
+		if d, ok := p.Dimensions[name]; ok && d.Enabled {
+			label := fmt.Sprintf("%s %.0f", dimensionLabel(name), d.Value)
+			if d.Threshold > 0 {
+				label += fmt.Sprintf("（%.0f 会提醒）", d.Threshold)
+			}
+			dims = append(dims, label)
+		}
+	}
+	line := fmt.Sprintf("你现在的倾向：%s", strings.Join(dims, " · "))
+	if len(dims) == 0 {
+		line = "可选的心智维度都没打开"
+	}
+	return line + "（0–100 的自评，不是真实生理状态）"
+}
+
 // ledgerSource 是这次自主活动记到账本的哪个来源：主人叫醒 > Hook > 约定/排好的事 > 自选探索。
 func ledgerSource(trig autonomy.Trigger, manual, hook bool) string {
 	switch {
@@ -594,6 +628,9 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	if !a.memoryOn(ag) {
 		b.WriteString("\n（长期记忆关着，这次记不了东西。）")
 	}
+	if parts := profileLine(st.Profile()); parts != "" {
+		b.WriteString("\n" + parts)
+	}
 	if sid, ok := func() (string, bool) {
 		if topic := topicOfTrigger(trig); topic != "" {
 			return st.BranchOfTopic(topic)
@@ -658,6 +695,14 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 	st.Spend(tokens)
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
 	st.SettleLedger(mr.Source, r.runID, tokens, now, a.loc)
+	// 维度按自己的漂移速度回落向基线；越过阈值的发一条可靠事件，Hook 可以订阅
+	for _, change := range st.DriftDimensions(now.Unix()) {
+		if !change.Crossed() {
+			continue
+		}
+		a.emitAgentRuntimeEvent("mind.threshold_crossed", mr.AgentID, map[string]any{
+			"dimension": change.Name, "from": change.From, "to": change.To, "threshold": change.Threshold, "agent": mr.AgentID})
+	}
 	a.scheduleMindNext(st, ag, now)
 	ls := a.lifeOf(ag.ID)
 	if next, ok := st.NextDueTime(); ok {
@@ -767,7 +812,7 @@ type AutonomyActionReq struct {
 	ID     string  `json:"id"`
 	When   string  `json:"when"`
 	Note   string  `json:"note"`
-	Field  string  `json:"field"` // set_number：interest / novelty / cost_minutes / priority / progress / confidence
+	Field  string  `json:"field"` // set_number / set_weight / set_dimension 要改的字段
 	Value  float64 `json:"value"`
 }
 
@@ -857,6 +902,42 @@ func (a *App) AutonomyAction(id string, x AutonomyActionReq) (autonomy.View, err
 		if err := st.SetNumber(x.ID, x.Field, x.Value, now); err != nil {
 			return autonomy.View{}, err
 		}
+	case "set_preset":
+		if err := st.SetPreset(strings.ToLower(strings.TrimSpace(x.ID)), now.Unix()); err != nil {
+			return autonomy.View{}, err
+		}
+	case "set_weight":
+		if err := st.SetWeight(strings.ToLower(strings.TrimSpace(x.Field)), x.Value, now.Unix()); err != nil {
+			return autonomy.View{}, err
+		}
+	case "set_dimension":
+		name := strings.ToLower(strings.TrimSpace(x.ID))
+		profile := st.Profile()
+		d, exists := profile.Dimensions[name]
+		if !exists {
+			d = autonomy.Dimension{Value: 50, Baseline: 50, Min: 0, Max: 100}
+		}
+		switch strings.ToLower(strings.TrimSpace(x.Field)) {
+		case "enabled":
+			d.Enabled = x.Value != 0
+		case "value":
+			d.Value = x.Value
+		case "baseline":
+			d.Baseline = x.Value
+		case "min":
+			d.Min = x.Value
+		case "max":
+			d.Max = x.Value
+		case "drift":
+			d.Drift = x.Value
+		case "threshold":
+			d.Threshold = x.Value
+		default:
+			return autonomy.View{}, errors.New("可以改维度的 enabled、value、baseline、min、max、drift、threshold")
+		}
+		if err := st.SetDimension(name, d, now.Unix()); err != nil {
+			return autonomy.View{}, err
+		}
 	default:
 		return autonomy.View{}, fmt.Errorf("不认识的操作 %q", x.Action)
 	}
@@ -938,6 +1019,11 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			}
 			fmt.Fprintf(&b, " · 约定 %d · Hook %d · 手动 %d（都不占探索次数）\n", commitment, hook, manual)
 		}
+		{
+			p := st.Profile()
+			fmt.Fprintf(&b, "心智档案：%s；权重 兴趣 %.1f / 新颖 %.1f / 成本 %.1f（参照 %d 分钟）\n", p.Preset, p.Weights.Interest, p.Weights.Novelty, p.Weights.Cost, p.Weights.CostScale)
+			b.WriteString(profileLine(p) + "\n")
+		}
 		fmt.Fprintf(&b, "今天用了 %d token", v.Budget.Tokens)
 		if v.Budget.Limit > 0 {
 			fmt.Fprintf(&b, "（上限 %d）", v.Budget.Limit)
@@ -975,7 +1061,118 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			return
 		}
 		a.answer(c, ag.Name+" 醒了（网页的 agent 节点里能看到它在做什么）。")
+	case "profile":
+		p := st.Profile()
+		b := fmt.Sprintf("心智档案：%s\n权重：兴趣 %.1f · 新颖 %.1f · 成本 %.1f（参照 %d 分钟）\n", p.Preset, p.Weights.Interest, p.Weights.Novelty, p.Weights.Cost, p.Weights.CostScale)
+		for _, name := range autonomy.DimensionNames {
+			d, ok := p.Dimensions[name]
+			if !ok {
+				b += fmt.Sprintf("- %s（%s）：没设置\n", name, dimensionLabel(name))
+				continue
+			}
+			state := "关"
+			if d.Enabled {
+				state = "开"
+			}
+			b += fmt.Sprintf("- %s（%s）：%s，值 %.0f，基线 %.0f，范围 %.0f–%.0f，漂移 %.0f，阈值 %.0f\n",
+				name, dimensionLabel(name), state, d.Value, d.Baseline, d.Min, d.Max, d.Drift, d.Threshold)
+		}
+		b += "\n/autonomy preset balanced|curious|focused · /autonomy weight novelty=2 · /autonomy dimension focus value=80 threshold=90 enabled=true"
+		a.answer(c, b)
 	default:
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "preset "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能改心智档案")
+				return
+			}
+			name := strings.ToLower(strings.TrimSpace(rest))
+			if err := st.SetPreset(name, now.Unix()); err != nil {
+				a.answer(c, "没改成："+err.Error())
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, "心智档案换成「"+st.Profile().Preset+"」了，下一次挑选和简报就用新值。")
+			return
+		}
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "weight "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能改心智档案")
+				return
+			}
+			field, raw, ok := strings.Cut(strings.TrimSpace(rest), "=")
+			value, convErr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if !ok || convErr != nil {
+				a.answer(c, "用法：/autonomy weight novelty=2（interest / novelty / cost 为 0–5，cost_scale 为 1–480 分钟）")
+				return
+			}
+			if err := st.SetWeight(strings.ToLower(strings.TrimSpace(field)), value, now.Unix()); err != nil {
+				a.answer(c, "没改成："+err.Error())
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, fmt.Sprintf("权重 %s 改成 %g 了；候选排序下一次就用新值。", field, value))
+			return
+		}
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "dimension "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能改心智档案")
+				return
+			}
+			fields := strings.Fields(rest)
+			if len(fields) < 2 {
+				a.answer(c, "用法：/autonomy dimension focus value=80 threshold=90 enabled=true")
+				return
+			}
+			name := strings.ToLower(fields[0])
+			p := st.Profile()
+			d, exists := p.Dimensions[name]
+			if !exists {
+				d = autonomy.Dimension{Value: 50, Baseline: 50, Min: 0, Max: 100}
+			}
+			for _, pair := range fields[1:] {
+				key, raw, ok := strings.Cut(pair, "=")
+				if !ok {
+					a.answer(c, "参数要写成 字段=数值")
+					return
+				}
+				key = strings.ToLower(strings.TrimSpace(key))
+				raw = strings.TrimSpace(raw)
+				if key == "enabled" {
+					d.Enabled = raw == "true" || raw == "1"
+					continue
+				}
+				value, convErr := strconv.ParseFloat(raw, 64)
+				if convErr != nil {
+					a.answer(c, "参数 "+key+" 要是数值")
+					return
+				}
+				switch key {
+				case "value":
+					d.Value = value
+				case "baseline", "base":
+					d.Baseline = value
+				case "min":
+					d.Min = value
+				case "max":
+					d.Max = value
+				case "drift":
+					d.Drift = value
+				case "threshold":
+					d.Threshold = value
+				default:
+					a.answer(c, "可以改：value、baseline、min、max、drift、threshold、enabled")
+					return
+				}
+			}
+			if err := st.SetDimension(name, d, now.Unix()); err != nil {
+				a.answer(c, "没改成："+err.Error())
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, fmt.Sprintf("维度 %s 改好了：%s，值 %.0f，基线 %.0f，漂移 %.0f，阈值 %.0f。", name,
+				map[bool]string{true: "开", false: "关"}[d.Enabled], d.Value, d.Baseline, d.Drift, d.Threshold))
+			return
+		}
 		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "set "); ok {
 			if !a.isAdmin(c.who) {
 				a.answer(c, "只有管理员能改这些数值")
