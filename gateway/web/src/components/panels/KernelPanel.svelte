@@ -10,6 +10,7 @@
   const k = $derived(node ? ov.kernels.find((x) => x.node === node) : undefined);
   const busy = $derived(k ? (ov.sessions ?? []).filter((s) => s.run_node === k.node) : []);
   const machine = $derived(k ? (k.local ? '本机' : k.node) : '');
+  const maxJobSeconds = $derived(k?.features?.job_timeout_max_seconds ?? 0);
   const paired = $derived(!!k && !k.local && (store.devices?.paired ?? []).some((p) => p.node === k.node));
 
   async function unpair() {
@@ -37,6 +38,10 @@
       <p class="p-note">这里是能力探测。实际执行隔离按每次调用结果显示；请求 on 与节点 off 冲突时失败。</p>
       <div class="p-row"><span class="p-k">系统</span><span class="p-grow">{[osLabel(k.os), k.arch, k.version ? 'v' + k.version : ''].filter(Boolean).join(' · ') || '—'}</span></div>
       <div class="p-row"><span class="p-k">连接</span><span class="p-grow">已连接 {since(k.since)}</span></div>
+      {#if (k.features?.job_stream ?? 0) >= 1 && maxJobSeconds > 0}
+        <div class="p-row"><span class="p-k">长命令上限</span><span class="p-grow">{k.features?.job_allow_no_timeout ? '允许不限时，需显式请求' : '最长 ' + maxJobSeconds.toLocaleString() + ' 秒'}</span></div>
+        <p class="p-note">这是执行节点的部署上限，请求不能提高它；对话自身的时限仍单独生效。</p>
+      {/if}
       <div class="p-row"><span class="p-k">工具</span><span class="p-grow">{k.tools.join('、')}</span></div>
       <div class="p-row"><span class="p-k">正在跑</span><span class="p-grow">{busy.length ? busy.map((s) => s.title).join('、') : '没有'}</span></div>
       <button class="btn sm" onclick={() => store.open({ type: 'machine', name: machine })}><Icon name="hub" size={13} />它所在的机器：{machine}</button>

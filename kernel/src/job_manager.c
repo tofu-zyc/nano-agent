@@ -160,6 +160,11 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
     if(strcmp(execution,"foreground") && strcmp(execution,"background") && strcmp(execution,"auto")) {
         snprintf(error,n,"execution 只能是 foreground、background 或 auto");return NULL;
     }
+    const cJSON *yield=cJSON_GetObjectItemCaseSensitive(args,"yield_after_ms");
+    if(yield && (!cJSON_IsNumber(yield) || yield->valuedouble<100 || yield->valuedouble>600000 ||
+                  yield->valuedouble!=(double)yield->valueint)) {
+        snprintf(error,n,"yield_after_ms 需为 100–600000 的整数毫秒");return NULL;
+    }
     const cJSON *time_limit=cJSON_GetObjectItemCaseSensitive(args,"timeout");
     const cJSON *maximum=cJSON_GetObjectItemCaseSensitive(request,"shell_timeout_max");
     int maximum_seconds=cJSON_IsNumber(maximum) && maximum->valuedouble>=1 && maximum->valuedouble<=86400*365
@@ -203,7 +208,6 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
     snprintf(j->execution,sizeof j->execution,"%s",execution);
     j->created_mono=now_ms();j->yield_ms=10000;j->timeout_seconds=timeout;
     set_number(j->model,"timeout_seconds",timeout);
-    const cJSON *yield=cJSON_GetObjectItemCaseSensitive(args,"yield_after_ms");
     if(cJSON_IsNumber(yield) && yield->valuedouble>=100 && yield->valuedouble<=600000)j->yield_ms=yield->valueint;
     cJSON *frozen=cJSON_GetObjectItemCaseSensitive(j->model,"request");
     set_number(frozen,"stream",1);set_string(frozen,"job_id",j->id);

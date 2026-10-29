@@ -179,6 +179,8 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft, "exec_started_timeout", 1);
     cJSON_AddNumberToObject(ft, "machine_leases", 1);
     cJSON_AddNumberToObject(ft,"job_stream",k->exec_stream_version);
+    cJSON_AddNumberToObject(ft,"job_timeout_max_seconds",k->conf.max_job_timeout?k->conf.max_job_timeout:31536000);
+    cJSON_AddNumberToObject(ft,"job_allow_no_timeout",k->conf.max_job_timeout==0?1:0);
     cJSON_AddNumberToObject(ft,"job_control_tool",1);
     cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
     cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
@@ -1097,6 +1099,20 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
         snprintf(err,errlen,"目标节点尚未协商后台 Job 能力，未执行");cJSON_Delete(req);return false;
     }
     bool managed=shell && k->jobs_mode;
+    const cJSON *stream_mode=cJSON_GetObjectItemCaseSensitive(req,"stream");
+    if(shell && (managed || (cJSON_IsNumber(stream_mode) && stream_mode->valuedouble>=1))) {
+        // Deployment policy is authoritative even for an authenticated host
+        // request. Neither model arguments nor Gateway top-level hints can
+        // enable unlimited execution or raise this node's hard maximum.
+        const cJSON *limit=cJSON_GetObjectItemCaseSensitive(job_args,"timeout");
+        if(cJSON_IsNumber(limit) && limit->valuedouble==0 && k->conf.max_job_timeout!=0) {
+            snprintf(err,errlen,"执行节点未允许不限时 Job");cJSON_Delete(req);return false;
+        }
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"shell_timeout_max");
+        cJSON_AddNumberToObject(req,"shell_timeout_max",k->conf.max_job_timeout?k->conf.max_job_timeout:31536000);
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"allow_no_timeout");
+        cJSON_AddBoolToObject(req,"allow_no_timeout",k->conf.max_job_timeout==0);
+    }
     if (!managed && !k->leasing && has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
         job_t *j = spawn_exec(k, req, sid, run_id, turn_id, id, name, kind, sandbox, res_keys, res_xkeys,
                               NULL, err, errlen);

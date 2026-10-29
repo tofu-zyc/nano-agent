@@ -25,6 +25,7 @@ typedef struct {
     int    max_parallel_shells;/* 其中最多几个 Shell，默认 2 */
     int    max_active_runs;    /* 同时活跃的 run 上限，默认 16；超出的 input 在内核里排队 */
     int    max_parallel_tools; /* 每个 run 同时跑几个工具，默认 4 */
+    int    max_job_timeout;    /* 受管理/流式命令最大执行秒数，默认 86400；0 允许不限时 */
     int    max_live_jobs;      /* 机器上还没结束的任务总数上限（跑着的 + 排队的），默认 16 */
     char  *sandbox_mode;       /* auto / on / off：请求的沙箱模式，默认 auto */
 } kconf;

@@ -47,6 +47,20 @@ static void finish(managed_job *j)
     jobs_observe(j,frame,NULL,0);cJSON_Delete(frame);
     jobs_process_finished(j);
 }
+static void invalid_yield(job_manager *m)
+{
+    const char *values[]={"-1","0","99","600001","100.5","\"100\"","null",NULL};
+    cJSON *origin=cJSON_Parse("{\"agent\":\"owner\",\"sid\":\"invalid-yield\"}");
+    for(const char **value=values;*value;value++) {
+        cJSON *request=cJSON_Parse("{\"tool\":\"Shell\",\"args\":{\"command\":\"must never start\"}}");
+        cJSON_AddItemToObject(cJSON_GetObjectItemCaseSensitive(request,"args"),"yield_after_ms",cJSON_Parse(*value));
+        char error[512]="";size_t before=jobs_count(m);
+        CHECK(!jobs_create(m,origin,request,"","",1,error,sizeof error));
+        CHECK(jobs_count(m)==before && strstr(error,"yield_after_ms"));
+        cJSON_Delete(request);
+    }
+    cJSON_Delete(origin);
+}
 int main(int argc,char **argv)
 {
     plat_init();int count=0;char **args=plat_args(argc,argv,&count);
@@ -58,6 +72,7 @@ int main(int argc,char **argv)
     const char *epoch="00112233445566778899aabbccddeeff";
     job_manager *m=jobs_open(root,epoch,NULL,error,sizeof error);
     if(!m){fprintf(stderr,"open: %s\n",error);return 1;}
+    invalid_yield(m);
     managed_job *j=create(m,"foreground");
     if(!j){jobs_close(m);return 1;}start(m,j);
     cJSON *frame=cJSON_Parse("{\"t\":\"output\",\"stream\":\"stdout\"}");

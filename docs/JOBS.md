@@ -111,3 +111,10 @@ silent 更新不改主聊天或全局通知，以及直接链接；截图在 bui
 不能覆盖计时。支持 exec_started_timeout 的协调节点收到 64 位毫秒时限；
 受管理命令不再套用旧 Gateway 的 610 秒工具看门狗，run 总预算继续独立约束。
 旧协调节点保留原协议，目标能力与默认执行方式仍继续接线，生产后台协商尚未开放。
+
+节点 kernel.conf 的 max_job_timeout 是受管理及流式 Shell 的硬上限，默认 86400 秒；
+0 才允许显式 timeout=0。请求里的 shell_timeout_max 和 allow_no_timeout 无法提高节点要求。
+hello 报告实际能力，网页节点面板显示上限；旧非流式模式继续使用原来的 120/600 秒规则。
+无效 yield_after_ms 在登记 Job 前拒绝，范围为 100–600000 的整数毫秒。
+Linux ASan 与原生 Windows 的生命周期测试均为 87 checks/0；
+真实执行验证请求提高上限仍在 3 秒结束、未经允许的不限时在启动前失败。

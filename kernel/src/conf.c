@@ -35,7 +35,7 @@ static int parse_int(const char *v, long lo, long hi, long *out)
 const char *const KCONF_KEYS[] = { "gateway", "token", "node", "exec", "skills", "max_steps",
                                     "run_timeout", "approval_timeout", "max_output",
                                     "max_execs", "max_parallel_shells", "max_active_runs",
-                                    "max_parallel_tools", "max_live_jobs", "sandbox", NULL };
+                                    "max_parallel_tools", "max_live_jobs", "max_job_timeout", "sandbox", NULL };
 
 /* 值里夹着另一个配置项（"65536gateway = …"）：两行粘在了一起，返回第二项开始的位置 */
 const char *kconf_glued(const char *val)
@@ -65,6 +65,7 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
     k->max_active_runs = 16;
     k->max_parallel_tools = 4;
     k->max_live_jobs = 16;
+    k->max_job_timeout = 86400;
     k->sandbox_mode = xstrdup("auto");
 
     buf_t text = {0};
@@ -136,6 +137,7 @@ int kconf_load(kconf *k, const char *path, char *err, size_t errlen)
         else if (!strcmp(key, "max_parallel_shells") && !parse_int(val, 1, 64, &n)) k->max_parallel_shells = (int)n;
         else if (!strcmp(key, "max_active_runs") && !parse_int(val, 1, 256, &n)) k->max_active_runs = (int)n;
         else if (!strcmp(key, "max_parallel_tools") && !parse_int(val, 1, 64, &n)) k->max_parallel_tools = (int)n;
+        else if (!strcmp(key, "max_job_timeout") && !parse_int(val, 0, 31536000, &n)) k->max_job_timeout = (int)n;
         else if (!strcmp(key, "max_live_jobs") && !parse_int(val, 1, 256, &n)) k->max_live_jobs = (int)n;
         else if (!strcmp(key, "sandbox")) {
             if (strcmp(val, "auto") && strcmp(val, "on") && strcmp(val, "off")) {

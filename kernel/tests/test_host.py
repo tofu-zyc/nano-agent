@@ -677,6 +677,23 @@ def t_streamed_host(gw):
     assert result["sandbox"]["effective"]=="none",result
 
 
+@case("节点部署时限不能被流式请求提高或改成不限时")
+def t_stream_timeout_policy(gw):
+    gw.send(t="run", id="hard-timeout", req={"tool": "Shell",
+        "args": {"command": "sleep 10", "timeout": 20},
+        "dirs": [WORK], "write": True, "sandbox": "off",
+        "stream": 1, "job_id": "j_policy_fixture", "shell_timeout_max": 31536000,
+        "allow_no_timeout": True})
+    result = gw.expect("run_result", timeout=6, id="hard-timeout", ok=False)
+    assert "执行超时（3 秒）" in result["content"], result
+    gw.send(t="run", id="no-unlimited", req={"tool": "Shell",
+        "args": {"command": "must never start", "timeout": 0},
+        "dirs": [WORK], "write": True, "sandbox": "off",
+        "stream": 1, "job_id": "j_policy_fixture2", "allow_no_timeout": True})
+    result = gw.expect("run_result", id="no-unlimited", ok=False)
+    assert "未允许不限时" in result["content"], result
+
+
 @case("异机 Job 的实际执行时限覆盖旧工具时限")
 def t_gateway_started_timeout(gw):
     gw.send_started = False
@@ -1020,7 +1037,7 @@ def main():
         conf = os.path.join(T, "kernel.conf")
         with open(conf, "w") as f:
             f.write(f"gateway = unix:{sock}\ntoken = t0k\nexec = {EXEC}\nskills = skills\n"
-                    f"max_output = 4096\napproval_timeout = 2\nmax_active_runs = 2\n")
+                    f"max_output = 4096\napproval_timeout = 2\nmax_active_runs = 2\nmax_job_timeout = 3\n")
 
         gw = Gateway(sock)
         log = open(os.path.join(T, "kernel.log"), "w")
@@ -1047,7 +1064,7 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_streamed_host, t_gateway_started_timeout, t_reconnect):
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_streamed_host, t_gateway_started_timeout, t_stream_timeout_policy, t_reconnect):
                 selected = os.environ.get("NANO_HOST_CASE", "")
                 if not selected or selected == t.__name__:
                     t(gw)

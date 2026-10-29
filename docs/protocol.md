@@ -334,3 +334,10 @@ request_id 固定关联节点、当前连接 epoch 和 job_id，最多 128 个�
 
 任务列表只投影元信息；状态保留 revision 和完整原调用身份。RPC 的成功表示动作受理，
 取消与终态分别表达；查询超时或取消不伪造实际进程停止。新工具上下文 prefixVer=10。
+
+受管理/流式 Shell 的节点部署上限由 kernel.conf 的 max_job_timeout 控制，
+默认 86400 秒；0 明确允许不限时请求。hello.features.job_timeout_max_seconds
+报告正数上限（不限时节点报告协议支持的一年），job_allow_no_timeout=1 表示允许 timeout=0。
+节点在受理流式/Job 请求时覆盖 shell_timeout_max/allow_no_timeout，Gateway 或模型
+不能通过请求提高节点上限；普通旧模式仍使用 120/600 秒语义。
+yield_after_ms 若提供，必须为 100–600000 的整数毫秒，否则在建立 Job 记录前拒绝。
