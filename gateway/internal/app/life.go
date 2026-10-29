@@ -522,7 +522,10 @@ func (a *App) branchDone(s *sess, r *run) {
 		progress, status = clip("失败（"+r.outcome+"）："+clip(strings.TrimSpace(r.final), 100), 200), session.BranchNeedsAttention
 	}
 	_ = a.store.SetBranch(s.sid, func(m *session.BranchMeta) {
-		m.Status = status
+		// 生命周期由主人决定：已经归档/暂停的分支，收尾回调只记进展，不把状态改回去
+		if m.Status != session.BranchArchived && m.Status != session.BranchPaused {
+			m.Status = status
+		}
 		m.Progress = clip(progress, 200)
 		m.ProgressAt = a.now().Unix()
 		m.LastActive = a.now().Unix()

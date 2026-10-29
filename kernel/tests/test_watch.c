@@ -147,6 +147,57 @@ int main(void)
     CHECK(ngot >= 1 && strcmp(got[0].key, "w1") == 0);
 #endif
 
+    /* 删掉前面的登记之后，保留下来的那条必须继续收到事件（槽位身份稳定） */
+    {
+        char dir2[] = "/tmp/na-watch-XXXXXX";
+        if (mkdtemp(dir2)) {
+            cJSON *two = cJSON_CreateArray();
+            cJSON *a = cJSON_CreateObject();
+            cJSON_AddStringToObject(a, "key", "keep-a");
+            cJSON_AddStringToObject(a, "path", dir);
+            cJSON_AddItemToArray(two, a);
+            cJSON *b = cJSON_CreateObject();
+            cJSON_AddStringToObject(b, "key", "keep-b");
+            cJSON_AddStringToObject(b, "path", dir2);
+            cJSON_AddItemToArray(two, b);
+            na_watch_sync(w, two, false, 5000);
+            cJSON_Delete(two);
+            /* 只留下第二条：第一条被摘掉，第二条的槽位不能跟着搬 */
+            cJSON *one = cJSON_CreateArray();
+            cJSON *b2 = cJSON_CreateObject();
+            cJSON_AddStringToObject(b2, "key", "keep-b");
+            cJSON_AddStringToObject(b2, "path", dir2);
+            cJSON_AddItemToArray(one, b2);
+            na_watch_sync(w, one, false, 5100);
+            cJSON_Delete(one);
+            ngot = 0;
+            touch(dir2, "after-remove");
+            na_watch_ready(w, 5200);
+            na_watch_tick(w, 5900, on_event, NULL);
+            CHECK(ngot == 1 && strcmp(got[0].key, "keep-b") == 0);
+            /* 同 key 换路径：旧路径不再报，新路径要报 */
+            cJSON *moved = cJSON_CreateArray();
+            cJSON *m = cJSON_CreateObject();
+            cJSON_AddStringToObject(m, "key", "keep-b");
+            cJSON_AddStringToObject(m, "path", dir);
+            cJSON_AddItemToArray(moved, m);
+            na_watch_sync(w, moved, false, 6000);
+            cJSON_Delete(moved);
+            na_watch_tick(w, 6100, on_event, NULL);
+            ngot = 0;
+            touch(dir2, "old-path");
+            na_watch_ready(w, 6200);
+            na_watch_tick(w, 6900, on_event, NULL);
+            CHECK(ngot == 0);
+            ngot = 0;
+            touch(dir, "new-path");
+            na_watch_ready(w, 7000);
+            na_watch_tick(w, 7700, on_event, NULL);
+            CHECK(ngot == 1 && strcmp(got[0].key, "keep-b") == 0);
+            rmdir(dir2);
+        }
+    }
+
     /* 集合里拿掉的登记不再观察 */
     ngot = 0;
     list = cJSON_CreateArray();

@@ -800,3 +800,23 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 列表路径只读元信息（`Branches()`/`Children()`），不会为了进展去加载每个分支的历史；网页的父子列表和分支面板显示「最近进展 + 相对时间」，静默分支只更新被动状态，不弹通知、不抢焦点。
 
 回归：`TestBranchRecentProgressComesFromRealState`（开始→结束两段进展、落盘、重开存储仍在）。
+
+## 评审第 26 节的三处收尾（G1–G3）
+
+### G1 观察器的订阅身份稳定下来
+
+以前 `na_watch_sync` 摘掉一条登记会把剩下的条目往前压缩，但 Windows 的 `win_watch.slot` 和 macOS 的 `kevent.udata` 在挂接时就记住了下标：保留下来的订阅会指向旧下标，`watch_by_slot` 一看越界就丢事件，而且普通的 tick 不会自愈。现在每条 `watch_entry` 有一个 `used` 位，**槽位一旦分配就不再移动**：新登记取第一个空槽，摘除只清自己那个槽（`be_detach` + `memset`），`w->n` 只做高水位收缩；`watch_by_slot`、`na_watch_tick`、`na_watch_next` 都跳过没用过的槽。同 key 换路径时仍在原槽位上先摘再挂，代际（`gen`）继续用来丢弃重新挂接前的迟到事件；退订命令按槽位找到的还是同一个对象，不会误伤新的一代。
+
+回归：POSIX `test_watch` 增加「两条登记删掉前一条后，后一条继续收到事件」和「同 key 换路径后旧路径不报、新路径照报」（13 checks / 0 failures）；Windows 原生测试加了同样两组，并把 `wait_ready` 的句柄类型从 `int` 改回 `intptr_t`。
+
+### G2 队列里的多份报告各留一张卡片
+
+父会话忙时连续引入的报告会在队列里合并成一条 user 消息，正文含两份、结构字段却只留第一份，前端见到 `report` 就只画那张卡片，第二份结论等于被藏起来。现在只要这一批里带报告，就**按队列项各写一条历史消息**（各自带自己的 `Report`），普通消息不合并之外的场景保持原来的合并语义；一次模型请求仍然把这几条一起发给模型。
+
+回归：`TestQueuedBranchReportsKeepEveryStructuredCard`（两份报告 + 真实的队列批处理落地，断言历史里有两份结构、顺序和结论都对）。
+
+### G3 归档状态不会被取消回执改回去
+
+`branchDone` 原来无条件写 `Status`，归档运行中的分支后，内核回来的 `cancelled` 会让状态从 `archived` 变成 `paused`，等于撤销了主人的归档决定。现在收尾只更新进展，**状态只在当前不是 `archived`/`paused` 时才改**；归档依然跨收尾和重启保留，`continue` 仍按规则拒绝。
+
+回归：`TestArchivingRunningBranchRemainsArchivedAfterCancel`（真实归档入口 + cancelled 收尾 + 重新打开存储 + 继续被拒）。

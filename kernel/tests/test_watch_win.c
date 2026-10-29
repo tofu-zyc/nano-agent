@@ -68,7 +68,7 @@ static void touch(const char *name)
 /* 等主循环该醒的那一下：WSAPoll 等观察 fd，收到就 na_watch_ready。 */
 static bool wait_ready(na_watch *w, int timeout_ms)
 {
-    int fd = na_watch_fd(w);
+    intptr_t fd = na_watch_fd(w);
     if (fd < 0) return false;
     WSAPOLLFD p;
     memset(&p, 0, sizeof p);
@@ -86,7 +86,8 @@ static int collect(na_watch *w)
     int64_t start = ms_now();
     while (ms_now() - start < 3000) {
         ngot = 0;
-        na_watch_ready(w, ms_now()); /* 直接读，不依赖唤醒字节 */
+        (void)wait_ready(w, 0); /* 顺手把唤醒路径也走一遍（结果不影响这里，读队列才是断言依据） */
+        na_watch_ready(w, ms_now());
         na_watch_tick(w, ms_now(), on_event, NULL);
         if (ngot > 0) return ngot;
         Sleep(20);
@@ -147,6 +148,59 @@ int main(void)
     touch("other.txt");
     collect(w);
     for (int i = 0; i < ngot; i++) CHECK(strcmp(got[i].key, "file1") != 0);
+
+    /* 删掉前面的登记之后，保留下来的那条必须继续收到事件（槽位身份稳定） */
+    {
+        char dir2[MAX_PATH];
+        snprintf(dir2, sizeof dir2, "%sna-watch-two-%lu", tmp, (unsigned long)GetTickCount());
+        _mkdir(dir2);
+        cJSON *two = cJSON_CreateArray();
+        cJSON *a = cJSON_CreateObject();
+        cJSON_AddStringToObject(a, "key", "keep-a");
+        cJSON_AddStringToObject(a, "path", dir);
+        cJSON_AddItemToArray(two, a);
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddStringToObject(b, "key", "keep-b");
+        cJSON_AddStringToObject(b, "path", dir2);
+        cJSON_AddItemToArray(two, b);
+        na_watch_sync(w, two, false, ms_now());
+        cJSON_Delete(two);
+        cJSON *only = cJSON_CreateArray();
+        cJSON *b2 = cJSON_CreateObject();
+        cJSON_AddStringToObject(b2, "key", "keep-b");
+        cJSON_AddStringToObject(b2, "path", dir2);
+        cJSON_AddItemToArray(only, b2);
+        na_watch_sync(w, only, false, ms_now());
+        cJSON_Delete(only);
+        char f2[MAX_PATH];
+        snprintf(f2, sizeof f2, "%s\\after-remove.txt", dir2);
+        FILE *fh = fopen(f2, "w");
+        if (fh) { fputs("x", fh); fclose(fh); }
+        ngot = 0;
+        collect(w);
+        bool saw_keep = false;
+        for (int k = 0; k < ngot; k++) if (strcmp(got[k].key, "keep-b") == 0) saw_keep = true;
+        CHECK(saw_keep);
+        /* 同 key 换路径：旧路径不再报 */
+        cJSON *moved = cJSON_CreateArray();
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "key", "keep-b");
+        cJSON_AddStringToObject(m, "path", dir);
+        cJSON_AddItemToArray(moved, m);
+        na_watch_sync(w, moved, false, ms_now());
+        cJSON_Delete(moved);
+        na_watch_tick(w, ms_now(), on_event, NULL);
+        char f3[MAX_PATH];
+        snprintf(f3, sizeof f3, "%s\\old-path.txt", dir2);
+        FILE *oh = fopen(f3, "w");
+        if (oh) { fputs("x", oh); fclose(oh); }
+        ngot = 0;
+        collect(w);
+        CHECK(ngot == 0);
+        _unlink(f2);
+        _unlink(f3);
+        _rmdir(dir2);
+    }
 
     /* 重新下发带 resync：每一条各报一次缺口 */
     list = watch_list_key("w1", dir);

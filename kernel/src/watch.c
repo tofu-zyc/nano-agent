@@ -32,6 +32,7 @@ typedef struct {
     char    last[WATCH_PATH_MAX]; /* 最近一次变化的实际路径（目录登记时是里面的文件） */
     int     wd;                   /* Linux: inotify watch；macOS: 文件 fd；Windows: 槽位 */
     unsigned gen;                 /* 每次重新挂接递增：旧的异步事件按它丢弃 */
+    bool    used;                 /* 槽位在用（槽位身份稳定：删登记不搬动别的条目） */
     int     count;
     int64_t due;                  /* 0 表示没有待发的事件 */
     int64_t next;                 /* 观察不到时下次再试的时刻 */
@@ -114,7 +115,7 @@ static int queue_pop(na_watch *w, pending_ev *out)
 #if !defined(__linux__)
 static watch_entry *watch_by_slot(na_watch *w, int slot)
 {
-    if (slot < 0 || slot >= w->n) return NULL;
+    if (slot < 0 || slot >= w->n || !w->items[slot].used) return NULL;
     return &w->items[slot];
 }
 #endif
@@ -789,12 +790,20 @@ void na_watch_sync(na_watch *w, const cJSON *list, bool resync, int64_t now)
         if (!key || !path || !*key || !*path) continue;
         if (strlen(key) >= WATCH_KEY_MAX || strlen(path) >= WATCH_PATH_MAX) continue;
         int slot = -1;
-        for (int i = 0; i < w->n; i++) if (!strcmp(w->items[i].key, key)) { slot = i; break; }
+        for (int i = 0; i < w->n; i++)
+            if (w->items[i].used && !strcmp(w->items[i].key, key)) { slot = i; break; }
         if (slot < 0) {
-            if (w->n >= NA_WATCH_MAX) continue; /* 超过上限的登记明确不接 */
-            slot = w->n++;
+            /* 槽位身份稳定：新登记用第一个空槽，不搬动已经在用的条目——
+             * 后台对象（Windows 的 win_watch、macOS 的 kevent.udata）按槽位下标认人，
+             * 搬动会让保留下来的订阅指向旧下标，之后的变化全被丢掉。 */
+            for (int i = 0; i < NA_WATCH_MAX; i++) {
+                if (!w->items[i].used) { slot = i; break; }
+            }
+            if (slot < 0) continue; /* 超过上限的登记明确不接 */
+            if (slot >= w->n) w->n = slot + 1;
             memset(&w->items[slot], 0, sizeof w->items[slot]);
             w->items[slot].wd = -1;
+            w->items[slot].used = true;
             snprintf(w->items[slot].key, sizeof w->items[slot].key, "%s", key);
         }
         watch_entry *e = &w->items[slot];
@@ -813,16 +822,14 @@ void na_watch_sync(na_watch *w, const cJSON *list, bool resync, int64_t now)
             if (!e->due) e->due = now;
         }
     }
-    int out = 0;
+    /* 摘除只清自己那个槽位，不移动别人：槽位身份必须稳定 */
     for (int i = 0; i < w->n; i++) {
-        if (!keep[i]) {
-            be_detach(w, &w->items[i]);
-            continue;
-        }
-        if (out != i) w->items[out] = w->items[i];
-        out++;
+        if (!w->items[i].used || keep[i]) continue;
+        be_detach(w, &w->items[i]);
+        memset(&w->items[i], 0, sizeof w->items[i]);
+        w->items[i].wd = -1;
     }
-    w->n = out;
+    while (w->n > 0 && !w->items[w->n - 1].used) w->n--;
 }
 
 void na_watch_ready(na_watch *w, int64_t now)
@@ -836,6 +843,7 @@ void na_watch_tick(na_watch *w, int64_t now, na_watch_emit emit, void *ud)
     if (!w || !emit) return;
     for (int i = 0; i < w->n; i++) {
         watch_entry *e = &w->items[i];
+        if (!e->used) continue;
         if (e->wd < 0 && e->next && now >= e->next) {
             e->wd = be_attach(w, e);
             e->next = e->wd < 0 ? now + NA_WATCH_RETRY : 0;
@@ -853,6 +861,7 @@ int64_t na_watch_next(const na_watch *w)
     if (!w) return -1;
     int64_t next = -1;
     for (int i = 0; i < w->n; i++) {
+        if (!w->items[i].used) continue;
         int64_t due = w->items[i].due;
         if (due && (next < 0 || due < next)) next = due;
     }

@@ -431,3 +431,105 @@ func TestBranchRecentProgressComesFromRealState(t *testing.T) {
 		t.Fatalf("进展没有落盘：%+v", got)
 	}
 }
+
+// 评审 §26 G2：父会话忙时连续引入两份报告，两份都要保留各自的卡片；混排的普通文字不能被卡片藏起来。
+func TestQueuedBranchReportsKeepEveryStructuredCard(t *testing.T) {
+	e := setup(t)
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "起点"}); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id, title, conclusion string) SessionForkResult {
+		out, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: title, RequestID: id, By: "fake:u1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.a.store.Append(out.BranchSID, session.Msg{Role: "assistant", Content: conclusion}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	a1 := mk("card-1", "第一份", "结论一：按天轮转")
+	b1 := mk("card-2", "第二份", "结论二：保留七天")
+	// 主会话正在跑一轮：两份报告都进入队列
+	e.say("先聊着")
+	e.k.expect(proto.TInput)
+	if _, err := e.a.introduceBranchReportLocked(a1.BranchSID, "fake:u1", endpoint{ch: "web", chat: mainSID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.introduceBranchReportLocked(b1.BranchSID, "fake:u1", endpoint{ch: "web", chat: mainSID}); err != nil {
+		t.Fatal(err)
+	}
+	// 这一轮结束后，队列里的报告作为下一轮进来
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	e.k.expect(proto.TInput) // 报告那一轮
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	waitIdle(t, e, mainSID)
+	e.a.mu.Lock()
+	hist := e.a.store.History(mainSID)
+	e.a.mu.Unlock()
+	var cards []session.Report
+	for _, m := range hist {
+		if m.Report != nil {
+			cards = append(cards, *m.Report)
+		}
+	}
+	if len(cards) != 2 {
+		t.Fatalf("两份报告只剩 %d 份结构：%+v", len(cards), cards)
+	}
+	if cards[0].BranchSID != a1.BranchSID || cards[1].BranchSID != b1.BranchSID {
+		t.Fatalf("报告顺序或归属不对：%+v", cards)
+	}
+	for _, card := range cards {
+		if !strings.Contains(card.Conclusion, "结论") {
+			t.Fatalf("报告的结论丢了：%+v", card)
+		}
+	}
+}
+
+// 评审 §26 G3：归档正在跑的分支之后，取消回执不能把 archived 改回 paused。
+func TestArchivingRunningBranchRemainsArchivedAfterCancel(t *testing.T) {
+	e := setup(t)
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "起点"}); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "归档", RequestID: "archive-running", By: "fake:u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.SessionBranchAction("continue", branch.BranchSID, "先跑着", "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	e.k.expect(proto.TInput)
+	// 归档：发 CANCEL，然后内核回一个 cancelled 的 DONE
+	if _, err := e.a.SessionBranchAction("archive", branch.BranchSID, "", "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := e.a.store.Branch(branch.BranchSID); !ok || m.Status != session.BranchArchived {
+		t.Fatalf("归档没有生效：%+v", m)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: branch.BranchSID, Status: proto.StatusCancelled})
+	waitIdle(t, e, branch.BranchSID)
+	got, ok := e.a.store.Branch(branch.BranchSID)
+	if !ok || got.Status != session.BranchArchived {
+		t.Fatalf("取消回执把归档改掉了：%+v", got)
+	}
+	if !strings.Contains(got.Progress, "取消") {
+		t.Fatalf("进展没有记录这次取消：%q", got.Progress)
+	}
+	// 重启后仍然是归档，继续仍然被拒绝
+	reopened, err := session.New(e.a.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, ok := reopened.Branch(branch.BranchSID)
+	if !ok || again.Status != session.BranchArchived {
+		t.Fatalf("重启后归档状态丢了：%+v", again)
+	}
+	if _, err := e.a.SessionBranchAction("continue", branch.BranchSID, "再跑", "fake:u1"); err == nil {
+		t.Fatal("归档的分支还能继续")
+	}
+}

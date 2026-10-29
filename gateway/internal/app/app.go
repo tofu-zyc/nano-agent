@@ -275,8 +275,8 @@ type queued struct {
 	ep      endpoint
 	who     string
 	trigger bool
-	ticket  uint64 // immutable queue admission order; cleared together with this entry
-	inner   bool   // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
+	ticket  uint64          // immutable queue admission order; cleared together with this entry
+	inner   bool            // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
 	report  *session.Report // 宿主生成的报告卡片（分支报告）：随这条消息一起进历史
 }
 
@@ -1197,20 +1197,39 @@ func (a *App) startRun(s *sess) {
 	}
 	a.remember(s, batch, a.histEnd(s.sid))
 	if !head.trigger {
-		msg := session.Msg{Role: "user", Content: content, Images: images}
-		if head.report != nil {
-			msg.Kind = "branch_report"
-			msg.Report = head.report
-		}
-		if isLifeSID(s.sid) && head.inner {
-			msg.Kind = "life_episode"
-			if s.mind != nil {
-				msg.Reason = s.mind.Trigger.Reason
-				msg.AgendaID = s.mind.Trigger.AgendaID
+		// 带结构化分支报告的消息不合并：合并正文后只能留一份 metadata，另一份会被卡片藏起来。
+		// 其余情况仍然按老规矩把这一批合成一条（连着发的几句话算一次输入）。
+		var parts []session.Msg
+		reports := false
+		for _, q := range batch {
+			if q.report != nil {
+				reports = true
 			}
 		}
-		if err := a.store.Append(s.sid, msg); err != nil {
-			a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
+		if reports {
+			for _, q := range batch {
+				one := session.Msg{Role: "user", Content: q.m.Text, Images: q.m.Images}
+				if q.report != nil {
+					one.Kind, one.Report = "branch_report", q.report
+				}
+				parts = append(parts, one)
+			}
+		} else {
+			msg := session.Msg{Role: "user", Content: content, Images: images}
+			if isLifeSID(s.sid) && head.inner {
+				msg.Kind = "life_episode"
+				if s.mind != nil {
+					msg.Reason = s.mind.Trigger.Reason
+					msg.AgendaID = s.mind.Trigger.AgendaID
+				}
+			}
+			parts = append(parts, msg)
+		}
+		for _, msg := range parts {
+			if err := a.store.Append(s.sid, msg); err != nil {
+				a.log.Warn("保存消息失败", "sid", s.sid, "err", err)
+				break
+			}
 		}
 	}
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)

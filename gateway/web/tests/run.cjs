@@ -105,4 +105,13 @@ test('宿主报告卡片：结构化字段画卡片，普通用户同样正文�
   // 用户消息只有正文、没有结构化字段：还是普通气泡，不冒充报告
   assert.equal(blocks[1].type, 'user');
   assert.match(blocks[1].text, /分支报告/);
+  // 两份报告（父会话忙时连续引入）各画各的卡片，内容都在
+  const two = buildBlocks([
+    { role: 'user', content: 'x', kind: 'branch_report', report: { ...report, branch_sid: 'br-1', conclusion: '结论一' } },
+    { role: 'user', content: 'y', kind: 'branch_report', report: { ...report, branch_sid: 'br-2', conclusion: '结论二' } },
+  ]);
+  const cards = two.filter(b => b.type === 'report');
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].report.conclusion, '结论一');
+  assert.equal(cards[1].report.conclusion, '结论二');
 });
