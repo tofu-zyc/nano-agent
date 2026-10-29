@@ -188,7 +188,7 @@ max_execs 和 max_parallel_shells。Gateway 的 welcome.features.machine_leases=
 每次连接先 lease_sync：携带 node_epoch 和 leases 完整清单（最多 256 条），包括仍运行/停止中
 的执行器以及尚未启动的本机请求。Gateway 可靠保存核对结果，回 lease_synced(ok)，随后才允许
 新 input 和 lease_acquire。重启恢复将未结算租约视为 unknown，保留真实槽和锁；不重放命令。
-当前启动身份的完整清单可以结算已不存在的旧执行；来源不符或损坏的恢复文件保留并显示错误。
+非 Job 的旧前台执行保持完整清单的结算规则；持久 Job 必须按下面的固定身份与终态回执核对。来源不符或损坏的恢复文件保留并显示错误。
 
 每个 lease_acquire 带 lease_id、node_epoch 及完整外层调用身份，lease 包含
 sid/run_id/turn_id/call_id/agent/name/priority/res_keys/res_xkeys，代执行另有 host_id。
@@ -273,3 +273,20 @@ notification_state=delivered，重复 ACK 幂等。未确认终态每 5 秒或�
 节点恢复失败在 hello/lease_sync 的 job_storage_error 中明确报告，Gateway 拒绝清空已有占用。
 Gateway 的 Job 索引/订阅/用户命令须分别实现后才协商开启该能力；流式解码或节点控制测试不代表
 渠道用户路径已经交付。
+
+### Job 租约的重连与跨启动核对
+
+lease 的 job_id 固定于首次创建，和原 lease_id 的节点启动身份绑定；后来不能换 Job、调用身份、
+agent 或缩小资源域。租约恢复同样保留 Job 身份。节点重启后使用当前 node_epoch 认证连接，
+旧 Job 的租约 ID 继续保留原编号，只允许作为 unknown 事实或可靠终态回执认领到当前连接。
+
+lease_sync 的 leases 是当前占用（最多 256 条）；独立 lease_receipts 是持久终态证明
+（最多 256 条），包含 terminal_receipt=true、job_id、完整原调用与资源，以及
+succeeded/failed/cancelled/timed_out/interrupted。unknown 不能作为释放资源的终态证明。
+重复终态幂等，已结算的编号不能通过旧活动清单复活。Gateway 先验证整份清单，再一起持久发布；
+任一身份或资源冲突都不会部分修改旧占用。
+
+未出现在清单的 Job 保留 unknown 和锁，不能仅靠“节点换了启动编号”认定命令已经退出。
+节点仍在保存后台移交时，在活动租约里带 detach_request=job_id；Gateway 保留匹配的容量预留。
+已保存 background=true 完成先前预留；明确仍为前台且没有待保存移交才撤销未使用预留。
+这样 Gateway 重启或断线不会在节点状态保存中途释放前台预算或误收回后台名额。

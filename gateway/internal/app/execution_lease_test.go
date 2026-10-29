@@ -248,3 +248,49 @@ func TestNodeJobRecoveryErrorPreservesLeases(t *testing.T) {
 	}
 	waitLeaseState(t, e.a, request.ID, "granted")
 }
+
+func TestNodeJobRebootInventoryRequiresMatchingDurableReceipts(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.NodeEpoch = "oldboot"
+	e.a.mu.Unlock()
+	req := dispatch.Request{JobID: "j_oldboot-1", ID: "loldboot-1", Name: "Shell", Owner: "test/oldboot",
+		Machine: e.a.machineOf("test"), Session: "source", RunID: "run", CallID: "call", Agent: "agent",
+		Shell: true, Background: true, Exclusive: []string{"dir:/work"}}
+	e.a.dispatcher.Submit(dispatch.Command{Action: "admit", Request: req})
+	waitLeaseState(t, e.a, req.ID, "granted")
+	e.k.expect(proto.TLeaseGrant)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.NodeEpoch = "newboot"
+	e.a.mu.Unlock()
+	spec := proto.LeaseSpec{LeaseID: req.ID, JobID: req.JobID, SID: req.Session, RunID: req.RunID, CallID: req.CallID,
+		Agent: req.Agent, Name: req.Name, Exclusive: "dir:/work", Background: true, State: "unknown"}
+	roundtrip := func(message proto.Msg, want bool) {
+		t.Helper()
+		message.T = proto.TLeaseSync
+		message.NodeEpoch = "newboot"
+		e.k.send(message)
+		reply := e.k.expect(proto.TLeaseSynced)
+		if reply.OK == nil || *reply.OK != want {
+			t.Fatal(reply)
+		}
+	}
+	roundtrip(proto.Msg{Leases: []proto.LeaseSpec{spec}}, true)
+	cp, _ := e.a.dispatcher.Snapshot()
+	if len(cp.Leases) != 1 || cp.Leases[0].Owner != "test/newboot" || cp.Leases[0].State != "unknown" {
+		t.Fatal(cp)
+	}
+	// A receipt sent through the active inventory is not a completion proof.
+	spec.State = "succeeded"
+	spec.TerminalReceipt = true
+	roundtrip(proto.Msg{Leases: []proto.LeaseSpec{spec}}, false)
+	roundtrip(proto.Msg{LeaseReceipts: []proto.LeaseSpec{spec}}, true)
+	cp, _ = e.a.dispatcher.Snapshot()
+	if len(cp.Leases) != 0 {
+		t.Fatal("terminal did not settle", cp)
+	}
+	roundtrip(proto.Msg{LeaseReceipts: []proto.LeaseSpec{spec}}, true)
+	spec.State = "unknown"
+	spec.TerminalReceipt = false
+	roundtrip(proto.Msg{Leases: []proto.LeaseSpec{spec}}, false)
+}

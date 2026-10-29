@@ -102,6 +102,13 @@ class Node:
         if kind == "ping":
             self.send(t="pong")
         elif kind == "lease_sync":
+            active=message.get("leases",[])
+            receipts=message.get("lease_receipts",[])
+            assert len(active)<=256 and len(receipts)<=256, message
+            assert not ({item["lease_id"] for item in active} & {item["lease_id"] for item in receipts}), message
+            for item in receipts:
+                assert item["terminal_receipt"] and item["job_id"] and item["state"] in (
+                    "succeeded","failed","cancelled","timed_out","interrupted"), item
             self.send(t="lease_synced", node_epoch=self.epoch, ok=True)
         elif kind == "lease_acquire":
             self.leases[message["lease_id"]] = message["lease"]
@@ -343,6 +350,11 @@ def check():
             queued = node.control("rebuild-queued", "status", restart_queued)["job"]
             assert live["status"] == "unknown" and queued["status"] == "interrupted", (live,queued)
             assert live["last_event_seq"] == queued["last_event_seq"] == 1
+            inventory=node.wait(lambda m: m["t"]=="lease_sync" and m["node_epoch"]==node.epoch,past=True)
+            held=[item for item in inventory["leases"] if item.get("job_id")==restart_live]
+            completed=[item for item in inventory["lease_receipts"] if item.get("job_id")==restart_queued]
+            assert len(held)==len(completed)==1 and held[0]["state"]=="unknown" and held[0]["background"]
+            assert completed[0]["state"]=="interrupted" and completed[0]["terminal_receipt"]
             assert (node.work / "restart-launches").read_text().splitlines() == ["started"]
             assert not (node.work / "must-not-run-after-restart").exists()
             for ident in ["fore", "queued", "block", "auto", "denied", "race", "reconnect", "cancel-block", "cancel-queued", "manual", "stop-running", "restart-live", "restart-queued"]:

@@ -27,7 +27,19 @@ func (a *App) leaseReply(node string, n *node, m *proto.Msg, kind, detail string
 
 func (a *App) leaseRequest(nodeName string, n *node, m *proto.Msg, observed bool) (dispatch.Request, error) {
 	spec := m.Lease
-	if spec == nil || spec.LeaseID != m.LeaseID || len(m.LeaseID) > 128 || !strings.HasPrefix(m.LeaseID, "l"+n.info.NodeEpoch+"-") {
+	if spec == nil || spec.LeaseID != m.LeaseID || len(m.LeaseID) > 128 {
+		return dispatch.Request{}, errors.New("执行租约编号或节点启动身份无效")
+	}
+	current := strings.HasPrefix(m.LeaseID, "l"+n.info.NodeEpoch+"-")
+	if spec.JobID != "" {
+		boot, _, ok := strings.Cut(strings.TrimPrefix(m.LeaseID, "l"), "-")
+		if !strings.HasPrefix(m.LeaseID, "l") || !ok || boot == "" || len(spec.JobID) > 96 ||
+			!strings.HasPrefix(spec.JobID, "j_"+boot+"-") ||
+			(!current && (!observed || (!spec.TerminalReceipt && spec.State != "unknown"))) {
+			return dispatch.Request{}, errors.New("Job 与执行租约的固定启动身份不匹配")
+		}
+	}
+	if !current && (!observed || spec.JobID == "") {
 		return dispatch.Request{}, errors.New("执行租约编号或节点启动身份无效")
 	}
 	owner := nodeName + "/" + n.info.NodeEpoch
@@ -66,7 +78,7 @@ func (a *App) leaseRequest(nodeName string, n *node, m *proto.Msg, observed bool
 	if origin.SID == "" {
 		origin.SID = "host:" + nodeName
 	}
-	req := dispatch.Request{ID: m.LeaseID, Name: spec.Name, Owner: owner, Machine: a.machineOf(nodeName), Session: origin.SID, RunID: origin.RunID, TurnID: origin.TurnID, CallID: origin.CallID, HostID: spec.HostID, Agent: origin.Agent, Priority: origin.Priority, Shell: spec.Name == "Shell", Background: spec.Background, Windows: n.info.OS == "windows", Shared: resourceKeys(spec.Resources), Exclusive: resourceKeys(spec.Exclusive), At: time.Now(), OwnerSlots: min(64, n.info.Features["max_execs"]), OwnerShells: min(64, n.info.Features["max_parallel_shells"])}
+	req := dispatch.Request{JobID: spec.JobID, ID: m.LeaseID, Name: spec.Name, Owner: owner, Machine: a.machineOf(nodeName), Session: origin.SID, RunID: origin.RunID, TurnID: origin.TurnID, CallID: origin.CallID, HostID: spec.HostID, Agent: origin.Agent, Priority: origin.Priority, Shell: spec.Name == "Shell", Background: spec.Background, Windows: n.info.OS == "windows", Shared: resourceKeys(spec.Resources), Exclusive: resourceKeys(spec.Exclusive), At: time.Now(), OwnerSlots: min(64, n.info.Features["max_execs"]), OwnerShells: min(64, n.info.Features["max_parallel_shells"])}
 	if req.Shell && len(req.Exclusive) == 0 {
 		return req, errors.New("Shell 没有声明受保护的资源域，未执行")
 	}
@@ -138,18 +150,23 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 			return true
 		}
 		command.Action = "sync"
-		if len(m.Leases) > 256 {
+		if len(m.Leases) > 256 || len(m.LeaseReceipts) > 256 {
 			a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseSynced, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: "节点执行清单超过上限"})
 			return true
 		}
-		for _, spec := range m.Leases {
+		inventory := append(append([]proto.LeaseSpec(nil), m.Leases...), m.LeaseReceipts...)
+		for index, spec := range inventory {
+			if spec.TerminalReceipt != (index >= len(m.Leases)) {
+				a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseSynced, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: "终态证明必须通过独立回执清单提交"})
+				return true
+			}
 			item := mCopyLease(m, spec)
 			req, err := a.leaseRequest(nodeName, n, &item, true)
 			if err != nil {
 				a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseSynced, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: err.Error()})
 				return true
 			}
-			command.Inventory = append(command.Inventory, dispatch.Lease{Request: req, State: spec.State})
+			command.Inventory = append(command.Inventory, dispatch.Lease{Request: req, State: spec.State, TerminalReceipt: spec.TerminalReceipt, DetachRequest: spec.DetachRequest})
 		}
 	}
 	if !a.dispatcher.Submit(command) {

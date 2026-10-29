@@ -881,6 +881,7 @@ static void lease_sync(kernel_t *k, int64_t now)
     cJSON *m = msg_new("lease_sync", NULL);
     cJSON_AddStringToObject(m, "node_epoch", k->node_epoch);
     cJSON *items = cJSON_AddArrayToObject(m, "leases");
+    cJSON *receipts=cJSON_AddArrayToObject(m,"lease_receipts");
     for (job_t *j = k->runner.jobs; j; j = j->next) {
         if (!j->lease_id) {
             j->lease_id = xasprintf("l%s-%llu", k->node_epoch, ++k->lease_seq);
@@ -898,6 +899,7 @@ static void lease_sync(kernel_t *k, int64_t now)
             cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
             cJSON_AddBoolToObject(item,"background",jobs_background(b->job));
             cJSON_AddStringToObject(item,"job_id",jobs_id(b->job));
+            if(b->detach_phase==2 || b->detach_phase==3)cJSON_AddStringToObject(item,"detach_request",jobs_id(b->job));
         }
         cJSON_AddItemToArray(items, item);
     }
@@ -908,6 +910,8 @@ static void lease_sync(kernel_t *k, int64_t now)
         if(q->managed) {
             cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
             cJSON_AddBoolToObject(item,"background",jobs_background(q->managed->job));
+            if(q->managed->detach_phase==2 || q->managed->detach_phase==3)
+                cJSON_AddStringToObject(item,"detach_request",jobs_id(q->managed->job));
         }
         cJSON_AddItemToArray(items,item);
     }
@@ -919,6 +923,21 @@ static void lease_sync(kernel_t *k, int64_t now)
         cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
         cJSON_AddBoolToObject(item,"background",jobs_background(b->job));
         cJSON_AddItemToArray(items,item);
+    }
+    for(job_binding *b=k->job_bindings;b;b=b->next) {
+        if(!b->lease_spec || !jobs_finished(b->job))continue;
+        cJSON *snapshot=jobs_snapshot(b->job);
+        const char *status=sget(snapshot,"status");
+        if(status && strcmp(status,"unknown")) {
+            cJSON *receipt=cJSON_Parse(b->lease_spec);
+            cJSON_DeleteItemFromObjectCaseSensitive(receipt,"state");
+            cJSON_AddStringToObject(receipt,"state",status);
+            cJSON_AddBoolToObject(receipt,"terminal_receipt",true);
+            cJSON_DeleteItemFromObjectCaseSensitive(receipt,"background");
+            cJSON_AddBoolToObject(receipt,"background",jobs_background(b->job));
+            cJSON_AddItemToArray(receipts,receipt);
+        }
+        cJSON_Delete(snapshot);
     }
     if(k->jobs_error[0])cJSON_AddStringToObject(m,"job_storage_error",k->jobs_error);
     link_send(&k->link, m);
@@ -2339,7 +2358,7 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
         free(b->control_request);b->control_request=NULL;
         free(b->read_request);b->read_request=NULL;
         if(b->detach_phase && jobs_background(b->job))b->detach_phase=3;
-        else b->detach_phase=0;
+        else if(b->detach_phase!=2)b->detach_phase=0;
     }
     execq_clear(k);
     runner_kill_foreground(&k->runner);

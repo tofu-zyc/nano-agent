@@ -113,22 +113,26 @@ const (
 
 // Msg 是所有消息的并集，按 T 区分类型，没用到的字段省略。
 type LeaseSpec struct {
-	LeaseID    string `json:"lease_id"`
-	SID        string `json:"sid"`
-	RunID      string `json:"run_id,omitempty"`
-	TurnID     int    `json:"turn_id,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	Agent      string `json:"agent,omitempty"`
-	Name       string `json:"name"`
-	State      string `json:"state"`
-	Resources  string `json:"res_keys,omitempty"`
-	Exclusive  string `json:"res_xkeys,omitempty"`
-	HostID     string `json:"host_id,omitempty"`
-	Background bool   `json:"background,omitempty"`
-	Priority   int    `json:"priority,omitempty"`
+	DetachRequest   string `json:"detach_request,omitempty"`
+	JobID           string `json:"job_id,omitempty"`
+	TerminalReceipt bool   `json:"terminal_receipt,omitempty"`
+	LeaseID         string `json:"lease_id"`
+	SID             string `json:"sid"`
+	RunID           string `json:"run_id,omitempty"`
+	TurnID          int    `json:"turn_id,omitempty"`
+	CallID          string `json:"call_id,omitempty"`
+	Agent           string `json:"agent,omitempty"`
+	Name            string `json:"name"`
+	State           string `json:"state"`
+	Resources       string `json:"res_keys,omitempty"`
+	Exclusive       string `json:"res_xkeys,omitempty"`
+	HostID          string `json:"host_id,omitempty"`
+	Background      bool   `json:"background,omitempty"`
+	Priority        int    `json:"priority,omitempty"`
 }
 
 type Msg struct {
+	LeaseReceipts   []LeaseSpec `json:"lease_receipts,omitempty"`
 	JobStorageError string      `json:"job_storage_error,omitempty"`
 	Phase           string      `json:"phase,omitempty"`
 	NodeEpoch       string      `json:"node_epoch,omitempty"`

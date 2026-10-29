@@ -31,6 +31,7 @@ func Defaults() Config {
 }
 
 type Request struct {
+	JobID       string    `json:"job_id,omitempty"`
 	ID          string    `json:"id"`
 	Name        string    `json:"name,omitempty"`
 	Owner       string    `json:"owner"` // authenticated execution owner (node + boot)
@@ -54,7 +55,8 @@ type Request struct {
 }
 
 type Lease struct {
-	DetachRequest string `json:"detach_request,omitempty"`
+	TerminalReceipt bool   `json:"terminal_receipt,omitempty"`
+	DetachRequest   string `json:"detach_request,omitempty"`
 	Request
 	State     string    `json:"state"` // queued | granted | running | cancelling | unknown
 	GrantedAt time.Time `json:"granted_at,omitempty"`
@@ -151,7 +153,7 @@ func (s *Scheduler) Admit(req Request, now time.Time) (Lease, []Lease, error) {
 		return Lease{}, nil, errors.New("执行租约身份或优先级无效")
 	}
 	if old := s.leases[req.ID]; old != nil {
-		if old.Owner != req.Owner || old.Machine != req.Machine || old.Session != req.Session || old.RunID != req.RunID || old.TurnID != req.TurnID || old.CallID != req.CallID {
+		if old.Owner != req.Owner || old.Machine != req.Machine || old.Session != req.Session || old.RunID != req.RunID || old.TurnID != req.TurnID || old.CallID != req.CallID || old.JobID != req.JobID {
 			return Lease{}, nil, errors.New("租约 ID 已属于另一调用")
 		}
 		return clone(old), nil, nil
@@ -497,7 +499,7 @@ func (s *Scheduler) CommitDetach(id, owner, requestID string, now time.Time) (Le
 	if requestID == "" || l.DetachRequest != requestID {
 		return clone(l), nil, errors.New("后台移交没有匹配的已保存预留")
 	}
-	if l.State == "unknown" || l.State == "cancelling" {
+	if l.State == "unknown" {
 		return clone(l), nil, errors.New("任务正在停止或状态未知，不能提交移交")
 	}
 	l.Background = true

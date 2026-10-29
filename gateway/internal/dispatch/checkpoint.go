@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 )
@@ -41,7 +42,7 @@ func (s *Scheduler) Restore(checkpoint Checkpoint, recovered bool) error {
 	next := map[string]*Lease{}
 	served := map[string]uint64{}
 	for i, saved := range checkpoint.Leases {
-		if saved.ID == "" || saved.Owner == "" || saved.Machine == "" || saved.Session == "" || next[saved.ID] != nil {
+		if saved.ID == "" || saved.Owner == "" || saved.Machine == "" || saved.Session == "" || len(saved.JobID) > 96 || len(saved.DetachRequest) > 128 || next[saved.ID] != nil {
 			return errors.New("执行租约恢复记录身份损坏")
 		}
 		switch saved.State {
@@ -81,23 +82,49 @@ func (s *Scheduler) Restore(checkpoint Checkpoint, recovered bool) error {
 	return nil
 }
 
-// SyncNode accepts a complete inventory from an authenticated node. A changed
-// node boot retires the old execution owner; no old request is replayed.
+// Job leases survive missing inventory and boot changes until a matching durable
+// receipt or recovered Job proves what happened. Legacy foreground inventory
+// retains its original semantics.
+func finalReceipt(l Lease) bool {
+	if !l.TerminalReceipt || l.JobID == "" {
+		return false
+	}
+	switch l.State {
+	case "succeeded", "failed", "cancelled", "timed_out", "interrupted":
+		return true
+	}
+	return false
+}
+func sameExecution(a, b Request) bool {
+	return a.ID == b.ID && a.JobID == b.JobID && a.Name == b.Name && a.Machine == b.Machine &&
+		a.Session == b.Session && a.RunID == b.RunID && a.TurnID == b.TurnID && a.CallID == b.CallID &&
+		a.HostID == b.HostID && a.Agent == b.Agent && a.Priority == b.Priority && a.Shell == b.Shell &&
+		a.Hook == b.Hook && a.Windows == b.Windows && slices.Equal(a.Shared, b.Shared) && slices.Equal(a.Exclusive, b.Exclusive)
+}
 func (s *Scheduler) SyncNode(node, owner string, inventory []Lease, now time.Time) ([]Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if node == "" || !strings.HasPrefix(owner, node+"/") || len(inventory) > 256 {
+	if node == "" || !strings.HasPrefix(owner, node+"/") || len(inventory) > 512 {
 		return nil, errors.New("节点租约对账身份或数量无效")
 	}
 	next := map[string]Lease{}
+	// Validate the complete plan before touching any published ownership.
 	for _, item := range inventory {
 		if item.ID == "" || item.Owner != owner || item.Machine == "" || item.Session == "" || next[item.ID].ID != "" {
 			return nil, errors.New("节点租约清单身份不匹配")
 		}
-		switch item.State {
-		case "queued", "granted", "running", "cancelling", "unknown":
-		default:
-			return nil, errors.New("节点租约清单状态无效")
+		if len(item.DetachRequest) > 128 || item.DetachRequest != "" && item.DetachRequest != item.JobID {
+			return nil, errors.New("节点后台移交的固定身份无效")
+		}
+		if !finalReceipt(item) {
+			if item.TerminalReceipt {
+				return nil, errors.New("任务终态回执缺少完整身份或状态")
+			}
+			switch item.State {
+			case "queued", "granted", "running", "cancelling", "unknown":
+			default:
+				return nil, errors.New("节点租约清单状态无效")
+			}
 		}
 		shared, err := normalizeKeys(item.Shared, item.Windows)
 		if err != nil {
@@ -108,36 +135,96 @@ func (s *Scheduler) SyncNode(node, owner string, inventory []Lease, now time.Tim
 			return nil, err
 		}
 		item.Shared, item.Exclusive = shared, exclusive
+		if old := s.leases[item.ID]; old != nil {
+			if !strings.HasPrefix(old.Owner, node+"/") || !sameExecution(old.Request, item.Request) {
+				return nil, errors.New("节点清单的调用身份或资源域与已保存租约不符")
+			}
+			if old.Owner != owner && (item.JobID == "" || (!finalReceipt(item) && item.State != "unknown")) {
+				return nil, errors.New("跨节点启动只能恢复同一 Job 的未知状态或终态回执")
+			}
+			if item.JobID != "" && !finalReceipt(item) {
+				if item.DetachRequest != "" && item.DetachRequest != old.DetachRequest {
+					return nil, errors.New("节点正在保存的移交没有匹配容量预留")
+				}
+				if old.Background && !item.Background {
+					return nil, errors.New("已移交后台所有权不能降回前台")
+				}
+				if !old.Background && item.Background && old.DetachRequest != item.JobID {
+					return nil, errors.New("后台所有权没有匹配的持久容量预留")
+				}
+			}
+		} else if closed, ok := s.closed[item.ID]; ok {
+			if !finalReceipt(item) || !strings.HasPrefix(closed, node+"/") {
+				return nil, errors.New("节点清单试图恢复已结算执行或另一执行者的回执")
+			}
+		}
 		next[item.ID] = item
+	}
+	count := len(s.leases)
+	for _, old := range s.leases {
+		if !strings.HasPrefix(old.Owner, node+"/") {
+			continue
+		}
+		item, found := next[old.ID]
+		if found && finalReceipt(item) || !found && old.JobID == "" {
+			count--
+		}
+	}
+	for id, item := range next {
+		if s.leases[id] == nil && !finalReceipt(item) {
+			count++
+		}
+	}
+	if count > s.cfg.Total {
+		return nil, errors.New("节点清单超出租约总上限")
 	}
 	for _, old := range s.leases {
 		if !strings.HasPrefix(old.Owner, node+"/") {
 			continue
 		}
 		if _, found := next[old.ID]; !found {
-			s.close(old)
+			if old.JobID == "" {
+				s.close(old)
+			} else {
+				old.State = "unknown"
+				old.WaitFor = "reconcile"
+				old.Holder = ""
+			}
 		}
 	}
 	for id, item := range next {
-		if old := s.leases[id]; old != nil {
-			if old.Owner != owner {
-				return nil, errors.New("节点试图认领另一执行者的租约")
+		old := s.leases[id]
+		if finalReceipt(item) {
+			if old != nil {
+				old.Owner = owner
+				s.close(old)
+			} else if _, closed := s.closed[id]; closed {
+				s.closed[id] = owner
+			} else {
+				s.close(&Lease{Request: item.Request})
 			}
-			// The gateway's durable identity and scopes remain authoritative.
+			continue
+		}
+		if old != nil {
+			old.Owner = owner
 			old.State = item.State
-			old.WaitFor, old.Holder = "", ""
+			old.WaitFor = ""
+			old.Holder = ""
+			if item.JobID != "" {
+				old.Background = item.Background
+				// Published foreground cancels an unused reservation; published
+				// background completes the prepared handoff after reconnection.
+				old.DetachRequest = item.DetachRequest
+				if item.Background {
+					old.DetachRequest = ""
+				}
+			}
 		} else {
-			if _, closed := s.closed[id]; closed {
-				return nil, errors.New("节点清单试图恢复已结算执行")
-			}
-			if len(s.leases) >= s.cfg.Total {
-				return nil, errors.New("节点清单超出租约总上限")
-			}
 			s.serial++
 			item.serial = s.serial
 			s.leases[id] = &item
 		}
-		if _, ok := s.served[sessionKey(item.Request)]; !ok {
+		if _, found := s.served[sessionKey(item.Request)]; !found {
 			s.served[sessionKey(item.Request)] = s.clock
 		}
 	}
