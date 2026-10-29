@@ -16,6 +16,7 @@
 #include "tools.h"
 #include "update.h"
 #include "util.h"
+#include "watch.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -118,6 +119,7 @@ typedef struct {
     na_core        *core;
     runner_t        runner;
     na_pipes        pipes;            /* 协议 v10：MCP 服务的 stdio 透传 */
+    na_watch       *watch;            /* 明确文件或非递归目录的观察登记（设计 §6.6） */
     struct gwjob   *gwjobs;      /* 交给网关执行、还没有结果的工具调用 */
     struct execq   *execq;       /* 等本机执行槽的调用 */
     struct pendin  *pendin;      /* 活跃 run 到上限时排队的 input */
@@ -185,6 +187,7 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft,"job_control_tool",1);
  cJSON_AddNumberToObject(ft,"hook_tool",1);
  cJSON_AddNumberToObject(ft,"hook_check",1);
+ cJSON_AddNumberToObject(ft,"file_watch",na_watch_supported(k->watch)?1:0);
  cJSON_AddNumberToObject(ft,"hook_input",k->exec_hook_input);
     cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
     cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
@@ -1804,6 +1807,18 @@ static void feed_pending_input(kernel_t *k, int64_t now)
     }
 }
 
+/* 观察结果发给网关：网关按 key 找回规则，写成可靠的 file.changed 事件。 */
+static void send_file_event(void *ud, const char *key, const char *path, int count, bool resync)
+{
+    kernel_t *k = ud;
+    cJSON *m = msg_new("file_event", NULL);
+    cJSON_AddStringToObject(m, "key", key);
+    cJSON_AddStringToObject(m, "path", path);
+    cJSON_AddNumberToObject(m, "count", count);
+    if (resync) cJSON_AddBoolToObject(m, "resync_required", true);
+    link_send(&k->link, m);
+}
+
 static void pump(kernel_t *k, int64_t now)
 {
     na_cmd *c;
@@ -2376,6 +2391,8 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         }
         ev.calls = calls;
         ev.ncalls = ncalls;
+    } else if(!strcmp(t,"watch_sync")){
+        na_watch_sync(k->watch,cJSON_GetObjectItemCaseSensitive(m,"watches"),cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"resync")),now);
     } else if(!strcmp(t,"hook_result")){
         const char *request=sget(m,"request_id"),*id=sget(m,"id");
         if(!request||!id||strcmp(request,id))return;
@@ -2527,6 +2544,8 @@ static int64_t next_wakeup(kernel_t *k, int64_t now)
     if(job_deadline>=0 && job_deadline<wake)wake=job_deadline;
     int64_t dl = na_core_next_deadline(k->core);
     if (dl >= 0 && dl < wake) wake = dl;
+    int64_t wd = na_watch_next(k->watch);
+    if (wd >= 0 && wd < wake) wake = wd;
     if (k->link.fd != NA_SOCK_NONE) {
         if (k->last_ping + PING_INTERVAL_MS < wake) wake = k->last_ping + PING_INTERVAL_MS;
     } else if (k->next_connect < wake) {
@@ -2567,6 +2586,11 @@ static void loop(kernel_t *k)
             li = (int)np;
             pfds[np++] = (na_pollfd){ .id = (intptr_t)k->link.fd,
                                       .events = NA_POLLIN | (k->link.out.len ? NA_POLLOUT : 0) };
+        }
+        int wi = -1;
+        if (na_watch_fd(k->watch) >= 0) {
+            wi = (int)np;
+            pfds[np++] = (na_pollfd){ .id = na_watch_fd(k->watch), .events = NA_POLLIN };
         }
         size_t base = np;
         np += runner_pollfds(&k->runner, pfds + base, refs + base, MAX_POLL - base);
@@ -2609,6 +2633,8 @@ static void loop(kernel_t *k)
                 disconnect(k, now, "写入失败");
         }
 
+        if (wi >= 0 && (pfds[wi].revents & NA_POLLIN)) na_watch_ready(k->watch, now);
+        na_watch_tick(k->watch, now, send_file_event, k);
         if (pbase > base) runner_on_poll(&k->runner, pfds + base, refs + base, pbase - base);
         pipes_poll(&k->pipes, pfds + pbase, prefs + pbase, np - pbase, now);
         pump_pipes(k);
@@ -2799,6 +2825,7 @@ int main(int argc, char **argv)
         .max_active_runs = k.conf.max_active_runs,
     };
     k.core = na_core_new(&cc);
+    k.watch = na_watch_new();
     pipes_init(&k.pipes);
     pipes_set_wake(&k.pipes, &g_wake);
     /* 执行器的输出是一行 JSON，内容转义后可能比原文长不少，留足余量 */
@@ -2860,6 +2887,7 @@ int main(int argc, char **argv)
     buf_free(&k.link.in);
     buf_free(&k.link.out);
     na_core_free(k.core);
+    na_watch_free(k.watch);
     free(k.exec_real);
     kconf_free(&k.conf);
     plat_wake_close(&g_wake);

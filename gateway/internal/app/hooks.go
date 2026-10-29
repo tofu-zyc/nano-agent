@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -330,6 +331,7 @@ func (a *App) HookAction(ctx context.Context, sid, who string, req HookRequest) 
 	if engine != nil {
 		engine.Wake()
 	}
+	a.syncHookWatches()
 	a.mu.Lock()
 	v := a.hookView(r)
 	out.Rule = &v
@@ -337,6 +339,190 @@ func (a *App) HookAction(ctx context.Context, sid, who string, req HookRequest) 
 	a.mu.Unlock()
 	return out, nil
 }
+
+// ---- 文件观察（设计 §6.6）：只登记明确文件或非递归目录 ----
+
+type hookWatchRule struct {
+	Key, Path, Workspace, Machine, Agent, SID string
+}
+
+// hookWatchKey 是同一 (工作目录, 路径) 的稳定短键；内核只原样带回，不解释它。
+func hookWatchKey(workspace, path string) string {
+	sum := sha256.Sum256([]byte(workspace + "\x00" + path))
+	return "w" + hex.EncodeToString(sum[:12])
+}
+
+// hookWatch 解析一条规则的观察登记：相对路径按工作目录展开。调用者持有 App.mu。
+func (a *App) hookWatch(spec hooks.Spec) (hookWatchRule, bool) {
+	if spec.Watch == nil {
+		return hookWatchRule{}, false
+	}
+	var ws *Workspace
+	for i := range a.wss {
+		if a.wss[i].ID == spec.Watch.Workspace {
+			ws = &a.wss[i]
+			break
+		}
+	}
+	if ws == nil {
+		return hookWatchRule{}, false
+	}
+	path := spec.Watch.Path
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ws.Path, path)
+	}
+	return hookWatchRule{Key: hookWatchKey(ws.ID, path), Path: path, Workspace: ws.ID, Machine: ws.Host, SID: spec.Scope.SID}, true
+}
+
+// hookWatchRules 列出启用中的规则要求的观察登记（agent 在下面按规则填）。调用者持有 App.mu。
+func (a *App) hookWatchRules() []hookWatchRule {
+	if a.jobEvents == nil {
+		return nil
+	}
+	out := []hookWatchRule{}
+	for _, rule := range a.jobEvents.Rules("") {
+		if !rule.Enabled || rule.Deleted {
+			continue
+		}
+		spec, err := hooks.Parse(rule)
+		if err != nil {
+			continue
+		}
+		w, ok := a.hookWatch(spec)
+		if !ok {
+			continue
+		}
+		w.Agent = rule.AgentID
+		out = append(out, w)
+	}
+	return out
+}
+
+// syncHookWatches 把当前观察集合推给在线的内核。断线或内核重启后重新下发，
+// 并让内核各报一次 resync：那段时间的变化没有记录，处理器要自己重新比较。
+// 只是集合变了（新加一条规则）不报缺口，原来那条一直在正常观察。
+func (a *App) syncHookWatches() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.hub == nil || a.jobEvents == nil {
+		return
+	}
+	if a.watchDigest == nil {
+		a.watchDigest, a.watchBroken = map[string]string{}, map[string]bool{}
+	}
+	want := map[string][]proto.WatchSub{}
+	seen := map[string]bool{}
+	for _, w := range a.hookWatchRules() {
+		node := a.kernelOn(w.Machine)
+		if node == "" || a.nodes[node] == nil || a.nodes[node].info.Features["file_watch"] < 1 || seen[node+"\x00"+w.Key] {
+			continue
+		}
+		seen[node+"\x00"+w.Key] = true
+		want[node] = append(want[node], proto.WatchSub{Key: w.Key, Path: w.Path})
+	}
+	for node, n := range a.nodes {
+		if n.info.Features["file_watch"] < 1 {
+			continue
+		}
+		list := want[node]
+		if list == nil {
+			list = []proto.WatchSub{}
+		}
+		raw, _ := json.Marshal(list)
+		broken := a.watchBroken[node]
+		if !broken && a.watchDigest[node] == string(raw) {
+			continue
+		}
+		a.watchDigest[node] = string(raw)
+		a.watchBroken[node] = false
+		a.hub.Send(node, proto.Msg{T: proto.TWatchSync, Watches: list, Resync: broken})
+	}
+}
+
+// hookCause 是一台机器上正在执行的 Hook 动作；窗口内的文件变化记在它名下。
+type hookCause struct {
+	Machine, Hook string
+	Until         int64
+}
+
+// noteHookCause 记下一个刚开始执行的 Hook 动作（最多 64 条，过期的先扔掉）。
+func (a *App) noteHookCause(machine, hook string, timeoutMS int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now().Unix()
+	live := a.hookCauses[:0]
+	for _, c := range a.hookCauses {
+		if c.Until >= now {
+			live = append(live, c)
+		}
+	}
+	a.hookCauses = live
+	if len(a.hookCauses) >= 64 {
+		a.hookCauses = a.hookCauses[1:]
+	}
+	a.hookCauses = append(a.hookCauses, hookCause{Machine: machine, Hook: hook, Until: now + int64(timeoutMS/1000) + 5})
+}
+
+// hookCauseOn 是这台机器上此刻正在执行的 Hook 动作（没有就返回空）。
+func (a *App) hookCauseOn(machine string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now().Unix()
+	for _, c := range a.hookCauses {
+		if c.Until >= now && c.Machine == machine {
+			return c.Hook
+		}
+	}
+	return ""
+}
+
+// fileChanged 把内核的观察结果写成可靠事件：每个关心这个路径的 agent/来源会话一条。
+// 如果变化发生在某个 Hook 动作执行期间，就记成它派生的事件：同一个 Hook 不会消费
+// 自己写出来的变化，其他 Hook 仍按因果深度处理。
+// 事件只表示至少观察到一次变化，resync_required 表示这里有缺口。
+func (a *App) fileChanged(node string, m *proto.Msg) {
+	a.mu.Lock()
+	store := a.jobEvents
+	epoch := ""
+	if n := a.nodes[node]; n != nil {
+		epoch = n.info.NodeEpoch
+	}
+	rules := a.hookWatchRules()
+	seq := a.runtimeEventSeq
+	machine := a.machineOf(node)
+	a.mu.Unlock()
+	if store == nil || epoch == "" {
+		return
+	}
+	now := a.now().Unix()
+	sent := map[string]bool{}
+	for _, w := range rules {
+		if w.Key != m.WatchKey || sent[w.Agent+"\x00"+w.SID] {
+			continue
+		}
+		sent[w.Agent+"\x00"+w.SID] = true
+		seq++
+		data, _ := json.Marshal(map[string]any{"workspace": w.Workspace, "path": m.Path, "count": m.Count, "resync_required": m.ResyncRequired})
+		event := eventlog.Event{Name: "file.changed", SourceID: "watch:" + node, SourceEpoch: epoch, Seq: seq,
+			OccurredAt: now, ObservedAt: now, AgentID: w.Agent, OriginSID: w.SID, Data: data}
+		if cause := a.hookCauseOn(machine); cause != "" {
+			event.OriginHook, event.Depth = cause, 1
+		}
+		event.ID = eventlog.EventID(event.SourceID, event.SourceEpoch, event.Seq)
+		if err := store.Commit(a.ctx, eventlog.Transaction{Event: &event}); err != nil {
+			a.log.Error("文件观察事件没有写进可靠日志", "node", node, "err", err)
+		}
+	}
+	a.mu.Lock()
+	if seq > a.runtimeEventSeq {
+		a.runtimeEventSeq = seq
+	}
+	a.mu.Unlock()
+	if a.hookEngine != nil {
+		a.hookEngine.Wake()
+	}
+}
+
 func isHookSID(sid string) bool {
 	return strings.HasPrefix(sid, "hook:") || strings.Contains(sid, "/hook:")
 }

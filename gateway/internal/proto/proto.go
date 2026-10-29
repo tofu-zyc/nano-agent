@@ -64,6 +64,8 @@ const (
 	TToolStarted        = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
 	THookCheck          = "hook_check"
 	THookResult         = "hook_result"
+	TWatchSync          = "watch_sync"  // 网关 → 内核：明确文件或非递归目录的完整观察集合
+	TFileEvent          = "file_event"  // 内核 → 网关：至少观察到一次变化，resync_required 表示有缺口
 	TExecStarted        = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
 	TExecQueued         = "exec_queued"
 	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
@@ -139,7 +141,18 @@ type LeaseSpec struct {
 	Silent          bool   `json:"silent,omitempty"`
 }
 
+// WatchSub 是一条观察登记：Key 由网关生成并原样带回，Path 是那台机器上的路径。
+type WatchSub struct {
+	Key  string `json:"key"`
+	Path string `json:"path"`
+}
+
 type Msg struct {
+	Watches         []WatchSub      `json:"watches,omitempty"`
+	WatchKey        string          `json:"key,omitempty"`
+	Count           int             `json:"count,omitempty"`
+	Resync          bool            `json:"resync,omitempty"`
+	ResyncRequired  bool            `json:"resync_required,omitempty"`
 	HookChecks      bool            `json:"hook_checks,omitempty"`
 	ForceApproval   bool            `json:"force_approval,omitempty"`
 	JobID           string          `json:"job_id,omitempty"`

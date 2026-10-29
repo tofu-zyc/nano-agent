@@ -31,7 +31,15 @@ notify 只替换固定模板变量。command 从标准输入读取最多 4096 �
 
 deadline.at 使用 deadline_at 的 Unix 毫秒值，统一最小堆调度；每个规则修订最多产生一个固定到期事件。停用、一次性消费和重启都不会重新触发同一修订。相同对象的冷却和每分钟最多 16 次触发从持久尝试记录恢复。已完成的事件正文保留每 agent 最近 100 条、最多 7 天；正在处理的投递不被清理，来源游标保留去重能力。来源游标总量最多 4096，达到上限明确暂停接收。
 
-当前模块已连接 Job 终态、run.started/finished、tool.after/failed、approval.waiting 与 tool.before。文件观察和 message.received 的平台 ID 对账仍未实现，不能仅凭这份配置声明已支持。
+当前模块已连接 Job 终态、run.started/finished、tool.after/failed、approval.waiting、tool.before 与 file.changed。message.received 的平台 ID 对账仍未实现，不能仅凭这份配置声明已支持。
+
+## 文件观察（file.changed）
+
+规则里的 `watch:{workspace,path}` 登记一台目标机器上的明确文件或不递归目录（相对路径按工作目录展开），由那台机器的 C 内核用 inotify 观察，事件写进同一份可靠日志。内核按 key 原样带回网关生成的名字，网关按规则找回 agent 和来源会话。
+
+同一路径 500 毫秒内的多次变化合成一条（`count` 是次数，目录登记时 `path` 是里面变化的文件）。每个内核最多 64 条登记；登记不上的路径、inotify 队列溢出、断线重连和内核重启都会给一条 `resync_required`，表示那段时间的变化没有记录，处理器要自己重新比较状态。首次登记不发事件，重启也不重放旧变化。
+
+Hook 动作执行期间发生的文件变化记成那个 Hook 派生的事件：同一个 Hook 不消费自己写出来的变化，其他 Hook 按因果深度（最多 4）处理。macOS 和 Windows 这轮没有观察器，只有 Linux 内核在 hello 里声明 `file_watch`；没有这个能力的目标机器不会登记，也不假装观察。
 
 ## 前置屏障（tool.before）
 

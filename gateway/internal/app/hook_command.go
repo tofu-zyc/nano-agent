@@ -191,6 +191,7 @@ func (x hookExecutor) command(ctx context.Context, w hooks.Execution, done func(
 		"dirs": spec.Dirs, "home": spec.Home, "ro": spec.RO, "rw": spec.RW, "write": true,
 		"sandbox": sandbox, "hook_input": string(input), "tmp_key": w.Delivery.ID, "max_output": 64 << 10, "watch_stdin": true,
 	})
+	a.noteHookCause(machine, w.Delivery.HookID, w.Spec.Handler.TimeoutMS)
 	result := h.Exec(ctx, append(request, '\n'))
 	if release != nil {
 		release(result.Lost)

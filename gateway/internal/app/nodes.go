@@ -227,6 +227,14 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	a.nodeSeq++
 	n.seq = a.nodeSeq
 	a.nodes[name] = n
+	// 新连接（含内核重启）：观察集合要重新下发，那段时间的变化按缺口告诉处理器
+	if a.watchDigest[name] != "" && a.watchDigest[name] != "[]" {
+		if a.watchBroken == nil {
+			a.watchBroken = map[string]bool{}
+		}
+		a.watchBroken[name] = true
+	}
+	delete(a.watchDigest, name)
 	if local && (a.localNode == "" || a.nodes[a.localNode] == nil) {
 		a.localNode = name
 	}
@@ -263,6 +271,7 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	}
 	// 机器上线后把离线时先按原样保存的工作目录换成那台机器给的规范形式
 	go a.normalizeWorkspaces(machine)
+	go a.syncHookWatches()
 	a.maybeUpdateKernel(name, hello)
 }
 

@@ -109,6 +109,9 @@ var helpText = func() string {
 
 type App struct {
 	hookEngine      *hooks.Engine
+	watchDigest     map[string]string // 每个内核最近一次下发的观察集合
+	watchBroken     map[string]bool   // 断开过的内核：重新下发时那段时间按缺口上报
+	hookCauses      []hookCause       // 正在执行的 Hook 动作：观察事件据此记因果，防自写循环
 	runtimeEventSeq uint64
 	jobControls     map[string]jobControlWait
 	jobCompletions  map[string]jobCompletionWait
@@ -1552,6 +1555,11 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 				}
 			}
 		}
+		return
+	}
+	if m.T == proto.TFileEvent {
+		// 观察结果是普通外部事实，写可靠日志时不占网关总锁
+		a.fileChanged(node, m)
 		return
 	}
 	a.mu.Lock()

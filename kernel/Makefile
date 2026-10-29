@@ -35,11 +35,11 @@ RUNNER := src/runner.c
 PIPE   :=
 endif
 
-SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
+SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c src/watch.c $(PLAT)
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
-KWIN_SRCS := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
-MAC_SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
+KWIN_SRCS := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/watch.c src/plat_win.c
+MAC_SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/watch.c src/plat_posix.c
 MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -108,6 +108,10 @@ build/cJSON.o: third_party/cjson/cJSON.c
 build/test_core: tests/test_core.c src/core.c src/core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(WARN) $(SAN) -o $@ tests/test_core.c src/core.c
+
+build/test_watch: tests/test_watch.c src/watch.c src/watch.h third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(WARN) $(SAN) -o $@ tests/test_watch.c src/watch.c third_party/cjson/cJSON.c
 
 build/test_exec_stream: tests/test_exec_stream.c src/exec_stream.c src/exec_stream.h src/util.c $(PLAT) third_party/cjson/cJSON.c
 	@mkdir -p $(dir $@)
@@ -178,8 +182,9 @@ test-win:
 	  ./build/test_runner.exe && ./build/test_exec_stream.exe && ./build/test_job_io.exe && ./build/test_job_manager.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 执行器测试；Windows 上的测试在 CI 的 Windows runner 跑）"; fi
 
-test: build/test_core build/test_runner build/test_exec_stream build/test_job_io build/test_job_manager build/nano-kernel-asan build/nano-exec-asan test-win
+test: build/test_core build/test_watch build/test_runner build/test_exec_stream build/test_job_io build/test_job_manager build/nano-kernel-asan build/nano-exec-asan test-win
 	./build/test_core
+	./build/test_watch
 	./build/test_runner
 	./build/test_exec_stream
 	./build/test_job_io
