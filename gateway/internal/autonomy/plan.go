@@ -288,22 +288,23 @@ func (s *State) ImportLife(recent []LifeNote, now time.Time) bool {
 
 // View 是给网页看的自主活动概况。
 type View struct {
-	SchemaVersion int          `json:"schema_version"`
-	Revision      int64        `json:"revision"`
-	Paused        bool         `json:"paused"`
-	PauseReason   string       `json:"pause_reason,omitempty"`
-	NextCheck     int64        `json:"next_check,omitempty"` // 毫秒，方便网页直接用
-	Budget        Budget       `json:"budget"`
-	BudgetLeft    int          `json:"budget_left"`
-	Self          Self         `json:"self"`
-	TodayPlanned  int          `json:"today_planned"`
-	TodayDone     int          `json:"today_done"`
-	Agenda        []AgendaItem `json:"agenda"`
-	Intentions    []Intention  `json:"intentions"`
-	Ideas         []Idea       `json:"ideas"`
-	Executions    []Execution  `json:"executions"`
-	Reflections   []Reflection `json:"reflections"`
-	Beliefs       []Belief     `json:"beliefs"`
+	SchemaVersion int           `json:"schema_version"`
+	Revision      int64         `json:"revision"`
+	Paused        bool          `json:"paused"`
+	PauseReason   string        `json:"pause_reason,omitempty"`
+	NextCheck     int64         `json:"next_check,omitempty"` // 毫秒，方便网页直接用
+	Budget        Budget        `json:"budget"`
+	BudgetLeft    int           `json:"budget_left"`
+	Self          Self          `json:"self"`
+	TodayPlanned  int           `json:"today_planned"`
+	TodayDone     int           `json:"today_done"`
+	Agenda        []AgendaItem  `json:"agenda"`
+	Intentions    []Intention   `json:"intentions"`
+	Ideas         []Idea        `json:"ideas"`
+	Executions    []Execution   `json:"executions"`
+	Reflections   []Reflection  `json:"reflections"`
+	Beliefs       []Belief      `json:"beliefs"`
+	Ledger        []LedgerUsage `json:"ledger"` // 今天的四个来源：探索/约定/Hook/手动
 }
 
 // View 整理一份给网页的概况（个数有上限，按时间倒序）。
@@ -311,7 +312,8 @@ func (s *State) View(now time.Time, loc *time.Location, limit int) View {
 	s.Normalize()
 	v := View{SchemaVersion: s.SchemaVersion, Revision: s.Revision, Paused: s.Paused, PauseReason: s.PauseReason,
 		Budget: s.Budget, BudgetLeft: s.BudgetLeft(s.Budget.Limit), Self: s.Self,
-		Agenda: s.OpenAgenda(), Intentions: s.ActiveIntentions(), Ideas: s.OpenIdeas(now)}
+		Agenda: s.OpenAgenda(), Intentions: s.ActiveIntentions(), Ideas: s.OpenIdeas(now),
+		Ledger: s.LedgerToday(now, loc)}
 	if s.NextCheck > 0 {
 		v.NextCheck = s.NextCheck * 1000
 	}

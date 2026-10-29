@@ -427,3 +427,62 @@ func TestSetNumberValidatesAndChangesThePick(t *testing.T) {
 		t.Fatal("不存在的认识应该被拒绝")
 	}
 }
+
+func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
+	s := New()
+	loc := time.UTC
+	day := at(10, 0)
+	s.ReserveLedger(LedgerExploration, day, loc)
+	if got := s.LedgerStarts(LedgerExploration, day, loc); got != 1 {
+		t.Fatalf("预留没有被算进额度：%d", got)
+	}
+	s.ReleaseLedger(LedgerExploration, day, loc)
+	if got := s.LedgerStarts(LedgerExploration, day, loc); got != 0 {
+		t.Fatalf("启动失败没有退回预留：%d", got)
+	}
+	s.ReserveLedger(LedgerExploration, day, loc)
+	s.SettleLedger(LedgerExploration, "r1", 120, day, loc)
+	by := map[string]LedgerUsage{}
+	for _, row := range s.LedgerToday(day, loc) {
+		by[row.Source] = row
+	}
+	if by[LedgerExploration].Starts != 1 || by[LedgerExploration].Tokens != 120 || by[LedgerExploration].Reserved != 0 || len(by[LedgerExploration].Runs) != 1 {
+		t.Fatalf("探索账本：%+v", by[LedgerExploration])
+	}
+	if by[LedgerCommitment].Starts != 0 || by[LedgerHook].Starts != 0 || by[LedgerManual].Starts != 0 {
+		t.Fatalf("其他来源被一起记了：%+v", by)
+	}
+	s.SettleLedger(LedgerManual, "r2", 50, day, loc)
+	s.SettleLedger(LedgerHook, "r3", 30, day, loc)
+	by = map[string]LedgerUsage{}
+	for _, row := range s.LedgerToday(day, loc) {
+		by[row.Source] = row
+	}
+	if by[LedgerManual].Tokens != 50 || by[LedgerHook].Tokens != 30 {
+		t.Fatalf("来源没有分开记：%+v", by)
+	}
+	// 换一天各自记，不互相覆盖
+	next := day.AddDate(0, 0, 1)
+	s.SettleLedger(LedgerExploration, "r4", 10, next, loc)
+	if s.LedgerStarts(LedgerExploration, day, loc) != 1 || s.LedgerStarts(LedgerExploration, next, loc) != 1 {
+		t.Fatalf("换天结算不对：%d / %d", s.LedgerStarts(LedgerExploration, day, loc), s.LedgerStarts(LedgerExploration, next, loc))
+	}
+	// 账本有界：只保留最近 14 天
+	for i := 0; i < 20; i++ {
+		s.SettleLedger(LedgerExploration, "", 1, day.AddDate(0, 0, i), loc)
+	}
+	days := map[string]bool{}
+	for _, row := range s.Ledger {
+		days[row.Day] = true
+	}
+	if len(days) > maxLedgerDays {
+		t.Fatalf("账本没有裁剪：%d 天", len(days))
+	}
+	// 旧 life.json 的次数只导一次
+	fresh := New()
+	fresh.SeedLedger(LedgerExploration, 3, 300, day, loc)
+	fresh.SeedLedger(LedgerExploration, 3, 300, day, loc)
+	if row := fresh.LedgerToday(day, loc)[0]; row.Starts != 3 || row.Tokens != 300 {
+		t.Fatalf("迁移导重了：%+v", row)
+	}
+}

@@ -95,6 +95,8 @@ type State struct {
 	Agenda     []AgendaItem `json:"agenda,omitempty"`
 
 	TopicBranches []TopicBranch `json:"topic_branches,omitempty"`
+	// Ledger 是统一的自主活动账本：按本地自然日、按来源记次数和 token（设计 §7.1）
+	Ledger []LedgerUsage `json:"ledger,omitempty"`
 
 	Events      []Event      `json:"events,omitempty"`
 	Executions  []Execution  `json:"executions,omitempty"`

@@ -36,6 +36,7 @@ type mindRun struct {
 	Trigger autonomy.Trigger
 	Started time.Time
 	Manual  bool
+	Source  string // 账本来源：exploration / commitment / hook / manual
 }
 
 type autonomyDoc struct {
@@ -435,6 +436,29 @@ func (a *App) startLife(agentID string, manual bool) error {
 	return a.startMindLocked(ag, st, trig, manual)
 }
 
+// ledgerSource 是这次自主活动记到账本的哪个来源：主人叫醒 > Hook > 约定/排好的事 > 自选探索。
+func ledgerSource(trig autonomy.Trigger, manual, hook bool) string {
+	switch {
+	case manual:
+		return autonomy.LedgerManual
+	case hook:
+		return autonomy.LedgerHook
+	case trig.IsCommitment() || !trig.IsExploration():
+		return autonomy.LedgerCommitment
+	default:
+		return autonomy.LedgerExploration
+	}
+}
+
+// migrateLifeLedger 把旧 life.json 的当日次数和 token 导一次进账本：
+// 升级当天不该显示成 0，只导一次（账本这一天已经有记录就不再动）。
+func (a *App) migrateLifeLedger(st *autonomy.State, ls *lifeState, now time.Time) {
+	if ls == nil || (ls.Wakes == 0 && ls.Tokens == 0) {
+		return
+	}
+	st.SeedLedger(autonomy.LedgerExploration, ls.Wakes, ls.Tokens, now, a.loc)
+}
+
 // startMindLocked 开一轮自主活动：内心会话、交接用的说明、状态先标成进行中。调用方持有锁。
 func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy.Trigger, manual bool) error {
 	return a.startMindWithHookLocked(ag, st, trig, manual, nil)
@@ -455,6 +479,8 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	}
 	now := a.now().In(a.loc)
 	ls := a.lifeOf(ag.ID)
+	// 旧 life.json 的当日次数先进账本，再记这一次（顺序反了会把这一次数两遍）
+	a.migrateLifeLedger(st, ls, now)
 	// 先记次数，这样这次醒来的说明里能看到“第几次”；开始失败时下面会退回去
 	if !manual && trig.IsExploration() {
 		ls.Wakes++
@@ -465,6 +491,8 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		}
 		return fmt.Errorf("开启内心片段失败：%w", err)
 	}
+	source := ledgerSource(trig, manual, hook != nil)
+	st.ReserveLedger(source, now, a.loc)
 	note := a.mindNote(ag, st, trig, now, manual)
 	pending := st.UnprocessedEvents(20)
 	ids := make([]string, 0, len(pending))
@@ -475,7 +503,7 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	ls.Next = now.Add(a.lifeInterval(ag, now)).Unix()
 	a.saveMinds()
 	a.saveLife()
-	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual}
+	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source}
 	who := "life:" + ag.ID
 	if hook != nil {
 		who = hook.work.Delivery.Creator
@@ -486,6 +514,7 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	if s.run == nil {
 		s.queue = nil
 		s.mind = nil
+		st.ReleaseLedger(source, now, a.loc)
 		if !manual && trig.IsExploration() {
 			ls.Wakes--
 		}
@@ -628,6 +657,7 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 	}
 	st.Spend(tokens)
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
+	st.SettleLedger(mr.Source, r.runID, tokens, now, a.loc)
 	a.scheduleMindNext(st, ag, now)
 	ls := a.lifeOf(ag.ID)
 	if next, ok := st.NextDueTime(); ok {
@@ -882,6 +912,31 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			for _, x := range v.Ideas {
 				fmt.Fprintf(&b, "- %s（%s，兴趣 %d，新颖 %d，约 %d 分钟）\n", x.Text, x.ID, x.Interest, x.Novelty, x.CostMinutes)
 			}
+		}
+		{
+			var exploration, commitment, hook, manual int
+			for _, row := range v.Ledger {
+				switch row.Source {
+				case autonomy.LedgerExploration:
+					exploration = row.Starts
+				case autonomy.LedgerCommitment:
+					commitment = row.Starts
+				case autonomy.LedgerHook:
+					hook = row.Starts
+				case autonomy.LedgerManual:
+					manual = row.Starts
+				}
+			}
+			wakes, limit := a.lifeOf(ag.ID).Wakes, effectiveLifePolicy(ag).MaxWakes
+			if exploration > wakes {
+				wakes = exploration
+			}
+			if limit > 0 {
+				fmt.Fprintf(&b, "今天：探索 %d / %d 次", wakes, limit)
+			} else {
+				fmt.Fprintf(&b, "今天：探索 %d 次（不限）", wakes)
+			}
+			fmt.Fprintf(&b, " · 约定 %d · Hook %d · 手动 %d（都不占探索次数）\n", commitment, hook, manual)
 		}
 		fmt.Fprintf(&b, "今天用了 %d token", v.Budget.Tokens)
 		if v.Budget.Limit > 0 {

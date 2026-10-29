@@ -591,3 +591,13 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestBranchHTTPListReportAndActions`（未登录 401、列表字段 `delivery_policy=silent`、`SessionInfo.branch.parent_sid`、空分支报告 400、暂停、归档后继续被拒绝、未知 action 400）；网页 `npm run check` 0 errors / 0 warnings、`npm test` 6/6、`npm run build` 通过。这一轮没有在真实浏览器里点一遍（当前环境没有浏览器），只做了类型检查和构建。
 
 未做：设计 §8.8 里"分支报告在父会话按 kind=branch_report 显示成卡片"仍是一条带 `[分支报告]` 标记的普通消息；会话列表还没有分支的活动摘要（最近进展）。
+
+### P6 统一活动账本
+
+`autonomy.State` 新增 `ledger`（`internal/autonomy/ledger.go`）：按本地自然日、按来源分开记启动次数和 token，来源固定为 `exploration` / `commitment` / `hook` / `manual`。口径写清楚：每日上限只限制自选探索，约定、Hook 和主人叫醒各记各的。每次启动先 `ReserveLedger`（预留也算进额度，两个入口不会同时通过「还剩一次」），启动失败 `ReleaseLedger` 退回，模型真的跑过之后 `SettleLedger` 结算一次并记下 run_id；账本保留最近 14 天、每个来源最近 5 个 run_id。旧 `life.json` 的当日次数和 token 在第一次启动前 `SeedLedger` 导一次（顺序放在「给这一次加次数」之前，避免把一次数两遍）。
+
+显示：`/autonomy` 现在写「今天：探索 N / 上限（或不限） · 约定 a · Hook b · 手动 c」，网页 agent 节点同一行；`autonomy.View.ledger` 提供今天四个来源，前端类型 `LedgerUsage` 同步。
+
+验证：`TestLedgerRecordsSourcesReservesAndRollsDays`（预留/退回/按来源结算/换天不互相覆盖/14 天裁剪/迁移只导一次）与 `TestActivityLedgerSplitsExplorationAndManual`（模拟时钟：一次自主探索 + 一次手动叫醒分别落账、结算后没有残留预留、`/autonomy` 文本显示分项）；全量 `go test`、`go vet`、网页 check/build 通过。
+
+未做：每日上限仍然读 `life.json` 的 `Wakes` 计数（账本记分项、上限沿用旧标量，两者在升级当天靠迁移对齐）；主动联系（Reaches）还没有进账本。

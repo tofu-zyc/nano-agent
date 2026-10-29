@@ -54,6 +54,23 @@
 
   // ---- 自主活动（v0.7.3）：日程、目标、想法 ----
   const auto = $derived(a?.autonomy);
+  // 今天的活动账本：探索占每日次数，约定/Hook/手动各记各的
+  const ledger = $derived.by(() => {
+    const out: Record<string, { starts: number; tokens: number; reserved?: number }> = {};
+    for (const row of auto?.ledger ?? []) out[row.source] = row;
+    return out;
+  });
+  const ledgerText = $derived.by(() => {
+    if (!ledger.exploration) return '';
+    const limit = a?.life?.max_wakes ?? 0;
+    const unlimited = a?.life?.wakes_unlimited ?? limit === 0;
+    const exploration = `探索 ${ledger.exploration.starts}${unlimited ? '（不限）' : ' / ' + limit}`;
+    const parts = [exploration];
+    if (ledger.commitment?.starts) parts.push(`约定 ${ledger.commitment.starts}`);
+    if (ledger.hook?.starts) parts.push(`Hook ${ledger.hook.starts}`);
+    if (ledger.manual?.starts) parts.push(`手动 ${ledger.manual.starts}`);
+    return '今天：' + parts.join(' · ');
+  });
   const kindLabel: Record<string, string> = { commitment: '约定', checkup: '复查', plan: '计划', exploration: '探索' };
   const mindState: Record<string, string> = {
     accepted: '推进中', running: '正在做', waiting: '等下一步', paused: '暂停', done: '完成', failed: '失败', cancelled: '取消',
@@ -266,6 +283,7 @@
               </div>
             {/each}
           {/if}
+          {#if ledgerText}<p class="p-note p-small">{ledgerText}</p>{/if}
           {#if auto.intentions.length}
             <div class="p-sub">在推进的目标</div>
             {#each auto.intentions as it (it.id)}

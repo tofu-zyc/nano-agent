@@ -582,3 +582,54 @@ func TestBranchReportComesBackAsASourcedMessageOnly(t *testing.T) {
 		t.Fatalf("重复带回了：%d → %d", len(after), again)
 	}
 }
+
+func TestActivityLedgerSplitsExplorationAndManual(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	base := time.Date(2026, 10, 21, 15, 0, 0, 0, time.UTC)
+	setNow(e, base)
+	e.a.lifeTick()
+	e.k.none()
+	setNow(e, base.Add(21*time.Minute))
+	e.a.lifeTick()
+	e.k.expect(proto.TInput)
+	sid := lifeSID("default")
+	e.k.send(proto.Msg{T: proto.TModel, SID: sid})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
+	waitIdle(t, e, sid)
+	if err := e.a.Wake("default"); err != nil {
+		t.Fatal(err)
+	}
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: sid})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
+	waitIdle(t, e, sid)
+	e.a.mu.Lock()
+	rows := e.a.mind("default").LedgerToday(e.a.now(), e.a.loc)
+	e.a.mu.Unlock()
+	by := map[string]autonomy.LedgerUsage{}
+	for _, row := range rows {
+		by[row.Source] = row
+	}
+	if by[autonomy.LedgerExploration].Starts != 1 {
+		t.Fatalf("探索没有记进账本：%+v", rows)
+	}
+	if by[autonomy.LedgerManual].Starts != 1 {
+		t.Fatalf("手动叫醒没有记进账本：%+v", rows)
+	}
+	if by[autonomy.LedgerManual].Reserved != 0 || by[autonomy.LedgerExploration].Reserved != 0 {
+		t.Fatalf("结算之后还留着预留：%+v", rows)
+	}
+	if by[autonomy.LedgerCommitment].Starts != 0 || by[autonomy.LedgerHook].Starts != 0 {
+		t.Fatalf("别的来源被一起记了：%+v", rows)
+	}
+	// /autonomy 上分别显示每个来源，不再只给一个总数
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	e.say("/autonomy")
+	e.ch.wait(t, "约定 0 · Hook 0 · 手动 1")
+}
