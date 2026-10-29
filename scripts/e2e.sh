@@ -120,6 +120,17 @@ expect_n() {
   echo "  FAIL $desc（没等到第 $n 个：$want）"; fail=$((fail + 1))
 }
 
+# wait_round_end：等这一轮真的结束（"次模型调用"再多一处）。一轮没结束就发下一条，
+# 会变成"用户补充"插进本轮，命令不会被当成工具调用。
+wait_round_end() {
+  local want=$(( $(grep -cF "次模型调用" "$TMP/out") + 1 ))
+  for _ in $(seq 50); do
+    [ "$(grep -cF "次模型调用" "$TMP/out")" -ge "$want" ] && return 0
+    sleep 0.1
+  done
+  return 0
+}
+
 expect "终端连上网关" "已连上网关。这个终端接在会话「主会话」上"
 send "你好";                                          expect "普通对话" "（mock）收到：你好"
 # 回复正文先流式显示，这一轮写进历史要等到结束（用量那一行之后）；先等它，/history 才看得到这一轮
@@ -224,7 +235,7 @@ fi
 DEMO_REMOTE=$(find "$TMP/remote/box/.nano-agent/skill-cache" -path '*/demo-*/data.txt' -type f -print -quit)
 READ_REMOTE=$(python3 -c 'import json,sys;print(json.dumps({"path":sys.argv[1],"workspace":"box"}))' "$DEMO_REMOTE")
 send "!call Read $READ_REMOTE"; expect_n "服务器上读技能文件" "skill-e2e-data" 2
-send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 2
+send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 1; wait_round_end
 # 网关执行的工具不挑工作目录：挂了多个目录时也不能要求 workspace（v0.7.4 修）
 send '!call Agenda {"action":"list"}'; expect "Agenda 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
 send '!call Idea {"action":"list"}'; expect "Idea 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
@@ -239,7 +250,7 @@ send "摘要第一轮-$long";                              expect "累积待整�
 send "摘要第二轮-$long";                              expect "历史超限后生成摘要" "正在整理上下文"
 echo "compaction-e2e-ok" > "$TMP/work/summary.txt"
 send '!call Read {"path":"summary.txt"}';             expect "压缩之后照常调用工具" "compaction-e2e-ok"
-if python3 - "$TMP/data/sessions" <<'PY'
+if python3 - "$TMP/data/v1/sessions" <<'PY'
 import json, pathlib, sys
 settings = [json.loads(p.read_text()) for p in pathlib.Path(sys.argv[1]).glob('*.settings.json')]
 assert any(s.get('title') == '压缩测试' and s.get('base', 0) > 0 and '较早对话已整理' in s.get('summary', '') for s in settings)
