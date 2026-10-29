@@ -3,7 +3,7 @@
 当前 v11：模型、工具、审批和取消使用完整 `(sid, run_id, turn_id, id)` 身份；`hello.features` 按能力协商有界并行、调用身份和执行隔离策略。旧协议演进说明如下；新字段见本文各扩展说明。
 
 - **传输**：TCP 或 Unix socket，由内核主动连网关。SSH 服务器不跑内核，网关自己通过 SSH 在上面运行执行器（见[执行器](#执行器)），不走这个协议。
-- **版本**：v9 起 `hello` 带 `version`（内核的发布版本）和 `update_failed`（上次自动更新失败、已经退回的版本），网关可以发 `update` 让内核换成新版本（见下面「内核更新」）。**从 v9 起，网关遇到协议版本比自己旧、但不低于 9 的内核时，应先推 `update` 把它升上来，而不是直接拒绝**。v8 起 `hello` 带 `os` / `arch`，`input.workspaces` 每项带 `os`（linux / macos / windows），网关在机器列表里显示系统；路径属于它所在的机器，网关只保存、显示、转发，不解析。v7 起提供网关管理工具 `Gateway` / `GatewayAdmin`（只给管理员，修改每次审批）；v6 起所有 nano-agent 文件统一放在 `~/.nano-agent`（当前技能源文件在 `skills/`，执行缓存在 `skill-cache/`，SSH 执行器在 `~/.nano-agent/nano-exec-<版本>`，内核在 `~/.nano-agent/kernel/`）。v5 起一个会话可以同时挂好几个工作目录（`input.workspaces`），技能放在网关上（`Skill` 交给网关），网关可以请内核代为执行（`run`）。版本不同的内核和网关不能互连，网关回 `error` 说明哪边太旧，旧内核用安装脚本重装即可。
+- **版本**：当前为 v11，兼容路径最低 v9；较旧节点先走更新检查，不支持的版本回 error。发布版本与协议版本分开，hello.version 报程序版本、update_failed 报上次更新回退原因。功能按 hello.features / welcome 协商，不能只凭版本号假定完整后台、插话、Hook 或观察能力。
 - **编码**：一行一条 JSON（UTF-8，`\n` 结尾），字段 `t` 是消息类型，没用到的字段省略。
 - **握手**：内核发 `hello` → 网关校验口令和版本 → 回 `welcome`；不通过就回 `error` 并断开。口令有两种：
   - 网关的共用口令（`kernel.token`），任何名字都能用，本机和自己配置的内核用它；
@@ -78,7 +78,7 @@
 
 ## 网关管理工具
 
-`Gateway`（查询）和 `GatewayAdmin`（修改，任何模式都审批）不在 `hello.tools` 里报描述：内核只在 `BUILTINS` 里登记名字和类型（`Gateway` 是只读，`GatewayAdmin` 是 `NA_TOOL_ADMIN`），模型看到的描述和 schema 由网关加。调用时内核和 `Skill` 一样，用 `exec` 交给网关（没有 `workspace`）；网关再查一次管理员身份后执行。修改直接走网页接口背后的函数，不重启。详见 [DESIGN-agent-gateway-admin.md](DESIGN-agent-gateway-admin.md)。
+`Gateway`（查询）和 `GatewayAdmin`（修改，任何模式都审批）不在 `hello.tools` 里报描述：内核只在 `BUILTINS` 里登记名字和类型（`Gateway` 是只读，`GatewayAdmin` 是 `NA_TOOL_ADMIN`），模型看到的描述和 schema 由网关加。调用时内核和 `Skill` 一样，用 `exec` 交给网关（没有 `workspace`）；网关再查一次管理员身份后执行。修改直接走网页接口背后的函数，不重启。职责见 [架构](ARCHITECTURE.md#会话模型与界面)。
 
 ## 一次完整的处理
 
@@ -345,7 +345,7 @@ yield_after_ms 若提供，必须为 100–600000 的整数毫秒，否则在建
 
 ### Hook 工具与短命令输入
 
-hello.features.hook_tool=1 表示协调节点认识并转发 Hook 工具。list/get/runs/test 按只读工具处理，修改按 GatewayAdmin 策略审批；Gateway 再核验管理员和固定来源。prefixVer=11 使旧工具前缀更新一次。
+hello.features.hook_tool=1 表示协调节点认识并转发 Hook 工具。list/get/runs/test 按只读工具处理，修改按 GatewayAdmin 策略审批；Gateway 再核验管理员和固定来源。工具定义变化时由网关更新稳定前缀版本。
 
 执行器 --probe 与节点 hello 分别报告 hook_input=1；节点取实际执行器能力，不因内核版本较新而假定旁边执行器也已升级。请求 hook_input 是宿主固定的 UTF-8 事件 JSON，不读取模型 Shell 参数中的同名字段，最多 4096 字节。子进程的 stdin 与执行器 watch_stdin 取消通道分开。Linux/macOS 和 Windows 使用有界输入管道，进程仍由现有 C 执行链管理。旧执行器缺少能力时，在执行命令前失败。
 

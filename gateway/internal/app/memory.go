@@ -1,6 +1,6 @@
 package app
 
-// 长期记忆（docs/DESIGN-v0.6-living-agent.md「记忆怎么进上下文」「Knowledge 工具」）。
+// 长期记忆：Knowledge 与上下文注入；见 docs/DESIGN-agent-runtime.md。
 //
 // 每个 agent 一个知识库 agents/<id>/knowledge（人物画像在 people/ 下），所有 agent 共用的在
 // ~/.nano-agent/knowledge，自我认知是 agents/<id>/self.md。系统提示不变（缓存优先）：

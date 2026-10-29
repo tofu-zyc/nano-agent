@@ -12,7 +12,7 @@ import (
 	"nano-agent/gateway/internal/session"
 )
 
-// 统一聊天循环（docs/DESIGN-v0.6-living-agent.md「拟人型：统一聊天循环」）。
+// 统一聊天循环；见 docs/DESIGN-agent-runtime.md。
 
 // 不调模型的门槛：问句更想接，@别人的不太想接，最近自己说得多更想接着说。
 func TestGroupGate(t *testing.T) {

@@ -1,6 +1,6 @@
 package app
 
-// 拟人型 agent 的自主活动（v0.7.3，docs/PLAN-agent-autonomy.md）。
+// 拟人型 agent 的自主活动；见 docs/DESIGN-agent-runtime.md。
 //
 // 心智状态（目标、想法、日程、执行记录）在 internal/autonomy；这里把它接进现有的网关：
 //   - 事件来源：聊天、FollowUp、dream、日程到点、执行结果、主人叫醒；

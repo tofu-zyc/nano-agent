@@ -17,7 +17,7 @@ import (
 	"nano-agent/gateway/internal/proto"
 )
 
-// MCP 服务（docs/PLAN-roadmap.md 阶段 11）：服务在网关这边连（本机 stdio 或远程 streamable
+// MCP 服务：由网关连接（本机 stdio 或远程 streamable
 // HTTP），工具以 <服务>__<工具> 的名字交给模型。模型调用时内核不认识这个名字，会转回网关
 // （见 kernel/src/core.c 的 FORWARDED），由 mcpCall 交给 MCP 客户端。
 

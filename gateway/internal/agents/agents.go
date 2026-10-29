@@ -57,13 +57,13 @@ type Agent struct {
 	GroupParts     *int    `json:"group_parts,omitempty"`
 	GroupMinGap    *string `json:"group_min_gap,omitempty"`
 
-	// v0.6（docs/DESIGN-v0.6-living-agent.md）：类型、拟人型的内心活动、长期记忆和做梦
+	// 类型、拟人活动、长期记忆和做梦；见 docs/DESIGN-agent-runtime.md。
 	Style      string  `json:"style,omitempty"`       // tool（空也是）| life
 	LifeAwake  *string `json:"life_awake,omitempty"`  // 醒着的时间，如 08:00-23:30
 	LifeLevel  *string `json:"life_level,omitempty"`  // low | normal | high
 	LifeReach  *string `json:"life_reach,omitempty"`  // owner | all | off
 	LifeBudget *int    `json:"life_budget,omitempty"` // 内心活动每天最多用多少 token，0 不限
-	// MindDimensions 是可选的内部维度配置（设计 §7.3）：默认值、范围和漂移在这里，
+	// MindDimensions 是可选的内部维度配置：默认值、范围和漂移在这里，
 	// 当前值和更新时间存在 autonomy 状态里；没配置的维度保持关闭。
 	MindDimensions map[string]MindDimension `json:"mind_dimensions,omitempty"`
 	// 每日唤醒次数与间隔独立配置（v0.9）：nil 跟随档位，0 表示不限，正整数是上限。

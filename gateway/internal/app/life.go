@@ -1,6 +1,6 @@
 package app
 
-// 拟人型的内心活动（docs/DESIGN-v0.6-living-agent.md「拟人型：内心活动」）。
+// 拟人型的内心活动；见 docs/DESIGN-agent-runtime.md。
 //
 // 拟人型 agent 有作息：醒着的时间里，按活跃度隔一阵自己醒一次（越久没人找它越容易醒），在
 // @<id>/life 会话里想事情、上网冲浪（WebSearch/WebFetch）、记东西（Knowledge）、找人聊天（Message）。

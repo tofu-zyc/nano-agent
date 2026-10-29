@@ -1,4 +1,4 @@
-// Package mcp 接 MCP 服务（docs/PLAN-roadmap.md 阶段 11）。
+// Package mcp 接 MCP 服务；模块关系见 docs/ARCHITECTURE.md。
 //
 // 配置在 data/mcp.json：每个服务要么在网关本机跑一个 stdio 进程，要么连一个远程
 // streamable HTTP 地址。工具以 <服务>__<工具> 暴露给模型，参数 schema 原样透传。

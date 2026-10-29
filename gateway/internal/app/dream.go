@@ -1,6 +1,6 @@
 package app
 
-// 睡觉做梦：整理记忆（docs/DESIGN-v0.6-living-agent.md「做梦」）。
+// 睡觉做梦：整理记忆；见 docs/DESIGN-agent-runtime.md。
 //
 // agent 睡着、空闲或者到点时，在 @<id>/dream 会话里跑一轮（每次都是全新的上下文）：用 Diary 读日记
 // （这个 agent 的原始聊天记录，压缩不影响），把值得长期记住的用 Knowledge 写进知识库。怎么整理写在
