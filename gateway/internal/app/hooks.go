@@ -488,7 +488,7 @@ func (a *App) fileChanged(node string, m *proto.Msg) {
 		epoch = n.info.NodeEpoch
 	}
 	rules := a.hookWatchRules()
-	seq := a.runtimeEventSeq
+	seq := a.watchSeq
 	machine := a.machineOf(node)
 	a.mu.Unlock()
 	if store == nil || epoch == "" {
@@ -503,7 +503,7 @@ func (a *App) fileChanged(node string, m *proto.Msg) {
 		sent[w.Agent+"\x00"+w.SID] = true
 		seq++
 		data, _ := json.Marshal(map[string]any{"workspace": w.Workspace, "path": m.Path, "count": m.Count, "resync_required": m.ResyncRequired})
-		event := eventlog.Event{Name: "file.changed", SourceID: "watch:" + node, SourceEpoch: epoch, Seq: seq,
+		event := eventlog.Event{Name: "file.changed", SourceID: "watch", SourceEpoch: epoch, Seq: seq,
 			OccurredAt: now, ObservedAt: now, AgentID: w.Agent, OriginSID: w.SID, Data: data}
 		if cause := a.hookCauseOn(machine); cause != "" {
 			event.OriginHook, event.Depth = cause, 1
@@ -514,8 +514,8 @@ func (a *App) fileChanged(node string, m *proto.Msg) {
 		}
 	}
 	a.mu.Lock()
-	if seq > a.runtimeEventSeq {
-		a.runtimeEventSeq = seq
+	if seq > a.watchSeq {
+		a.watchSeq = seq
 	}
 	a.mu.Unlock()
 	if a.hookEngine != nil {

@@ -531,3 +531,44 @@ func TestFileWatchAttributesChangesToTheRunningHookSoItCannotLoop(t *testing.T) 
 		t.Fatal(event, ok)
 	}
 }
+
+func TestMessageReceivedEventIsRecordedOncePerPlatformMessage(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	spec := hooks.Spec{Name: "消息", On: []string{"message.received"}, Handler: hooks.Handler{Type: "notify", Text: "收到 {{event_name}}"}, Deliver: "none"}
+	view, err := e.a.HookAction(context.Background(), mainSID, "fake:u1", HookRequest{Action: "create", OperationID: "msg-one", Spec: &spec})
+	if err != nil || view.Rule == nil {
+		t.Fatal(view, err)
+	}
+	rule := *view.Rule
+	e.say("你好", msgID("m1"))
+	deadline := time.Now().Add(5 * time.Second)
+	for len(watchDeliveries(e, rule)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	rows := watchDeliveries(e, rule)
+	if len(rows) != 1 {
+		t.Fatalf("消息没有写进可靠事件：%d", len(rows))
+	}
+	event, ok := e.a.jobEvents.Event(rows[0].EventID)
+	if !ok || event.Name != "message.received" || event.OriginSID != mainSID || !strings.Contains(string(event.Data), "你好") {
+		t.Fatal(event, ok)
+	}
+	// 平台重发同一条消息：只记一次，不重复受理 Hook
+	e.say("你好", msgID("m1"))
+	time.Sleep(400 * time.Millisecond)
+	if got := len(watchDeliveries(e, rule)); got != 1 {
+		t.Fatalf("重复的平台消息产生了 %d 条事件", got)
+	}
+	// 新消息照常记
+	e.say("第二条", msgID("m2"))
+	deadline = time.Now().Add(5 * time.Second)
+	for len(watchDeliveries(e, rule)) < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := len(watchDeliveries(e, rule)); got != 2 {
+		t.Fatalf("新消息没有记下来：%d", got)
+	}
+}

@@ -328,6 +328,50 @@ func (a *App) emitRuntimeEvent(name, sid string, r *run, data any) {
 	}
 }
 
+// recordMessage 把校验通过的渠道入站消息写成可靠事件。去重键沿用插话日志那套
+// （sid|渠道|聊天窗口|消息ID），在同一个日志里单独占一格：平台重发不会多出一条事件，
+// 已经受理的补充也不会和它互相顶掉。事件先落盘，Hook 只匹配已经提交的事件。
+func (a *App) recordMessage(sid string, ep endpoint, m channel.Message, who, text string) {
+	store := a.jobEvents
+	if store == nil {
+		return
+	}
+	key := ""
+	if k := dedupKey(sid, ep.ch, ep.chat, m.MsgID); k != "" {
+		key = "event|" + k
+		if rec, ok := a.journalByDedup(sid, key); ok {
+			if _, recorded := store.Event(rec.ID); recorded {
+				return
+			}
+			// 上次只写下了去重键、事件没落盘：这次重新记
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"channel": ep.ch, "chat": ep.chat, "from": who,
+		"text": cutRunes(text, 512), "images": len(m.Images)})
+	a.messageSeq++
+	now := a.now().Unix()
+	event := eventlog.Event{Name: "message.received", SourceID: "message", SourceEpoch: a.dispatchBoot, Seq: a.messageSeq,
+		OccurredAt: now, ObservedAt: now, AgentID: a.execAgentID(sid), OriginSID: sid, Data: data, Silent: a.branchSilent(sid)}
+	event.ID = eventlog.EventID(event.SourceID, event.SourceEpoch, event.Seq)
+	if key != "" {
+		if err := a.journalAppend(sid, journalRec{Kind: jrecDedup, ID: event.ID, Dedup: key}); err != nil {
+			a.log.Warn("消息去重记录没有写下来", "sid", sid, "err", err)
+		}
+	}
+	engine := a.hookEngine
+	if err := store.Submit(eventlog.Transaction{Event: &event}, func(err error) {
+		if err != nil {
+			a.log.Warn("收到的消息没能写进可靠日志", "sid", sid, "err", err)
+			return
+		}
+		if engine != nil {
+			engine.Wake()
+		}
+	}); err != nil {
+		a.log.Warn("收到的消息没能排进可靠日志", "sid", sid, "err", err)
+	}
+}
+
 func (x hookExecutor) Changed(d eventlog.Delivery) {
 	x.a.publish(events.Event{T: "hooks", Name: d.AgentID, ID: d.HookID})
 }

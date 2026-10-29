@@ -385,7 +385,8 @@ func (a *App) journalAppend(sid string, rec journalRec) error {
 	if rec.Seq > j.highSeq {
 		j.highSeq = rec.Seq
 	}
-	if rec.Dedup != "" && rec.ID != "" && rec.Kind == jrecReceived {
+	// 去重索引里也放普通的"已记录消息"（jrecDedup）：和受理的补充共用同一张表
+	if rec.Dedup != "" && rec.ID != "" && (rec.Kind == jrecReceived || rec.Kind == jrecDedup) {
 		if _, seen := j.dedup[rec.Dedup]; !seen {
 			j.dedupOrder = append(j.dedupOrder, rec.Dedup)
 		}

@@ -31,7 +31,11 @@ notify 只替换固定模板变量。command 从标准输入读取最多 4096 �
 
 deadline.at 使用 deadline_at 的 Unix 毫秒值，统一最小堆调度；每个规则修订最多产生一个固定到期事件。停用、一次性消费和重启都不会重新触发同一修订。相同对象的冷却和每分钟最多 16 次触发从持久尝试记录恢复。已完成的事件正文保留每 agent 最近 100 条、最多 7 天；正在处理的投递不被清理，来源游标保留去重能力。来源游标总量最多 4096，达到上限明确暂停接收。
 
-当前模块已连接 Job 终态、run.started/finished、tool.after/failed、approval.waiting、tool.before 与 file.changed。message.received 的平台 ID 对账仍未实现，不能仅凭这份配置声明已支持。
+当前模块已连接 Job 终态、run.started/finished、tool.after/failed、approval.waiting、tool.before、file.changed 与 message.received。
+
+## 收到的消息（message.received）
+
+聊天通道校验通过的入站消息先写成一条可靠事件再受理：`data` 里是渠道、聊天窗口、发送者和最多 512 字正文，正文更长只保留开头。去重键沿用插话日志那套（`sid|渠道|聊天窗口|消息ID`），在同一份日志里用独立的一格记录已收到的消息，平台重发同一条只记一次；这个窗口和插话的去重窗口一起裁剪。群聊记录会话里的发言在更早的入口处理，不走这一条。
 
 ## 文件观察（file.changed）
 

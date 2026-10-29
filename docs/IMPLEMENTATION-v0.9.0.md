@@ -527,3 +527,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`kernel/build/test_watch` 10 checks / 0 failures（去抖、集合替换、重连缺口、17000 次变化触发队列溢出后的 resync、超过上限的登记）；真实进程回归 `TestFileWatchRealKernelDebounceAndResyncAfterRestart`（首次登记不报缺口、窗口内两次写入只一条、杀掉内核重启后一条 resync 且不重放）；`go test ./...`、`go vet`、hooks/app race、test_core 262/0、Linux ASan 宿主全套 0 failures 通过。
 
 未做：macOS（kqueue/FSEvents）和 Windows（ReadDirectoryChangesW）观察器，递归目录，以及网关直接观察远端 SSH 机器。未观察到的路径只按 `resync_required` 告知，不声称完整审计。
+
+### P7 message.received 生产者（B2）
+
+渠道入站消息通过白名单、命令、空消息和分支就绪检查之后，先写一条可靠的 `message.received` 事件（`SourceID=message`，正文最多 512 字），再由 Hook 匹配；Hook 只看得到已提交的事件。去重沿用插话日志：同一个 `sid|渠道|聊天窗口|消息ID` 在同一份日志里占独立的一格（`jrecDedup`），平台重发不再产生第二条事件，进程重启后仍有效。
+
+验证：`TestMessageReceivedEventIsRecordedOncePerPlatformMessage`（第一条记一次、同 ID 重发不重复、新 ID 照常记）；`go test ./...`、`go vet`、app race 通过；插话日志既有回归全部通过。
+
+未做：群聊记录会话里的发言在更早的入口处理，不落这条事件；去重窗口与插话共用有界裁剪，很久以后才重发的消息仍可能再记一条。

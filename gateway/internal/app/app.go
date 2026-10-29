@@ -112,6 +112,8 @@ type App struct {
 	watchDigest     map[string]string // 每个内核最近一次下发的观察集合
 	watchBroken     map[string]bool   // 断开过的内核：重新下发时那段时间按缺口上报
 	hookCauses      []hookCause       // 正在执行的 Hook 动作：观察事件据此记因果，防自写循环
+	watchSeq        uint64            // watch 来源的事件序号（和工具事件的序号分开记）
+	messageSeq      uint64            // message 来源的事件序号
 	runtimeEventSeq uint64
 	jobControls     map[string]jobControlWait
 	jobCompletions  map[string]jobCompletionWait
@@ -871,6 +873,8 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		data["images"] = m.Images
 	}
 	a.publish(events.Event{T: "message", SID: s.sid, Name: m.SenderName, Text: m.Text, Data: data})
+	// 校验通过的入站消息先写成可靠事件，Hook 只在这之后才可能看到它
+	a.recordMessage(s.sid, ep, m, who, heard)
 	// 当前这一轮还在跑：发起人在这个会话里继续发来的普通消息是插话，进本轮的有序收件箱，
 	// 等这一批工具调用或这次生成结束再插入——不取消正在跑的命令，也不打断正在生成的回复。
 	if s.run != nil && (s.run.canInterject(who) || (isLifeSID(s.sid) && a.isAdmin(who))) {
