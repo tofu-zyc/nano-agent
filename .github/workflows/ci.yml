@@ -1,5 +1,6 @@
 # 每次推送和 PR：Linux 上跑全部测试；Windows 和 macOS 在真机上跑各自平台的测试。
-# main 是稳定分支，大版本在 dev/<版本> 分支上开发，两边都跑。发布（release.yml）也先跑这里。
+# main 是稳定分支，大版本在 dev/<版本> 分支上开发，两边都跑。发布（release.yml）也先跑这里，
+# 但跳过 macOS：GitHub 的 arm64 macOS runner 经常排不上队，排不上整个发布就被跳过。
 name: CI
 
 on:
@@ -7,6 +8,10 @@ on:
     branches: [main, "dev/**"]
   pull_request:
   workflow_call:
+    inputs:
+      skip_macos:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -133,6 +138,8 @@ jobs:
         run: python scripts/test-install-win.py
 
   macos:
+    # 推送时 inputs 是空的，照常跑；只有发布调用时传 skip_macos
+    if: ${{ !inputs.skip_macos }}
     runs-on: macos-14
     env:
       # macOS 默认的临时目录（/var/folders/…）很长，测试里的 unix socket 会超过 104 字节的上限

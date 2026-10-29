@@ -1,4 +1,5 @@
-# 推 v* 标签：先跑完整的 CI，全过才编译所有平台的包并发布到 GitHub Release。
+# 推 v* 标签：先跑 CI（Linux、Windows；macOS 真机不挡发布，包照样在 Linux 上交叉编译），
+# 全过才编译所有平台的包并发布到 GitHub Release。
 name: Release
 
 on:
@@ -28,6 +29,8 @@ jobs:
   test:
     needs: guard
     uses: ./.github/workflows/ci.yml
+    with:
+      skip_macos: true
 
   release:
     needs: test
