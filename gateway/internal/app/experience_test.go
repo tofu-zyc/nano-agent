@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 // This model deliberately repeats any apparently unfinished request outside a
@@ -123,4 +125,47 @@ func TestP6bContextMemoryResetDoesNotWakeOrRepeat(t *testing.T) {
 		t.Fatal("reset chat was rehydrated through experience")
 	}
 	e.a.mu.Unlock()
+}
+
+func TestBranchRunLeavesAnAdminOnlyExperience(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	base := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	setNow(e, base)
+	meta := session.BranchMeta{SID: "br-exp", ParentSID: mainSID, Title: "一件事", Status: session.BranchPreparing, Delivery: session.BranchDeliverySilent}
+	if err := e.a.store.BeginBranch(meta); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	s := e.a.sessOf("br-exp")
+	r := &run{runID: "r-branch", from: "fake:u1", asked: "把这件事接着做完", start: base}
+	e.a.recordRunExperience(s, r, proto.StatusOK, "分支里做完了，结论放在这里")
+	rows := e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 10, base)
+	public := e.a.experienceOf("default").Recent(knowledge.Viewer{Who: "fake:u9"}, "", 10, base)
+	e.a.mu.Unlock()
+	found := false
+	for _, row := range rows {
+		if row.Kind == "branch" && row.SID == "br-exp" && strings.Contains(row.Said, "结论") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("分支没有留下经历：%+v", rows)
+	}
+	for _, row := range public {
+		if row.SID == "br-exp" {
+			t.Fatal("分支经历漏给了非主人", row)
+		}
+	}
+	// 什么都没说的分支轮次不记，避免给每次空跑都留一条
+	e.a.mu.Lock()
+	e.a.recordRunExperience(s, &run{runID: "r-empty", from: "fake:u1", start: base}, proto.StatusOK, "[不回复]")
+	empty := e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 10, base)
+	e.a.mu.Unlock()
+	for _, row := range empty {
+		if row.RunID == "r-empty" {
+			t.Fatal("空的分支轮次也记了经历", row)
+		}
+	}
 }

@@ -535,3 +535,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestMessageReceivedEventIsRecordedOncePerPlatformMessage`（第一条记一次、同 ID 重发不重复、新 ID 照常记）；`go test ./...`、`go vet`、app race 通过；插话日志既有回归全部通过。
 
 未做：群聊记录会话里的发言在更早的入口处理，不落这条事件；去重窗口与插话共用有界裁剪，很久以后才重发的消息仍可能再记一条。
+
+### P6b 补充整合：分支也留经历（B3）
+
+`recordRunExperience` 识别分支会话（`isBranchSID`）：Fork 与拟人自主分支的轮次记成 `kind=branch` 的经历，`where` 为「安静分支」，可见范围固定 `admin`，不因为分支里说过话就放宽给访客，也不把分支结论写进源聊天。什么都没说、也没有工具或明确动作的分支轮次不记，避免每次空跑都留一条。
+
+验证：`TestBranchRunLeavesAnAdminOnlyExperience`（分支轮次留一条 admin 经历、非主人视图看不到、空轮次不记）；`go test ./internal/app ./internal/experience ./internal/session`、`go vet` 通过。
+
+未做：网页分支卡片上的经历入口和真实浏览器回归；分支经历的目录/清理仍沿用现有 `experience/<agent>.jsonl` 上限。

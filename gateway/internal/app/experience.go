@@ -85,9 +85,6 @@ func (a *App) recordRunExperience(s *sess, r *run, status, body string) {
 		return
 	}
 	kind, where, visible := "chat", s.sid, a.experienceVisibility(s.sid, r.from)
-	if a.isOwnerSID(ag.ID, s.sid) {
-		where = "和主人的私聊"
-	}
 	if r.inner {
 		if !isLifeSID(s.sid) {
 			return
@@ -95,8 +92,17 @@ func (a *App) recordRunExperience(s *sess, r *run, status, body string) {
 		kind, where, visible = "life", "自己的时间", "admin"
 	} else if isInnerSID(s.sid) || isCronSID(s.sid) {
 		return
+	} else if a.isBranchSID(s.sid) {
+		// 分支（Fork 和拟人自主分支）也是主人看得见的经历，但保持安静：不因为
+		// 分支里说过话就给访客看到，也不把分支的结论当成源聊天的回答。
+		kind, where, visible = "branch", "安静分支", "admin"
+	} else if a.isOwnerSID(ag.ID, s.sid) {
+		where = "和主人的私聊"
 	}
 	if kind == "chat" && (isSilence(body) || strings.TrimSpace(r.asked) == "") {
+		return
+	}
+	if kind == "branch" && isSilence(body) && len(r.toolEvidence) == 0 && len(r.experienceActions) == 0 {
 		return
 	}
 	e := experience.Entry{Kind: kind, SID: s.sid, Where: where, Visible: visible, RunID: r.runID, Asked: r.asked, Said: body, Status: status, Generation: a.store.Settings(s.sid).SessionGeneration, Sources: []string{"run:" + r.runID}}
