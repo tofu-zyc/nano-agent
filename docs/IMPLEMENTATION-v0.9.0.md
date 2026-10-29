@@ -611,3 +611,16 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestMindProfileWeightsDimensionsAndDrift`（默认排序不变、提高成本权重后排序真的翻转、预设展开、权重与维度越界/未知名字被拒、漂移向基线且只报一次阈值）与 `TestMindThresholdCrossedReachesAHook`（命令设维度 → 手动叫醒结算漂移 → `mind.threshold_crossed` 经可靠日志投递给 Hook）；全量 `go test`、`go vet`、网页 check/build 通过。
 
 未做：阈值只报向上穿越，没有迟滞带（多次在阈值附近来回会各报一次）；维度不参与选择分，只出现在简报和阈值事件里。
+
+### 性能实测：并行输出、Job、Hook 与 100 个闲置分支
+
+`gateway/internal/app/perf_test.go` 用同一套假内核 + 确定性模型，在每步前后取 `runtime.ReadMemStats`（`HeapAlloc` 活跃堆、`TotalAlloc` 累计分配）和 `/proc/self/status` 的 `VmRSS`（进程内存），每次测量前先 `runtime.GC()`。本机（WSL2，Go 单线程调度器）实测：
+
+| 场景 | 活跃堆 | 累计分配 | 进程内存 | 说明 |
+| --- | --- | --- | --- | --- |
+| 100 个闲置分支 + 刷新列表 | 0 MiB | 1 MiB | 2 MiB | 建 100 个分支、`Branches()` 翻一遍之后；历史不常驻 |
+| 3 路并行 1 MiB 乱序结果 | 5 MiB | 62 MiB | 22 MiB | 三条结果倒序回来，正文完整进历史 |
+| 200 条 Hook 事件 | 0 MiB | 70 MiB | 0 MiB | 200 条进可靠日志，12 条按每分钟 16 次限额投递 |
+| 200 个 Job 索引 + 游标翻页 | 0 MiB | 5 MiB | 1 MiB | 每页 50 条翻完 200 个任务 |
+
+判据是「活跃堆和进程内存不随批量增长」，累计分配高是正常的 GC 周转；`VmRSS` 为 0 说明 GC 之后内存已经还给了系统。这些数字只是本机的量级参考，不是承诺的基准；测试里对活跃堆和 RSS 设了宽松上限，超过就失败。
