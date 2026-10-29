@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +155,16 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	}
 	if req.Start && strings.TrimSpace(req.Prompt) == "" {
 		return SessionForkResult{}, errors.New("启动分支必须提供 prompt")
+	}
+	if autonomousForker(req.By) {
+		if a.branchDepth(src)+1 > maxAutoBranchDepth {
+			return SessionForkResult{}, fmt.Errorf("自动分支最多 %d 层；想比较别的做法请在主人的会话里手动 Fork", maxAutoBranchDepth)
+		}
+		if req.Start {
+			if err := a.checkAutoBranchRoom(a.execAgentID(src)); err != nil {
+				return SessionForkResult{}, err
+			}
+		}
 	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
@@ -545,6 +556,67 @@ func (a *App) branchInfo(m session.BranchMeta) BranchInfo {
 	return info
 }
 
+// 自主分支的默认限额（设计 §8.6）：用户自己的前台 Fork / 继续不受这些数字限制。
+const (
+	maxAutoBranchRunning = 1
+	maxAutoBranchQueued  = 2
+	maxAutoBranchDepth   = 3
+)
+
+// autonomousForker 判断这次分叉/继续是不是 agent 自己发起的（而不是主人手动操作）。
+func autonomousForker(by string) bool {
+	for _, prefix := range []string{"life:", "hook:", "dream:"} {
+		if strings.HasPrefix(by, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// branchDepth 是一个分支往上数几层：直接挂在普通会话上的分支是 1。
+func (a *App) branchDepth(sid string) int {
+	depth := 0
+	for i := 0; i < 8; i++ {
+		m, ok := a.store.Branch(sid)
+		if !ok || m.ParentSID == "" {
+			return depth
+		}
+		depth++
+		sid = m.ParentSID
+	}
+	return depth
+}
+
+// autonomousBranchLoad 数一个 agent 正在跑和在排队的自主分支。
+func (a *App) autonomousBranchLoad(agent string) (running, queued int) {
+	if agent == "" {
+		return 0, 0
+	}
+	for sid, s := range a.sessions {
+		m, ok := a.store.Branch(sid)
+		if !ok || m.OwnerAgent != agent {
+			continue
+		}
+		if s.run != nil {
+			running++
+		}
+		if len(s.queue) > 0 {
+			queued++
+		}
+	}
+	return running, queued
+}
+
+// checkAutoBranchRoom 在 agent 自己又要开一个分支 run 之前检查并发和排队上限。
+func (a *App) checkAutoBranchRoom(owner string) error {
+	running, queued := a.autonomousBranchLoad(owner)
+	if running >= maxAutoBranchRunning || queued >= maxAutoBranchQueued {
+		return fmt.Errorf("这个 agent 已经有 %d 个自主分支在跑、%d 个在排队（上限 %d / %d），这次不开始",
+			running, queued, maxAutoBranchRunning, maxAutoBranchQueued)
+	}
+	return nil
+}
+
 // SessionBranchAction 是分支的后续操作（continue / pause / archive / inspect）。
 func (a *App) SessionBranchAction(action, sid, prompt, by string) (BranchInfo, error) {
 	a.mu.Lock()
@@ -577,6 +649,11 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		if a.forkWaitBoundary(sid) {
 			return BranchInfo{}, errors.New("这个分支正在跑，等它结束")
 		}
+		if autonomousForker(by) {
+			if err := a.checkAutoBranchRoom(m.OwnerAgent); err != nil {
+				return BranchInfo{}, err
+			}
+		}
 		a.startBranchRunLocked(sid, prompt, by)
 	case "pause", "archive":
 		if s := a.sessions[sid]; s != nil && s.run != nil {
@@ -599,6 +676,119 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 	got, _ := a.store.Branch(sid)
 	a.publish(events.Event{T: "branch", SID: sid, Kind: action})
 	return a.branchInfo(got), nil
+}
+
+// BranchReport 是主人主动从分支带回来的结论（设计 §8.7）：只有来源、分叉点和证据引用，
+// 不合并分支历史，也不切换当前窗口。
+type BranchReport struct {
+	BranchSID  string   `json:"branch_sid"`
+	ParentSID  string   `json:"parent_sid"`
+	Title      string   `json:"title"`
+	Checkpoint int      `json:"checkpoint"`
+	SnapshotID string   `json:"snapshot_id,omitempty"`
+	Conclusion string   `json:"conclusion"`
+	Evidence   []string `json:"evidence,omitempty"`
+	Injected   bool     `json:"injected"`
+}
+
+// IntroduceBranchReport 是主人主动"引入这个分支的结论"：把带来源和证据引用的报告放进
+// 父会话的下一个安全边界，不合并历史、不自动切换窗口。调用方持有锁。
+func (a *App) introduceBranchReportLocked(branchSID, by string, ep endpoint) (BranchReport, error) {
+	sid := strings.TrimSpace(branchSID)
+	m, ok := a.store.Branch(sid)
+	if !ok {
+		return BranchReport{}, errors.New("没有这个分支")
+	}
+	if !a.canAccessForkContext(by, "", sid) {
+		return BranchReport{}, errors.New("没有这个分支的访问权限")
+	}
+	parent := m.ParentSID
+	if parent == "" || !a.hasSession(parent) {
+		return BranchReport{}, errors.New("分支的父会话已经不在了")
+	}
+	report := BranchReport{BranchSID: sid, ParentSID: parent, Title: m.Title, Checkpoint: m.Checkpoint, SnapshotID: m.SnapshotID}
+	history := a.store.History(sid)
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
+			report.Conclusion = clip(history[i].Content, 1200)
+			break
+		}
+	}
+	if report.Conclusion == "" {
+		return BranchReport{}, errors.New("分支里还没有可以带回来的结论")
+	}
+	if m.SnapshotID != "" {
+		report.Evidence = append(report.Evidence, "分叉点快照 "+m.SnapshotID+"（第 "+strconv.Itoa(m.Checkpoint)+" 条）")
+	}
+	for _, ex := range a.mind(a.execAgentID(parent)).Executions {
+		if ex.RunSID == sid && len(report.Evidence) < 4 {
+			report.Evidence = append(report.Evidence, "分支里的执行："+clip(ex.Summary, 200))
+		}
+	}
+	text := "[分支报告 " + sid + "「" + m.Title + "」]\n来源会话：" + parent + "；分叉点：第 " + strconv.Itoa(m.Checkpoint) + " 条；分支状态：" + m.Status + "。\n结论：" + report.Conclusion
+	if len(report.Evidence) > 0 {
+		text += "\n依据：" + strings.Join(report.Evidence, "；")
+	}
+	text += "\n这是主人主动带回来的分支结论，分支里更早的对话没有合并进来；需要过程就打开分支看。"
+	// 同一个结论只带回一次：分支之后又做了别的事、结论变了才允许再带
+	for _, old := range a.store.History(parent) {
+		if old.Role == "user" && strings.Contains(old.Content, "[分支报告 "+sid+"「") && strings.Contains(old.Content, "结论："+report.Conclusion) {
+			return BranchReport{}, errors.New("这个分支的结论已经带回来过了")
+		}
+	}
+	msg := channel.Message{ChatID: parent, SenderID: by, Text: text, MsgID: "report-" + sid + "-" + strconv.Itoa(m.Checkpoint)}
+	s := a.sessOf(parent)
+	if !a.queueFits(s, msg) {
+		return BranchReport{}, errors.New("父会话的等待队列已满，稍后再试")
+	}
+	s.queue = append(s.queue, queued{m: msg, ep: ep, who: by})
+	report.Injected = true
+	a.publish(events.Event{T: "branch", SID: sid, Kind: "report"})
+	if s.run == nil && !s.compacting {
+		a.startRun(s)
+	}
+	return report, nil
+}
+
+// cmdBranch 是 /branch：列出这个会话的分支，或者把某个分支的结论带回它的父会话。
+func (a *App) cmdBranch(c in, arg string) {
+	if c.s == nil || c.s.sid == "" {
+		a.answer(c, "还没有接到会话：先发一条消息再说 /branch")
+		return
+	}
+	fields := strings.Fields(arg)
+	if len(fields) > 0 && strings.EqualFold(fields[0], "report") {
+		if len(fields) < 2 {
+			a.answer(c, "用法：/branch report <分支编号>；编号用 /branch 查看。")
+			return
+		}
+		rep, err := a.introduceBranchReportLocked(fields[1], c.who, c.ep)
+		if err != nil {
+			a.answer(c, "没带回来："+err.Error())
+			return
+		}
+		a.answer(c, fmt.Sprintf("已经把分支 %s 的结论放到「%s」的下一个安全边界（分叉点第 %d 条）；分支历史和当前窗口都没有被改动。",
+			rep.BranchSID, rep.ParentSID, rep.Checkpoint))
+		return
+	}
+	list := a.branchInfos(c.s.sid)
+	if len(list) == 0 {
+		a.answer(c, "这个会话还没有分支。分支都是安静运行的：过程留在分支里，需要时用 /branch report <编号> 带结论回来。")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("这个会话的分支：")
+	for _, br := range list {
+		fmt.Fprintf(&b, "\n- %s「%s」%s", br.SID, br.Title, br.Status)
+		if br.Running {
+			b.WriteString("（正在跑）")
+		}
+		if br.Checkpoint > 0 {
+			fmt.Fprintf(&b, " 分叉点第 %d 条", br.Checkpoint)
+		}
+	}
+	b.WriteString("\n/branch report <分支编号> 把那个分支的结论带回这个会话。")
+	a.answer(c, b.String())
 }
 
 // branchDelivery 是分支的有效投递策略（不是分支返回空）。

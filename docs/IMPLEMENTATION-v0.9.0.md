@@ -559,3 +559,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestTopicBranchIsReusedForTheSameTopic`（同一话题第二次分叉返回已有分支、分支数仍是 1、下一次内心说明提到它）与 `TestBranchRunTokensCountIntoTheActivityBudget`（分支 token 计入 `Budget.Tokens`）；`go test ./...`、`go vet`、app/autonomy race 通过。
 
 未做：自主活动仍是「醒来先决定、再进分支」，没有把整段内心活动搬进分支里跑；每 agent 的自主分支并发/深度上限、分支报告入口和「一次活动只计一次唤醒」的账本字段仍未接；分支经历（B3）已能看到结论，但不含分支内的过程。
+
+### F2 补充：自主分支限额与结论带回
+
+自主分支默认每 agent 同时 1 个在跑、2 个排队，自动分叉最多 3 层；只约束 agent 自己发起的 Fork/继续（`life:`/`hook:`/`dream:` 主体），主人手动分叉和继续不受这些数字限制，超限时明确报错而不是静默排队。`/branch` 列出父会话的分支，`/branch report <编号>` 把分支结论带回父会话：报告带来源会话、分叉点、快照和执行依据，作为一条带 `[分支报告]` 标记的消息进入父会话的下一安全边界；分支历史不合并、窗口不切换，同一个结论只带回一次（分支之后又有新结论才允许再带）。
+
+验证：`TestAutonomousBranchLimitsAndDepth`（三层后 agent 再分叉被拒、已有自主分支在跑时 agent 再开被拒、主人手动继续照常）与 `TestBranchReportComesBackAsASourcedMessageOnly`（报告带来源/分叉点/结论、父会话只多一条、继承历史没被合并、同结论不重复）；全量 `go test`/`go vet` 与 app race 通过。
+
+未做：网页没有分支界面，所以报告入口只有 `/branch`；报告不会自动生成或自动推送，也没有 HTTP 接口。

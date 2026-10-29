@@ -68,6 +68,7 @@ var Commands = []Command{
 	{Name: "sleep", Desc: "让 agent 现在去整理记忆（睡觉做梦）", Admin: true},
 	{Name: "wake", Desc: "叫醒拟人型 agent，让它自己待一会儿（冲浪、想事情、找人聊天）", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "branch", Args: "[report <分支编号>]", Desc: "查看这个会话的安静分支；把某个分支的结论带回这个会话"},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
 	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
@@ -719,6 +720,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "forget":
 		a.cmdForget(c, arg)
+		return
+	case "branch":
+		a.cmdBranch(c, arg)
 		return
 	case "session":
 		if strings.HasPrefix(strings.TrimSpace(arg), "fork") {

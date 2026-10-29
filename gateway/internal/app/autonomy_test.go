@@ -482,3 +482,103 @@ func TestBranchRunTokensCountIntoTheActivityBudget(t *testing.T) {
 		t.Fatalf("分支 token 没有计进自主预算：%d → %d", before, after)
 	}
 }
+
+func TestAutonomousBranchLimitsAndDepth(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 29, 11, 0, 0, 0, time.UTC))
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "种子"}); err != nil {
+		t.Fatal(err)
+	}
+	// 这三层都是 agent 自己分出来的：只有自己创建的分支它才能继续
+	first, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, CallerSID: lifeSID("default"), Title: "第一层", RequestID: "depth-1", By: "life:default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := e.a.SessionFork(SessionForkRequest{SourceSID: first.BranchSID, CallerSID: first.BranchSID, Title: "第二层", RequestID: "depth-2", By: "life:default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := e.a.SessionFork(SessionForkRequest{SourceSID: second.BranchSID, CallerSID: second.BranchSID, Title: "第三层", RequestID: "depth-3", By: "life:default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	depth := e.a.branchDepth(third.BranchSID)
+	e.a.mu.Unlock()
+	if depth != 3 {
+		t.Fatalf("分支层数：%d", depth)
+	}
+	// 已经三层，agent 自己再分一层就被拒绝
+	e.a.mu.Lock()
+	_, err = e.a.sessionForkLocked(SessionForkRequest{SourceSID: third.BranchSID, CallerSID: third.BranchSID, Title: "第四层", RequestID: "depth-4", By: "life:default"})
+	e.a.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "最多 3 层") {
+		t.Fatalf("自动分叉深度没有被拦住：%v", err)
+	}
+	// 已经有一个自主分支在跑：agent 自己再开一个被拒绝，主人手动继续不受限
+	e.a.mu.Lock()
+	e.a.sessOf(first.BranchSID).run = &run{runID: "r-busy", from: "life:default", inner: true}
+	_, err = e.a.sessionBranchActionLocked("continue", second.BranchSID, "接着做", "life:default")
+	e.a.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("自主分支并发没有被拦住：%v", err)
+	}
+	e.k.none()
+	if _, err := e.a.SessionBranchAction("continue", second.BranchSID, "主人让你接着做", "fake:u1"); err != nil {
+		t.Fatalf("用户手动继续被拦了：%v", err)
+	}
+}
+
+func TestBranchReportComesBackAsASourcedMessageOnly(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "帮我看看日志格式"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "assistant", Content: "我先记下这件事"}); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "日志格式", RequestID: "report-1", By: "fake:u1"})
+	if err != nil || branch.BranchSID == "" {
+		t.Fatal(branch, err)
+	}
+	// 分支里有一句结论
+	if err := e.a.store.Append(branch.BranchSID, session.Msg{Role: "assistant", Content: "结论：日志按天轮转，保留 7 天。"}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	before := len(e.a.store.History(mainSID))
+	e.a.mu.Unlock()
+	e.say("/branch report " + branch.BranchSID)
+	e.ch.wait(t, "下一个安全边界")
+	// 父会话历史只多了这条报告消息，分支历史没有被合并进来
+	e.a.mu.Lock()
+	after := e.a.store.History(mainSID)
+	e.a.mu.Unlock()
+	if len(after) != before+1 {
+		t.Fatalf("父会话历史条数：%d → %d", before, len(after))
+	}
+	report := after[len(after)-1]
+	for _, want := range []string{"[分支报告 " + branch.BranchSID, "来源会话：" + mainSID, "分叉点：第 ", "结论：日志按天轮转", "没有合并"} {
+		if !strings.Contains(report.Content, want) {
+			t.Fatalf("报告缺少 %q：%s", want, report.Content)
+		}
+	}
+	if strings.Contains(report.Content, "我先记下这件事") {
+		t.Fatal("分支继承的历史被合并进来了")
+	}
+	// 同一个结论不重复带回
+	e.say("/branch report " + branch.BranchSID)
+	e.ch.wait(t, "已经带回来过")
+	e.a.mu.Lock()
+	again := len(e.a.store.History(mainSID))
+	e.a.mu.Unlock()
+	if again != len(after) {
+		t.Fatalf("重复带回了：%d → %d", len(after), again)
+	}
+}
