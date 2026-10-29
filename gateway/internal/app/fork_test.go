@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -342,4 +343,53 @@ func TestSilentBranchMessageNeverReachesTheSourceChat(t *testing.T) {
 	if !inBranch {
 		t.Fatal("结论没有留在分支历史里")
 	}
+}
+
+// 评审 §24 R2：自主分支不能绕过暂停和当天预算；主人手动继续不受影响。
+func TestAutonomousBranchRespectsPauseAndBudget(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	budget := 10
+	makeLife(t, e, store, func(ag *agents.Agent) { ag.LifeBudget = &budget })
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "种子上下文"}); err != nil {
+		t.Fatal(err)
+	}
+	fork := func(id string) SessionForkResult {
+		out, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: id, RequestID: id, By: "life:default"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// 1) 暂停之后，agent 自己继续分支被拒绝，也没有新的 input
+	paused := fork("pause-branch")
+	e.a.mu.Lock()
+	e.a.mind("default").SetPaused(true, "测试暂停", e.a.now())
+	e.a.mu.Unlock()
+	if _, err := e.a.SessionBranchAction("continue", paused.BranchSID, "继续做点事", "life:default"); err == nil || !strings.Contains(err.Error(), "暂停") {
+		t.Fatalf("暂停后仍然启动了分支：%v", err)
+	}
+	e.k.none()
+	// 暂停时主人手动继续仍然可以（用户交互语义不变）
+	e.a.mu.Lock()
+	e.a.mind("default").SetPaused(false, "", e.a.now())
+	e.a.mu.Unlock()
+	if _, err := e.a.SessionBranchAction("continue", paused.BranchSID, "主人让它继续", "fake:u1"); err != nil {
+		t.Fatalf("主人手动继续被挡住了：%v", err)
+	}
+	e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: paused.BranchSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: paused.BranchSID, Status: proto.StatusOK})
+	waitIdle(t, e, paused.BranchSID)
+	// 2) 预算用完之后，agent 自己继续同样被拒绝
+	broke := fork("broke-branch")
+	e.a.mu.Lock()
+	e.a.mind("default").Spend(10)
+	e.a.mind("default").SetBudgetLimit(10)
+	e.a.mu.Unlock()
+	if _, err := e.a.SessionBranchAction("continue", broke.BranchSID, "再试一次", "life:default"); err == nil || !strings.Contains(err.Error(), "预算") {
+		t.Fatalf("预算用完之后仍然启动了分支：%v", err)
+	}
+	e.k.none()
 }

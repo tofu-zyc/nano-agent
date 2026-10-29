@@ -298,3 +298,48 @@ func TestScheduleSilentRule(t *testing.T) {
 		}
 	}
 }
+
+// 评审 §24 R1：安静分支派生的定时任务不向主人窗口推送。
+func TestSilentBranchDerivedScheduleNeverPushes(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "安静派生", RequestID: "quiet-sched", By: "life:default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.a.ScheduleAction(branch.BranchSID, "life:default", ScheduleRequest{Action: "create", Name: "quiet child",
+		When: "every 30m", Prompt: "看一下有没有新东西", Deliver: []string{"fake:c1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := e.a.schedules.List()
+	if len(tasks) != 1 || !tasks[0].Silent || tasks[0].Source != branch.BranchSID {
+		t.Fatalf("派生的定时任务没有继承安静策略：%+v", tasks)
+	}
+	_ = out
+	// 拨到到期时间，走真实 tick → 真实模型轮次 → 结果路由
+	due := tasks[0].Next
+	setNow(e, due.Add(time.Second))
+	e.a.ScheduleTick()
+	in := e.k.expect(proto.TInput)
+	if in.SID != cronSID(tasks[0]) || !in.Silent {
+		t.Fatalf("派生任务的这一轮不是安静的：sid=%s silent=%v", in.SID, in.Silent)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitIdle(t, e, in.SID)
+	select {
+	case text := <-e.ch.sent:
+		t.Fatal("安静分支派生的定时任务推送到主人窗口了", text)
+	default:
+	}
+	saved := e.a.schedules.List()
+	if len(saved) != 1 || saved[0].Last == nil {
+		t.Fatalf("结果没有记进任务页：%+v", saved)
+	}
+}

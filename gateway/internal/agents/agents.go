@@ -63,6 +63,9 @@ type Agent struct {
 	LifeLevel  *string `json:"life_level,omitempty"`  // low | normal | high
 	LifeReach  *string `json:"life_reach,omitempty"`  // owner | all | off
 	LifeBudget *int    `json:"life_budget,omitempty"` // 内心活动每天最多用多少 token，0 不限
+	// MindDimensions 是可选的内部维度配置（设计 §7.3）：默认值、范围和漂移在这里，
+	// 当前值和更新时间存在 autonomy 状态里；没配置的维度保持关闭。
+	MindDimensions map[string]MindDimension `json:"mind_dimensions,omitempty"`
 	// 每日唤醒次数与间隔独立配置（v0.9）：nil 跟随档位，0 表示不限，正整数是上限。
 	// 次数、间隔和主动联系次数互不影响；不限次数不等于没有间隔。
 	LifeMaxWakes   *int    `json:"life_max_wakes,omitempty"`
@@ -289,3 +292,17 @@ func SessionFor(agent, name string) string {
 
 // Dir 是一个 agent 的数据目录：agents/<id>（人格在 persona.md）。
 func Dir(root, id string) string { return filepath.Join(root, id) }
+
+// MindDimension 是一个维度的配置：agent 配置里只放默认值、范围和漂移，不放当前值。
+type MindDimension struct {
+	Enabled    bool    `json:"enabled"`
+	Initial    float64 `json:"initial,omitempty"`
+	Baseline   float64 `json:"baseline,omitempty"`
+	Min        float64 `json:"min,omitempty"`
+	Max        float64 `json:"max,omitempty"`
+	Drift      float64 `json:"drift_per_hour,omitempty"`
+	Threshold  float64 `json:"threshold,omitempty"`
+	Rearm      float64 `json:"rearm,omitempty"`
+	AllowDelta bool    `json:"allow_agent_delta,omitempty"`
+	MaxDelta   float64 `json:"max_delta_per_run,omitempty"`
+}

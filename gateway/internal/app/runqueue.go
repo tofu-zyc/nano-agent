@@ -74,6 +74,26 @@ func (a *App) pumpRuns() {
 		return l.sid < r.sid
 	})
 	for _, s := range waiting {
+		if a.branchRunBlocked(s) {
+			continue
+		}
 		a.startRun(s)
 	}
+}
+
+// branchRunBlocked 是"排队等着的自主分支任务现在不该开始"：agent 暂停了或今天的预算用完了。
+// 队列留在原地，恢复之后 pumpRuns 会再放行（评审 §24 R2）。调用方持有锁。
+func (a *App) branchRunBlocked(s *sess) bool {
+	if len(s.queue) == 0 || !a.isBranchSID(s.sid) || !autonomousForker(s.queue[0].who) {
+		return false
+	}
+	m, ok := a.store.Branch(s.sid)
+	if !ok {
+		return false
+	}
+	if err := a.autoActivityRoom(m.OwnerAgent); err != nil {
+		a.log.Info("自主分支排队但先不开", "branch", s.sid, "err", err)
+		return true
+	}
+	return false
 }

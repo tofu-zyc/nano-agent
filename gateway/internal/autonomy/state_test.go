@@ -1,6 +1,7 @@
 package autonomy
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -432,16 +433,16 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 	s := New()
 	loc := time.UTC
 	day := at(10, 0)
-	s.ReserveLedger(LedgerExploration, day, loc)
+	s.ReserveLedger(LedgerExploration, "act-1", day, loc)
 	if got := s.LedgerStarts(LedgerExploration, day, loc); got != 1 {
 		t.Fatalf("预留没有被算进额度：%d", got)
 	}
-	s.ReleaseLedger(LedgerExploration, day, loc)
+	s.ReleaseLedger("act-1")
 	if got := s.LedgerStarts(LedgerExploration, day, loc); got != 0 {
 		t.Fatalf("启动失败没有退回预留：%d", got)
 	}
-	s.ReserveLedger(LedgerExploration, day, loc)
-	s.SettleLedger(LedgerExploration, "r1", 120, day, loc)
+	s.ReserveLedger(LedgerExploration, "act-2", day, loc)
+	s.SettleLedger(LedgerExploration, "act-2", "r1", 120, day, loc)
 	by := map[string]LedgerUsage{}
 	for _, row := range s.LedgerToday(day, loc) {
 		by[row.Source] = row
@@ -452,8 +453,8 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 	if by[LedgerCommitment].Starts != 0 || by[LedgerHook].Starts != 0 || by[LedgerManual].Starts != 0 {
 		t.Fatalf("其他来源被一起记了：%+v", by)
 	}
-	s.SettleLedger(LedgerManual, "r2", 50, day, loc)
-	s.SettleLedger(LedgerHook, "r3", 30, day, loc)
+	s.SettleLedger(LedgerManual, "", "r2", 50, day, loc)
+	s.SettleLedger(LedgerHook, "", "r3", 30, day, loc)
 	by = map[string]LedgerUsage{}
 	for _, row := range s.LedgerToday(day, loc) {
 		by[row.Source] = row
@@ -461,15 +462,24 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 	if by[LedgerManual].Tokens != 50 || by[LedgerHook].Tokens != 30 {
 		t.Fatalf("来源没有分开记：%+v", by)
 	}
+	// 同一个 run 重复结算不再重复记次数/token
+	s.SettleLedger(LedgerManual, "", "r2", 50, day, loc)
+	by = map[string]LedgerUsage{}
+	for _, row := range s.LedgerToday(day, loc) {
+		by[row.Source] = row
+	}
+	if by[LedgerManual].Starts != 1 || by[LedgerManual].Tokens != 50 {
+		t.Fatalf("重复结算被算了两次：%+v", by[LedgerManual])
+	}
 	// 换一天各自记，不互相覆盖
 	next := day.AddDate(0, 0, 1)
-	s.SettleLedger(LedgerExploration, "r4", 10, next, loc)
+	s.SettleLedger(LedgerExploration, "", "r4", 10, next, loc)
 	if s.LedgerStarts(LedgerExploration, day, loc) != 1 || s.LedgerStarts(LedgerExploration, next, loc) != 1 {
 		t.Fatalf("换天结算不对：%d / %d", s.LedgerStarts(LedgerExploration, day, loc), s.LedgerStarts(LedgerExploration, next, loc))
 	}
 	// 账本有界：只保留最近 14 天
 	for i := 0; i < 20; i++ {
-		s.SettleLedger(LedgerExploration, "", 1, day.AddDate(0, 0, i), loc)
+		s.SettleLedger(LedgerExploration, "", "day-"+itoa(i), 1, day.AddDate(0, 0, i), loc)
 	}
 	days := map[string]bool{}
 	for _, row := range s.Ledger {
@@ -484,6 +494,33 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 	fresh.SeedLedger(LedgerExploration, 3, 300, day, loc)
 	if row := fresh.LedgerToday(day, loc)[0]; row.Starts != 3 || row.Tokens != 300 {
 		t.Fatalf("迁移导重了：%+v", row)
+	}
+}
+
+// 评审 §24 R4：跨日结束释放旧那天的预留，token 记在结束日，重复结算幂等。
+func TestLedgerCrossDayReservationAndIdempotentSettle(t *testing.T) {
+	s := New()
+	loc := time.UTC
+	day1 := time.Date(2026, 10, 28, 23, 59, 0, 0, time.UTC)
+	day2 := time.Date(2026, 10, 29, 0, 1, 0, 0, time.UTC)
+	s.ReserveLedger(LedgerExploration, "act-cross", day1, loc)
+	s.SettleLedger(LedgerExploration, "act-cross", "run-cross", 10, day2, loc)
+	rows := map[string]LedgerUsage{}
+	for _, row := range s.Ledger {
+		rows[row.Day+"|"+row.Source] = row
+	}
+	old := rows["2026-10-28|"+LedgerExploration]
+	if old.Starts != 1 || old.Reserved != 0 || old.Tokens != 0 {
+		t.Fatalf("跨日之后旧那天不对：%+v", old)
+	}
+	nw := rows["2026-10-29|"+LedgerExploration]
+	if nw.Tokens != 10 || nw.Starts != 0 || nw.Reserved != 0 || len(nw.Runs) != 1 || nw.Runs[0].Start != day1.Unix() {
+		t.Fatalf("结束日不对：%+v", nw)
+	}
+	// 同一个 run 再结算一次：不重复记次数/token
+	s.SettleLedger(LedgerExploration, "act-cross", "run-cross", 10, day2, loc)
+	if fresh := s.ledgerEntry("2026-10-29", "", LedgerExploration, false); fresh == nil || fresh.Tokens != 10 || fresh.Starts != 0 {
+		t.Fatalf("重复结算被算了两次：%+v", fresh)
 	}
 }
 
@@ -538,11 +575,11 @@ func TestMindProfileWeightsDimensionsAndDrift(t *testing.T) {
 	if err := s.SetDimension("mood", Dimension{Enabled: true, Value: 50, Baseline: 50, Min: 0, Max: 100}, 0); err == nil {
 		t.Fatal("未知维度应该被拒绝")
 	}
-	if err := s.SetDimension("focus", Dimension{Enabled: true, Value: 54, Baseline: 75, Min: 0, Max: 100, Drift: 10, Threshold: 55}, 0); err != nil {
+	if err := s.SetDimension("focus", Dimension{Enabled: true, Value: 54, Baseline: 75, Min: 0, Max: 100, Drift: 10, Threshold: 55}, 1000); err != nil {
 		t.Fatal(err)
 	}
 	crossed := false
-	for _, c := range s.DriftDimensions(0) {
+	for _, c := range s.DriftDimensions(1000 + 3600) {
 		if c.Name == "focus" {
 			crossed = c.To > c.From && c.Crossed()
 		}
@@ -550,7 +587,7 @@ func TestMindProfileWeightsDimensionsAndDrift(t *testing.T) {
 	if !crossed {
 		t.Fatal("focus 漂过阈值没有报")
 	}
-	for _, c := range s.DriftDimensions(0) {
+	for _, c := range s.DriftDimensions(1000 + 3600) {
 		if c.Name == "focus" && c.Crossed() {
 			t.Fatalf("已经在阈值之上不该重复报：%+v", c)
 		}
@@ -578,12 +615,18 @@ func TestPinnedNumbersAndThresholdHysteresis(t *testing.T) {
 	}
 	// 迟滞：越过阈值报一次，回落到阈值下 hysteresis 之内不重新装，掉够了才再报
 	armed := true
-	d := Dimension{Enabled: true, Value: 54, Baseline: 90, Min: 0, Max: 100, Drift: 10, Threshold: 55, Armed: &armed}
-	if err := s.SetDimension("focus", d, 0); err != nil {
+	d := Dimension{Enabled: true, Value: 54, Baseline: 90, Min: 0, Max: 100, Drift: 10, Threshold: 55, Armed: &armed, At: 1000}
+	if err := s.SetDimension("focus", d, 1000); err != nil {
 		t.Fatal(err)
 	}
+	// 同一时刻再算一次：没有经过时间，什么都不变（评审 §24 R3）
+	for _, c := range s.DriftDimensions(1000) {
+		if c.Name == "focus" {
+			t.Fatalf("没有经过时间却漂移了：%+v", c)
+		}
+	}
 	first := false
-	for _, c := range s.DriftDimensions(0) {
+	for _, c := range s.DriftDimensions(1000 + 3600) {
 		if c.Name == "focus" && c.Crossed() {
 			first = true
 		}
@@ -591,21 +634,20 @@ func TestPinnedNumbersAndThresholdHysteresis(t *testing.T) {
 	if !first {
 		t.Fatal("第一次越过阈值没有报")
 	}
-	for _, c := range s.DriftDimensions(0) {
+	for _, c := range s.DriftDimensions(1000 + 3600) {
 		if c.Name == "focus" && c.Crossed() {
 			t.Fatalf("迟滞没起作用：%+v", c)
 		}
 	}
 	// 人工把值放回阈值以下足够多，重新装上之后还能再报
-	armed = true
 	d = s.Profile().Dimensions["focus"]
-	d.Value, d.Armed = 50, nil
-	if err := s.SetDimension("focus", d, 0); err != nil {
+	d.Value, d.Armed = 40, nil // 掉到重新武装线（阈值下 10 点）以下
+	if err := s.SetDimension("focus", d, 1000+3600); err != nil {
 		t.Fatal(err)
 	}
 	fired := false
-	for i := 0; i < 3 && !fired; i++ {
-		for _, c := range s.DriftDimensions(0) {
+	for i := 1; i <= 3 && !fired; i++ {
+		for _, c := range s.DriftDimensions(1000 + 3600 + int64(i*3600)) {
 			if c.Name == "focus" && c.Crossed() {
 				fired = true
 			}
@@ -613,5 +655,110 @@ func TestPinnedNumbersAndThresholdHysteresis(t *testing.T) {
 	}
 	if !fired {
 		t.Fatal("回落重新装上之后没有再次报阈值")
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
+
+// 评审 §24 R3：漂移按真实经过的小时算，不按活动次数；同一时刻连续调用不变化。
+func TestDimensionDriftFollowsElapsedHours(t *testing.T) {
+	s := New()
+	armed := true
+	if err := s.SetDimension("energy", Dimension{Enabled: true, Value: 80, Baseline: 50, Min: 0, Max: 100, Drift: 10, Armed: &armed}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	// 同一时刻调两次：都不应该变化
+	s.DriftDimensions(1000)
+	for _, c := range s.DriftDimensions(1000) {
+		if c.Name == "energy" {
+			t.Fatalf("没有经过时间也变了：%+v", c)
+		}
+	}
+	if v := s.Profile().Dimensions["energy"].Value; v != 80 {
+		t.Fatalf("同一时刻的值变了：%v", v)
+	}
+	// 经过 2 小时：按每小时 10 点向基线移动 20 点
+	s.DriftDimensions(1000 + 2*3600)
+	if v := s.Profile().Dimensions["energy"].Value; v != 60 {
+		t.Fatalf("两小时应该到 60：%v", v)
+	}
+	// 到基线就停
+	s.DriftDimensions(1000 + 20*3600)
+	if v := s.Profile().Dimensions["energy"].Value; v != 50 {
+		t.Fatalf("应该停在基线 50：%v", v)
+	}
+	// 中间活动多少轮都不影响：再算更多次仍然停在基线
+	for i := 0; i < 5; i++ {
+		s.DriftDimensions(1000 + int64(30+i)*3600)
+	}
+	if v := s.Profile().Dimensions["energy"].Value; v != 50 {
+		t.Fatalf("多次调用不该越过基线：%v", v)
+	}
+}
+
+// 维度必须真的影响行为：好奇调探索排序、专注调"先做手上那件"。
+func TestDimensionCuriosityAndFocusChangeSelection(t *testing.T) {
+	s := New()
+	now := at(10, 0)
+	plain, err := s.AddIdea(Idea{Text: "稳一点的活", Interest: 5, Novelty: 1, CostMinutes: 10, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	novel, err := s.AddIdea(Idea{Text: "没试过的事", Interest: 1, Novelty: 4, CostMinutes: 10, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 没有维度：按默认权重（兴趣 1 / 新颖 1），兴趣高的在前
+	if got := s.OpenIdeas(now); got[0].ID != plain.ID {
+		t.Fatalf("默认排序变了：%+v", got)
+	}
+	// 好奇 100：新颖权重 1.5 倍，没试过的事排到前面
+	s.SetRuntime(Runtime{Curiosity: 100})
+	if got := s.OpenIdeas(now); got[0].ID != novel.ID {
+		t.Fatalf("好奇没有影响排序：%+v", got)
+	}
+	// 专注 90：一次只推进一个目标（软偏好），约定/复查不受影响
+	s.SetRuntime(Runtime{})
+	now2 := at(11, 0)
+	goalA, err := s.AddIntention(Intention{Title: "手头这件", Priority: 3, State: IntentionAccepted}, now2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalB, err := s.AddIntention(Intention{Title: "另一件", Priority: 3, State: IntentionAccepted}, now2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddAgenda(AgendaItem{Title: "手头这件要做", Kind: KindPlan, At: now2.Unix(), IntentionID: goalA.ID}, now2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddAgenda(AgendaItem{Title: "另一件要做", Kind: KindPlan, At: now2.Unix(), IntentionID: goalB.ID}, now2); err != nil {
+		t.Fatal(err)
+	}
+	if due := s.Due(now2.Add(time.Minute)); len(due) != 2 {
+		t.Fatalf("默认应该两件都能推进：%+v", due)
+	}
+	s.SetRuntime(Runtime{Focus: 90})
+	if due := s.Due(now2.Add(time.Minute)); len(due) != 1 {
+		t.Fatalf("专注 90 应该只推进一个目标：%+v", due)
+	}
+}
+
+// 人工锁定的优先级在想法转成目标时生效（评审 §24 R3：Agenda 也要消费锁定）。
+func TestPinnedPriorityAppliesWhenAnIdeaBecomesAGoal(t *testing.T) {
+	s := New()
+	now := at(10, 0)
+	idea, err := s.AddIdea(Idea{Text: "想做的事", Interest: 5, Novelty: 3, CostMinutes: 5, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPin("priority", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ScheduleIdea(idea.ID, now.Add(time.Hour).Unix(), 5, now); err != nil {
+		t.Fatal(err)
+	}
+	intents := s.ActiveIntentions()
+	if len(intents) != 1 || intents[0].Priority != 1 {
+		t.Fatalf("锁定优先级没有生效：%+v", intents)
 	}
 }

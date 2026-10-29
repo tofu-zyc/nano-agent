@@ -694,3 +694,39 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 ### prefixVer
 
 仍为 **11**。本轮没有增删模型可见的工具、没有改工具描述、也没有改系统提示的工具段：心智档案的「你现在的倾向」是每轮附带的用户消息（`mindNote`），分支/账本/锁定的新能力都通过既有工具的 action 扩展或管理员命令暴露，因此前缀快照不变，不需要为缓存失效付代价。
+
+## 评审 §24 集中修复（2026-10-29）
+
+### R1 安静分支派生的定时任务不再推送
+
+`schedule.Task` 新增持久字段 `source`（创建时所在会话）和 `silent`（派生出来的有效投递策略）：从安静分支创建的任务在创建时就继承 `silent=true`，之后 `deliver` 不能把它变吵——`launchSchedule` 忽略 deliver、`scheduleNote` 明确告诉模型结果只留任务页、`completeSchedule` 不推送也不写外部心智事件。更关键的是 `branchSilent` 现在把「从安静分支派生的定时任务会话」也算作安静，所以任务自己那一轮的内核 `input.silent`、租约、Hook 事件和 `Message` 工具全都会按静默处理，`Message` 在派生任务的这一轮同样被拒绝。任务重启后策略仍在（字段持久化），普通用户有意创建的可投递任务不受影响（`silent` 只在创建来源本身安静时才为 true）。
+
+回归：`TestSilentBranchDerivedScheduleNeverPushes`——真实 silent 分支 → `Schedule` 创建带 `deliver: fake:c1` 的每 30 分钟任务 → 拨到到期时间 → 真实 `ScheduleTick` + 模型轮次 + 结束路由：断言任务 `silent=true`、这一轮 `input.silent=true`、假渠道 `sent` 里什么都没有、结果确实记进了任务页。
+
+### R2 自主分支接入统一准入
+
+新增 `autoActivityRoom(agentID)`：暂停和当天总预算的统一判断。自主分支的三条启动路径都接到它——`SessionBranchAction(continue)`（自动来源）、异步 Fork 完成后启动（失败时把分支标成暂停并写原因）、以及排队后由 `pumpRuns` 放行时（`branchRunBlocked` 判断，暂停或预算用完就留在队列里不启动）。`startBranchRunLocked` 同时校验分支归属（自动来源只能继续自己 agent 的分支），并在不通过时返回具体原因。**主人手动继续不受这些自动限制影响**。
+
+回归：`TestAutonomousBranchRespectsPauseAndBudget`——暂停后 agent 自己继续被拒绝且没有新 `input`；暂停期间主人手动继续照旧启动；`Spend` 用尽当天预算后 agent 继续同样被拒绝。
+
+### R3 维度按时间漂移并接入行为映射
+
+- **时间语义**：`Dimension.drift_per_hour` 现在是「每小时向基线移动多少点，达到即停止」，用 `computed_at` 按真实经过时间惰性计算；同一个 `now` 调两次不再变化，漂移量只取决于经过的小时数（`TestDimensionDriftFollowsElapsedHours`）。
+- **上下双阈值**：跨过 `threshold` 报一次并卸下，回落到 `rearm`（默认阈值下 10 点）以下才重新武装；迟滞状态跟着时间漂移一起更新。
+- **行为映射**（固定、可解释，关闭维度即旧行为）：`curiosity` 调自选探索排序里「新颖」的权重（0.5–1.5 倍）；`focus` 限制同时推进的目标数（≥80 一次一个，≥40 两个，否则旧行为，约定和复查不受影响）；`energy` 按 0.5–1.5 倍调整自选探索间隔；`social_drive` 调简报里「想不想找人」的倾向。所有映射都只动偏好，不动次数、暂停、预算、权限边界。
+- **配置与当前值分离**：维度默认值/范围/漂移/阈值/是否允许 delta 放进 `agents.json` 的 `mind_dimensions`，当前值、计算时刻和迟滞留在 autonomy 状态；`effectiveDimensions` 负责合并。
+- **受限 delta**：`Mind` 工具新增 `action=dimension`，必须带来源，只有 `allow_agent_delta` 打开的维度能改，每轮按 `max_delta_per_run`（默认 5）限幅，然后仍走原来的范围校验。
+- **锁定消费**：想法转成目标时消费 `priority` 锁定（`TestPinnedPriorityAppliesWhenAnIdeaBecomesAGoal`）。
+
+回归：`TestDimensionCuriosityAndFocusChangeSelection`、`TestAgentDimensionConfigDrivesBehavior`（配置合并、精力调间隔、delta 限幅与拒绝）、`TestMindProfileWeightsDimensionsAndDrift`、`TestPinnedNumbersAndThresholdHysteresis`（按时间重写）；阈值端到端 `TestMindThresholdCrossedReachesAHook` 改成先拨两小时再叫醒。
+
+### R4 账本预留绑定身份、跨日释放、结算幂等
+
+预留现在绑定稳定的活动身份和启动日（`ledger_pending`），结算按身份找到预留：跨日结束时先释放旧那天的预留，开始次数记在启动日，token 记在结束日，并保留 `started_at`（`LedgerRun`）。已经结算过的 run 身份进 `ledger_settled`（有界 256），重复回调或重启重放都只算一次。
+
+回归：`TestLedgerCrossDayReservationAndIdempotentSettle`（23:59 预留 → 次日 00:01 结算 → 旧日 `starts=1/reserved=0/tokens=0`、结束日 `tokens=10/starts=0/started_at` 保留 → 同一 run 再结算不重复计数）与更新后的 `TestLedgerRecordsSourcesReservesAndRollsDays`。
+
+### 仍未解决
+
+- **Windows/macOS 文件观察器**：`watch.c` 仍然只有 Linux inotify，非 Linux 的 `watch_attach` 返回 -1、`na_watch_supported` 为 false，节点不宣告 `file_watch`（干净能力降级，不会假宣告）。这是代码缺口，不是测试账号问题：Windows 的 `plat_poll` 是 `WSAPoll`（只有套接字），要加目录观察必须引入工作线程 + 可轮询的唤醒通道（macOS 用 kqueue + 管道唤醒，Windows 用 ReadDirectoryChangesW + 回环套接字唤醒），并需要真机跑通才敢宣告能力；当前环境没有 macOS 工具链，Windows 也只有交叉编译。
+- 网页分支报告仍是带标记的普通消息、分支列表还没有「最近进展」摘要；这两个是界面收尾项，不影响运行正确性。

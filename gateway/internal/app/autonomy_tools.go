@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -286,7 +287,7 @@ func (a *App) mindCall(sid string, raw []byte) (string, error) {
 		Source     string  `json:"source"`
 		Subject    string  `json:"subject"`
 		Value      string  `json:"value"`
-		Confidence float64 `json:"confidence"`
+		Confidence float64 `json:"confidence"` // dimension 用它传 delta
 		Change     string  `json:"change"`
 	}
 	if err := json.Unmarshal(raw, &x); err != nil {
@@ -330,6 +331,39 @@ func (a *App) mindCall(sid string, raw []byte) (string, error) {
 		st.SetBelief(x.Subject, x.Value, x.Source, conf, now)
 		a.afterMindChange(st, ag, now)
 		return "记下了这条认识（置信度 " + fmt.Sprintf("%.0f%%", conf*100) + "）。", nil
+	case "dimension":
+		// 模型只能对允许 delta 的维度提一个有来源的小变化，宿主限幅后合并（设计 §7.3）
+		name := strings.ToLower(strings.TrimSpace(x.Subject))
+		if name == "" {
+			return "", errors.New("dimension 要写 subject（维度名），比如 energy")
+		}
+		if strings.TrimSpace(x.Source) == "" {
+			return "", errors.New("改维度要写来源（从哪次观察或聊天来的）")
+		}
+		d, ok := a.effectiveDimensions(ag)[name]
+		if !ok {
+			return "", errors.New("没有这个维度：" + name)
+		}
+		if !d.AllowDelta {
+			return "", errors.New("用户没有允许你改这个维度")
+		}
+		limit := d.MaxDelta
+		if limit <= 0 {
+			limit = 5
+		}
+		delta := x.Confidence // 用 confidence 传 delta（-limit..limit）
+		if delta > limit {
+			delta = limit
+		}
+		if delta < -limit {
+			delta = -limit
+		}
+		d.Value = math.Max(d.Min, math.Min(d.Max, d.Value+delta))
+		if err := st.SetDimension(name, d, now.Unix()); err != nil {
+			return "", err
+		}
+		a.afterMindChange(st, ag, now)
+		return fmt.Sprintf("把 %s 调了 %+.0f（现在 %.0f，来源：%s）。", name, delta, d.Value, x.Source), nil
 	case "reflect":
 		if strings.TrimSpace(x.Text) == "" {
 			return "", errors.New("reflect 要写这次反思")

@@ -95,8 +95,16 @@ type State struct {
 	Agenda     []AgendaItem `json:"agenda,omitempty"`
 
 	TopicBranches []TopicBranch `json:"topic_branches,omitempty"`
+	// runtime 是这次规划时启用的维度影响（不落盘，由网关按 agent 配置注入）
+	runtime Runtime
+
 	// MindProfile 是心智档案：候选权重、可选维度与阈值（设计 §7.2 / §7.3）
 	MindProfile MindProfile `json:"mind_profile,omitempty"`
+
+	// LedgerPending 是已经开始、还没结算的启动（绑定活动身份和启动日）
+	LedgerPending []LedgerReservation `json:"ledger_pending,omitempty"`
+	// LedgerSettled 是最近结算过的活动身份：重复回调/重启重放不再重复计数
+	LedgerSettled []string `json:"ledger_settled,omitempty"`
 
 	// Ledger 是统一的自主活动账本：按本地自然日、按来源记次数和 token（设计 §7.1）
 	Ledger []LedgerUsage `json:"ledger,omitempty"`
@@ -434,22 +442,48 @@ func (s *State) Due(now time.Time) []Trigger {
 		}
 		out = append(out, Trigger{Kind: "intention", IntentionID: in.ID, Reason: in.Title, Due: in.NextAt})
 	}
-	rank := func(k string) int {
-		switch k {
-		case EventCommitment, KindCommitment:
+	// 专注维度打开时限制"同时推进几个目标"（软偏好）：专注越高，一次越只做手上一件。
+	// 约定和复查不受影响，边界（次数/预算/暂停）也不变；没打开维度就保持旧行为。
+	if s.runtime.Focus > 0 && len(out) > 1 {
+		limit := 3
+		switch {
+		case s.runtime.Focus >= 80:
+			limit = 1
+		case s.runtime.Focus >= 40:
+			limit = 2
+		}
+		intents := map[string]bool{}
+		kept := out[:0]
+		for _, t := range out {
+			if t.IntentionID != "" && !t.IsCommitment() {
+				if intents[t.IntentionID] {
+					continue // 同一个目标一次只推进一件事
+				}
+				if len(intents) >= limit {
+					continue // 同时推进的目标数量到软上限了，剩下的往后排
+				}
+				intents[t.IntentionID] = true
+			}
+			kept = append(kept, t)
+		}
+		out = kept
+	}
+	rank := func(t Trigger) int {
+		switch {
+		case t.IsCommitment():
 			return 0
-		case KindCheckup:
+		case t.Kind == KindCheckup:
 			return 1
-		case "intention":
+		case t.IntentionID != "":
 			return 2
-		case KindPlan:
+		case t.Kind == KindPlan:
 			return 3
 		default:
 			return 4
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if ri, rj := rank(out[i].Kind), rank(out[j].Kind); ri != rj {
+		if ri, rj := rank(out[i]), rank(out[j]); ri != rj {
 			return ri < rj
 		}
 		return out[i].Due < out[j].Due
@@ -863,8 +897,11 @@ func (s *State) OpenIdeas(now time.Time) []Idea {
 		out = append(out, x)
 	}
 	// 选择分用心智档案的权重（默认 兴趣 1 / 新颖 1 / 成本 0，和原来的"兴趣+新颖"一致）；
-	// 同分时新的在前，仍然稳定。
+	// 好奇维度打开时只调"新颖"的权重（0.5–1.5 倍），其他边界不变；同分时新的在前。
 	profile := s.Profile()
+	if s.runtime.Curiosity > 0 {
+		profile.Weights.Novelty *= 0.5 + s.runtime.Curiosity/100
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := profile.ScoreIdea(out[i]), profile.ScoreIdea(out[j])
 		if a != b {
@@ -896,7 +933,11 @@ func (s *State) ScheduleIdea(id string, at int64, minutes int, now time.Time) (*
 	if minutes <= 0 || minutes > 120 {
 		minutes = idea.CostMinutes
 	}
-	in, err := s.AddIntention(Intention{Title: idea.Text, Why: "想法：" + idea.Source, Priority: idea.Interest, NextAt: 0}, now)
+	priority := idea.Interest
+	if pinned, ok := s.Profile().Pin("priority"); ok {
+		priority = int(pinned) // 人工锁定的优先级：想法转成目标时按锁定值
+	}
+	in, err := s.AddIntention(Intention{Title: idea.Text, Why: "想法：" + idea.Source, Priority: priority, NextAt: 0}, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1292,3 +1333,19 @@ func clip(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
+
+// Runtime 是这次规划时启用的维度影响（不落盘）：没启用的维度是 0，行为保持旧样。
+// 映射是固定的、可解释的：curiosity 调自选探索排序，social_drive 调联系倾向，
+// focus 调同时推进目标的软偏好，energy 由网关按间隔消费（设计 §7.3）。
+type Runtime struct {
+	Curiosity   float64
+	SocialDrive float64
+	Focus       float64
+	Energy      float64
+}
+
+// SetRuntime 在规划前注入当前生效的维度值。调用方持有锁。
+func (s *State) SetRuntime(r Runtime) { s.runtime = r }
+
+// RuntimeOf 返回当前注入的维度影响（只读）。
+func (s *State) RuntimeOf() Runtime { return s.runtime }

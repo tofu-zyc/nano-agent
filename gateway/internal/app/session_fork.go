@@ -438,7 +438,16 @@ func (a *App) materializeForkLocked(branchSID string) (SessionForkResult, error)
 		a.publish(events.Event{T: "branch", SID: branchSID, Name: meta.ParentSID, Kind: "ready", Data: map[string]any{"status": session.BranchReady, "snapshot_id": snap.SnapshotID, "title": meta.Title}})
 		a.store.UnloadHistory(branchSID)
 		if current.StartRequested && strings.TrimSpace(current.Intent) != "" {
-			a.startBranchRunLocked(branchSID, current.Intent, current.CreatedBy)
+			if err := a.startBranchRunLocked(branchSID, current.Intent, current.CreatedBy); err != nil {
+				// 暂停或预算用完：分支保留就绪状态，等恢复后再由 agent 自己继续
+				_ = a.store.SetBranch(branchSID, func(m *session.BranchMeta) {
+					if m.Status == session.BranchRunning {
+						m.Status = session.BranchPaused
+					}
+					m.Note = "这次没有开始：" + err.Error()
+				})
+				a.log.Info("自主分支没有开始", "branch", branchSID, "err", err)
+			}
 		}
 	}()
 	meta.Status = session.BranchPreparing
@@ -460,7 +469,21 @@ func (a *App) checkForkPublication(op session.ForkOp) error {
 }
 
 // startBranchRunLocked 在分支里排一条自己的任务并开跑。分支没有聊天窗口，输出只写进分支。
-func (a *App) startBranchRunLocked(sid, prompt, by string) {
+// 自动来源（agent 自己继续分支）在这里统一过一次准入：并发、暂停、当天预算和归属，
+// 用户手动继续不受这些自动限制影响（评审 §24 R2）。调用方持有锁。
+func (a *App) startBranchRunLocked(sid, prompt, by string) error {
+	m, _ := a.store.Branch(sid)
+	if autonomousForker(by) {
+		if owner := autonomousOwner(by); owner != "" && m.OwnerAgent != "" && m.OwnerAgent != owner {
+			return errors.New("这个分支不属于你，不能自己继续")
+		}
+		if err := a.checkAutoBranchRoom(m.OwnerAgent); err != nil {
+			return err
+		}
+		if err := a.autoActivityRoom(m.OwnerAgent); err != nil {
+			return err
+		}
+	}
 	s := a.sessOf(sid)
 	s.queue = append(s.queue, queued{
 		m:     channel.Message{ChatID: sid, SenderID: by, Text: prompt, MsgID: "fork-" + sid},
@@ -472,6 +495,7 @@ func (a *App) startBranchRunLocked(sid, prompt, by string) {
 		m.LastActive = a.now().Unix()
 	})
 	a.startRun(s)
+	return nil
 }
 
 // forkResultOf 把分支元信息转成给调用方的结果。
@@ -649,12 +673,9 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		if a.forkWaitBoundary(sid) {
 			return BranchInfo{}, errors.New("这个分支正在跑，等它结束")
 		}
-		if autonomousForker(by) {
-			if err := a.checkAutoBranchRoom(m.OwnerAgent); err != nil {
-				return BranchInfo{}, err
-			}
+		if err := a.startBranchRunLocked(sid, prompt, by); err != nil {
+			return BranchInfo{}, err
 		}
-		a.startBranchRunLocked(sid, prompt, by)
 	case "pause", "archive":
 		if s := a.sessions[sid]; s != nil && s.run != nil {
 			s.run.dropInbox = true
@@ -832,7 +853,11 @@ func (a *App) branchSilent(sid string) bool {
 	if inv := a.sessionHook(sid); inv != nil {
 		return inv.work.Delivery.Silent || inv.work.Spec.Handler.Conversation == "branch"
 	}
-	return a.branchDelivery(sid) == session.BranchDeliverySilent
+	if a.branchDelivery(sid) == session.BranchDeliverySilent {
+		return true
+	}
+	// 从安静分支派生出来的定时任务同样安静：任务自己那一轮不对外发声（评审 §24 R1）
+	return a.silentTaskSID(sid)
 }
 
 // branchNote 是给模型看的分支说明：继承的历史是分叉前的经历，当前任务以这次的要求为准。
@@ -1066,4 +1091,14 @@ func sessionTool() proto.ToolSpec {
 		"分支带着这份上下文独立继续，源会话照常用；分支默认安静运行，结果不发回原来的聊天。action 取 fork / list_branches / inspect / continue / pause / archive。" +
 		"在工具批次里调用 fork 会先返回 pending_boundary，等这批调用结束才真正建好；用同一个 request_id 重试返回同一个分支。",
 		InputSchema: json.RawMessage(schema)}
+}
+
+// autonomousOwner 是自动来源对应的 agent：life:default / hook:<agent> / dream:<agent>。
+func autonomousOwner(by string) string {
+	for _, prefix := range []string{"life:", "hook:", "dream:"} {
+		if id, ok := strings.CutPrefix(by, prefix); ok {
+			return id
+		}
+	}
+	return ""
 }

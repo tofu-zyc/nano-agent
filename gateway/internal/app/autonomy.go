@@ -37,6 +37,7 @@ type mindRun struct {
 	Started time.Time
 	Manual  bool
 	Source  string // 账本来源：exploration / commitment / hook / manual
+	Ledger  string // 账本预留身份：跨日结算和重复回调靠它对齐
 }
 
 type autonomyDoc struct {
@@ -331,6 +332,7 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	if ls.Next == 0 && st.NextCheck == 0 {
 		a.lifeBegin(ag) // 刚变成拟人型 / 第一次启动：安排第一次自己活动
 	}
+	st.SetRuntime(a.dimensionRuntime(ag))
 	trig := st.Next(now)
 	if trig == nil {
 		a.mirrorNextCheck(st, ls)
@@ -470,6 +472,93 @@ func profileLine(p autonomy.MindProfile) string {
 	return line + "（0–100 的自评，不是真实生理状态）"
 }
 
+// effectiveDimensions 把 agent 配置里的维度默认值合并进当前档案：
+// 配置管默认值、范围和漂移，状态只管当前值、计算时刻和迟滞。调用方持有锁。
+func (a *App) effectiveDimensions(ag agents.Agent) map[string]autonomy.Dimension {
+	st := a.mind(ag.ID)
+	profile := st.Profile()
+	merged := map[string]autonomy.Dimension{}
+	for name, d := range profile.Dimensions {
+		merged[name] = d
+	}
+	for name, cfg := range ag.MindDimensions {
+		d, ok := merged[name]
+		if !ok {
+			d = autonomy.Dimension{Value: cfg.Initial, Baseline: cfg.Initial, Min: 0, Max: 100}
+		}
+		d.Enabled = cfg.Enabled
+		if cfg.Initial != 0 && !ok {
+			d.Value = cfg.Initial
+		}
+		if cfg.Baseline != 0 {
+			d.Baseline = cfg.Baseline
+		}
+		if cfg.Max > cfg.Min {
+			d.Min, d.Max = cfg.Min, cfg.Max
+		}
+		d.Drift = cfg.Drift
+		d.Threshold = cfg.Threshold
+		d.Rearm = cfg.Rearm
+		d.AllowDelta = cfg.AllowDelta
+		d.MaxDelta = cfg.MaxDelta
+		if d.MaxDelta <= 0 {
+			d.MaxDelta = 5
+		}
+		merged[name] = d
+	}
+	return merged
+}
+
+// enabledDimension 返回某个维度的当前值，以及它是不是真的开着。调用方持有锁。
+func (a *App) enabledDimension(ag agents.Agent, name string) (float64, bool) {
+	d, ok := a.effectiveDimensions(ag)[name]
+	if !ok || !d.Enabled {
+		return 0, false
+	}
+	return d.Value, true
+}
+
+// dimensionRuntime 把已启用的维度整理成这次规划用的影响值；没启用的就是 0（旧行为）。
+func (a *App) dimensionRuntime(ag agents.Agent) autonomy.Runtime {
+	var rt autonomy.Runtime
+	for name, d := range a.effectiveDimensions(ag) {
+		if !d.Enabled {
+			continue
+		}
+		switch name {
+		case "curiosity":
+			rt.Curiosity = d.Value
+		case "social_drive":
+			rt.SocialDrive = d.Value
+		case "focus":
+			rt.Focus = d.Value
+		case "energy":
+			rt.Energy = d.Value
+		}
+	}
+	return rt
+}
+
+// autoActivityRoom 是"agent 自己还能不能再开一轮"的统一准入：暂停、当天总预算。
+// 内心活动、自主分支的继续、异步 Fork 完成后启动和排队后放行都走这里（评审 §24 R2）。
+// 调用方持有锁。
+func (a *App) autoActivityRoom(agentID string) error {
+	ag, ok := a.agentByID(agentID)
+	if !ok {
+		return errors.New("没有这个 agent")
+	}
+	st := a.mind(agentID)
+	if st.Paused {
+		return errors.New("自主活动暂停了，这次不开始")
+	}
+	limit := pickInt(ag.LifeBudget, 0)
+	st.SetBudgetLimit(limit)
+	if limit > 0 && st.BudgetLeft(limit) == 0 {
+		return fmt.Errorf("今天的自主活动预算用完了（%d token），这次不开始", limit)
+	}
+	return nil
+}
+
 // ledgerSource 是这次自主活动记到账本的哪个来源：主人叫醒 > Hook > 约定/排好的事 > 自选探索。
 func ledgerSource(trig autonomy.Trigger, manual, hook bool) string {
 	switch {
@@ -526,7 +615,8 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		return fmt.Errorf("开启内心片段失败：%w", err)
 	}
 	source := ledgerSource(trig, manual, hook != nil)
-	st.ReserveLedger(source, now, a.loc)
+	resID := fmt.Sprintf("mind-%s-%d", ag.ID, now.UnixNano())
+	st.ReserveLedger(source, resID, now, a.loc)
 	note := a.mindNote(ag, st, trig, now, manual)
 	pending := st.UnprocessedEvents(20)
 	ids := make([]string, 0, len(pending))
@@ -537,7 +627,7 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	ls.Next = now.Add(a.lifeInterval(ag, now)).Unix()
 	a.saveMinds()
 	a.saveLife()
-	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source}
+	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source, Ledger: resID}
 	who := "life:" + ag.ID
 	if hook != nil {
 		who = hook.work.Delivery.Creator
@@ -548,7 +638,7 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	if s.run == nil {
 		s.queue = nil
 		s.mind = nil
-		st.ReleaseLedger(source, now, a.loc)
+		st.ReleaseLedger(resID)
 		if !manual && trig.IsExploration() {
 			ls.Wakes--
 		}
@@ -631,6 +721,14 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	if parts := profileLine(st.Profile()); parts != "" {
 		b.WriteString("\n" + parts)
 	}
+	// 社交维度打开时只调"想不想找人"的倾向：联系范围和次数上限不变（设计 §7.3）
+	if drive, on := a.enabledDimension(ag, "social_drive"); on {
+		if drive >= 60 {
+			b.WriteString("\n今天你更想找人说话：有正经事再联系，别为了说话而说话。")
+		} else if drive <= 40 {
+			b.WriteString("\n今天你更想自己待着：除非有明确的约定，别主动找人。")
+		}
+	}
 	if sid, ok := func() (string, bool) {
 		if topic := topicOfTrigger(trig); topic != "" {
 			return st.BranchOfTopic(topic)
@@ -694,7 +792,7 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 	}
 	st.Spend(tokens)
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
-	st.SettleLedger(mr.Source, r.runID, tokens, now, a.loc)
+	st.SettleLedger(mr.Source, mr.Ledger, r.runID, tokens, now, a.loc)
 	// 维度按自己的漂移速度回落向基线；越过阈值的发一条可靠事件，Hook 可以订阅
 	for _, change := range st.DriftDimensions(now.Unix()) {
 		if !change.Crossed() {

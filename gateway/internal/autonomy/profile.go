@@ -30,17 +30,31 @@ type ScoreWeights struct {
 	CostScale int     `json:"cost_scale"` // 成本参照分钟数 1–480
 }
 
-// Dimension 是一个可选的内部维度：0–100 的当前值、基线和范围，可以带一个阈值。
+// Dimension 是一个可选的内部维度（设计 §7.3）：
+// 值按"每小时向基线移动指定点数"惰性计算，不按活动次数算；阈值是上下双阈值。
 type Dimension struct {
-	Enabled   bool    `json:"enabled"`
-	Value     float64 `json:"value"`
-	Baseline  float64 `json:"baseline"`
-	Min       float64 `json:"min"`
-	Max       float64 `json:"max"`
-	Drift     float64 `json:"drift,omitempty"`     // 每次结算向基线靠多少（0–10）
-	Threshold float64 `json:"threshold,omitempty"` // 越过它发一条 mind.threshold_crossed（0 表示不设）
-	// Armed 是阈值迟滞的另一半：报过一次就不再报，等值回落到阈值以下 hysteresis 才重新装上
+	Enabled    bool    `json:"enabled"`
+	Value      float64 `json:"value"`             // 当前值（定点，0–100）
+	Initial    float64 `json:"initial,omitempty"` // 第一次启用时的初值
+	Baseline   float64 `json:"baseline"`          // 漂移目标
+	Min        float64 `json:"min"`
+	Max        float64 `json:"max"`
+	Drift      float64 `json:"drift_per_hour"`              // 每小时向基线移动多少点（0–10，达到即停止）
+	Threshold  float64 `json:"threshold,omitempty"`         // 越过它发一条 mind.threshold_crossed（0 表示不设）
+	Rearm      float64 `json:"rearm,omitempty"`             // 回落到它以下才重新武装（0 表示阈值下 10 点）
+	AllowDelta bool    `json:"allow_agent_delta"`           // 允不允许模型每轮提一个有来源的小 delta
+	MaxDelta   float64 `json:"max_delta_per_run,omitempty"` // 每轮最多改多少点（默认 5）
+	At         int64   `json:"computed_at,omitempty"`       // 上次按时间计算漂移的时刻（秒）
+	// Armed 是阈值迟滞的另一半：报过一次就不再报，回落到 rearm 以下才重新装上
 	Armed *bool `json:"armed,omitempty"`
+}
+
+// rearmAt 是这条维度的重新武装线：没有显式设置就是阈值下 10 点。
+func (d Dimension) rearmAt() float64 {
+	if d.Rearm > 0 {
+		return d.Rearm
+	}
+	return max(d.Threshold-10, d.Min)
 }
 
 // MindProfile 是保存下来的一份档案；Preset 只说明它是从哪个预设来的，改过就是 custom。
@@ -154,6 +168,9 @@ func (s *State) SetDimension(name string, d Dimension, now int64) error {
 		d.Baseline < d.Min || d.Baseline > d.Max || d.Drift < 0 || d.Drift > 10 || d.Threshold < 0 || d.Threshold > 100 {
 		return errors.New("维度的范围、基线、漂移或阈值不合法（值 0–100，漂移 0–10）")
 	}
+	if d.At == 0 {
+		d.At = now
+	}
 	p := s.Profile()
 	if p.Dimensions == nil {
 		p.Dimensions = map[string]Dimension{}
@@ -191,7 +208,9 @@ func (p MindProfile) ScoreIdea(x Idea) float64 {
 	return p.Weights.Interest*(interest-1)/4 + p.Weights.Novelty*(novelty-1)/4 - p.Weights.Cost*cost/float64(scale)
 }
 
-// DriftDimensions 让已启用的维度按各自的漂移速度回落向基线（每次活动结算一次）。
+// DriftDimensions 按真实经过的时间把已启用的维度移向基线（设计 §7.3）：
+// 每小时移动 drift_per_hour 点，达到基线就停；同样的 now 调两次结果一样，
+// 和中间活动了多少次无关。返回这次有变化的维度。
 func (s *State) DriftDimensions(now int64) []DimensionChange {
 	p := s.Profile()
 	if len(p.Dimensions) == 0 {
@@ -200,31 +219,49 @@ func (s *State) DriftDimensions(now int64) []DimensionChange {
 	var changed []DimensionChange
 	for _, name := range DimensionNames {
 		d, ok := p.Dimensions[name]
-		if !ok || !d.Enabled || d.Drift <= 0 {
+		if !ok || !d.Enabled {
 			continue
 		}
-		next := d.Value + (d.Baseline-d.Value)*d.Drift/100
+		before := d.Value
+		hours := float64(now-d.At) / 3600
+		if d.At == 0 || hours <= 0 {
+			d.At = now
+			p.Dimensions[name] = d
+			continue
+		}
+		move := d.Drift * hours
+		next := d.Value
+		if move > 0 {
+			switch {
+			case d.Value < d.Baseline:
+				next = math.Min(d.Baseline, d.Value+move)
+			case d.Value > d.Baseline:
+				next = math.Max(d.Baseline, d.Value-move)
+			}
+		}
 		next = math.Round(next*10) / 10
-		if next < d.Min {
-			next = d.Min
-		}
-		if next > d.Max {
-			next = d.Max
-		}
-		if next == d.Value {
+		next = math.Max(d.Min, math.Min(d.Max, next))
+		armedBefore := d.IsArmed()
+		if next == before {
+			d.At = now
+			p.Dimensions[name] = d
 			continue
 		}
-		before, armedBefore := d.Value, d.IsArmed()
 		d.Value = next
-		d.afterCrossing(before)
+		d.At = now
+		armedAfter := armedBefore
+		if d.Threshold > 0 && before < d.Threshold && next >= d.Threshold {
+			armedAfter = false // 真越过阈值：卸下迟滞，等回落
+		} else if d.Threshold > 0 && next <= d.rearmAt() {
+			armedAfter = true
+		}
+		d.Armed = &armedAfter
 		p.Dimensions[name] = d
 		changed = append(changed, DimensionChange{Name: name, From: before, To: next, Threshold: d.Threshold, Armed: armedBefore})
 	}
-	if len(changed) > 0 {
-		p.Updated = now
-		s.MindProfile = p
-		s.Touch()
-	}
+	p.Updated = now
+	s.MindProfile = p
+	s.Touch()
 	return changed
 }
 

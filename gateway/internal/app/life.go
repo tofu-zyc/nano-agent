@@ -299,6 +299,10 @@ func (a *App) lifeInterval(ag agents.Agent, now time.Time) time.Duration {
 	if now.Sub(a.agentLastActivity(ag.ID)) > lifeBored {
 		d /= 2
 	}
+	// 精力维度打开时按 0.5–1.5 倍调整自选探索的间隔（50 为中性），不改变次数/预算边界
+	if energy, on := a.enabledDimension(ag, "energy"); on {
+		d = time.Duration(float64(d) * (1.5 - energy/100))
+	}
 	return d
 }
 

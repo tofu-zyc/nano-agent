@@ -183,7 +183,8 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	var task schedule.Task
 	if p.Action == "create" {
 		// 新任务归当前会话的执行 agent（会话可以切换过）；已有任务不跟着聊天走
-		task = schedule.Task{ID: schedule.NewID(), Agent: a.execAgentID(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true, Workspaces: a.workspaceOf(sid).ids()}
+		task = schedule.Task{ID: schedule.NewID(), Agent: a.execAgentID(sid), Mode: mode, CreatorMode: mode, CreatedBy: who, Enabled: true, CatchUp: true,
+			Workspaces: a.workspaceOf(sid).ids(), Source: sid, Silent: a.branchSilent(sid)}
 		// deliver 不写就是「只放任务页」：结果留在任务自己的会话和任务列表里，不往聊天窗口推。
 		// 以前这里默认投到创建任务时所在的那个窗口，模型在私聊里建的周期任务就会每轮往聊天里发结果。
 	} else {
@@ -422,9 +423,10 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 		return fail(errors.New("没有在线的内核"))
 	}
 	s.scheduled = &task
-	// 没有投递窗口（只放任务页）时，这一轮挂在任务自己的会话上；结果由 completeSchedule 记进任务
+	// 没有投递窗口（只放任务页）时，这一轮挂在任务自己的会话上；结果由 completeSchedule 记进任务。
+	// 从安静分支派生的任务（task.Silent）一律不投递：deliver 不能用来把派生任务变吵。
 	ep := endpoint{ch: "web", chat: s.sid}
-	if len(task.Deliver) > 0 {
+	if len(task.Deliver) > 0 && !task.Silent {
 		ep = parseEndpoint(task.Deliver[0])
 	}
 	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
@@ -443,6 +445,10 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 // scheduleNote 告诉模型这一轮的结果会去哪：有投递窗口的，没什么要说就只回 [不回复]，不推送。
 // 不说的话，工具型 agent 不知道还能这样，每一轮都会往聊天里发一条“没有新消息”。调用方持有锁。
 func (a *App) scheduleNote(task schedule.Task) string {
+	if task.Silent {
+		return "[系统] 这是从安静分支派生出来的定时任务「" + task.Name + "」。结果只记在任务页，不会发到任何聊天；\n" +
+			"要联系主人，由主人自己在来源会话里「引入结论」，不要用 Message 往外发。\n\n"
+	}
 	if len(task.Deliver) == 0 {
 		return "[系统] 这是定时任务「" + task.Name + "」。结果只记在任务页，不会发到聊天里。\n\n"
 	}
@@ -482,7 +488,7 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 			summary += "\n（没有推送）"
 		}
 	}
-	push := !silent
+	push := !silent && !task.Silent
 	tasks := a.schedules.List()
 	i := slices.IndexFunc(tasks, func(t schedule.Task) bool { return t.ID == task.ID })
 	if i >= 0 {
@@ -497,7 +503,7 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 		}
 	}
 	body := "[定时任务 " + task.Name + "]\n" + summary
-	if push {
+	if push && !task.Silent {
 		a.mindExternal(task.Agent, "schedule:"+task.ID, body)
 	}
 	a.publish(events.Event{T: "say", SID: cronSID(*task), Text: body})

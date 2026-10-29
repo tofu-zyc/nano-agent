@@ -20,23 +20,27 @@ type Result struct {
 	Summary string    `json:"summary"`
 }
 type Task struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	When        string    `json:"when"`
-	Agent       string    `json:"agent"`
-	Prompt      string    `json:"prompt"`
-	Deliver     []string  `json:"deliver"`
-	Workspaces  []string  `json:"workspaces"`
-	Mode        string    `json:"mode"`
-	Enabled     bool      `json:"enabled"`
-	CreatedBy   string    `json:"created_by"`
-	CreatorMode string    `json:"creator_mode"`
-	CatchUp     bool      `json:"catch_up"`
-	Timeout     string    `json:"timeout,omitempty"`
-	Next        time.Time `json:"next"`
-	Last        *Result   `json:"last,omitempty"`
-	Results     []Result  `json:"results"`
-	Running     bool      `json:"running"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	When        string   `json:"when"`
+	Agent       string   `json:"agent"`
+	Prompt      string   `json:"prompt"`
+	Deliver     []string `json:"deliver"`
+	Workspaces  []string `json:"workspaces"`
+	Mode        string   `json:"mode"`
+	Enabled     bool     `json:"enabled"`
+	CreatedBy   string   `json:"created_by"`
+	CreatorMode string   `json:"creator_mode"`
+	// Source 是创建任务时所在的会话（安静分支派生的任务靠它记录来源）；
+	// Silent 是派生出来的有效投递策略：为 true 时结果只留任务页，不往任何聊天推。
+	Source  string    `json:"source,omitempty"`
+	Silent  bool      `json:"silent,omitempty"`
+	CatchUp bool      `json:"catch_up"`
+	Timeout string    `json:"timeout,omitempty"`
+	Next    time.Time `json:"next"`
+	Last    *Result   `json:"last,omitempty"`
+	Results []Result  `json:"results"`
+	Running bool      `json:"running"`
 }
 
 func NewID() string { b := make([]byte, 6); _, _ = rand.Read(b); return hex.EncodeToString(b) }

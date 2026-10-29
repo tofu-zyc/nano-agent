@@ -923,6 +923,19 @@ func (a *App) lastEndpoint(sid string) (endpoint, bool) {
 func (a *App) silentBranch(sid string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	meta, ok := a.store.Branch(sid)
-	return ok && meta.Delivery == session.BranchDeliverySilent
+	return a.branchSilent(sid)
+}
+
+// silentTaskSID 表示这个会话是"从安静分支派生、结果不投递"的定时任务会话。
+func (a *App) silentTaskSID(sid string) bool {
+	id, ok := strings.CutPrefix(sid, "cron:")
+	if !ok || a.schedules == nil {
+		return false
+	}
+	for _, task := range a.schedules.List() {
+		if task.ID == id {
+			return task.Silent
+		}
+	}
+	return false
 }

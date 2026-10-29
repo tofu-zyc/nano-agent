@@ -651,6 +651,8 @@ func TestMindThresholdCrossedReachesAHook(t *testing.T) {
 	}
 	e.say("/autonomy dimension focus enabled=true value=54 baseline=75 drift=10 threshold=55")
 	e.ch.wait(t, "维度 focus 改好了")
+	// 漂移按真实经过的时间算：拨两小时，focus 从 54 向 75 走 20 点到 74，越过阈值 55
+	setNow(e, time.Date(2026, 10, 22, 11, 0, 0, 0, time.UTC))
 	if err := e.a.Wake("default"); err != nil {
 		t.Fatal(err)
 	}
@@ -716,5 +718,53 @@ func TestPinnedNoveltyOverridesTheIdeaToolProposal(t *testing.T) {
 	}
 	if strings.Contains(out, "锁定值") {
 		t.Fatalf("解锁之后还在覆盖：%s", out)
+	}
+}
+
+// 评审 §24 R3：agent 配置里的维度默认值合并生效，精力影响探索间隔，模型只能提受限 delta。
+func TestAgentDimensionConfigDrivesBehavior(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	budget := 100000
+	makeLife(t, e, store, func(ag *agents.Agent) {
+		ag.LifeBudget = &budget
+		ag.MindDimensions = map[string]agents.MindDimension{
+			"energy":       {Enabled: true, Initial: 100, Baseline: 50, Min: 0, Max: 100, Drift: 1},
+			"curiosity":    {Enabled: true, Initial: 100, Baseline: 50, Min: 0, Max: 100, Drift: 1},
+			"social_drive": {Enabled: true, Initial: 80, Baseline: 50, Min: 0, Max: 100, Drift: 1},
+			"focus":        {Enabled: true, Initial: 90, Baseline: 50, Min: 0, Max: 100, Drift: 1, AllowDelta: true, MaxDelta: 5},
+		}
+	})
+	setNow(e, time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC))
+	e.a.mu.Lock()
+	ag, _ := store.Get("default")
+	dims := e.a.effectiveDimensions(ag)
+	runtime := e.a.dimensionRuntime(ag)
+	e.a.mu.Unlock()
+	if !dims["energy"].Enabled || dims["energy"].Value != 100 || runtime.Energy != 100 || runtime.Curiosity != 100 || runtime.Focus != 90 {
+		t.Fatalf("配置没有合并进当前档案：%+v / %+v", dims, runtime)
+	}
+	// 精力 100：自选探索间隔是中性的一半
+	e.a.mu.Lock()
+	interval := e.a.lifeInterval(ag, e.a.now())
+	e.a.mu.Unlock()
+	base := effectiveLifePolicy(ag)
+	if interval > (base.Min+base.Max)/2 {
+		t.Fatalf("精力 100 应该让间隔更短：%v", interval)
+	}
+	// 模型只能提受限 delta（focus 允许，每轮最多 5）
+	out, err := e.a.mindCall(lifeSID("default"), []byte(`{"action":"dimension","subject":"focus","confidence":40,"source":"聊天里注意到自己很专注"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	after := e.a.effectiveDimensions(ag)["focus"].Value
+	e.a.mu.Unlock()
+	if after != 95 {
+		t.Fatalf("delta 没有限幅：%.1f（%s）", after, out)
+	}
+	// 没允许 delta 的维度会被拒绝
+	if _, err := e.a.mindCall(lifeSID("default"), []byte(`{"action":"dimension","subject":"energy","confidence":2,"source":"随便"}`)); err == nil {
+		t.Fatal("没允许 delta 的维度应该被拒绝")
 	}
 }
