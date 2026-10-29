@@ -149,6 +149,13 @@ func (a *App) scheduleAction(sid, who string, p ScheduleRequest) (any, error) {
 	}
 	i := slices.IndexFunc(tasks, func(t schedule.Task) bool { return t.ID == p.ID })
 	mode := a.scheduleCallerMode(sid, who)
+	// 安静来源（安静分支或它派生的任务）只能动自己派生的安静任务：
+	// 改、立即运行、删除普通任务都可能把结果推给主人（评审 §25 S2）
+	if a.branchSilent(sid) && p.Action != "list" && p.Action != "create" {
+		if i < 0 || !tasks[i].Silent {
+			return nil, errors.New("这是从安静分支派生的请求：不能修改、立即运行或删除会往聊天里发结果的普通任务；需要的话请主人自己操作")
+		}
+	}
 	if p.Action == "run_now" {
 		if i < 0 {
 			return nil, errors.New("没有这个任务")

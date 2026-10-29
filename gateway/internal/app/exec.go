@@ -178,7 +178,7 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 		return
 	}
 	if m.Name == "Mind" {
-		out, err := a.mindCall(s.sid, m.Args)
+		out, err := a.mindCall(s.sid, r.runID, m.Args)
 		if err != nil {
 			reply(false, err.Error())
 		} else {

@@ -762,3 +762,50 @@ func TestPinnedPriorityAppliesWhenAnIdeaBecomesAGoal(t *testing.T) {
 		t.Fatalf("锁定优先级没有生效：%+v", intents)
 	}
 }
+
+// 评审 §25 S3：同一经过时间，不同计算频率结果一致（不丢小数增量）。
+func TestDimensionDriftIndependentOfActivityFrequency(t *testing.T) {
+	build := func() *State {
+		s := New()
+		armed := true
+		if err := s.SetDimension("energy", Dimension{Enabled: true, Value: 80, Baseline: 50, Min: 0, Max: 100, Drift: 1, Armed: &armed}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	once := build()
+	once.DriftDimensions(1000 + 3600)
+	frequent := build()
+	for m := int64(1); m <= 60; m++ {
+		frequent.DriftDimensions(1000 + m*60)
+	}
+	a := once.Profile().Dimensions["energy"].Value
+	b := frequent.Profile().Dimensions["energy"].Value
+	if a != b {
+		t.Fatalf("一小时里不同计算次数结果不同：一次=%v 每分钟=%v", a, b)
+	}
+	if a != 79 {
+		t.Fatalf("一小时应该走 1 点：%v", a)
+	}
+}
+
+// 评审 §25 S4：同一轮里多次 delta 共享同一个上限，换一轮重新拿额度。
+func TestDimensionDeltaBudgetSharedByCallsInOneRun(t *testing.T) {
+	s := New()
+	if allowed, used, over := s.AllowDelta("focus", "run-1", 5, 5); over || allowed != 5 || used != 5 {
+		t.Fatalf("第一次应该允许：%v %v %v", allowed, used, over)
+	}
+	if allowed, used, over := s.AllowDelta("focus", "run-1", 5, 5); !over || allowed != 0 || used != 5 {
+		t.Fatalf("同一轮第二次应该被拒绝：%v %v %v", allowed, used, over)
+	}
+	if allowed, used, over := s.AllowDelta("focus", "run-1", 3, 5); !over || allowed != 0 {
+		t.Fatalf("额度用完后正负都不该再给：%v %v %v", allowed, used, over)
+	}
+	if allowed, used, over := s.AllowDelta("focus", "run-2", 5, 5); over || allowed != 5 || used != 5 {
+		t.Fatalf("换一轮应该重新拿到额度：%v %v %v", allowed, used, over)
+	}
+	// 超过额度的请求被截到剩余量，而不是整笔拒绝
+	if allowed, _, over := s.AllowDelta("focus", "run-3", 40, 5); over || allowed != 5 {
+		t.Fatalf("超出的 delta 应该截到上限：%v %v", allowed, over)
+	}
+}

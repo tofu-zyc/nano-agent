@@ -97,6 +97,8 @@ type State struct {
 	TopicBranches []TopicBranch `json:"topic_branches,omitempty"`
 	// runtime 是这次规划时启用的维度影响（不落盘，由网关按 agent 配置注入）
 	runtime Runtime
+	// deltaUse 是"这一轮已经用掉的维度调整额度"（不落盘；换一个 run 就清零）
+	deltaUse map[string]deltaUse
 
 	// MindProfile 是心智档案：候选权重、可选维度与阈值（设计 §7.2 / §7.3）
 	MindProfile MindProfile `json:"mind_profile,omitempty"`
@@ -1349,3 +1351,46 @@ func (s *State) SetRuntime(r Runtime) { s.runtime = r }
 
 // RuntimeOf 返回当前注入的维度影响（只读）。
 func (s *State) RuntimeOf() Runtime { return s.runtime }
+
+// deltaUse 记录某个维度在某个 run 里已经用掉的调整量。
+type deltaUse struct {
+	Run  string
+	Used float64
+}
+
+// AllowDelta 给这次调整发额度：同一个 run 内累计不能超过 limit，超出部分直接截掉。
+// 返回实际允许的调整量、已经用掉的量和是否一点都不剩；换一个 run 会重新拿到全额额度。
+func (s *State) AllowDelta(name, runID string, delta, limit float64) (float64, float64, bool) {
+	if s.deltaUse == nil {
+		s.deltaUse = map[string]deltaUse{}
+	}
+	use := s.deltaUse[name]
+	if use.Run != runID {
+		use = deltaUse{Run: runID}
+	}
+	remaining := limit - use.Used
+	if delta > remaining {
+		delta = remaining
+	}
+	if delta < -remaining {
+		delta = -remaining
+	}
+	if delta == 0 {
+		s.deltaUse[name] = use
+		return 0, use.Used, true
+	}
+	use.Used += delta
+	s.deltaUse[name] = use
+	return delta, use.Used, false
+}
+
+// DeltaUsed 返回某个维度在这一轮已经用掉的调整量（只读，给测试和显示用）。
+func (s *State) DeltaUsed(name, runID string) float64 {
+	if s.deltaUse == nil {
+		return 0
+	}
+	if use, ok := s.deltaUse[name]; ok && use.Run == runID {
+		return use.Used
+	}
+	return 0
+}

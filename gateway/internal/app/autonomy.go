@@ -62,7 +62,9 @@ func (a *App) loadMinds() {
 	}
 	var doc autonomyDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
-		a.log.Warn("自主活动状态读不了，先用空的", "file", a.autonomyFile(), "err", err)
+		// 读不动就当成"不知道现在是什么"，绝不拿空状态覆盖原文件
+		a.mindsErr = fmt.Errorf("自主状态解析失败（%v），先不覆盖：%s", err, a.autonomyFile())
+		a.log.Error(a.mindsErr.Error())
 		return
 	}
 	needsMigration := doc.Version < autonomy.SchemaVersion
@@ -332,6 +334,7 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	if ls.Next == 0 && st.NextCheck == 0 {
 		a.lifeBegin(ag) // 刚变成拟人型 / 第一次启动：安排第一次自己活动
 	}
+	a.syncDimensions(ag)
 	st.SetRuntime(a.dimensionRuntime(ag))
 	trig := st.Next(now)
 	if trig == nil {
@@ -509,6 +512,63 @@ func (a *App) effectiveDimensions(ag agents.Agent) map[string]autonomy.Dimension
 	return merged
 }
 
+// syncDimensions 把 agent 配置里的维度写进持久档案（第一次启用时用 initial），
+// 之后漂移、阈值和显示都只看状态里的值，配置改动也会在这里对齐（评审 §25 S3）。
+// 调用方持有锁。
+func (a *App) syncDimensions(ag agents.Agent) {
+	if len(ag.MindDimensions) == 0 {
+		return
+	}
+	st := a.mind(ag.ID)
+	profile := st.Profile()
+	now := a.now()
+	for name, cfg := range ag.MindDimensions {
+		d, ok := profile.Dimensions[name]
+		changed := false
+		if !ok {
+			baseline := cfg.Baseline
+			if baseline == 0 {
+				baseline = 50
+			}
+			d = autonomy.Dimension{Value: baseline, Baseline: baseline, Min: 0, Max: 100}
+			changed = true
+		}
+		if cfg.Initial != 0 && !ok {
+			d.Value, changed = cfg.Initial, true
+		}
+		if d.Enabled != cfg.Enabled {
+			d.Enabled, changed = cfg.Enabled, true
+		}
+		if cfg.Baseline != 0 && d.Baseline != cfg.Baseline {
+			d.Baseline, changed = cfg.Baseline, true
+		}
+		if cfg.Max > cfg.Min && (d.Min != cfg.Min || d.Max != cfg.Max) {
+			d.Min, d.Max, changed = cfg.Min, cfg.Max, true
+		}
+		if d.Drift != cfg.Drift {
+			d.Drift, changed = cfg.Drift, true
+		}
+		if d.Threshold != cfg.Threshold {
+			d.Threshold, changed = cfg.Threshold, true
+		}
+		if d.Rearm != cfg.Rearm {
+			d.Rearm, changed = cfg.Rearm, true
+		}
+		if d.AllowDelta != cfg.AllowDelta {
+			d.AllowDelta, changed = cfg.AllowDelta, true
+		}
+		if cfg.MaxDelta > 0 && d.MaxDelta != cfg.MaxDelta {
+			d.MaxDelta, changed = cfg.MaxDelta, true
+		}
+		if !changed {
+			continue
+		}
+		if err := st.SetDimension(name, d, now.Unix()); err != nil {
+			a.log.Warn("维度配置没有生效", "agent", ag.ID, "dimension", name, "err", err)
+		}
+	}
+}
+
 // enabledDimension 返回某个维度的当前值，以及它是不是真的开着。调用方持有锁。
 func (a *App) enabledDimension(ag agents.Agent, name string) (float64, bool) {
 	d, ok := a.effectiveDimensions(ag)[name]
@@ -604,6 +664,7 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 	ls := a.lifeOf(ag.ID)
 	// 旧 life.json 的当日次数先进账本，再记这一次（顺序反了会把这一次数两遍）
 	a.migrateLifeLedger(st, ls, now)
+	a.syncDimensions(ag)
 	// 先记次数，这样这次醒来的说明里能看到“第几次”；开始失败时下面会退回去
 	if !manual && trig.IsExploration() {
 		ls.Wakes++

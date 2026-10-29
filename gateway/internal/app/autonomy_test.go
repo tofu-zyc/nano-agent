@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -321,28 +322,28 @@ func TestMindToolUpdatesInterestsBeliefsAndReflections(t *testing.T) {
 	setNow(e, time.Date(2026, 10, 21, 15, 0, 0, 0, time.UTC))
 
 	e.a.mu.Lock()
-	out, err := e.a.mindCall(mainSID, []byte(`{"action":"view"}`))
+	out, err := e.a.mindCall(mainSID, "run-view", []byte(`{"action":"view"}`))
 	if err != nil || !strings.Contains(out, "长期兴趣：还没有") {
 		e.a.mu.Unlock()
 		t.Fatalf("初始心智状态不对: %q %v", out, err)
 	}
-	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"interest_add","text":"读科幻"}`)); err == nil {
+	if _, err := e.a.mindCall(mainSID, "run-view", []byte(`{"action":"interest_add","text":"读科幻"}`)); err == nil {
 		e.a.mu.Unlock()
 		t.Fatal("没有来源的兴趣不该收")
 	}
-	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"interest_add","text":"读科幻","source":"看完三体之后想到的"}`)); err != nil {
+	if _, err := e.a.mindCall(mainSID, "run-view", []byte(`{"action":"interest_add","text":"读科幻","source":"看完三体之后想到的"}`)); err != nil {
 		e.a.mu.Unlock()
 		t.Fatal(err)
 	}
-	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"belief","subject":"主人的面试","value":"下周三二面","source":"主人刚才说的","confidence":0.9}`)); err != nil {
+	if _, err := e.a.mindCall(mainSID, "run-view", []byte(`{"action":"belief","subject":"主人的面试","value":"下周三二面","source":"主人刚才说的","confidence":0.9}`)); err != nil {
 		e.a.mu.Unlock()
 		t.Fatal(err)
 	}
-	if _, err := e.a.mindCall(mainSID, []byte(`{"action":"reflect","text":"约定要当天记下来，不然容易忘","change":"以后先 Agenda add"}`)); err != nil {
+	if _, err := e.a.mindCall(mainSID, "run-view", []byte(`{"action":"reflect","text":"约定要当天记下来，不然容易忘","change":"以后先 Agenda add"}`)); err != nil {
 		e.a.mu.Unlock()
 		t.Fatal(err)
 	}
-	out, err = e.a.mindCall(mainSID, []byte(`{"action":"view"}`))
+	out, err = e.a.mindCall(mainSID, "run-view", []byte(`{"action":"view"}`))
 	st := e.a.mindOf("default")
 	view := st.View(e.a.now(), e.a.loc, 10)
 	e.a.mu.Unlock()
@@ -753,7 +754,7 @@ func TestAgentDimensionConfigDrivesBehavior(t *testing.T) {
 		t.Fatalf("精力 100 应该让间隔更短：%v", interval)
 	}
 	// 模型只能提受限 delta（focus 允许，每轮最多 5）
-	out, err := e.a.mindCall(lifeSID("default"), []byte(`{"action":"dimension","subject":"focus","confidence":40,"source":"聊天里注意到自己很专注"}`))
+	out, err := e.a.mindCall(lifeSID("default"), "run-config", []byte(`{"action":"dimension","subject":"focus","confidence":40,"source":"聊天里注意到自己很专注"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +765,168 @@ func TestAgentDimensionConfigDrivesBehavior(t *testing.T) {
 		t.Fatalf("delta 没有限幅：%.1f（%s）", after, out)
 	}
 	// 没允许 delta 的维度会被拒绝
-	if _, err := e.a.mindCall(lifeSID("default"), []byte(`{"action":"dimension","subject":"energy","confidence":2,"source":"随便"}`)); err == nil {
+	if _, err := e.a.mindCall(lifeSID("default"), "run-config", []byte(`{"action":"dimension","subject":"energy","confidence":2,"source":"随便"}`)); err == nil {
 		t.Fatal("没允许 delta 的维度应该被拒绝")
+	}
+}
+
+// 评审 §25 S1：旧版账本 runs 是字符串数组，升级加载不能把整份心智状态丢掉。
+func TestLegacyLedgerRunsUpgradePreservesMindState(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	base := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	setNow(e, base)
+	e.a.mu.Lock()
+	st := e.a.mind("default")
+	st.SetPaused(true, "测试暂停", base)
+	st.SetBelief("主人", "喜欢简洁的回答", "聊天里说的", 0.9, base)
+	st.SettleLedger(autonomy.LedgerExploration, "", "old-run", 5, base, time.UTC)
+	raw, err := json.Marshal(map[string]any{"version": 2, "agents": map[string]any{"default": st}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	// 改写成旧格式：runs 是字符串数组
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatal(err)
+	}
+	agents := generic["agents"].(map[string]any)
+	agent := agents["default"].(map[string]any)
+	for _, row := range agent["ledger"].([]any) {
+		entry := row.(map[string]any)
+		runs, ok := entry["runs"].([]any)
+		if !ok {
+			continue
+		}
+		ids := make([]any, 0, len(runs))
+		for _, r := range runs {
+			ids = append(ids, r.(map[string]any)["id"])
+		}
+		entry["runs"] = ids
+	}
+	legacy, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := e.a.autonomyFile()
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 重新从磁盘加载
+	e.a.mu.Lock()
+	e.a.mindsLoaded, e.a.minds, e.a.mindsErr = false, nil, nil
+	loaded := e.a.mind("default")
+	paused := loaded.Paused
+	beliefs := len(loaded.Beliefs)
+	e.a.saveMinds()
+	e.a.mu.Unlock()
+	if !paused || beliefs != 1 {
+		t.Fatalf("旧账本格式把心智状态弄丢了：paused=%v beliefs=%d", paused, beliefs)
+	}
+	rows := loaded.LedgerToday(base, time.UTC)
+	if len(rows) == 0 || rows[0].Starts != 1 || len(rows[0].Runs) != 1 || rows[0].Runs[0].ID != "old-run" {
+		t.Fatalf("旧 runs 没有按对象读回来：%+v", rows)
+	}
+	// 再重新加载一次：保存之后状态还在
+	e.a.mu.Lock()
+	e.a.mindsLoaded, e.a.minds, e.a.mindsErr = false, nil, nil
+	again := e.a.mind("default")
+	e.a.mu.Unlock()
+	if !again.Paused || len(again.Beliefs) != 1 {
+		t.Fatalf("保存后重新加载丢状态：paused=%v beliefs=%d", again.Paused, len(again.Beliefs))
+	}
+}
+
+// 评审 §25 S1：文件读不动时拒绝覆盖，原文件保持原样。
+func TestUnreadableMindStateIsNeverOverwritten(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	path := e.a.autonomyFile()
+	broken := []byte("{ 这不是 JSON")
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	e.a.mindsLoaded, e.a.minds, e.a.mindsErr = false, nil, nil
+	_ = e.a.mind("default")
+	e.a.saveMinds()
+	e.a.mu.Unlock()
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(saved) != string(broken) {
+		t.Fatalf("解析失败之后覆盖了原文件：%s", saved)
+	}
+}
+
+// 评审 §25 S4：dimension 必须在模型可见的工具 schema 里，参数语义也要写清楚。
+func TestMindDimensionExposedInModelToolSchema(t *testing.T) {
+	spec := mindTool()
+	var schema struct {
+		Properties map[string]struct {
+			Enum        []string `json:"enum"`
+			Description string   `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(spec.InputSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	actions := schema.Properties["action"].Enum
+	found := false
+	for _, x := range actions {
+		if x == "dimension" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("schema 没有暴露 dimension：%v", actions)
+	}
+	if !strings.Contains(schema.Properties["subject"].Description, "dimension") ||
+		!strings.Contains(schema.Properties["confidence"].Description, "dimension") {
+		t.Fatal("subject/confidence 的说明没有覆盖 dimension 的语义")
+	}
+}
+
+// 评审 §25 S3：只在 agents.json 配置的维度也要真正进入漂移状态。
+func TestConfiguredDimensionDriftsAcrossRealEpisodes(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, func(ag *agents.Agent) {
+		ag.MindDimensions = map[string]agents.MindDimension{
+			"energy": {Enabled: true, Initial: 80, Baseline: 50, Min: 0, Max: 100, Drift: 10},
+		}
+	})
+	base := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	setNow(e, base)
+	episode := func() {
+		if err := e.a.Wake("default"); err != nil {
+			t.Fatal(err)
+		}
+		sid := lifeSID("default")
+		e.k.expect(proto.TInput)
+		e.k.send(proto.Msg{T: proto.TModel, SID: sid})
+		e.k.expect(proto.TTurn)
+		e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
+		waitIdle(t, e, sid)
+	}
+	episode()
+	e.a.mu.Lock()
+	d, ok := e.a.mind("default").Profile().Dimensions["energy"]
+	e.a.mu.Unlock()
+	if !ok || d.Value != 80 {
+		t.Fatalf("配置的维度没有进入状态：%+v", d)
+	}
+	// 拨两小时：按每小时 10 点从 80 走到 60
+	setNow(e, base.Add(2*time.Hour))
+	episode()
+	e.a.mu.Lock()
+	d, ok = e.a.mind("default").Profile().Dimensions["energy"]
+	e.a.mu.Unlock()
+	if !ok || d.Value < 59.9 || d.Value > 60.1 {
+		t.Fatalf("配置的维度没有按时间漂移：%+v", d)
 	}
 }

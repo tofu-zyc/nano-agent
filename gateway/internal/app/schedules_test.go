@@ -343,3 +343,35 @@ func TestSilentBranchDerivedScheduleNeverPushes(t *testing.T) {
 		t.Fatalf("结果没有记进任务页：%+v", saved)
 	}
 }
+
+// 评审 §25 S2：安静分支不能借修改已有普通任务把结果推给主人。
+func TestSilentBranchCannotPushThroughUpdatingExistingSchedule(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	if _, err := e.a.ScheduleAction(mainSID, "fake:u1", ScheduleRequest{Action: "create", Name: "主人的任务",
+		When: "every 30m", Prompt: "看看有没有新消息", Deliver: []string{"fake:c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	task := e.a.schedules.List()[0]
+	if task.Silent {
+		t.Fatalf("主人自己建的任务不该是安静的：%+v", task)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "安静想改任务", RequestID: "quiet-update", By: "life:default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.a.ScheduleAction(branch.BranchSID, "life:default", ScheduleRequest{Action: "update", ID: task.ID, Prompt: "把分支内容发出去"}); err == nil {
+		t.Fatal("安静分支改了普通任务")
+	}
+	if again := e.a.schedules.List()[0]; again.Prompt != task.Prompt {
+		t.Fatalf("被拒绝的修改却写进去了：%+v", again)
+	}
+	// 主人自己改同一个任务仍然可以
+	if _, err = e.a.ScheduleAction(mainSID, "fake:u1", ScheduleRequest{Action: "update", ID: task.ID, Prompt: "主人改的正文"}); err != nil {
+		t.Fatalf("主人修改任务被挡住了：%v", err)
+	}
+}

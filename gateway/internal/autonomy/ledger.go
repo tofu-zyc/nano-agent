@@ -1,6 +1,7 @@
 package autonomy
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"time"
@@ -28,13 +29,35 @@ const (
 
 // LedgerUsage 是某天、某个来源的用量。
 type LedgerUsage struct {
-	Day      string      `json:"day"`
-	TZ       string      `json:"tz,omitempty"` // 结算用的时区名（时区改了仍然按当天记）
-	Source   string      `json:"source"`
-	Starts   int         `json:"starts"`
-	Tokens   int         `json:"tokens"`
-	Reserved int         `json:"reserved,omitempty"` // 已经预留、还没结算的启动
-	Runs     []LedgerRun `json:"runs,omitempty"`
+	Day      string     `json:"day"`
+	TZ       string     `json:"tz,omitempty"` // 结算用的时区名（时区改了仍然按当天记）
+	Source   string     `json:"source"`
+	Starts   int        `json:"starts"`
+	Tokens   int        `json:"tokens"`
+	Reserved int        `json:"reserved,omitempty"` // 已经预留、还没结算的启动
+	Runs     LedgerRuns `json:"runs,omitempty"`
+}
+
+// LedgerRuns 兼容两种历史格式：旧版本写成字符串数组（只有 run id），
+// 新版本写成对象数组（带 started_at 和这一次的 token）。读旧格式不会让整份心智状态反序列化失败。
+type LedgerRuns []LedgerRun
+
+func (r *LedgerRuns) UnmarshalJSON(b []byte) error {
+	var objects []LedgerRun
+	if err := json.Unmarshal(b, &objects); err == nil {
+		*r = objects
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal(b, &ids); err != nil {
+		return err
+	}
+	out := make(LedgerRuns, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, LedgerRun{ID: id})
+	}
+	*r = out
+	return nil
 }
 
 // LedgerRun 是一次已经结算的活动：run 身份、开始时间和这一次的 token。

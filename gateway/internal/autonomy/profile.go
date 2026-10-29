@@ -44,7 +44,8 @@ type Dimension struct {
 	Rearm      float64 `json:"rearm,omitempty"`             // 回落到它以下才重新武装（0 表示阈值下 10 点）
 	AllowDelta bool    `json:"allow_agent_delta"`           // 允不允许模型每轮提一个有来源的小 delta
 	MaxDelta   float64 `json:"max_delta_per_run,omitempty"` // 每轮最多改多少点（默认 5）
-	At         int64   `json:"computed_at,omitempty"`       // 上次按时间计算漂移的时刻（秒）
+	Anchor     float64 `json:"anchor,omitempty"`            // 锚点值：At 时刻的值，漂移按经过时间从锚点算，和计算频率无关
+	At         int64   `json:"computed_at,omitempty"`       // 锚点时刻（秒）
 	// Armed 是阈值迟滞的另一半：报过一次就不再报，回落到 rearm 以下才重新装上
 	Armed *bool `json:"armed,omitempty"`
 }
@@ -168,9 +169,7 @@ func (s *State) SetDimension(name string, d Dimension, now int64) error {
 		d.Baseline < d.Min || d.Baseline > d.Max || d.Drift < 0 || d.Drift > 10 || d.Threshold < 0 || d.Threshold > 100 {
 		return errors.New("维度的范围、基线、漂移或阈值不合法（值 0–100，漂移 0–10）")
 	}
-	if d.At == 0 {
-		d.At = now
-	}
+	d.Anchor, d.At = d.Value, now
 	p := s.Profile()
 	if p.Dimensions == nil {
 		p.Dimensions = map[string]Dimension{}
@@ -223,32 +222,37 @@ func (s *State) DriftDimensions(now int64) []DimensionChange {
 			continue
 		}
 		before := d.Value
-		hours := float64(now-d.At) / 3600
-		if d.At == 0 || hours <= 0 {
-			d.At = now
+		if d.At == 0 || d.Anchor == 0 {
+			// 第一次计算：把当前值锚下来；之后都从锚点按经过时间算，
+			// 一小时算一次和每分钟算一次结果完全一样（评审 §25 S3）
+			d.Anchor, d.At = d.Value, now
 			p.Dimensions[name] = d
 			continue
 		}
+		hours := float64(now-d.At) / 3600
+		if hours <= 0 {
+			continue
+		}
 		move := d.Drift * hours
-		next := d.Value
+		next := d.Anchor
 		if move > 0 {
-			switch {
-			case d.Value < d.Baseline:
-				next = math.Min(d.Baseline, d.Value+move)
-			case d.Value > d.Baseline:
-				next = math.Max(d.Baseline, d.Value-move)
+			if d.Anchor >= d.Baseline {
+				next = math.Max(d.Baseline, d.Anchor-move)
+			} else {
+				next = math.Min(d.Baseline, d.Anchor+move)
 			}
 		}
-		next = math.Round(next*10) / 10
 		next = math.Max(d.Min, math.Min(d.Max, next))
 		armedBefore := d.IsArmed()
 		if next == before {
-			d.At = now
 			p.Dimensions[name] = d
 			continue
 		}
 		d.Value = next
-		d.At = now
+		if next == d.Baseline || next == d.Min || next == d.Max {
+			// 到基线/边界就停，把锚点落在终点
+			d.Anchor, d.At = next, now
+		}
 		armedAfter := armedBefore
 		if d.Threshold > 0 && before < d.Threshold && next >= d.Threshold {
 			armedAfter = false // 真越过阈值：卸下迟滞，等回落

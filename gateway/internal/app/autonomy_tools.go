@@ -55,12 +55,12 @@ func ideaTool() proto.ToolSpec {
 }
 
 const mindSchema = `{"type":"object","properties":{
- "action":{"type":"string","enum":["view","interest_add","interest_remove","belief","reflect"]},
+ "action":{"type":"string","enum":["view","interest_add","interest_remove","belief","reflect","dimension"]},
  "text":{"type":"string","description":"interest_add：兴趣内容；interest_remove：要删掉的兴趣原文；reflect：这次反思"},
  "source":{"type":"string","description":"interest_add / belief：来源，写清从哪次经历、哪段聊天或哪次反思来的（必填）"},
- "subject":{"type":"string","description":"belief：这条认识是关于什么的（比如某个人、某件事）"},
+ "subject":{"type":"string","description":"belief：这条认识是关于什么的（比如某个人、某件事）；dimension：维度名（curiosity / social_drive / focus / energy）"},
  "value":{"type":"string","description":"belief：你认为它是怎样的"},
- "confidence":{"type":"number","description":"belief：置信度 0–1，默认 0.6"},
+ "confidence":{"type":"number","description":"belief：置信度 0–1，默认 0.6；dimension：这次想调多少（-max_delta_per_run..max_delta_per_run，每轮累计有上限）"},
  "change":{"type":"string","description":"reflect：这次反思之后打算怎么调整"}
 },"required":["action"]}`
 
@@ -280,7 +280,7 @@ func (a *App) ideaCall(sid string, raw []byte) (string, error) {
 }
 
 // mindCall 执行 Mind：查看或更新长期兴趣、认识、反思。调用方持有锁。
-func (a *App) mindCall(sid string, raw []byte) (string, error) {
+func (a *App) mindCall(sid, runID string, raw []byte) (string, error) {
 	var x struct {
 		Action     string  `json:"action"`
 		Text       string  `json:"text"`
@@ -332,7 +332,8 @@ func (a *App) mindCall(sid string, raw []byte) (string, error) {
 		a.afterMindChange(st, ag, now)
 		return "记下了这条认识（置信度 " + fmt.Sprintf("%.0f%%", conf*100) + "）。", nil
 	case "dimension":
-		// 模型只能对允许 delta 的维度提一个有来源的小变化，宿主限幅后合并（设计 §7.3）
+		// 模型只能对允许 delta 的维度提一个有来源的小变化，宿主限幅后合并（设计 §7.3）；
+		// 同一个 run 里多次调用共享同一个上限，不能靠多调几次绕过（评审 §25 S4）。
 		name := strings.ToLower(strings.TrimSpace(x.Subject))
 		if name == "" {
 			return "", errors.New("dimension 要写 subject（维度名），比如 energy")
@@ -352,12 +353,11 @@ func (a *App) mindCall(sid string, raw []byte) (string, error) {
 			limit = 5
 		}
 		delta := x.Confidence // 用 confidence 传 delta（-limit..limit）
-		if delta > limit {
-			delta = limit
+		allowed, used, over := st.AllowDelta(name, runID, delta, limit)
+		if over {
+			return "", fmt.Errorf("这一轮改 %s 的额度用完了（上限 %g，已经用了 %g）", name, limit, used)
 		}
-		if delta < -limit {
-			delta = -limit
-		}
+		delta = allowed
 		d.Value = math.Max(d.Min, math.Min(d.Max, d.Value+delta))
 		if err := st.SetDimension(name, d, now.Unix()); err != nil {
 			return "", err

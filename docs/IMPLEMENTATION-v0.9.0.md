@@ -5,6 +5,13 @@
 本文记录**已经落到代码里**的部分（含测试）和还没做的部分。设计文档描述目标，本文只写当前实现；
 两者不一致时以本文和代码为准。
 
+> **发布范围（2026-10-29 明确）**：v0.9.0 是 **Linux 首发**。
+> - 已在 Linux（WSL2，内核 6.x）上实测：网关全部测试、race、C 状态机/观察器/执行器/宿主（含 ASan）、网页检查与构建。
+> - **Windows / macOS 的文件观察器没有实现**：`watch.c` 只有 Linux inotify，其他平台的 `na_watch_supported` 为 false，节点因此不宣告 `file_watch`，相关能力按节点降级。
+> - 网关、内核、执行器在代码上是平台无关的，但**原生 Windows / macOS 没有在本轮实测**（执行器的 Windows 专项在更早轮次单独通过，不随本轮结论复述）。
+> - 因此不要把 v0.9.0 读成「全平台全部完成」；跨平台观察器是明确的后续项，不是本轮已验证范围内的一行。
+
+
 ## 已实现
 
 ### P0 完整调用身份与能力协商
@@ -730,3 +737,32 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 
 - **Windows/macOS 文件观察器**：`watch.c` 仍然只有 Linux inotify，非 Linux 的 `watch_attach` 返回 -1、`na_watch_supported` 为 false，节点不宣告 `file_watch`（干净能力降级，不会假宣告）。这是代码缺口，不是测试账号问题：Windows 的 `plat_poll` 是 `WSAPoll`（只有套接字），要加目录观察必须引入工作线程 + 可轮询的唤醒通道（macOS 用 kqueue + 管道唤醒，Windows 用 ReadDirectoryChangesW + 回环套接字唤醒），并需要真机跑通才敢宣告能力；当前环境没有 macOS 工具链，Windows 也只有交叉编译。
 - 网页分支报告仍是带标记的普通消息、分支列表还没有「最近进展」摘要；这两个是界面收尾项，不影响运行正确性。
+
+## 评审 §25 集中修复（2026-10-29，`eb874e2` 之后）
+
+### S1 旧账本格式升级不再丢心智状态
+
+`LedgerUsage.Runs` 改成自定义类型 `LedgerRuns`，同时接受旧版字符串数组（`["run-id"]`）和新版对象数组（`[{"id":…,"started_at":…,"tokens":…}]`），schema 版本不变——旧文件照常读，不需人工迁移。另外 `loadMinds` 区分「文件不存在」和「解析失败」：解析失败时设置 `mindsErr` 并保留原文件，`saveMinds` 会因此拒绝写盘（不会拿空状态覆盖真实的认识、暂停、日程和预算）。
+
+回归：`TestLegacyLedgerRunsUpgradePreservesMindState`（真实旧格式 → 重新加载 → `paused`/`beliefs`/`runs` 都在 → 保存 → 再重启仍在）与 `TestUnreadableMindStateIsNeverOverwritten`（坏文件不解析也绝不覆盖）。
+
+### S2 安静来源不能再动普通任务
+
+`scheduleAction` 在 `list`/`create` 之外的动作上统一核对来源策略：安静分支（或它派生的安静任务）只能改、立即运行或删除**自己派生的安静任务**；对主人的普通任务一律拒绝并说明原因，另一条路是主人自己改。普通用户修改自己的任务不受影响（正向回归保留）。
+
+回归：`TestSilentBranchCannotPushThroughUpdatingExistingSchedule`（主人建普通任务 → 安静分支 update 被拒且原文未变 → 主人自己 update 成功）。
+
+### S3 配置维度真正进入漂移，计算频率不影响结果
+
+- `syncDimensions(ag)` 把 `agents.json` 的 `mind_dimensions` 写进持久档案（第一次用 `initial` 初始化，之后对齐 enabled/baseline/范围/漂移/阈值/rearm/delta 配置），漂移和阈值只看状态里的值；调度 tick 和手动叫醒两条入口都会调用它。
+- 漂移改成**锚点模型**：`anchor`+`computed_at` 记录锚点值和时刻，每次按「锚点 ± drift_per_hour × 经过小时」直接计算，到基线/边界才重新锚定。一小时算一次和每分钟算一次得到完全相同的值（`79` vs `79`），不再每次舍入丢小数、也不再每轮推进基准时刻。
+
+回归：`TestConfiguredDimensionDriftsAcrossRealEpisodes`（只在 agents.json 配 energy → 真实叫醒一轮 → 拨两小时再跑一轮 → 值从 80 到 60）与 `TestDimensionDriftIndependentOfActivityFrequency`（一次 vs 每分钟，结果相等且等于 79）。
+
+### S4 工具 schema 与每轮 delta 额度
+
+`Mind` 工具的 schema 现在声明 `dimension` 动作，`subject` 说明「维度名（curiosity / social_drive / focus / energy）」、`confidence` 说明「这次想调多少，每轮累计有上限」。宿主按 run 记账（`AllowDelta`）：同一个 run 内多次调用共享 `max_delta_per_run`，超出部分直接截断而不是整笔拒绝；换一个 run 重新拿到全额额度。额度用完再调会给出具体错误。
+
+因为模型可见的工具 schema 变了，**`prefixVer` 从 11 升到 12**（前缀缓存会失效一次，这是必要的代价）。
+
+回归：`TestMindDimensionExposedInModelToolSchema`（enum 与参数说明）与 `TestDimensionDeltaBudgetSharedByCallsInOneRun`（同轮第二次被拒、换轮重新发放、超量请求被截到上限）。
