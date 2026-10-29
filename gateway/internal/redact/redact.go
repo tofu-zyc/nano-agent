@@ -47,6 +47,10 @@ func Needed(mode string, publicModel, publicChannel bool) bool {
 // ToolResult 脱敏一段工具结果。known 是网关自己保存的密钥原文，先精确替换；
 // then 再按常见特征兜底。返回结果对同一段输入总是相同。
 func ToolResult(text string, known []string) string {
+	return toolText(jobChunks(text, known), known)
+}
+
+func toolText(text string, known []string) string {
 	if text == "" {
 		return text
 	}
