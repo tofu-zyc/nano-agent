@@ -551,3 +551,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 生效：想法仍按兴趣+新颖排序、目标按优先级排序（都是现有挑选逻辑），改完下一次挑选立即使用新值；内心简报里的认识带上置信度，低于 0.5 标「还没确认」。验证：`TestSetNumberValidatesAndChangesThePick`（越界/小数/不存在被拒绝，想法与目标的挑选顺序真的翻转）与 `TestAutonomySetNumberFromWebAndCommand`（网页、命令、访客被拒）；`go test ./internal/autonomy ./internal/app`、`go vet`、网页 check/test/build 通过。
 
 未做：可选行为维度（curiosity/social_drive/focus/energy）与阈值预设（设计 §7.3）整块未做；数值目前存在 agent 的心智状态文件里，没有 `agents.json` 级别的默认值/权重配置；`confidence=0` 仍与「没标过」共用 0 值。
+
+### F2 按话题复用持久自主分支
+
+心智状态新增 `topic_branches`（话题 `in:<意图>` / `ag:<日程>` → 分支 sid）。自主活动里用 Session 工具分叉或 continue 时，把分支记到当前话题上；同一个话题下一次再想分叉时直接复用已有分支（不新建、不另起上下文），内心说明里也会写明「这个话题已经有一个持久分支 X，要接着做就在那里 continue」。分支仍只接受 silent 投递（F1 的统一策略），自主分支这一轮的 token 现在经 `branchDone` 计入 agent 的自主活动预算，换个 sid 不能绕开每日预算。
+
+验证：`TestTopicBranchIsReusedForTheSameTopic`（同一话题第二次分叉返回已有分支、分支数仍是 1、下一次内心说明提到它）与 `TestBranchRunTokensCountIntoTheActivityBudget`（分支 token 计入 `Budget.Tokens`）；`go test ./...`、`go vet`、app/autonomy race 通过。
+
+未做：自主活动仍是「醒来先决定、再进分支」，没有把整段内心活动搬进分支里跑；每 agent 的自主分支并发/深度上限、分支报告入口和「一次活动只计一次唤醒」的账本字段仍未接；分支经历（B3）已能看到结论，但不含分支内的过程。

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/proto"
@@ -636,6 +637,44 @@ func (a *App) branchNote(sid string) string {
 		"当前任务以这次的要求为准，不要自动重放已经做过的操作；结果默认留在分支里，不会发回原来的聊天。"
 }
 
+// topicOfTrigger 是这次自主活动的话题：一个意图或一个日程。同一个话题复用同一个持久分支。
+func topicOfTrigger(t autonomy.Trigger) string {
+	if t.IntentionID != "" {
+		return "in:" + t.IntentionID
+	}
+	if t.AgendaID != "" {
+		return "ag:" + t.AgendaID
+	}
+	return ""
+}
+
+// topicBranch 是这次自主活动的话题已经在用的分支（还能继续时才返回）。调用方持有锁。
+func (a *App) topicBranch(s *sess) (string, bool) {
+	if s == nil || s.run == nil || s.mind == nil {
+		return "", false
+	}
+	sid, ok := a.mind(s.mind.AgentID).BranchOfTopic(topicOfTrigger(s.mind.Trigger))
+	if !ok {
+		return "", false
+	}
+	meta, found := a.store.Branch(sid)
+	if !found || meta.Status == session.BranchArchived || meta.Status == session.BranchCancelled {
+		return "", false
+	}
+	return sid, true
+}
+
+// linkForkTopic 把这次分叉记到当前自主活动的话题上，下一次接着用同一个分支。调用方持有锁。
+func (a *App) linkForkTopic(s *sess, branchSID string) {
+	if s == nil || s.run == nil || s.mind == nil || branchSID == "" {
+		return
+	}
+	if topic := topicOfTrigger(s.mind.Trigger); topic != "" {
+		a.mind(s.mind.AgentID).LinkTopicBranch(topic, branchSID, a.now())
+		a.saveMinds()
+	}
+}
+
 // handleSessionTool 处理 Session 工具（网关执行）。
 func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 	var args struct {
@@ -658,6 +697,10 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 	from := a.runBy(s)
 	switch action {
 	case "fork":
+		// 同一个话题不每次醒来都 Fork：已经有可用分支就复用它，上下文和进度都还在那里
+		if reuse, ok := a.topicBranch(s); ok {
+			return fmt.Sprintf("这个话题已经有分支 %s；要用就在它里面 continue（Session 工具，branch_sid=%s），这次没有新建分支。", reuse, reuse), true
+		}
 		src := args.SourceSID
 		if src == "" {
 			src = s.sid
@@ -667,6 +710,7 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 		if err != nil {
 			return err.Error(), false
 		}
+		a.linkForkTopic(s, res.BranchSID)
 		text := fmt.Sprintf("已创建分支 %s（%s），来源会话 %s，操作 %s。", res.BranchSID, res.Title, res.ParentSID, res.OperationID)
 		switch res.Status {
 		case session.BranchPendingBoundary:
@@ -712,6 +756,9 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 		info, err := a.sessionBranchActionLocked(action, args.BranchSID, args.Prompt, from)
 		if err != nil {
 			return err.Error(), false
+		}
+		if action == "continue" {
+			a.linkForkTopic(s, args.BranchSID)
 		}
 		return fmt.Sprintf("分支 %s 现在是 %s（%s）。", info.SID, info.Status, info.Title), true
 	}

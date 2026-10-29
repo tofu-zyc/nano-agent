@@ -3,13 +3,16 @@ package app
 // 自主活动的集成测试（模拟时间 + 假模型 + 假内核，走真实的模型请求和工具执行链）。
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/autonomy"
+	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 func addAgendaCall(t *testing.T, e *env, args string) autonomy.AgendaItem {
@@ -401,3 +404,81 @@ func TestAutonomySetNumberFromWebAndCommand(t *testing.T) {
 }
 
 func intentID(in *autonomy.Intention) string { return in.ID }
+
+func TestTopicBranchIsReusedForTheSameTopic(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC))
+	e.a.mu.Lock()
+	st := e.a.mind("default")
+	intention, err := st.AddIntention(autonomy.Intention{Title: "研究日志格式", Priority: 3}, e.a.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "看看日志格式"}); err != nil {
+		t.Fatal(err)
+	}
+	s := e.a.sessOf(lifeSID("default"))
+	s.run = &run{runID: "r-life", from: "life:default", inner: true}
+	s.mind = &mindRun{AgentID: "default", Trigger: autonomy.Trigger{Kind: autonomy.EventSelfCheck, IntentionID: intention.ID}}
+	ag := e.a.agentOf(s.sid)
+	e.a.mu.Unlock()
+	fork := func(request string) string {
+		t.Helper()
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		text, ok := e.a.handleSessionTool(s, &proto.Msg{Args: json.RawMessage(`{"action":"fork","source_sid":"` + mainSID + `","title":"研究日志","request_id":"` + request + `"}`)})
+		if !ok {
+			t.Fatalf("fork 失败：%s", text)
+		}
+		return text
+	}
+	fork("topic-1")
+	e.a.mu.Lock()
+	branch, ok := st.BranchOfTopic("in:" + intention.ID)
+	e.a.mu.Unlock()
+	if !ok || branch == "" {
+		t.Fatal("分叉没有记到话题上")
+	}
+	if children := e.a.store.Children(mainSID); len(children) != 1 {
+		t.Fatalf("第一次分叉数：%d", len(children))
+	}
+	// 同一话题再来：复用已有分支，不再新建
+	again := fork("topic-2")
+	if !strings.Contains(again, branch) || !strings.Contains(again, "已经有分支") {
+		t.Fatalf("没有复用已有分支：%s", again)
+	}
+	if children := e.a.store.Children(mainSID); len(children) != 1 {
+		t.Fatalf("同一话题又建了一个分支：%d", len(children))
+	}
+	// 下一次醒来在说明里看得到这个分支
+	e.a.mu.Lock()
+	note := e.a.mindNote(ag, st, s.mind.Trigger, e.a.now(), false)
+	e.a.mu.Unlock()
+	if !strings.Contains(note, branch) {
+		t.Fatalf("内心说明没有提到已有分支：%s", note)
+	}
+}
+
+func TestBranchRunTokensCountIntoTheActivityBudget(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC))
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "种子"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "预算", RequestID: "budget-1", By: "fake:u1"})
+	if err != nil || res.BranchSID == "" {
+		t.Fatal(res, err)
+	}
+	e.a.mu.Lock()
+	before := e.a.mind("default").Budget.Tokens
+	e.a.branchDone(&sess{sid: res.BranchSID}, &run{usage: llm.Usage{PromptTokens: 100, CompletionTokens: 20}})
+	after := e.a.mind("default").Budget.Tokens
+	e.a.mu.Unlock()
+	if after-before != 120 {
+		t.Fatalf("分支 token 没有计进自主预算：%d → %d", before, after)
+	}
+}

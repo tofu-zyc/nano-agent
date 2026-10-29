@@ -485,6 +485,8 @@ func (a *App) innerDone(s *sess, r *run, status, body string) {
 	case isLifeSID(s.sid):
 		a.lifeDone(s, r, status, body)
 		a.autonomyDone(s, r, status, body)
+	default:
+		a.branchDone(s, r)
 	}
 }
 
@@ -497,6 +499,23 @@ func (a *App) lifeDone(s *sess, r *run, status, body string) {
 
 	a.saveLife()
 	a.publish(events.Event{T: "life", Name: agentID, Kind: "end", Text: text})
+}
+
+// branchDone 把自主分支这一轮的 token 计进 agent 的自主活动预算：换个 sid 不能绕开每日预算，
+// 也不能让同一项活动的总账少算一次。调用方持有锁。
+func (a *App) branchDone(s *sess, r *run) {
+	meta, ok := a.store.Branch(s.sid)
+	if !ok || meta.OwnerAgent == "" {
+		return
+	}
+	ag, ok := a.agentByID(meta.OwnerAgent)
+	if !ok || !ag.Life() {
+		return
+	}
+	st := a.mind(meta.OwnerAgent)
+	st.Spend(r.usage.PromptTokens + r.usage.CompletionTokens)
+	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
+	a.saveMinds()
 }
 
 // lifeHeard 把一件事记进 agent 的内心会话（比如昨晚整理了记忆），它下次醒来时会看到。调用方持有锁。

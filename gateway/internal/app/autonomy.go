@@ -565,6 +565,14 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	if !a.memoryOn(ag) {
 		b.WriteString("\n（长期记忆关着，这次记不了东西。）")
 	}
+	if sid, ok := func() (string, bool) {
+		if topic := topicOfTrigger(trig); topic != "" {
+			return st.BranchOfTopic(topic)
+		}
+		return "", false
+	}(); ok {
+		fmt.Fprintf(&b, "\n这个话题已经有一个持久分支 %s：要接着做就在那里 continue（Session 工具），不要把这件事重新 fork 一份。", sid)
+	}
 	b.WriteString("\n做完用一两句话写下真的做了什么、结果怎样；什么都没做就只回 [不做]。")
 	return b.String()
 }

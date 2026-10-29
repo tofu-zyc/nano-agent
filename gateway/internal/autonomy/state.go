@@ -94,11 +94,21 @@ type State struct {
 	Intentions []Intention  `json:"intentions,omitempty"`
 	Agenda     []AgendaItem `json:"agenda,omitempty"`
 
+	TopicBranches []TopicBranch `json:"topic_branches,omitempty"`
+
 	Events      []Event      `json:"events,omitempty"`
 	Executions  []Execution  `json:"executions,omitempty"`
 	Reflections []Reflection `json:"reflections,omitempty"`
 
 	Migrated int `json:"migrated,omitempty"` // 从旧 life.json 导入过什么
+}
+
+// TopicBranch 记住某个话题（意图 in:<id> 或日程 ag:<id>）已经用自己的持久分支继续。
+// 同一个话题下一次接着做时复用这个分支，不每次醒来都 Fork 一个新的。
+type TopicBranch struct {
+	Topic     string `json:"topic"`
+	BranchSID string `json:"branch_sid"`
+	Updated   int64  `json:"updated"`
 }
 
 // Interest 是长期兴趣，必须带来源（哪次经历、哪段聊天或哪次反思让它产生的）。
@@ -730,6 +740,35 @@ func (s *State) AddIdea(x Idea, now time.Time, ttl time.Duration) (*Idea, error)
 	s.Ideas = append(s.Ideas, x)
 	s.Touch()
 	return &s.Ideas[len(s.Ideas)-1], nil
+}
+
+// LinkTopicBranch 记下这个话题的持久分支；同一话题再来时复用，不重复创建。
+func (s *State) LinkTopicBranch(topic, sid string, now time.Time) {
+	if topic == "" || sid == "" {
+		return
+	}
+	for i := range s.TopicBranches {
+		if s.TopicBranches[i].Topic == topic {
+			s.TopicBranches[i].BranchSID, s.TopicBranches[i].Updated = sid, now.Unix()
+			s.Touch()
+			return
+		}
+	}
+	s.TopicBranches = append(s.TopicBranches, TopicBranch{Topic: topic, BranchSID: sid, Updated: now.Unix()})
+	s.Touch()
+}
+
+// BranchOfTopic 是这个话题已经在用的分支；没有返回空。
+func (s *State) BranchOfTopic(topic string) (string, bool) {
+	if topic == "" {
+		return "", false
+	}
+	for _, t := range s.TopicBranches {
+		if t.Topic == topic {
+			return t.BranchSID, t.BranchSID != ""
+		}
+	}
+	return "", false
 }
 
 // SetNumber 改一个可以直接编辑的心智数值（设计 §7.2）：想法的兴趣/新颖/预计耗时、
