@@ -160,7 +160,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 	branch := a.isBranchSID(sid)
 	active := a.sessions[sid] != nil && a.sessions[sid].run != nil
 	var context session.ContextInfo
-	if !branch || active {
+	if (!branch && !isHookSID(sid)) || active {
 		context = a.contextInfo(sid)
 	} else {
 		context = session.ContextInfo{Lazy: true, Last: st.Meter.Usage, Compacted: st.Base, CompactedAt: st.CompactedAt, Total: st.Meter.Usage.PromptTokens}
@@ -261,7 +261,7 @@ func (a *App) Session(sid string) (info SessionInfo, ok bool) {
 		return SessionInfo{}, false
 	}
 	info = a.sessionInfo(sid)
-	if a.isBranchSID(sid) {
+	if a.isBranchSID(sid) || isHookSID(sid) {
 		info.Context = a.contextInfo(sid)
 		if a.sessions[sid] == nil || a.sessions[sid].run == nil {
 			a.store.UnloadHistory(sid)
@@ -276,7 +276,7 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 	defer a.mu.Unlock()
 	h := slices.Clone(a.store.History(sid))
 	summary := a.store.Settings(sid).Summary
-	if a.isBranchSID(sid) && (a.sessions[sid] == nil || a.sessions[sid].run == nil) {
+	if (a.isBranchSID(sid) || isHookSID(sid)) && (a.sessions[sid] == nil || a.sessions[sid].run == nil) {
 		a.store.UnloadHistory(sid)
 	}
 	return h, summary

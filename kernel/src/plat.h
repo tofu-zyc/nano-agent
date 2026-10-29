@@ -143,6 +143,7 @@ typedef struct {
     void (*started)(void *ctx, int64_t pid);
     void (*output)(void *ctx, int stream, const void *data, size_t n);
     void *ctx;
+ const char *input; /* optional bounded UTF-8 child stdin, <=4096 bytes */
 } proc_stream;
 int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[], int timeout_s,
                           bool watch_stdin, size_t max_output, buf_t *out, proc_status *st,

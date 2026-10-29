@@ -250,6 +250,9 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
     x->write = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "write"));
     x->home_only = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "home"));
     x->watch_stdin = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "watch_stdin"));
+ const cJSON *hi=cJSON_GetObjectItemCaseSensitive(req,"hook_input");
+ if(hi && (!cJSON_IsString(hi)||strlen(hi->valuestring)>4096)){buf_puts(err,"Hook 输入最多 4096 字节");return -1;}
+ x->hook_input=cJSON_IsString(hi)?hi->valuestring:NULL;
 
     if (load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "dirs"), true, false, &x->dirs, &x->ndirs, err) < 0 ||
         load_paths(x, cJSON_GetObjectItemCaseSensitive(req, "ro"), false, true, &x->ro, &x->nro, err) < 0 ||
@@ -376,6 +379,7 @@ static int probe(void)
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "v", NEXEC_VERSION);
     cJSON_AddNumberToObject(r,"job_stream",1);
+ cJSON_AddNumberToObject(r,"hook_input",1);
     cJSON_AddNumberToObject(r, "landlock", sb_landlock_abi());
     /* 能接受哪些沙箱请求模式：on 只有在有 Landlock 时才真正成立 */
     cJSON *modes = cJSON_AddArrayToObject(r, "sandbox_modes");

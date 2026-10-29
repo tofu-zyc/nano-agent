@@ -27,6 +27,7 @@ type Local struct {
 	probed       bool
 	landlock     int
 	sandboxModes []string
+	hookInput    bool
 	osName       string
 	detail       string
 }
@@ -56,14 +57,16 @@ func (l *Local) Probe() (landlock int, osName string, ok bool, detail string) {
 		defer cancel()
 		out, err := exec.CommandContext(ctx, l.exec.Path, "--probe").Output()
 		var p struct {
-			Landlock *int   `json:"landlock"`
-			OS       string `json:"os"`
+			HookInput int    `json:"hook_input"`
+			Landlock  *int   `json:"landlock"`
+			OS        string `json:"os"`
 		}
 		if err != nil || json.Unmarshal(out, &p) != nil || p.Landlock == nil {
 			l.detail = "执行器 " + l.exec.Path + " 运行不了"
 		} else {
 			l.landlock = *p.Landlock
 			l.sandboxModes = probeSandboxModes(string(out))
+			l.hookInput = p.HookInput >= 1
 			if p.OS != "" {
 				l.osName = p.OS
 			}
@@ -75,6 +78,9 @@ func (l *Local) Probe() (landlock int, osName string, ok bool, detail string) {
 func (l *Local) Exec(ctx context.Context, req []byte) Result {
 	if _, _, ok, detail := l.Probe(); !ok {
 		return Result{Content: detail}
+	}
+	if err := checkHookInput(req, l.hookInput); err != nil {
+		return Result{Content: err.Error()}
 	}
 	if err := checkSandboxRequest(req, l.sandboxModes); err != nil {
 		return Result{Content: err.Error()}

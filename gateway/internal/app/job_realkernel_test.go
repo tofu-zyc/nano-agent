@@ -153,7 +153,7 @@ func TestRealCJobControlFramesThroughGoHub(t *testing.T) {
 		t.Fatal("node ACK preceded durable Gateway ownership/event", saved)
 	}
 	fact, exists := e.a.jobEvents.Event(saved.TerminalEventID)
-	if !exists || fact.Name != "job.completed" || fact.Matched {
+	if !exists || fact.Name != "job.completed" || len(fact.DeliveryIDs) != 0 {
 		t.Fatal(fact, exists)
 	}
 	// A typed array projection is distinct from the string data used by pipes.

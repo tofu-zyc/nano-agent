@@ -36,6 +36,8 @@ function parseHash(): { route: Route; legacy?: Legacy } {
       return { route: topo, legacy: { target: { type: 'gateway' }, focus: params.get('focus') ?? undefined } };
     case 'devices':
       return { route: topo, legacy: { target: { type: 'machines' } } };
+    case 'hooks':
+      return { route:topo, legacy:{target:{type:'hooks',agent:arg}} };
     case 'jobs':
       return { route: topo, legacy: { target: { type: 'jobs', job_id: arg, node: params.get('node') ?? undefined } } };
     case 'schedules':

@@ -36,7 +36,7 @@ func (l Limits) defaults() Limits {
 		l.Deliveries = 4096
 	}
 	if l.Sources <= 0 {
-		l.Sources = 256
+		l.Sources = 4096
 	}
 	if l.Queue <= 0 {
 		l.Queue = 128
@@ -54,6 +54,7 @@ func (l Limits) defaults() Limits {
 }
 
 type Event struct {
+	OriginSID   string          `json:"origin_sid,omitempty"`
 	ID          string          `json:"event_id"`
 	Name        string          `json:"name"`
 	SourceID    string          `json:"source_id"`
@@ -108,6 +109,7 @@ type EventRecord struct {
 	DeliveryIDs []string `json:"deliveries,omitempty"`
 }
 type Delivery struct {
+	RunSID     string          `json:"run_sid,omitempty"`
 	ObjectKey  string          `json:"object_key,omitempty"`
 	UpdatedMS  int64           `json:"updated_ms,omitempty"`
 	Registered bool            `json:"registered_rule,omitempty"`
@@ -136,7 +138,7 @@ func (d Delivery) valid() error {
 	raw, err := json.Marshal(d)
 	if err != nil || len(raw) > 8192 || d.ID != DeliveryID(d.EventID, d.HookID, d.Revision) ||
 		d.EventID == "" || d.HookID == "" || len(d.HookID) > 128 || d.Revision == 0 ||
-		d.AgentID == "" || d.Attempt < 0 || d.Attempt > 8 || !json.Valid(d.Rule) {
+		d.AgentID == "" || len(d.RunSID) > 256 || d.Attempt < 0 || d.Attempt > 8 || !json.Valid(d.Rule) {
 		return errors.New("Hook 投递身份、规则快照或重试次数无效")
 	}
 	switch d.Status {
@@ -228,6 +230,11 @@ func sameEvent(a, b Event) bool {
 	return string(x) == string(y)
 }
 func sameDelivery(a, b Delivery) bool {
+	if a.RunSID != "" && a.RunSID != b.RunSID {
+		return false
+	}
+	a.RunSID = ""
+	b.RunSID = ""
 	a.Status = ""
 	b.Status = ""
 	a.Attempt = 0

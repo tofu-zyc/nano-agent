@@ -33,3 +33,20 @@ func probeSandboxModes(line string) []string {
 	_ = json.Unmarshal([]byte(line), &p)
 	return p.Modes
 }
+
+func checkHookInput(req []byte, supported bool) error {
+	var v map[string]json.RawMessage
+	if json.Unmarshal(req, &v) != nil {
+		return fmt.Errorf("执行请求不是有效 JSON")
+	}
+	if input, ok := v["hook_input"]; ok {
+		var text *string
+		if !supported {
+			return fmt.Errorf("目标执行器尚不支持 Hook 事件输入，未执行，请更新执行器")
+		}
+		if json.Unmarshal(input, &text) != nil || text == nil || len(*text) > 4096 {
+			return fmt.Errorf("Hook 输入必须为不超过 4096 字节的字符串")
+		}
+	}
+	return nil
+}

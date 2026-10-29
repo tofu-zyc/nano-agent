@@ -135,6 +135,9 @@ func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	}
 	if admin {
 		tools = append(tools, toolOf(scheduleTool()))
+		if a.jobEvents != nil && n.info.Features["hook_tool"] >= 1 {
+			tools = append(tools, toolOf(hookTool()))
+		}
 		for _, spec := range a.gatewayTools() {
 			tools = append(tools, toolOf(spec))
 		}

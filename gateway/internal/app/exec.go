@@ -32,7 +32,7 @@ func (a *App) execTool(node string, s *sess, m *proto.Msg) {
 	// processes. Without this, four state calls plus four node calls could run
 	// concurrently after the node acknowledged its queued calls.
 	switch m.Name {
-	case "Session", "Schedule", "Message", "SendFile", "FollowUp", "Agenda", "Idea", "Mind", "Diary", knowledgeLabel, "Skill", "Gateway", "GatewayAdmin":
+	case "Hook", "Session", "Schedule", "Message", "SendFile", "FollowUp", "Agenda", "Idea", "Mind", "Diary", knowledgeLabel, "Skill", "Gateway", "GatewayAdmin":
 		r := s.run
 		if r.execs == nil {
 			r.execs = map[string]context.CancelFunc{}
@@ -102,6 +102,10 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 	}
 	if m.Name == "WebSearch" || m.Name == "WebFetch" {
 		a.webTool(s, m, reply)
+		return
+	}
+	if m.Name == "Hook" {
+		a.hookToolCall(s, m, reply)
 		return
 	}
 	if m.Name == "Job" {

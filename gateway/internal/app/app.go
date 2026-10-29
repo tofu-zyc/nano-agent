@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
+	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/llm"
@@ -51,6 +52,8 @@ type Command struct {
 
 var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
+	{Name: "hooks", Desc: "查看可靠事件规则", Admin: true},
+	{Name: "hook", Args: "<编号> [get|runs|enable|disable|delete] | create <JSON>", Desc: "管理事件规则与投递", Admin: true},
 	{Name: "jobs", Desc: "查看已登记的长时间和后台任务"},
 	{Name: "bg", Args: "[job_id]", Desc: "把当前前台命令原地转后台"},
 	{Name: "job", Args: "<job_id> [status|output [游标]|wait [秒]|cancel|detach]", Desc: "查看日志、短等待或停止一个任务"},
@@ -105,17 +108,19 @@ var helpText = func() string {
 }()
 
 type App struct {
-	jobControls    map[string]jobControlWait
-	jobCompletions map[string]jobCompletionWait
-	jobEvents      *eventlog.Store
-	jobEventsErr   error
-	jobPersist     map[string]*jobPersistence
-	runtimeLimits  config.Runtime
-	runWaitSerial  uint64
-	dispatcher     *dispatch.Engine
-	dispatchErr    error
-	dispatchBoot   string
-	dispatchWait   map[string]func(dispatch.Change)
+	hookEngine      *hooks.Engine
+	runtimeEventSeq uint64
+	jobControls     map[string]jobControlWait
+	jobCompletions  map[string]jobCompletionWait
+	jobEvents       *eventlog.Store
+	jobEventsErr    error
+	jobPersist      map[string]*jobPersistence
+	runtimeLimits   config.Runtime
+	runWaitSerial   uint64
+	dispatcher      *dispatch.Engine
+	dispatchErr     error
+	dispatchBoot    string
+	dispatchWait    map[string]func(dispatch.Change)
 
 	forkWG            sync.WaitGroup
 	forkWork          map[string]chan struct{}
@@ -258,6 +263,7 @@ type sess struct {
 // queued 是排队等处理的一条消息。trigger 是群聊里“该你说话了”的触发：
 // 内容已经在历史里了，不再追加一条用户消息。
 type queued struct {
+	hook    *hookInvocation
 	m       channel.Message
 	ep      endpoint
 	who     string
@@ -281,6 +287,7 @@ type out struct {
 }
 
 type run struct {
+	hook                 *hookInvocation
 	experienceActions    []string
 	experienceActionTurn int
 	experienceActionKeys map[string]bool
@@ -481,6 +488,9 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 func (a *App) SetHub(h *kernel.Hub) {
 	a.mu.Lock()
 	a.hub = h
+	if a.hookEngine == nil && a.jobEvents != nil {
+		a.hookEngine = hooks.New(a.ctx, a.jobEvents, hookExecutor{a}, func() time.Time { a.mu.Lock(); defer a.mu.Unlock(); return a.now() })
+	}
 	a.mu.Unlock()
 	a.hubRef.Store(h)
 }
@@ -773,6 +783,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			a.answer(c, text)
 			a.mu.Unlock()
 		}()
+		return
+	case "hooks", "hook":
+		a.cmdHook(c, cmd, arg, m.MsgID)
 		return
 	case "jobs", "bg", "job":
 		a.cmdJobs(c, cmd, arg)
@@ -1179,7 +1192,7 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+	r := &run{hook: head.hook, scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
 		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(8)), asked: text,
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
@@ -1312,6 +1325,7 @@ func (a *App) startRun(s *sess) {
 		runData["images"] = images
 	}
 	a.publish(events.Event{T: "run", SID: s.sid, RunID: r.runID, Kind: "start", Text: content, Data: runData})
+	a.emitRuntimeEvent("run.started", s.sid, r, map[string]string{"status": "running"})
 	if !a.hub.Send(node, in) {
 		a.endRun(s, "（内核连接断开，本轮已中止）")
 	}
@@ -1351,7 +1365,13 @@ func (a *App) endRun(s *sess, note string) {
 	for _, v := range r.views() {
 		v.Close()
 	}
+	a.emitRuntimeEvent("run.finished", s.sid, r, map[string]string{"status": r.outcome})
+	a.finishHook(s, r, note)
 	s.run = nil
+	if isHookSID(s.sid) {
+		a.store.UnloadHistory(s.sid)
+		delete(a.sessions, s.sid)
+	}
 	s.scheduled = nil
 	if r.scheduled != nil {
 		why := note
@@ -1607,6 +1627,11 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.cancelMCP(s.sid, m.ID)
 	case proto.TResult:
 		a.recordToolEvidence(s.run, m)
+		name := "tool.after"
+		if m.OK != nil && !*m.OK {
+			name = "tool.failed"
+		}
+		a.emitRuntimeEvent(name, s.sid, s.run, map[string]any{"tool": s.run.callArgs[m.ID].Name, "call_id": m.ID, "turn_id": s.run.turnID, "ok": m.OK == nil || *m.OK})
 		content := m.Content
 		if m.OK != nil && !*m.OK {
 			content = "[执行失败] " + content
@@ -1641,6 +1666,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		a.publish(events.Event{T: "tool_result", SID: s.sid, RunID: s.run.runID, TurnID: s.run.turnID, ID: m.ID, OK: events.Bool(m.OK == nil || *m.OK),
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000), Sandbox: m.Sandbox})
 	case proto.TApproveReq:
+		a.emitRuntimeEvent("approval.waiting", s.sid, s.run, map[string]string{"tool": m.Name, "call_id": m.ID})
 		if s.run.full {
 			a.autoApprove(s, m)
 		} else {
@@ -1809,7 +1835,10 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	s.lastActivity = a.now()
 	a.pumpRuns()
-	if s.run == nil && a.isBranchSID(s.sid) {
+	if s.run == nil && isHookSID(s.sid) {
+		a.store.UnloadHistory(s.sid)
+		delete(a.sessions, s.sid)
+	} else if s.run == nil && a.isBranchSID(s.sid) {
 		a.store.UnloadHistory(s.sid)
 	} else if s.run == nil && !isCronSID(s.sid) {
 		a.maybeCompact(s, false)
@@ -1819,6 +1848,10 @@ func (a *App) finish(s *sess, status, detail string) {
 // callModel 发起一次模型请求。调用方持有锁；请求本身在协程里跑。
 func (a *App) callModel(s *sess) {
 	r := s.run
+	if r.hook != nil && r.hook.work.Spec.Handler.TokenBudget > 0 && r.usage.PromptTokens+r.usage.CompletionTokens >= r.hook.work.Spec.Handler.TokenBudget {
+		a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID, Reason: proto.ReasonError, Detail: "Hook token 子预算已用尽"})
+		return
+	}
 	if r.cancelLLM != nil {
 		a.log.Warn("上一次模型请求还没结束，忽略重复的 model", "sid", s.sid)
 		return
@@ -1899,6 +1932,9 @@ func (a *App) generateModel(s *sess) {
 				}
 			}
 		}
+	}
+	if r.hook != nil && r.hook.work.Spec.Handler.TokenBudget > 0 {
+		req.MaxTokens = max(1, r.hook.work.Spec.Handler.TokenBudget-r.usage.PromptTokens-r.usage.CompletionTokens)
 	}
 	req.Tools = snapshotTools
 	_, _, meterSignature, _ := a.contextParts(s.sid)
@@ -2105,6 +2141,9 @@ func wireMs(d time.Duration) int {
 // Wait joins durable workers after the App context has been cancelled. Call it
 // before re-exec or releasing the data directory; an in-progress sync may finish.
 func (a *App) Wait() {
+	if a.hookEngine != nil {
+		a.hookEngine.Close()
+	}
 	if a.dispatcher != nil {
 		<-a.dispatcher.Done()
 	}

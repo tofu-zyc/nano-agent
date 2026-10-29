@@ -125,10 +125,12 @@ def setup():
 
 
 def run(tool, args=None, dirs=(WORK_WIN,), write=True, ro=(), rw=(), home=False,
-        max_output=65536, timeout=40, sandbox="auto"):
+        max_output=65536, timeout=40, sandbox="auto", hook_input=None):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs),
            "write": write, "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test",
            "max_output": max_output, "watch_stdin": True, "sandbox": sandbox}
+    if hook_input is not None:
+        req["hook_input"] = hook_input
     p = subprocess.Popen(win_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, cwd=WIN_CWD)
     p.stdin.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -412,12 +414,20 @@ def t_stream():
         print("  FAIL stream:",e)
 
 
+@case("Hook：Windows 子进程接收 UTF-8 JSON 标准输入")
+def t_hook_input():
+    body = json.dumps({"delivery_id": "hd_fixed", "data": "中文🙂", "literal": "$(do-not-run)"}, ensure_ascii=False)
+    content = ok(run("Shell", {"command": "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false);[Console]::In.ReadToEnd()"}, hook_input=body))
+    assert json.loads(content) == json.loads(body), content
+    bad(run("Shell", {"command": "'must-not-run'"}, hook_input="x" * 4097), "4096")
+
+
 def main():
     try:
         setup()
         print(f"windows temp：{ROOT_WIN}")
         for t in (t_probe, t_read, t_write, t_edit_crlf, t_fetch, t_escape, t_read_all, t_shell, t_env,
-                  t_stream, t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics, t_sandbox_policy):
+                  t_stream, t_hook_input, t_timeout, t_cancel, t_grep, t_ls, t_bad_request, t_unicode_home, t_directory_diagnostics, t_sandbox_policy):
             t()
         print(f"exec-win: {len(FAILS)} failures")
         return 1 if FAILS else 0

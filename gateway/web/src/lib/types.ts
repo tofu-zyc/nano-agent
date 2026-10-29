@@ -456,6 +456,7 @@ export type Target =
   | { type: 'skills' }
   | { type: 'mcp' } // MCP 服务
   | { type: 'schedules' }
+  | { type: 'hooks'; agent?: string }
   | { type: 'jobs'; node?: string; job_id?: string };
 
 // /api/devices：SSH 连接、配对请求、配对过的电脑、电脑接入地址
@@ -499,3 +500,17 @@ export type JobInfo = {
 export type JobOutput = {chunks:{cursor:number;next_cursor:number;stream:string;data:string}[];
   next_cursor:number;output_cursor:number;truncated_before:number;gap:boolean;error?:string};
 export type JobResponse = {job?:JobInfo;jobs?:JobInfo[];output?:JobOutput;next?:string;accepted?:boolean;action?:string;wait_expired?:boolean};
+
+export type HookSpec = {
+  name:string;on:string[];match?:{job_id?:string;workspace_id?:string;status?:string[];fields?:Record<string,string>;path_glob?:string};
+  handler:{type:'notify'|'command'|'agent';text?:string;command?:string;script?:string;digest?:string;prompt?:string;
+    conversation?:'temporary'|'origin'|'life'|'branch';branch_sid?:string;timeout_ms?:number;token_budget?:number;retry_safe?:boolean};
+  scope?:{source_sid?:string;mode?:string;workspaces?:string[];endpoints?:{channel:string;chat:string;fingerprint?:string}[]};
+  deliver?:'creator'|'origin'|'none';debounce_ms?:number;cooldown_ms?:number;retries?:number;priority?:number;on_error?:'allow'|'deny';
+  deadline_at?:number;watch?:{workspace:string;path:string};
+};
+export type HookRule = {id:string;revision:number;agent_id:string;creator:string;enabled:boolean;once:boolean;silent:boolean;
+  claimed_by?:string;deleted?:boolean;spec:HookSpec;paused_reason?:string};
+export type HookDelivery = {delivery_id:string;event_id:string;hook_id:string;hook_revision:number;agent_id:string;creator:string;silent:boolean;
+  target_sid?:string;run_sid?:string;status:string;attempt:number;next_at?:number;updated_ms?:number;error?:string;result?:string};
+export type HookResponse = {rules?:HookRule[];rule?:HookRule;deliveries?:HookDelivery[];next?:string;matched?:boolean};

@@ -16,6 +16,7 @@ type Execution struct {
 	Spec     Spec
 }
 type Result struct {
+	RunSID    string
 	Summary   string
 	Err       error
 	Retry     bool
@@ -40,6 +41,8 @@ type finished struct {
 	result Result
 }
 type Engine struct {
+	deadlines                deadlines
+	nextPrune                int64
 	ctx                      context.Context
 	cancel                   context.CancelFunc
 	store                    *eventlog.Store
@@ -167,20 +170,17 @@ func (e *Engine) step() {
 	for _, done := range expired {
 		e.finish(done)
 	}
-	version := e.store.RuleVersion()
-	if version != e.ruleVersion {
-		e.rules = e.store.Rules("")
-		e.ruleVersion = version
-	}
+	e.refreshRules()
+	e.due(now)
 	for _, event := range e.store.PendingEvents(16) {
-		if version := e.store.RuleVersion(); version != e.ruleVersion {
-			e.rules = e.store.Rules("")
-			e.ruleVersion = version
-		}
+		e.refreshRules()
 		deliveries := []eventlog.Delivery{}
 		for _, record := range e.rules {
 			if record.Deleted || !record.Enabled || record.AgentID != event.AgentID || record.ID == event.OriginHook ||
 				record.Once && record.ClaimedBy != "" {
+				continue
+			}
+			if event.Name == "deadline.at" && event.SourceID == "deadline" && event.SourceEpoch != fmt.Sprintf("%s-r%d", record.ID, record.Revision) {
 				continue
 			}
 			spec, err := Parse(record)
@@ -250,7 +250,11 @@ func (e *Engine) step() {
 			continue
 		}
 		key := d.HookID + "/" + d.ObjectKey
-		if now.UnixMilli() < e.last[key]+int64(spec.CooldownMS) {
+		last, _ := e.store.LastAttempt(d.HookID, d.ObjectKey)
+		if now.UnixMilli() < max(last, e.last[key])+int64(spec.CooldownMS) && d.Attempt == 0 {
+			continue
+		}
+		if e.store.AttemptsSince(d.HookID, now.Add(-time.Minute).UnixMilli()) >= 16 {
 			continue
 		}
 		event, ok := e.store.Event(d.EventID)
@@ -331,6 +335,9 @@ func (e *Engine) finish(done finished) {
 	}
 	d := job.work.Delivery
 	result := done.result
+	if result.RunSID != "" {
+		d.RunSID = result.RunSID
+	}
 	d.Result = result.Summary
 	if len(d.Result) > 2048 {
 		d.Result = d.Result[:2048]
@@ -357,4 +364,7 @@ func (e *Engine) finish(done finished) {
 		e.fail(err)
 	}
 	e.release(job)
+	if observer, ok := e.executor.(interface{ Changed(eventlog.Delivery) }); ok {
+		observer.Changed(d)
+	}
 }

@@ -76,8 +76,11 @@ bool tool_shell(const xctx *x, const cJSON *a, buf_t *out)
 #endif
     argv[n] = NULL;
     proc_status st;
+    proc_stream input_stream = x->stream ? *x->stream : (proc_stream){0};
+    input_stream.input=x->hook_input;
+    const proc_stream *proc=x->hook_input ? &input_stream : x->stream;
     int rc = plat_run_proc_stream(argv, x->ndirs ? x->dirs[0] : x->home, x->env, timeout,
-                           x->watch_stdin, x->max_output, out, &st, x->stream);
+                           x->watch_stdin, x->max_output, out, &st, proc);
     if (x->process_status) *x->process_status=st;
     free(exe);
     free(wrapped);

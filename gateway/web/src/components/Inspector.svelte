@@ -26,6 +26,7 @@
   import WorkspacePanel from './panels/WorkspacePanel.svelte';
   import Icon from './Icon.svelte';
   import JobsPanel from './panels/JobsPanel.svelte';
+ import HooksPanel from './panels/HooksPanel.svelte';
 
   const target = $derived(store.inspector!);
   const ov = $derived(store.ov!);
@@ -117,6 +118,8 @@
         return { icon: 'plug', color: 'var(--c-mcp)', title: 'MCP 服务',
           sub: list.length ? `${list.length} 个服务 · ${list.filter((m) => m.online).length} 个连着 · ${list.reduce((n, m) => n + (m.enabled ? m.tool_count : 0), 0)} 个工具` : '外部工具：文件系统、浏览器、computer use……' };
       }
+      case 'hooks':
+        return {icon:'plug',color:'var(--c-cron)',title:'事件规则',sub:'可靠事件、处理器和投递记录'};
       case 'jobs':
         return { icon: 'terminal', color: 'var(--c-kernel)', title: '执行任务', sub: '后台任务、日志和执行状态' };
       case 'schedules': {
@@ -186,6 +189,8 @@
         <SkillsPanel />
       {:else if target.type === 'mcp'}
         <MCPPanel />
+      {:else if target.type === 'hooks'}
+ <HooksPanel agent={target.agent}/>
       {:else if target.type === 'jobs'}
         <JobsPanel node={target.node} job_id={target.job_id} />
       {:else if target.type === 'schedules'}

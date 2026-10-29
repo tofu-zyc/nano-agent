@@ -579,6 +579,7 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         /* Schedule：查看和立即运行按只读算，增删改按写算 */
         if (schedule)
             kind = in->action && (!strcmp(in->action, "list") || !strcmp(in->action, "run_now")) ? NA_TOOL_READ : NA_TOOL_WRITE;
+        if (!strcmp(k->name,"Hook") && in->action && (!strcmp(in->action,"list") || !strcmp(in->action,"get") || !strcmp(in->action,"runs") || !strcmp(in->action,"test"))) kind=NA_TOOL_READ;
         decision d = k->tool ? decide(sandbox, sandbox_off, r->mode, kind, k->elevated, r->elevate, &why) : DECIDE_DENY;
         if (schedule && !r->elevate) {
             d = DECIDE_DENY;

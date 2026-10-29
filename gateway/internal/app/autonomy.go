@@ -436,6 +436,9 @@ func (a *App) startLife(agentID string, manual bool) error {
 
 // startMindLocked 开一轮自主活动：内心会话、交接用的说明、状态先标成进行中。调用方持有锁。
 func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy.Trigger, manual bool) error {
+	return a.startMindWithHookLocked(ag, st, trig, manual, nil)
+}
+func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig autonomy.Trigger, manual bool, hook *hookInvocation) error {
 	if item, ok := st.AgendaByID(trig.AgendaID); ok && item.ScopeSet {
 		for _, id := range item.Workspaces {
 			if a.findWorkspace(id) == nil {
@@ -472,7 +475,11 @@ func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy
 	a.saveMinds()
 	a.saveLife()
 	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual}
-	s.queue = append(s.queue, queued{ep: endpoint{ch: "life", chat: ag.ID}, who: "life:" + ag.ID, inner: true,
+	who := "life:" + ag.ID
+	if hook != nil {
+		who = hook.work.Delivery.Creator
+	}
+	s.queue = append(s.queue, queued{hook: hook, ep: endpoint{ch: "life", chat: ag.ID}, who: who, inner: true,
 		m: channel.Message{Text: note}})
 	a.startRun(s)
 	if s.run == nil {

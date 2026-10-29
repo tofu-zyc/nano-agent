@@ -704,9 +704,18 @@ int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[]
         sigaction(SIGHUP, &sa, NULL);
     }
 
+    int ip[2]={-1,-1};
+    if(stream && stream->input){
+        size_t bytes=strlen(stream->input);
+        if(bytes>4096 || pipe(ip)<0){close(p[0]);close(p[1]);if(stream){close(ep[0]);close(ep[1]);}buf_puts(out,"Hook 输入管道失败");return -1;}
+        set_cloexec(ip[0]);set_cloexec(ip[1]);
+        if(write(ip[1],stream->input,bytes)!=(ssize_t)bytes){close(ip[0]);close(ip[1]);close(p[0]);close(p[1]);close(ep[0]);close(ep[1]);return -1;}
+        close(ip[1]);ip[1]=-1;
+    }
     pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) {
+        if(ip[0]>=0)close(ip[0]);
         buf_puts(out, "fork 失败：");
         buf_puts(out, strerror(errno));
         close(p[0]); close(p[1]);
@@ -723,7 +732,7 @@ int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[]
         signal(SIGTERM, SIG_DFL);
         signal(SIGHUP, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
-        int dn = open("/dev/null", O_RDONLY);
+        int dn = ip[0]>=0 ? ip[0] : open("/dev/null", O_RDONLY);
         if (dn < 0 || dup2(dn, 0) < 0 || dup2(p[1], 1) < 0 || dup2(stream ? ep[1] : p[1], 2) < 0) _exit(127);
         if (chdir(cwd) < 0) {
             dprintf(2, "进入目录 %s 失败：%s\n", cwd, strerror(errno));
@@ -734,6 +743,7 @@ int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[]
         _exit(127);
     }
     setpgid(pid, pid);
+    if(ip[0]>=0)close(ip[0]);
     close(p[1]);
     set_nonblock(p[0]);
     if (stream) {close(ep[1]);set_nonblock(ep[0]);}

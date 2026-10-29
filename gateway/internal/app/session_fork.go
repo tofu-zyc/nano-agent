@@ -614,6 +614,9 @@ func (a *App) branchDelivery(sid string) string {
 
 // branchSilent 报告这个会话是不是"安静运行"。
 func (a *App) branchSilent(sid string) bool {
+	if inv := a.sessionHook(sid); inv != nil {
+		return inv.work.Delivery.Silent || inv.work.Spec.Handler.Conversation == "branch"
+	}
 	return a.branchDelivery(sid) == session.BranchDeliverySilent
 }
 

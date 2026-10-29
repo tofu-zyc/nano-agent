@@ -138,3 +138,56 @@ func TestDebounceCoalescesPersistedObjectAndCausationDoesNotLoop(t *testing.T) {
 	default:
 	}
 }
+
+func TestHookDeadlineHeapPublishesOnlyItsRegisteredRuleAndSurvivesRestart(t *testing.T) {
+	store, rule := hookFixture(t, true, 0)
+	spec, _ := Parse(rule)
+	spec.On = []string{"deadline.at"}
+	spec.DeadlineAt = 100500
+	body, _ := json.Marshal(spec)
+	rule.Body = body
+	rule.Revision++
+	if err := store.Commit(context.Background(), eventlog.Transaction{Rule: &eventlog.RuleChange{Record: rule, Expected: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	spec.DeadlineAt = 200000
+	body, _ = json.Marshal(spec)
+	later := eventlog.RuleRecord{ID: "later", Revision: 1, AgentID: rule.AgentID, Creator: rule.Creator, OperationID: "later-op", Enabled: true, Once: true, Body: body}
+	if err := store.Commit(context.Background(), eventlog.Transaction{Rule: &eventlog.RuleChange{Record: later}}); err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(100000)
+	exec := &recorder{calls: make(chan Execution, 8)}
+	engine := New(context.Background(), store, exec, func() time.Time { return time.UnixMilli(clock.Load()) })
+	engine.Wake()
+	select {
+	case got := <-exec.calls:
+		t.Fatal("deadline early", got)
+	case <-time.After(30 * time.Millisecond):
+	}
+	clock.Store(100500)
+	engine.Wake()
+	var got Execution
+	select {
+	case got = <-exec.calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline did not fire")
+	}
+	if got.Delivery.HookID != rule.ID || got.Event.Name != "deadline.at" {
+		t.Fatal(got)
+	}
+	waitState(t, store, got.Delivery.ID, "succeeded")
+	engine.Close()
+	engine = New(context.Background(), store, exec, func() time.Time { return time.UnixMilli(clock.Load()) })
+	defer engine.Close()
+	engine.Wake()
+	select {
+	case got = <-exec.calls:
+		t.Fatal("replayed once deadline or fired unrelated rule", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if later, _ := store.Rule("later"); later.ClaimedBy != "" {
+		t.Fatal(later)
+	}
+}

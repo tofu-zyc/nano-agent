@@ -234,6 +234,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/workspaces/{id}", s.auth(s.patchWorkspace))
 	mux.HandleFunc("DELETE /api/workspaces/{id}", s.auth(s.removeWorkspace))
 	mux.HandleFunc("GET /api/events", s.auth(s.events))
+	mux.HandleFunc("GET /api/hooks", s.auth(s.getHooks))
+	mux.HandleFunc("POST /api/hooks", s.auth(s.hookAction))
 	mux.HandleFunc("GET /api/jobs", s.auth(s.jobs))
 	mux.HandleFunc("POST /api/jobs/{job}/control", s.auth(s.jobControl))
 	mux.HandleFunc("POST /api/sessions", s.auth(s.newSession))

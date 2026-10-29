@@ -28,6 +28,7 @@ type sshConn struct {
 	ready        bool
 	landlock     int
 	sandboxModes []string
+	hookInput    bool
 	osName       string
 	master       *exec.Cmd
 }
@@ -309,7 +310,11 @@ type sshHost struct{ h *sshConn }
 func (s sshHost) Exec(ctx context.Context, req []byte) Result {
 	s.h.mu.Lock()
 	modes := append([]string(nil), s.h.sandboxModes...)
+	hookInput := s.h.hookInput
 	s.h.mu.Unlock()
+	if err := checkHookInput(req, hookInput); err != nil {
+		return Result{Content: err.Error()}
+	}
 	if err := checkSandboxRequest(req, modes); err != nil {
 		return Result{Content: err.Error()}
 	}
@@ -380,6 +385,11 @@ func (h *sshConn) acceptProbe(line string) (int, string, error) {
 		modes := probeSandboxModes(strings.TrimPrefix(line, "OK "))
 		h.mu.Lock()
 		h.sandboxModes = modes
+		var capabilities struct {
+			HookInput int `json:"hook_input"`
+		}
+		_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "OK ")), &capabilities)
+		h.hookInput = capabilities.HookInput >= 1
 		h.mu.Unlock()
 	}
 	return n, osName, err

@@ -19,12 +19,13 @@ static na_tool_policy tools[] = {
     { "GatewayAdmin", NA_TOOL_ADMIN, 610000 },
     { "WebSearch", NA_TOOL_PUBLIC_READ, 70000 },
  {"Schedule",NA_TOOL_SCHEDULE,70000},
+ {"Hook",NA_TOOL_ADMIN,70000},
 };
 
 static na_core *mk_sb(int max_steps, bool sandbox)
 {
     na_core_config cfg = {
-        .tools = tools, .ntools = 6,
+        .tools = tools, .ntools = sizeof tools/sizeof tools[0],
         .sandbox = sandbox,
         .max_steps = max_steps,
         .run_timeout_ms = 600000,
@@ -818,7 +819,7 @@ static void test_queued_ack_timeout_retires_host_request(void)
 
 static void test_queued_timeout(void)
 {
-    na_core_config cfg = { .tools = tools, .ntools = 6, .sandbox = true, .max_steps = 16,
+    na_core_config cfg = { .tools = tools, .ntools = sizeof tools/sizeof tools[0], .sandbox = true, .max_steps = 16,
                            .run_timeout_ms = 600000, .approval_timeout_ms = 120000,
                            .max_parallel_tools_per_run = 1, .queued_timeout_ms = 5000 };
     na_core *c = na_core_new(&cfg);
@@ -908,7 +909,7 @@ static void test_turn_batch_validation(void)
     na_core_free(c);
 
     /* 一轮调用数超过上限 */
-    na_core_config cfg = { .tools = tools, .ntools = 6, .sandbox = true, .max_steps = 16,
+    na_core_config cfg = { .tools = tools, .ntools = sizeof tools/sizeof tools[0], .sandbox = true, .max_steps = 16,
                            .run_timeout_ms = 600000, .approval_timeout_ms = 120000,
                            .max_calls_per_turn = 2 };
     c = na_core_new(&cfg);
@@ -923,7 +924,7 @@ static void test_turn_batch_validation(void)
 /* 排队上限：超出后直接给出可读错误，不会无限展开 */
 static void test_queue_limit(void)
 {
-    na_core_config cfg = { .tools = tools, .ntools = 6, .sandbox = true, .max_steps = 16,
+    na_core_config cfg = { .tools = tools, .ntools = sizeof tools/sizeof tools[0], .sandbox = true, .max_steps = 16,
                            .run_timeout_ms = 600000, .approval_timeout_ms = 120000,
                            .max_parallel_tools_per_run = 1, .max_queued_calls_per_run = 1 };
     na_core *c = na_core_new(&cfg);
@@ -972,8 +973,26 @@ static void test_resource_directory_overlap(void)
     CHECK(!na_resource_overlap(NULL, 0, a, strlen(a)));
 }
 
+
+static void test_hook_management_policy(void)
+{
+    na_core *c=mk(16);
+    na_event in={.type=NA_EV_INPUT,.sid="h",.from="user",.mode=NA_MODE_AUTO,.elevate=true};
+    CHECK(na_core_feed(c,0,&in)==0);drain(c);
+    na_call call={.id="read",.name="Hook",.args="{}",.args_ok=true,.action="list"};
+    CHECK(turn(c,10,"h",NA_TURN_TOOL_USE,&call,1)==0);
+    EXPECT(c,"EXEC(read,Hook,70000)");
+    na_core_free(c);
+    c=mk(16);CHECK(na_core_feed(c,0,&in)==0);drain(c);
+    call=(na_call){.id="change",.name="Hook",.args="{}",.args_ok=true,.action="create"};
+    CHECK(turn(c,10,"h",NA_TURN_TOOL_USE,&call,1)==0);
+    EXPECT(c,"APPROVE_REQ(change,Hook,user)");
+    na_core_free(c);
+}
+
 int main(void)
 {
+    test_hook_management_policy();
     test_schedule_policy_and_deadlines();
     test_public_read_all_modes();
     test_final_answer();

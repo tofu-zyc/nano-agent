@@ -20,6 +20,7 @@ type Endpoint struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
 type Scope struct {
+	Tools      []string   `json:"tools,omitempty"`
 	SID        string     `json:"source_sid"`
 	Mode       string     `json:"mode"`
 	Workspaces []string   `json:"workspaces"`
@@ -91,11 +92,14 @@ func Normalize(s Spec) (Spec, error) {
 			s.Handler.TimeoutMS = 300000
 		}
 	}
+	if slices.Contains(s.On, "deadline.at") && s.DeadlineAt <= 0 {
+		return s, errors.New("deadline.at 需要正的 Unix 毫秒时间")
+	}
 	before := slices.Contains(s.On, "tool.before")
 	if before && s.Handler.TimeoutMS > 2000 {
 		s.Handler.TimeoutMS = 2000
 	}
-	if len(s.On) == 0 || len(s.On) > 16 || len(s.Name) > 120 || len(s.Scope.SID) > 256 || len(s.Scope.Workspaces) > 16 || len(s.Scope.Endpoints) > 8 {
+	if len(s.On) == 0 || len(s.On) > 16 || len(s.Name) > 120 || len(s.Scope.SID) > 256 || len(s.Scope.Tools) > 128 || len(s.Scope.Workspaces) > 16 || len(s.Scope.Endpoints) > 8 {
 		return s, errors.New("Hook 事件、名称或来源范围超限")
 	}
 	for _, name := range s.On {
@@ -129,7 +133,7 @@ func Normalize(s Spec) (Spec, error) {
 		if s.Handler.TimeoutMS > 30000 {
 			return s, errors.New("Hook 命令最长 30 秒；长计算请移交 Job")
 		}
-		if s.Handler.Script != "" && (len(s.Handler.Digest) != 64 || s.Handler.Script == "") {
+		if s.Handler.Script != "" && (s.Handler.Digest != "" && len(s.Handler.Digest) != 64) {
 			return s, errors.New("脚本必须登记固定内容摘要")
 		}
 	}

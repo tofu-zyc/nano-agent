@@ -14,6 +14,9 @@ import (
 
 // approvalOuts 自主活动不广播过程，但审批仍送回创建日程的管理员会话。
 func (a *App) approvalOuts(s *sess) []out {
+	if a.branchSilent(s.sid) {
+		return nil
+	}
 	if !isLifeSID(s.sid) || !s.run.inner {
 		return s.run.outs
 	}

@@ -23,3 +23,18 @@ func TestExplicitSandboxRequiresTargetProbeCapability(t *testing.T) {
 		t.Fatal("tool outcome confused with applied isolation", r)
 	}
 }
+
+func TestHookInputRequiresActualExecutorSupport(t *testing.T) {
+	request := []byte(`{"hook_input":"{\"event\":\"done\"}"}`)
+	if err := checkHookInput(request, false); err == nil {
+		t.Fatal("old executor accepted Hook stdin")
+	}
+	if err := checkHookInput(request, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`{"hook_input":null}`, `{"hook_input":12}`, `{"hook_input":"` + strings.Repeat("x", 4097) + `"}`} {
+		if err := checkHookInput([]byte(raw), true); err == nil {
+			t.Fatal("invalid input", raw[:min(100, len(raw))])
+		}
+	}
+}

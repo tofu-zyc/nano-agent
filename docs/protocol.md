@@ -341,3 +341,12 @@ request_id 固定关联节点、当前连接 epoch 和 job_id，最多 128 个�
 节点在受理流式/Job 请求时覆盖 shell_timeout_max/allow_no_timeout，Gateway 或模型
 不能通过请求提高节点上限；普通旧模式仍使用 120/600 秒语义。
 yield_after_ms 若提供，必须为 100–600000 的整数毫秒，否则在建立 Job 记录前拒绝。
+
+
+### Hook 工具与短命令输入
+
+hello.features.hook_tool=1 表示协调节点认识并转发 Hook 工具。list/get/runs/test 按只读工具处理，修改按 GatewayAdmin 策略审批；Gateway 再核验管理员和固定来源。prefixVer=11 使旧工具前缀更新一次。
+
+执行器 --probe 与节点 hello 分别报告 hook_input=1；节点取实际执行器能力，不因内核版本较新而假定旁边执行器也已升级。请求 hook_input 是宿主固定的 UTF-8 事件 JSON，不读取模型 Shell 参数中的同名字段，最多 4096 字节。子进程的 stdin 与执行器 watch_stdin 取消通道分开。Linux/macOS 和 Windows 使用有界输入管道，进程仍由现有 C 执行链管理。旧执行器缺少能力时，在执行命令前失败。
+
+Hook 规则和投递沿用 runtime/events.jsonl，规则格式升级为 2，首次写入保留 v1 流式备份。OriginSID 固定事件发生的真实会话；投递的 run_sid 指实际运行场合，成功后不能换成另一场对话。外部副作用仍采用至少一次语义。

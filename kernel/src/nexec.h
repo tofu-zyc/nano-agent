@@ -37,6 +37,7 @@ typedef struct {
     proc_status *process_status;
     int shell_timeout_max;
     bool allow_no_timeout;
+    const char *hook_input;        /* trusted request event JSON, not a model argument */
     bool   watch_stdin;
     char **env;                   /* 子进程的环境变量，以 NULL 结尾 */
 } xctx;

@@ -133,6 +133,39 @@ def api(page, method, path, body=None):
 
 
 
+def check_hooks(page, url):
+    h = page.context.new_page()
+    h.goto(url + "#hooks")
+    h.get_by_role("heading", name="事件规则", exact=True).wait_for()
+    h.get_by_role("button", name="新建规则", exact=True).click()
+    h.get_by_label("名称", exact=True).fill("浏览器通知规则")
+    h.get_by_label("通知模板", exact=True).fill("构建结束 {{job_id}}")
+    h.get_by_role("button", name="保存", exact=True).click()
+    h.locator(".hooks article").filter(has_text="浏览器通知规则").wait_for()
+    row = h.locator(".hooks article").filter(has_text="浏览器通知规则")
+    row.get_by_role("button", name="停用", exact=True).click()
+    row.get_by_role("button", name="启用", exact=True).wait_for()
+    row.get_by_role("button", name="启用", exact=True).click()
+    row.get_by_role("button", name="停用", exact=True).wait_for()
+    row.get_by_role("button", name="删除", exact=True).click()
+    row.wait_for(state="detached")
+    code, out = api(h, "POST", "/api/hooks", {
+        "action": "create", "operation_id": "browser-deadline", "once": True, "sid": "main",
+        "spec": {"name": "真实到期事件", "on": ["deadline.at"], "deadline_at": int(time.time() * 1000) + 500,
+                 "handler": {"type": "notify", "text": "浏览器到期通知"}, "deliver": "none"}})
+    assert code == 200, out
+    h.get_by_role("button", name="查看全部投递", exact=True).click()
+    for _ in range(30):
+        h.get_by_role("button", name="查看全部投递", exact=True).click()
+        if h.locator(".hooks article").filter(has_text="成功").count():
+            break
+        h.wait_for_timeout(100)
+    assert h.locator(".hooks article").filter(has_text="成功").count(), h.locator(".hooks").inner_text()
+    h.screenshot(path=os.path.join(SHOTS, "hooks.png"))
+    h.close()
+    ok("事件规则：实际表单创建/停用/启用/删除，到期事件通过持久投递成功")
+
+
 def check_jobs(page, url):
     """UI event/HTTP races use deterministic responses; Go tests cover the node wire."""
     import base64
@@ -248,9 +281,13 @@ def run(page, url, nano):
     page.fill("input[type=password]", PASSWORD)
     page.keyboard.press("Enter")
     page.wait_for_selector("g.node.gateway", timeout=15000)
+    if os.environ.get("NANO_UI_HOOKS_ONLY") == "1":
+        check_hooks(page, url)
+        return
     if os.environ.get("NANO_UI_JOBS_ONLY") == "1":
         check_jobs(page, url)
         return
+    check_hooks(page, url)
     check_jobs(page, url)
     # 节点有 0.45 秒的淡入：等它们真的画出来再截图，免得截到空白
     page.wait_for_function(

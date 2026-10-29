@@ -51,7 +51,7 @@ func isDreamSID(sid string) bool {
 }
 
 // isInnerSID 是 agent 自己的会话（内心活动、整理记忆）：不当普通会话显示，不算“有人找它”。
-func isInnerSID(sid string) bool { return isLifeSID(sid) || isDreamSID(sid) }
+func isInnerSID(sid string) bool { return isLifeSID(sid) || isDreamSID(sid) || isHookSID(sid) }
 
 // memStore 是 agent 的知识库。调用方持有锁。
 func (a *App) memStore(agentID string) *knowledge.Store {

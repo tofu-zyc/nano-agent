@@ -110,6 +110,7 @@ typedef struct {
     char jobs_error[512];
     uint64_t job_request_seq;
     int exec_stream_version;
+ int exec_hook_input;
     char node_epoch[33];
     unsigned long long lease_seq;
     int64_t next_lease_sync;
@@ -182,6 +183,8 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft,"job_timeout_max_seconds",k->conf.max_job_timeout?k->conf.max_job_timeout:31536000);
     cJSON_AddNumberToObject(ft,"job_allow_no_timeout",k->conf.max_job_timeout==0?1:0);
     cJSON_AddNumberToObject(ft,"job_control_tool",1);
+ cJSON_AddNumberToObject(ft,"hook_tool",1);
+ cJSON_AddNumberToObject(ft,"hook_input",k->exec_hook_input);
     cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
     cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
     if(k->jobs_error[0])cJSON_AddStringToObject(m,"job_storage_error",k->jobs_error);
@@ -751,6 +754,7 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
     for (const char *const *key = (const char *const[]){ "dirs", NULL }; *key && ok && strcmp(final_sb, "off"); key++)
         ok = guard_paths(k, cJSON_GetObjectItemCaseSensitive(req, *key), err, errlen);
     job_t *j = NULL;
+ if(ok&&cJSON_GetObjectItemCaseSensitive(req,"hook_input")&&k->exec_hook_input<1){snprintf(err,errlen,"执行器不支持 Hook 标准输入，未执行");ok=false;}
     if (ok) {
         const cJSON *mo = cJSON_GetObjectItemCaseSensitive(req, "max_output");
         size_t max_output=cJSON_IsNumber(mo) && mo->valuedouble>=1024 && mo->valuedouble<=(64u<<20)
@@ -1184,7 +1188,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
 static bool gateway_tool(const char *name)
 {
     static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
-                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session", "Job" };
+                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session", "Job", "Hook" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(name, names[i])) return true;
     return false;
@@ -2647,6 +2651,8 @@ static int probe_exec(kernel_t *k, char *err, size_t errlen)
         snprintf(err, errlen, "执行器 %s 的自检结果看不懂（用 exec = 指定它的路径）", k->conf.exec);
         return -1;
     }
+    const cJSON *hi=cJSON_GetObjectItemCaseSensitive(r,"hook_input");
+    k->exec_hook_input=cJSON_IsNumber(hi)&&hi->valuedouble>=1?1:0;
     const cJSON *stream=cJSON_GetObjectItemCaseSensitive(r,"job_stream");
     k->exec_stream_version=cJSON_IsNumber(stream)?stream->valueint:0;
     k->landlock = (int)ll->valuedouble;

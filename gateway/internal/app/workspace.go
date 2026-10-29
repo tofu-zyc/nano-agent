@@ -38,6 +38,12 @@ type workspace struct {
 }
 
 func (a *App) workspaceOf(sid string) workspace {
+	if inv := a.sessionHook(sid); inv != nil {
+		return a.hookWorkspaces(inv)
+	}
+	return a.workspaceBase(sid)
+}
+func (a *App) workspaceBase(sid string) workspace {
 	st := a.store.Settings(sid)
 	// 权限模式：会话自己的 > agent 的 > 全局默认
 	w := workspace{mode: a.agentModeDefault(sid)}

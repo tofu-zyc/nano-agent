@@ -27,9 +27,11 @@ SANDBOX = PROBE["landlock"] > 0
 
 
 def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30,
-        sandbox=None):
+        sandbox=None, hook_input=None):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
            "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
+    if hook_input is not None:
+        req["hook_input"] = hook_input
     if sandbox is not None:
         req["sandbox"] = sandbox
     p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
@@ -80,6 +82,15 @@ def case(name, need_sandbox=False, linux_only=False):
                 print(f"  FAIL {name}: {e}")
         return go
     return wrap
+
+
+@case("Hook：子进程标准输入是有界事件 JSON")
+def t_hook_input():
+    body = json.dumps({"delivery_id": "hd_fixed", "data": "中文🙂", "literal": "$(do-not-run)"}, ensure_ascii=False)
+    content = ok(run("Shell", {"command": "cat"}, hook_input=body))
+    assert json.loads(content) == json.loads(body), content
+    bad(run("Shell", {"command": "touch should-not-run"}, hook_input="x" * 4097), "4096")
+    assert not os.path.exists(os.path.join(WORK, "should-not-run"))
 
 
 # ---- Read ----
@@ -437,7 +448,7 @@ def main():
         setup()
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
-                  t_shell, t_stream, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
+                  t_shell, t_stream, t_hook_input, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
                   t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")

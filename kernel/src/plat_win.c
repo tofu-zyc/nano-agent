@@ -1148,7 +1148,7 @@ typedef struct {
 } child_t;
 
 static int spawn_child(char *const argv[], const char *cwd, char *const envp[], bool combine, bool separate,
-                       child_t *c, char *err, size_t errlen)
+                       child_t *c, char *err, size_t errlen, const char *input)
 {
     memset(c, 0, sizeof *c);
     c->proc = c->thread = c->job = INVALID_HANDLE_VALUE;
@@ -1173,6 +1173,15 @@ static int spawn_child(char *const argv[], const char *cwd, char *const envp[], 
     }
     HANDLE nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                                 OPEN_EXISTING, 0, NULL);
+    if(input){
+        HANDLE input_read=INVALID_HANDLE_VALUE,input_write=INVALID_HANDLE_VALUE;
+        DWORD written=0;size_t bytes=strlen(input);
+        bool valid=bytes<=4096 && CreatePipe(&input_read,&input_write,&sa,4096);
+        if(valid){SetHandleInformation(input_write,HANDLE_FLAG_INHERIT,0);valid=WriteFile(input_write,input,(DWORD)bytes,&written,NULL)&&written==bytes;}
+        if(input_write!=INVALID_HANDLE_VALUE)CloseHandle(input_write);
+        if(!valid){if(input_read!=INVALID_HANDLE_VALUE)CloseHandle(input_read);if(nul_in!=INVALID_HANDLE_VALUE)CloseHandle(nul_in);CloseHandle(out_r);CloseHandle(out_w);if(separate){CloseHandle(err_r);CloseHandle(err_w);}set_err(err,errlen,"Hook 输入管道失败");goto fail;}
+        if(nul_in!=INVALID_HANDLE_VALUE)CloseHandle(nul_in);nul_in=input_read;
+    }
     HANDLE nul_out = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                                  OPEN_EXISTING, 0, NULL);
 
@@ -1296,7 +1305,7 @@ int plat_run_proc_stream(char *const argv[], const char *cwd, char *const envp[]
     st->exit_code=-1;
     child_t c;
     char err[512] = "";
-    if (spawn_child(argv, cwd, envp, true, stream!=NULL, &c, err, sizeof err) < 0) {
+    if (spawn_child(argv, cwd, envp, true, stream!=NULL, &c, err, sizeof err, stream?stream->input:NULL) < 0) {
         buf_puts(out, err);
         return -1;
     }
@@ -1396,7 +1405,7 @@ int plat_probe(char *const argv[], int timeout_ms, buf_t *out)
 {
     child_t c;
     char err[512] = "";
-    if (spawn_child(argv, NULL, NULL, false, false, &c, err, sizeof err) < 0) return -1;
+    if (spawn_child(argv, NULL, NULL, false, false, &c, err, sizeof err, NULL) < 0) return -1;
     capture cap = { .head_max = 65536, .tail_max = 0 };
     HANDLE done = CreateEventW(NULL, TRUE, FALSE, NULL);
     reader_arg ra = { .h = c.out_read, .cap = &cap, .done = done };

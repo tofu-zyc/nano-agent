@@ -15,6 +15,8 @@
     {#if !store.connected}<span class="tag warn">实时连接断开，重连中…</span>{/if}
   </div>
 
+  <button class="jobs" onclick={() => store.open({ type: 'hooks' })} title="事件规则与投递记录"><Icon name="plug" size={15} /><span>事件规则</span></button>
+
   <button class="jobs" onclick={() => store.open({ type: 'jobs' })} title="查看执行任务和日志"><Icon name="terminal" size={15} /><span>执行任务</span></button>
 
   <button class="search" onclick={() => (store.palette = true)}>
