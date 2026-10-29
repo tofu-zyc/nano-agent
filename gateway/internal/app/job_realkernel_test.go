@@ -107,7 +107,8 @@ func TestRealCJobControlFramesThroughGoHub(t *testing.T) {
 		if running.OK == nil || !*running.OK || running.Job == nil {
 			t.Fatal(running)
 		}
-		if running.Job.PID > 0 && running.Job.OutputCursor >= 8 {
+		// 内核先落盘再提交 running：这之前快照里已经有 pid 和输出，但状态还是 starting
+		if running.Job.Status == "running" && running.Job.PID > 0 && running.Job.OutputCursor >= 8 {
 			break
 		}
 		if time.Now().After(deadline) {
