@@ -63,8 +63,8 @@ typedef struct job_binding {
     job_t *process;  /* retained until the terminal metadata fence is acknowledged */
     char *sid,*run_id,*id,*lease_id,*lease_spec;
     int turn_id,kind,detach_phase;
-    bool wait_closed,terminal_handled,long_notice,recovered,process_drained,lease_registered,detach_requested,unknown_reported;
-    int64_t admitted_at,started_at,next_event,next_detach;
+    bool wait_closed,terminal_handled,long_notice,recovered,process_drained,lease_registered,detach_requested,unknown_reported,retention_pending;
+    int64_t admitted_at,started_at,next_event,next_detach,next_prune;
     char *control_request,*read_request;
     uint64_t read_id;
     struct job_binding *next;
@@ -104,7 +104,7 @@ typedef struct {
     int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
     bool leasing, lease_synced;
-    bool jobs_mode,detach_capable;
+    bool jobs_mode,detach_capable,jobs_pruning;
     job_manager *jobs;
     job_binding *job_bindings;
     char jobs_error[512];
@@ -1400,6 +1400,12 @@ static void sync_jobs(kernel_t *k)
         cJSON_AddItemToArray(items,job_public(b));
     link_send(&k->link,m);
 }
+static void binding_free(job_binding *b)
+{
+    if(b->process_drained && b->process)job_free(b->process);
+    free(b->sid);free(b->run_id);free(b->id);free(b->lease_id);free(b->lease_spec);
+    free(b->control_request);free(b->read_request);free(b);
+}
 static void pump_jobs(kernel_t *k,int64_t now)
 {
     if(!k->jobs)return;
@@ -1407,6 +1413,17 @@ static void pump_jobs(kernel_t *k,int64_t now)
     while(jobs_poll(k->jobs,now,&event)) {
         job_binding *b=binding_find(k,event.id);
         if(!b){jobs_event_free(&event);continue;}
+        if(!strcmp(event.kind,"removed")) {
+            b->retention_pending=false;
+            if(!event.ok)b->next_prune=now+5000;
+            if(event.ok) {
+                job_binding **pp=&k->job_bindings;
+                while(*pp && *pp!=b)pp=&(*pp)->next;
+                if(*pp)*pp=b->next;
+                managed_job *owned=b->job;binding_free(b);jobs_forget(owned);
+            } else managed_state(k,b,"storage_error",event.error);
+            jobs_event_free(&event);continue;
+        }
         if(!strcmp(event.kind,"created")) {
             if(event.ok) {
                 managed_state(k,b,"queued",NULL);
@@ -1498,6 +1515,27 @@ static void pump_jobs(kernel_t *k,int64_t now)
         if(!b->long_notice && !b->wait_closed && b->started_at && now-b->started_at>=10000) {
             managed_state(k,b,"long_running","命令仍在执行，可以 /bg 转后台、/job 查看输出或停止");
             b->long_notice=true;
+        }
+    }
+    /* At 240 records, reclaim only acknowledged definitive old terminals
+     * until 32 slots are free. Pending outbox and unknown ownership never expire. */
+    if(jobs_count(k->jobs)>=240)k->jobs_pruning=true;
+    if(jobs_count(k->jobs)<=224)k->jobs_pruning=false;
+    if(k->jobs_pruning) {
+        size_t pending=0;
+        for(job_binding *b=k->job_bindings;b;b=b->next)if(b->retention_pending)pending++;
+        for(unsigned submitted=0;submitted<8 && jobs_count(k->jobs)>224+pending;submitted++) {
+            job_binding *oldest=NULL;double oldest_at=0;
+            for(job_binding *b=k->job_bindings;b;b=b->next) {
+                if(!b->terminal_handled || b->process || b->read_request || b->control_request || b->retention_pending || now<b->next_prune)continue;
+                double at=0;
+                if(jobs_removable(b->job,&at) && (!oldest || at<oldest_at ||
+                   (at==oldest_at && strcmp(jobs_id(b->job),jobs_id(oldest->job))<0))) {
+                    oldest=b;oldest_at=at;
+                }
+            }
+            if(!oldest || !jobs_remove(oldest->job,++k->job_request_seq))break;
+            oldest->retention_pending=true;pending++;
         }
     }
     /* Closed queue entries cannot be allowed to launch after a cancellation fence. */
@@ -2752,9 +2790,7 @@ int main(int argc, char **argv)
     for(job_binding *b=k.job_bindings;b;) {
         job_binding *next=b->next;
         /* Only drained processes removed from runner are retained by the binding. */
-        if(b->process_drained && b->process)job_free(b->process);
-        free(b->sid);free(b->run_id);free(b->id);free(b->lease_id);free(b->lease_spec);
-        free(b->control_request);free(b->read_request);free(b);b=next;
+        binding_free(b);b=next;
     }
     jobs_close(k.jobs);
     pipes_shutdown(&k.pipes);

@@ -16,7 +16,7 @@ struct managed_job {
     int timeout_seconds;
     atomic_flag observation_lock;
     int64_t created_mono,yield_ms;
-    bool created,spawn_ready,spawned,started_reported,process_done,terminal_saved,auto_reported,cancel_requested;
+    bool created,spawn_ready,spawned,started_reported,process_done,terminal_saved,auto_reported,cancel_requested,removing,removed;
     char *failure_status,*failure_detail;
     char tail[8192];
     size_t tail_length;
@@ -280,7 +280,7 @@ bool jobs_detach(managed_job *j,uint64_t request_id,char *error,size_t n)
 void jobs_detach_denied(managed_job *j){j->auto_reported=true;}
 bool jobs_acknowledge(managed_job *j,uint64_t seq)
 {
-    if(!j->terminal_saved || j->pending || seq!=1)return false;
+    if(!j->terminal_saved || j->pending || j->removing || j->removed || seq!=1)return false;
     if(str(j->model,"notification_state") && !strcmp(str(j->model,"notification_state"),"delivered"))return true;
     cJSON *old=cJSON_Duplicate(j->model,true);
     set_string(j->model,"notification_state","delivered");
@@ -307,7 +307,7 @@ managed_job *jobs_find(job_manager *m,const char *id)
 }
 bool jobs_read(managed_job *j,uint64_t cursor,size_t bytes,uint64_t request_id)
 {
-    return j->created && job_io_read(j->manager->io,j->id,cursor,bytes,request_id);
+    return j->created && !j->removing && !j->removed && job_io_read(j->manager->io,j->id,cursor,bytes,request_id);
 }
 static void terminal_commit(managed_job *j)
 {
@@ -336,7 +336,10 @@ static void pump(job_manager *m,int64_t now)
     job_io_result saved;
     while(m->event_count<JOB_IO_QUEUE-1 && job_io_poll(m->io,&saved)) {
         managed_job *j=jobs_find(m,saved.job_id);
-        if(!strcmp(saved.kind,"read")) {
+        if(j && !strcmp(saved.kind,"remove")) {
+            j->removed=saved.ok;j->removing=false;
+            emit(m,j,"removed",saved.ok,saved.error,saved.request_id,NULL);
+        } else if(!strcmp(saved.kind,"read")) {
             if(j && saved.data) {
                 set_number(saved.data,"output_cursor",(double)atomic_load(&j->cursor));
                 if(atomic_load(&j->gap))set_bool(saved.data,"gap",true);
@@ -391,6 +394,36 @@ bool jobs_poll(job_manager *m,int64_t now,job_event *event)
     m->event_head=(m->event_head+1)%JOB_IO_QUEUE;m->event_count--;
     return true;
 }
+size_t jobs_count(const job_manager *m){return m->count;}
+bool jobs_removable(const managed_job *j,double *created_at)
+{
+    const char *notification=str(j->model,"notification_state"),*status=str(j->model,"status");
+    if(!j->terminal_saved || j->pending || j->removing || j->removed ||
+       !notification || strcmp(notification,"delivered") || !status || !strcmp(status,"unknown"))return false;
+    const cJSON *created=cJSON_GetObjectItemCaseSensitive(j->model,"created_at");
+    if(created_at)*created_at=cJSON_IsNumber(created)?created->valuedouble:0;
+    return true;
+}
+bool jobs_remove(managed_job *j,uint64_t request_id)
+{
+    if(!jobs_removable(j,NULL) || !job_io_remove(j->manager->io,j->id,request_id))return false;
+    j->removing=true;return true;
+}
+static void free_job(managed_job *j)
+{
+    cJSON_Delete(j->model);cJSON_Delete(j->published);cJSON_Delete(j->pending);cJSON_Delete(j->terminal);cJSON_Delete(j->start_frame);
+    free(j->failure_status);free(j->failure_detail);free(j);
+}
+bool jobs_forget(managed_job *j)
+{
+    if(!j->removed || j->pending)return false;
+    job_manager *m=j->manager;
+    for(size_t i=0;i<m->count;i++)if(m->jobs[i]==j) {
+        memmove(m->jobs+i,m->jobs+i+1,(m->count-i-1)*sizeof m->jobs[0]);
+        m->count--;free_job(j);return true;
+    }
+    return false;
+}
 int64_t jobs_next_deadline(job_manager *m)
 {
     int64_t next=-1;
@@ -416,8 +449,7 @@ void jobs_close(job_manager *m)
     job_io_close(m->io);
     for(size_t i=0;i<m->count;i++) {
         managed_job *j=m->jobs[i];
-        cJSON_Delete(j->model);cJSON_Delete(j->published);cJSON_Delete(j->pending);cJSON_Delete(j->terminal);cJSON_Delete(j->start_frame);
-        free(j->failure_status);free(j->failure_detail);free(j);
+        free_job(j);
     }
     for(size_t i=0;i<m->event_count;i++)jobs_event_free(&m->events[(m->event_head+i)%JOB_IO_QUEUE]);
     free(m->epoch);free(m);

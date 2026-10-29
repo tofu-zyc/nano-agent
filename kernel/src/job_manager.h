@@ -36,6 +36,11 @@ cJSON *jobs_snapshot(const managed_job *j);
 managed_job *jobs_find(job_manager *m,const char *id);
 bool jobs_read(managed_job *j,uint64_t cursor,size_t bytes,uint64_t request_id);
 bool jobs_poll(job_manager *m,int64_t now,job_event *event);
+size_t jobs_count(const job_manager *m);
+/* Only acknowledged definitive terminal jobs may release their bounded log slot. */
+bool jobs_removable(const managed_job *j,double *created_at);
+bool jobs_remove(managed_job *j,uint64_t request_id);
+bool jobs_forget(managed_job *j);
 int64_t jobs_next_deadline(job_manager *m);
 cJSON *jobs_list(job_manager *m);
 void jobs_event_free(job_event *event);

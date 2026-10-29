@@ -102,6 +102,22 @@ int main(int argc,char **argv)
     CHECK(!jobs_background(failure));
     CHECK(plat_remove_tree(path)==0 && plat_rename(backup,path)==0);
     free(path);free(backup);free(dir);
+    // Only a durable completion ACK permits removing logs/metadata. Unknown
+    // or still-unacknowledged jobs retain their reserved outbox/storage slot.
+    CHECK(!jobs_remove(second,80));
+    CHECK(!jobs_acknowledge(j,2));
+    CHECK(jobs_acknowledge(j,1));
+    event(m,jobs_id(j),"ack",true);
+    snapshot=jobs_snapshot(j);
+    CHECK(!strcmp(str(snapshot,"notification_state"),"delivered"));
+    CHECK(!strcmp(str(snapshot,"output_tail"),"first"));
+    cJSON_Delete(snapshot);
+    char removed_id[97];snprintf(removed_id,sizeof removed_id,"%s",jobs_id(j));
+    size_t before_remove=jobs_count(m);
+    CHECK(jobs_remove(j,81) && !jobs_remove(j,82) && !jobs_read(j,0,10,83));
+    event(m,jobs_id(j),"removed",true);
+    CHECK(jobs_forget(j) && jobs_count(m)==before_remove-1 && !jobs_find(m,removed_id));
+    char unknown_id[97];snprintf(unknown_id,sizeof unknown_id,"%s",jobs_id(failure));
     char saved_id[97];snprintf(saved_id,sizeof saved_id,"%s",jobs_id(automatic));
     jobs_close(m);
     m=jobs_open(root,"ffeeddccbbaa99887766554433221100",NULL,error,sizeof error);
@@ -111,6 +127,13 @@ int main(int argc,char **argv)
         CHECK(recovered && jobs_background(recovered) && jobs_finished(recovered) && !jobs_spawn_ready(recovered));
         snapshot=jobs_snapshot(recovered);
         CHECK(!strcmp(str(snapshot,"status"),"interrupted"));
+        cJSON_Delete(snapshot);
+        managed_job *unknown=jobs_find(m,unknown_id);
+        CHECK(unknown && jobs_finished(unknown) && jobs_acknowledge(unknown,1));
+        event(m,unknown_id,"ack",true);
+        snapshot=jobs_snapshot(unknown);
+        CHECK(!strcmp(str(snapshot,"status"),"unknown") && !strcmp(str(snapshot,"notification_state"),"delivered"));
+        CHECK(!jobs_remove(unknown,90) && !jobs_forget(unknown));
         cJSON_Delete(snapshot);jobs_close(m);
     }
     char *real=plat_canonical(root),*real_base=plat_canonical(base);

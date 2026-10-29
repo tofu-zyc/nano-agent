@@ -405,6 +405,42 @@ if mode=='truncated': print('{',end='',flush=True)
     print("node jobs: duplicate/truncated/missing terminal cannot publish successful completion")
 
 
+def bounded_retention():
+    with tempfile.TemporaryDirectory(prefix="na-job-retention-", dir=temp_root()) as root:
+        records=Path(root)/"node.jobs"
+        records.mkdir()
+        for index in range(240):
+            ident=f"j_seed-{index:04}"
+            directory=records/ident
+            directory.mkdir()
+            state=dict(version=1,job_id=ident,owner_agent="test-agent",origin_sid="tg:owner",
+                created_by="tg:owner",origin=dict(agent="test-agent",sid="tg:owner"),background=True,
+                status="unknown" if index==0 else "succeeded",created_at=index+1,last_event_seq=1,
+                notification_state="pending" if index==1 else "delivered",
+                revision=1,request=dict(tool="Shell",args=dict(command="never replay retained fixture")))
+            (directory/"meta.json").write_text(json.dumps(state),encoding="utf-8")
+        node=Node(root)
+        try:
+            deadline=time.monotonic()+8
+            while True:
+                listing=node.control("retained-list","list")["data"]
+                if len(listing)<=224:
+                    assert len(listing)==224,len(listing)
+                    break
+                assert time.monotonic()<deadline,len(listing)
+                time.sleep(0.01)
+            present={record["job_id"] for record in listing}
+            assert "j_seed-0000" in present and "j_seed-0001" in present, present
+            assert "j_seed-0239" in present and "j_seed-0002" not in present, present
+            assert node.control("pending-survives","status","j_seed-0001")["job"]["notification_state"]=="pending"
+            assert node.control("unknown-survives","status","j_seed-0000")["job"]["status"]=="unknown"
+            assert len(list(records.iterdir()))==len(listing)
+            print("node jobs: 240 rebuilt records reclaim oldest ACKed terminals; pending/unknown retained")
+        finally:
+            node.close()
+
+
 if __name__ == "__main__":
     check()
     invalid_protocol()
+    bounded_retention()
