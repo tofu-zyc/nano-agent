@@ -64,8 +64,9 @@ struct na_watch {
     pthread_mutex_t lock;
     pthread_cond_t  cond;
     bool        thread_started, stop;
-    struct { int kind; watch_entry *e; } cmdq[NA_WATCH_MAX]; /* 0 空 / 1 挂接 / 2 摘除 */
+    struct { int kind; watch_entry *e; unsigned gen; } cmdq[NA_WATCH_MAX]; /* 0 空 / 1 挂接 / 2 摘除 */
     int         cmd_head, cmd_tail;
+    unsigned    slot_gen[NA_WATCH_MAX]; /* 工作线程这边每个槽位当前的代际 */
 #elif defined(_WIN32)
     HANDLE      iocp;       /* 完成端口：目录变化完成和命令都从这里出来 */
     HANDLE      thread;
@@ -73,7 +74,7 @@ struct na_watch {
     struct sockaddr_in wake_addr;
     SRWLOCK     lock;
     bool        thread_started, stop;
-    struct { int kind; watch_entry *e; } cmdq[NA_WATCH_MAX];
+    struct { int kind; watch_entry *e; struct win_watch *ww; } cmdq[NA_WATCH_MAX];
     int         cmd_head, cmd_tail;
     struct win_watch *ww[NA_WATCH_MAX]; /* 每个槽位的目录句柄和重叠结构 */
 #endif
@@ -220,7 +221,7 @@ static void mac_wake(na_watch *w)
 }
 
 /* 工作线程里真正挂接；失败时把槽位标回"没挂上"，主循环五秒后重试。 */
-static void mac_open(na_watch *w, watch_entry *e)
+static void mac_open(na_watch *w, watch_entry *e, unsigned gen)
 {
     int slot = (int)(e - w->items);
     if (w->fds[slot] >= 0) return;
@@ -245,16 +246,19 @@ static void mac_open(na_watch *w, watch_entry *e)
         return;
     }
     w->fds[slot] = fd;
+    w->slot_gen[slot] = gen;
     pthread_mutex_lock(&w->lock);
     e->wd = 1; /* 已挂上（真实 fd 在工作线程自己的表里） */
     e->next = 0;
     pthread_mutex_unlock(&w->lock);
 }
 
-static void mac_close(na_watch *w, watch_entry *e)
+static void mac_close(na_watch *w, watch_entry *e, unsigned gen)
 {
     int slot = (int)(e - w->items);
+    if (w->slot_gen[slot] != gen) return; /* 这条已经换过代：别动新挂上去的观察 */
     if (w->fds[slot] < 0) return;
+    w->slot_gen[slot] = 0;
     struct kevent reg;
     EV_SET(&reg, (uintptr_t)w->fds[slot], EVFILT_VNODE, EV_DELETE, 0, 0, NULL);
     if (w->kq >= 0) kevent(w->kq, &reg, 1, NULL, 0, NULL);
@@ -286,10 +290,11 @@ static void *mac_thread(void *ud)
                     if (w->cmd_head == w->cmd_tail) { pthread_mutex_unlock(&w->lock); break; }
                     int kind = w->cmdq[w->cmd_head].kind;
                     watch_entry *e = w->cmdq[w->cmd_head].e;
+                    unsigned gen = w->cmdq[w->cmd_head].gen;
                     w->cmd_head = (w->cmd_head + 1) % NA_WATCH_MAX;
                     pthread_mutex_unlock(&w->lock);
-                    if (kind == 1) mac_open(w, e);
-                    else if (kind == 2) mac_close(w, e);
+                    if (kind == 1) mac_open(w, e, gen);
+                    else if (kind == 2) mac_close(w, e, gen);
                 }
                 continue;
             }
@@ -354,7 +359,7 @@ static void be_free(na_watch *w)
         pthread_join(w->thread, NULL);
         w->thread_started = false;
     }
-    for (int i = 0; i < w->n; i++) mac_close(w, &w->items[i]);
+    for (int i = 0; i < w->n; i++) mac_close(w, &w->items[i], w->slot_gen[i]);
     if (w->kq >= 0) close(w->kq);
     if (w->cmd[0] >= 0) close(w->cmd[0]);
     if (w->cmd[1] >= 0) close(w->cmd[1]);
@@ -374,6 +379,7 @@ static int be_attach(na_watch *w, watch_entry *e)
     pthread_mutex_lock(&w->lock);
     w->cmdq[w->cmd_tail].kind = 1;
     w->cmdq[w->cmd_tail].e = e;
+    w->cmdq[w->cmd_tail].gen = e->gen;
     w->cmd_tail = (w->cmd_tail + 1) % NA_WATCH_MAX;
     pthread_mutex_unlock(&w->lock);
     char b = 1;
@@ -389,6 +395,7 @@ static void be_detach(na_watch *w, watch_entry *e)
     pthread_mutex_lock(&w->lock);
     w->cmdq[w->cmd_tail].kind = 2;
     w->cmdq[w->cmd_tail].e = e;
+    w->cmdq[w->cmd_tail].gen = e->gen; /* 退订绑定这一代，不按"现在槽位里是谁"猜 */
     w->cmd_tail = (w->cmd_tail + 1) % NA_WATCH_MAX;
     pthread_mutex_unlock(&w->lock);
     char b = 1;
@@ -523,13 +530,11 @@ static void win_drain_commands(na_watch *w)
             return;
         }
         int kind = w->cmdq[w->cmd_head].kind;
-        watch_entry *e = w->cmdq[w->cmd_head].e;
+        win_watch *ww = w->cmdq[w->cmd_head].ww;
         w->cmd_head = (w->cmd_head + 1) % NA_WATCH_MAX;
         ReleaseSRWLockExclusive(&w->lock);
-        if (kind != 2 || !e) continue;
-        int slot = (int)(e - w->items);
-        win_watch *ww = w->ww[slot];
-        if (!ww) continue;
+        if (kind != 2 || !ww) continue; /* 退订绑定排队时那个具体对象，不按槽位猜 */
+        if (w->ww[ww->slot] == ww) w->ww[ww->slot] = NULL;
         if (ww->pending) {
             ww->dead = true;
             CancelIoEx(ww->dir, &ww->ov); /* 取消之后会来一条完成，那时再回收 */
@@ -702,7 +707,7 @@ static void be_detach(na_watch *w, watch_entry *e)
     if (e->wd < 0) return;
     AcquireSRWLockExclusive(&w->lock);
     w->cmdq[w->cmd_tail].kind = 2;
-    w->cmdq[w->cmd_tail].e = e;
+    w->cmdq[w->cmd_tail].ww = w->ww[(int)(e - w->items)]; /* 记住排队时那个对象，别按槽位猜 */
     w->cmd_tail = (w->cmd_tail + 1) % NA_WATCH_MAX;
     ReleaseSRWLockExclusive(&w->lock);
     PostQueuedCompletionStatus(w->iocp, 0, WIN_KEY_CMD, NULL);

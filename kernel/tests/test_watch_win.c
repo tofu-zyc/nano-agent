@@ -202,6 +202,41 @@ int main(void)
         _rmdir(dir2);
     }
 
+    /* 删掉一条之后，同一个槽位立刻挂上另一条：旧的退订命令不能取消新观察 */
+    {
+        char dir3[MAX_PATH];
+        snprintf(dir3, sizeof dir3, "%sna-watch-reuse-%lu", tmp, (unsigned long)GetTickCount());
+        _mkdir(dir3);
+        cJSON *first = cJSON_CreateArray();
+        cJSON *fa = cJSON_CreateObject();
+        cJSON_AddStringToObject(fa, "key", "reuse-a");
+        cJSON_AddStringToObject(fa, "path", dir3);
+        cJSON_AddItemToArray(first, fa);
+        na_watch_sync(w, first, false, ms_now());
+        cJSON_Delete(first);
+        cJSON *none = cJSON_CreateArray();
+        na_watch_sync(w, none, false, ms_now()); /* 摘掉：旧退订命令进队列 */
+        cJSON_Delete(none);
+        cJSON *second = cJSON_CreateArray();
+        cJSON *sb = cJSON_CreateObject();
+        cJSON_AddStringToObject(sb, "key", "reuse-b");
+        cJSON_AddStringToObject(sb, "path", dir3);
+        cJSON_AddItemToArray(second, sb);
+        na_watch_sync(w, second, false, ms_now()); /* 同一个槽位立刻挂新的 */
+        cJSON_Delete(second);
+        char f4[MAX_PATH];
+        snprintf(f4, sizeof f4, "%s\\after-reuse.txt", dir3);
+        FILE *rh = fopen(f4, "w");
+        if (rh) { fputs("x", rh); fclose(rh); }
+        ngot = 0;
+        collect(w);
+        bool saw_reuse = false;
+        for (int k = 0; k < ngot; k++) if (strcmp(got[k].key, "reuse-b") == 0) saw_reuse = true;
+        CHECK(saw_reuse);
+        _unlink(f4);
+        _rmdir(dir3);
+    }
+
     /* 重新下发带 resync：每一条各报一次缺口 */
     list = watch_list_key("w1", dir);
     na_watch_sync(w, list, true, ms_now());

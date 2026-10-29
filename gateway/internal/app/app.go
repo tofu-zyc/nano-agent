@@ -1207,8 +1207,15 @@ func (a *App) startRun(s *sess) {
 			}
 		}
 		if reports {
-			for _, q := range batch {
-				one := session.Msg{Role: "user", Content: q.m.Text, Images: q.m.Images}
+			// 拆开之后每条只带自己的正文，但准备好的说明（时间戳、环境、记忆、交接）不能丢：
+			// 统一加在第一条前面，模型看到的上下文和合并时一致（评审 §27）。
+			extra := strings.TrimSuffix(content, text)
+			for i, q := range batch {
+				body := q.m.Text
+				if i == 0 {
+					body = extra + body
+				}
+				one := session.Msg{Role: "user", Content: body, Images: q.m.Images}
 				if q.report != nil {
 					one.Kind, one.Report = "branch_report", q.report
 				}

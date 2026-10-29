@@ -533,3 +533,78 @@ func TestArchivingRunningBranchRemainsArchivedAfterCancel(t *testing.T) {
 		t.Fatal("归档的分支还能继续")
 	}
 }
+
+// 评审 §27：拆分报告不能用原始正文顶替准备好的说明（交接、环境、记忆），交接被消费就必须进历史。
+func TestQueuedBranchReportsKeepPreparedContext(t *testing.T) {
+	e := setup(t)
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "起点"}); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id, conclusion string) SessionForkResult {
+		out, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: id, RequestID: id, By: "fake:u1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.a.store.Append(out.BranchSID, session.Msg{Role: "assistant", Content: conclusion}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	a1 := mk("ctx-1", "结论一")
+	b1 := mk("ctx-2", "结论二")
+	e.say("先聊着")
+	e.k.expect(proto.TInput)
+	// 会话正在跑的时候才写入交接说明：它必须留给下一轮（报告那一轮），不能被这一轮吃掉
+	e.a.mu.Lock()
+	st := e.a.store.Settings(mainSID)
+	st.Handoff = "[交接] 上一个 agent 留下的说明：先看任务清单"
+	if err := e.a.store.SaveSettings(mainSID, st); err != nil {
+		e.a.mu.Unlock()
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	if _, err := e.a.introduceBranchReportLocked(a1.BranchSID, "fake:u1", endpoint{ch: "web", chat: mainSID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.introduceBranchReportLocked(b1.BranchSID, "fake:u1", endpoint{ch: "web", chat: mainSID}); err != nil {
+		t.Fatal(err)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	e.k.expect(proto.TInput)
+	// 模型这一轮看到的用户消息里必须有交接说明（消费了就要真的用上）
+	e.k.send(proto.Msg{T: proto.TModel, SID: mainSID})
+	e.k.expect(proto.TTurn)
+	req := e.llm.lastReq()
+	e.k.send(proto.Msg{T: proto.TDone, SID: mainSID, Status: proto.StatusOK})
+	waitIdle(t, e, mainSID)
+	saw := false
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, "[交接] 上一个 agent 留下的说明") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("交接说明没有进入模型上下文")
+	}
+	e.a.mu.Lock()
+	left := e.a.store.Settings(mainSID).Handoff
+	hist := e.a.store.History(mainSID)
+	e.a.mu.Unlock()
+	if left != "" {
+		t.Fatalf("交接说明已经用掉却没清空：%q", left)
+	}
+	cards := 0
+	for _, m := range hist {
+		if m.Report != nil {
+			cards++
+			if !strings.Contains(m.Content, "结论") && m.Kind != "branch_report" {
+				t.Fatalf("报告的正文丢了：%+v", m)
+			}
+		}
+	}
+	if cards != 2 {
+		t.Fatalf("两份报告的结构：%d", cards)
+	}
+}

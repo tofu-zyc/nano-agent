@@ -820,3 +820,20 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 `branchDone` 原来无条件写 `Status`，归档运行中的分支后，内核回来的 `cancelled` 会让状态从 `archived` 变成 `paused`，等于撤销了主人的归档决定。现在收尾只更新进展，**状态只在当前不是 `archived`/`paused` 时才改**；归档依然跨收尾和重启保留，`continue` 仍按规则拒绝。
 
 回归：`TestArchivingRunningBranchRemainsArchivedAfterCancel`（真实归档入口 + cancelled 收尾 + 重新打开存储 + 继续被拒）。
+
+## 评审第 27 节的两处收尾（G4–G5）
+
+### G4 退订绑定到具体的那一代对象
+
+上一轮把槽位固定下来之后还留了一个洞：退订命令在排队时只记了条目指针，工作线程执行时按「当前槽位里是谁」去找对象。同槽位被重新挂接（换了 key，或者同 key 换了路径）之后，旧退订会作用到新对象上。现在两条路径都绑定到排队那一刻的具体身份：
+
+- **macOS**：命令里带代际 `gen`，工作线程自己维护 `slot_gen[]`（挂接成功时写入）。执行摘除时 `slot_gen[slot] != gen` 就直接跳过，不会关掉新挂上的 vnode fd；关机时的统一回收用 `slot_gen[i]`（无条件）。
+- **Windows**：命令里直接带排队时那个 `win_watch *`，工作线程只取消/回收这个对象，不再按槽位查当前指针；`win_free_ww` 只在槽位仍指向自己时才清空槽位，所以后来挂上来的对象不会被误清。
+
+回归：Windows 原生测试新增「删掉一条之后同槽位立刻挂另一条，旧退订不能取消新观察」；连同上一轮的「留后删前」和「同 key 换路径」，覆盖了身份转移的三种形态。Linux 的 POSIX 测试继续覆盖前两种（inotify 按 wd 映射，没有异步命令队列）。
+
+### G5 拆分报告不再绕开准备好的说明
+
+上一轮为了保住每份报告的结构，拆开时直接用 `q.m.Text` 当正文，把这一轮准备好的说明（时间戳、环境说明、记忆说明、换 agent 的交接）全跳过了——交接还在更早的位置被清空，等于丢了一次交接。现在拆开时先算 `extra := strings.TrimSuffix(content, text)`，只加在**第一条**前面，其余各带自己的正文；模型看到的上下文和合并时完全一致，交接消费一次就真的进了历史。
+
+回归：`TestQueuedBranchReportsKeepPreparedContext`（会话忙时写入交接说明 → 两份报告排队 → 报告那一轮的模型请求里必须含交接原文、设置里的交接已清空、两份报告结构仍在）。
