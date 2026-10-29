@@ -5,11 +5,11 @@
 本文记录**已经落到代码里**的部分（含测试）和还没做的部分。设计文档描述目标，本文只写当前实现；
 两者不一致时以本文和代码为准。
 
-> **发布范围（2026-10-29 明确）**：v0.9.0 是 **Linux 首发**。
-> - 已在 Linux（WSL2，内核 6.x）上实测：网关全部测试、race、C 状态机/观察器/执行器/宿主（含 ASan）、网页检查与构建。
-> - **Windows / macOS 的文件观察器没有实现**：`watch.c` 只有 Linux inotify，其他平台的 `na_watch_supported` 为 false，节点因此不宣告 `file_watch`，相关能力按节点降级。
-> - 网关、内核、执行器在代码上是平台无关的，但**原生 Windows / macOS 没有在本轮实测**（执行器的 Windows 专项在更早轮次单独通过，不随本轮结论复述）。
-> - 因此不要把 v0.9.0 读成「全平台全部完成」；跨平台观察器是明确的后续项，不是本轮已验证范围内的一行。
+> **实现状态、验证状态与正式支持范围（2026-10-29 更新）**
+> - **实现状态**：三个平台的文件观察器都已实现（Linux inotify 直接进主循环；macOS kqueue + 一个工作线程 + 管道唤醒；Windows 一个 IOCP 工作线程 + ReadDirectoryChangesW + 回环 UDP 套接字唤醒）。`na_watch_supported()` 只在 `be_init` 成功时为 true，节点据此决定 hello 里宣不宣告 `file_watch`。
+> - **验证状态**：Linux 在 WSL2 上**实际运行**过（`test_watch` 10/10，ASan/UBSan）；Windows 与 macOS 的观察器**编译通过**（zig：`x86_64-windows-gnu`、`aarch64-macos`、`x86_64-macos`），Windows 的原生测试 `tests/test_watch_win.c` 已写并接入 CI 的 windows job，但**本机是通过 WSL 互通跑的，没有得到可信的运行结论**，所以不记为已通过；macOS 没有真机、也没有在本机运行。
+> - **正式支持范围**：v0.9.0 发布按 **Linux 首发**。Windows / macOS 的观察器属于"已实现、按能力宣告、尚未在真机验证"；它们的节点在初始化失败或运行异常时不会宣告能力，能力降级是明确行为。
+> - 网关、内核、执行器在代码上是平台无关的；原生 Windows 执行器专项在更早轮次单独通过，不随本条复述。
 
 
 ## 已实现
@@ -735,7 +735,7 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 
 ### 仍未解决
 
-- **Windows/macOS 文件观察器**：`watch.c` 仍然只有 Linux inotify，非 Linux 的 `watch_attach` 返回 -1、`na_watch_supported` 为 false，节点不宣告 `file_watch`（干净能力降级，不会假宣告）。这是代码缺口，不是测试账号问题：Windows 的 `plat_poll` 是 `WSAPoll`（只有套接字），要加目录观察必须引入工作线程 + 可轮询的唤醒通道（macOS 用 kqueue + 管道唤醒，Windows 用 ReadDirectoryChangesW + 回环套接字唤醒），并需要真机跑通才敢宣告能力；当前环境没有 macOS 工具链，Windows 也只有交叉编译。
+- **Windows/macOS 文件观察器**：已实现（见文末「跨平台文件观察器」），不再是代码缺口；剩下的是真机运行验证（Windows CI 会跑，macOS 未运行）。
 - 网页分支报告仍是带标记的普通消息、分支列表还没有「最近进展」摘要；这两个是界面收尾项，不影响运行正确性。
 
 ## 评审 §25 集中修复（2026-10-29，`eb874e2` 之后）
@@ -766,3 +766,37 @@ e53c7c9 fix(branch): refuse outbound Message from a silent branch
 因为模型可见的工具 schema 变了，**`prefixVer` 从 11 升到 12**（前缀缓存会失效一次，这是必要的代价）。
 
 回归：`TestMindDimensionExposedInModelToolSchema`（enum 与参数说明）与 `TestDimensionDeltaBudgetSharedByCallsInOneRun`（同轮第二次被拒、换轮重新发放、超量请求被截到上限）。
+
+## 跨平台文件观察器（评审第 25 节之后）
+
+`kernel/src/watch.c` 现在是「公共表 + 三个后端」：
+
+| 平台 | 机制 | 主循环接入 | 工作线程 |
+| --- | --- | --- | --- |
+| Linux | inotify | 直接轮询 inotify fd | 无 |
+| macOS | kqueue `EVFILT_VNODE`（`O_EVTONLY` 打开登记路径） | 轮询管道读端 `wake[0]` | 1 个，命令管道唤醒 |
+| Windows | `ReadDirectoryChangesW` 重叠读 + IOCP | 轮询回环 UDP 套接字（`WSAPoll` 认套接字） | 1 个 IOCP 线程 |
+
+共同点：`NA_WATCH_MAX` 64 条登记上限不变；工作线程到主线程之间是固定 256 条的事件环，满了就置 `overflow` 并在下一次 `na_watch_ready` 里让所有登记发一次 `resync`；每条登记带 `gen`，重新挂接后旧的异步事件按代号丢弃；目录登记报目录里的文件名（kqueue 只能报目录本身，所以路径是目录）；明确文件在 Windows 上通过「观察父目录 + 按文件名过滤」实现，macOS 直接把文件本身注册进 kqueue。关闭时 Windows 先让工作线程把挂起的读取消并回收，再停线程、关完成端口和套接字；macOS 先置停止位、写命令管道唤醒、`pthread_join`，再关 kqueue 和两组管道。
+
+能力宣告：`na_watch_supported()` 只在后端初始化成功时返回 true（Linux inotify fd、macOS kqueue+管道+线程、Windows IOCP+套接字+线程），失败时内核的 hello 里 `file_watch` 就是 false，网关不会给这个节点下发 `watch_sync`。Windows 句柄宽度按 `intptr_t` 处理（`na_watch_fd` 已从 `int` 改成 `intptr_t`，`SOCKET` 在 x64 上是 64 位）。
+
+测试与构建：`tests/test_watch.c` 改成 POSIX 通用（Linux 跑 inotify 溢出用例；macOS 跑重命名用例）；新增 `tests/test_watch_win.c`（目录、明确文件过滤、摘除、resync、关闭回收，带 20 秒看门狗）。Makefile 新增 `build/test_watch.exe`、`mac-check`（zig 交叉编译两个 macOS 架构，只证明能编过），`windows-tests` 和 CI 的 windows job 会构建并运行 `test_watch.exe`，Linux 的 artifact 里也带上它。
+
+**运行结果（本机）**：Linux `test_watch` 10/10 通过；macOS 两个架构与 Windows 目标都编译通过；Windows 原生测试在本机只能通过 WSL 互通启动，没有得到可信的运行结论（互通下输出和退出状态不稳定），因此不记为通过——它会在 CI 的 windows runner 上真实运行。
+
+## 分支报告卡片
+
+宿主带回来的结论现在有结构化字段，不再只靠正文前缀：`session.Msg` 增加 `Report *Report`（`kind=branch_report`），`introduceBranchReportLocked` 在排队注入时带上 `branch_sid / parent_sid / title / conclusion / checkpoint / status / evidence / snapshot_id / at`，由 `startRun` 写进历史；网页 `buildBlocks` 看到 `report` 就画卡片（`ReportCard.svelte`：标题、结论、依据、来源会话、分叉点、时间、「打开分支」链接——打开只是切到分支会话，不改绑窗口、不开主动推送）。正文仍然保留完整的老格式，命令行、飞书/Telegram 和模型上下文不受影响。
+
+旧数据兼容：`History()` 在读历史时把**完整**老模板（含结尾那句宿主说明）补成同样的结构化字段，网页刷新后照样是卡片；只写相同前缀的用户消息不会被当成报告（`parseLegacyReport` 要求整段模板匹配）。用户自己的消息即使正文一模一样也没有 `report` 字段，网页仍画成普通气泡。
+
+回归：`TestBranchReportComesBackAsASourcedMessageOnly`（补了结构化断言）、`TestLegacyBranchReportAnnotatedAndUserTextNotForged`、网页 `tests/run.cjs` 的报告卡片用例（结构化→卡片、只有正文→气泡）。
+
+## 分支的「最近进展」
+
+`BranchMeta` 增加 `progress`/`progress_at`（`BranchInfo` 同样字段），由宿主从真实状态生成，不调模型、不读历史：开始跑时「运行中：<这一轮要做什么>」；结束时「完成：这一轮做了「…」」/「已取消：这一轮被打断」/「失败（状态）：<最后一段文本>」；暂停/归档/带出结论也各写一句。长度 `clip(…, 200)`，随分支元信息持久化，重启后照常可读；旧记录没有进展就显示「还没有进展记录」。
+
+列表路径只读元信息（`Branches()`/`Children()`），不会为了进展去加载每个分支的历史；网页的父子列表和分支面板显示「最近进展 + 相对时间」，静默分支只更新被动状态，不弹通知、不抢焦点。
+
+回归：`TestBranchRecentProgressComesFromRealState`（开始→结束两段进展、落盘、重开存储仍在）。
