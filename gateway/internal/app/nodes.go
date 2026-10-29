@@ -291,6 +291,9 @@ func (a *App) KernelDown(name string) {
 	if n := a.nodes[name]; n != nil && n.info.NodeEpoch != "" && a.dispatcher != nil {
 		a.dispatcher.Submit(dispatch.Command{Action: "disconnect", Owner: name + "/" + n.info.NodeEpoch})
 	}
+	if n := a.nodes[name]; n != nil {
+		delete(a.watchSeq, n.info.NodeEpoch)
+	}
 	delete(a.nodes, name)
 	if machine != host.LocalName || a.localKernel() == "" {
 		a.mindMachineChanged(machine, false)

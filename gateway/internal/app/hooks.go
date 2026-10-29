@@ -463,10 +463,8 @@ func (a *App) noteHookCause(machine, hook string, timeoutMS int) {
 	a.hookCauses = append(a.hookCauses, hookCause{Machine: machine, Hook: hook, Until: now + int64(timeoutMS/1000) + 5})
 }
 
-// hookCauseOn 是这台机器上此刻正在执行的 Hook 动作（没有就返回空）。
-func (a *App) hookCauseOn(machine string) string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// hookCauseOnLocked 是这台机器上此刻正在执行的 Hook 动作（没有就返回空）。调用方持有锁。
+func (a *App) hookCauseOnLocked(machine string) string {
 	now := a.now().Unix()
 	for _, c := range a.hookCauses {
 		if c.Until >= now && c.Machine == machine {
@@ -478,8 +476,8 @@ func (a *App) hookCauseOn(machine string) string {
 
 // fileChanged 把内核的观察结果写成可靠事件：每个关心这个路径的 agent/来源会话一条。
 // 如果变化发生在某个 Hook 动作执行期间，就记成它派生的事件：同一个 Hook 不会消费
-// 自己写出来的变化，其他 Hook 仍按因果深度处理。
-// 事件只表示至少观察到一次变化，resync_required 表示这里有缺口。
+// 自己写出来的变化，其他 Hook 仍按因果深度处理。序号一次分配完，两台机器的观察同时
+// 到达也不会撞到同一个 Seq 而被可靠日志当成重复丢掉。
 func (a *App) fileChanged(node string, m *proto.Msg) {
 	a.mu.Lock()
 	store := a.jobEvents
@@ -488,24 +486,40 @@ func (a *App) fileChanged(node string, m *proto.Msg) {
 		epoch = n.info.NodeEpoch
 	}
 	rules := a.hookWatchRules()
-	seq := a.watchSeq
 	machine := a.machineOf(node)
 	a.mu.Unlock()
 	if store == nil || epoch == "" {
 		return
 	}
 	now := a.now().Unix()
-	sent := map[string]bool{}
+	type pendingEvent struct {
+		agent, sid, workspace string
+	}
+	var want []pendingEvent
+	seen := map[string]bool{}
 	for _, w := range rules {
-		if w.Key != m.WatchKey || sent[w.Agent+"\x00"+w.SID] {
+		if w.Key != m.WatchKey || seen[w.Agent+"\x00"+w.SID] {
 			continue
 		}
-		sent[w.Agent+"\x00"+w.SID] = true
-		seq++
-		data, _ := json.Marshal(map[string]any{"workspace": w.Workspace, "path": m.Path, "count": m.Count, "resync_required": m.ResyncRequired})
-		event := eventlog.Event{Name: "file.changed", SourceID: "watch", SourceEpoch: epoch, Seq: seq,
-			OccurredAt: now, ObservedAt: now, AgentID: w.Agent, OriginSID: w.SID, Data: data}
-		if cause := a.hookCauseOn(machine); cause != "" {
+		seen[w.Agent+"\x00"+w.SID] = true
+		want = append(want, pendingEvent{w.Agent, w.SID, w.Workspace})
+	}
+	if len(want) == 0 {
+		return
+	}
+	a.mu.Lock()
+	if a.watchSeq == nil {
+		a.watchSeq = map[string]uint64{}
+	}
+	base := a.watchSeq[epoch]
+	a.watchSeq[epoch] = base + uint64(len(want))
+	cause := a.hookCauseOnLocked(machine)
+	a.mu.Unlock()
+	for i, w := range want {
+		data, _ := json.Marshal(map[string]any{"workspace": w.workspace, "path": m.Path, "count": m.Count, "resync_required": m.ResyncRequired})
+		event := eventlog.Event{Name: "file.changed", SourceID: "watch", SourceEpoch: epoch, Seq: base + uint64(i) + 1,
+			OccurredAt: now, ObservedAt: now, AgentID: w.agent, OriginSID: w.sid, Data: data}
+		if cause != "" {
 			event.OriginHook, event.Depth = cause, 1
 		}
 		event.ID = eventlog.EventID(event.SourceID, event.SourceEpoch, event.Seq)
@@ -513,11 +527,6 @@ func (a *App) fileChanged(node string, m *proto.Msg) {
 			a.log.Error("文件观察事件没有写进可靠日志", "node", node, "err", err)
 		}
 	}
-	a.mu.Lock()
-	if seq > a.watchSeq {
-		a.watchSeq = seq
-	}
-	a.mu.Unlock()
 	if a.hookEngine != nil {
 		a.hookEngine.Wake()
 	}

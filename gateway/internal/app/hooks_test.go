@@ -572,3 +572,32 @@ func TestMessageReceivedEventIsRecordedOncePerPlatformMessage(t *testing.T) {
 		t.Fatalf("新消息没有记下来：%d", got)
 	}
 }
+
+func TestFileWatchKeepsGaplessSequencesPerNodeEpoch(t *testing.T) {
+	e := setup(t)
+	work := t.TempDir()
+	e.a.mu.Lock()
+	e.a.wss = []Workspace{{ID: "w", Host: host.LocalName, Path: work, SandboxMode: "off"}}
+	e.a.nodes["k1"] = &node{info: KernelInfo{Node: "k1", NodeEpoch: "e1", Local: true, Features: map[string]int{"file_watch": 1}}}
+	e.a.nodes["k2"] = &node{info: KernelInfo{Node: "k2", NodeEpoch: "e2", Local: true, Features: map[string]int{"file_watch": 1}}}
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	spec := hooks.Spec{Name: "观察", On: []string{"file.changed"}, Handler: hooks.Handler{Type: "notify", Text: "变了"},
+		Deliver: "none", Watch: &hooks.Watch{Workspace: "w", Path: "."}}
+	if _, err := e.a.HookAction(context.Background(), mainSID, "fake:u1", HookRequest{Action: "create", OperationID: "seq", Spec: &spec}); err != nil {
+		t.Fatal(err)
+	}
+	key := hookWatchKey("w", work)
+	note := func(node, path string) {
+		e.a.fileChanged(node, &proto.Msg{WatchKey: key, Path: path, Count: 1})
+	}
+	// 两台机器的观察交错到达：每个内核启动身份的序号各自连续，不会被彼此挤出空档
+	note("k1", filepath.Join(work, "a"))
+	note("k2", filepath.Join(work, "b"))
+	note("k1", filepath.Join(work, "c"))
+	for _, id := range []string{eventlog.EventID("watch", "e1", 1), eventlog.EventID("watch", "e1", 2), eventlog.EventID("watch", "e2", 1)} {
+		if _, ok := e.a.jobEvents.Event(id); !ok {
+			t.Fatalf("观察事件没有按自己的序号写下来：%s", id)
+		}
+	}
+}

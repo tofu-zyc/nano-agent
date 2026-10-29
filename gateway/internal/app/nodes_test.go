@@ -62,6 +62,10 @@ func (k *fakeKernel) expectAll(n int) map[string]proto.Msg {
 		if m.T == proto.TExecStarted {
 			continue // 协议 v11 的“真的开始了”通知，不计入期望的条数
 		}
+		if m.T == proto.TLs {
+			k.send(proto.Msg{T: proto.TLsResult, ID: m.ID, OK: proto.Bool(true), Path: m.Path})
+			continue
+		}
 		got[m.T+":"+m.ID] = m
 		i++
 	}

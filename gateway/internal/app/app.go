@@ -113,7 +113,7 @@ type App struct {
 	watchDigest     map[string]string // 每个内核最近一次下发的观察集合
 	watchBroken     map[string]bool   // 断开过的内核：重新下发时那段时间按缺口上报
 	hookCauses      []hookCause       // 正在执行的 Hook 动作：观察事件据此记因果，防自写循环
-	watchSeq        uint64            // watch 来源的事件序号（和工具事件的序号分开记）
+	watchSeq        map[string]uint64 // watch 来源的事件序号：按内核启动身份分开记，不然会互相挤出新序号
 	messageSeq      uint64            // message 来源的事件序号
 	runtimeEventSeq uint64
 	jobControls     map[string]jobControlWait

@@ -119,6 +119,12 @@ func (k *fakeKernel) expect(typ string) proto.Msg {
 		if ok && m.T == proto.TExecStarted && typ != proto.TExecStarted {
 			continue
 		}
+		// 真实内核会马上回答网关的目录询问。后台规范化工作目录的 ls 在这里自己回掉，
+		// 不能让它在缓冲里被后面的断言当成别的消息（全量跑时这一条会偶发抢在前面）。
+		if ok && m.T == proto.TLs && typ != proto.TLs {
+			k.send(proto.Msg{T: proto.TLsResult, ID: m.ID, OK: proto.Bool(true), Path: m.Path})
+			continue
+		}
 		if !ok || m.T != typ {
 			k.t.Fatalf("期望内核收到 %s，实际 %+v（ok=%v）", typ, m, ok)
 		}
@@ -135,6 +141,10 @@ func (k *fakeKernel) none() {
 		}
 		if m.T == proto.TExecStarted {
 			continue // “真的开始了”的通知不算工具结果
+		}
+		if m.T == proto.TLs {
+			k.send(proto.Msg{T: proto.TLsResult, ID: m.ID, OK: proto.Bool(true), Path: m.Path})
+			continue
 		}
 		k.t.Fatalf("不该收到消息：%+v", m)
 	}
