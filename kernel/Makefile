@@ -66,7 +66,7 @@ SRCTAR := nano-exec-src.tar.gz
 XHDRS  := src/nexec.h src/sandbox.h src/util.h src/plat.h third_party/cjson/cJSON.h
 
 .DEFAULT_GOAL := all
-.PHONY: all test test-win windows-exec windows-kernel windows-tests cross-linux cross-macos clean static FORCE
+.PHONY: all test test-win windows-exec windows-kernel windows-tests cross-linux cross-macos mac-check clean static FORCE
 
 # 版本号变了才重写 version.h，只有用到它的文件会重新编译
 $(VERSION_H): FORCE
@@ -141,10 +141,22 @@ build/test_runner.exe: tests/test_runner.c src/exec_stream.c src/runner_stream.c
 build/test_exec_stream.exe: tests/test_exec_stream.c src/exec_stream.c src/exec_stream.h src/util.c src/plat_win.c third_party/cjson/cJSON.c $(VERSION_H)
 	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_exec_stream.c src/exec_stream.c src/util.c src/plat_win.c third_party/cjson/cJSON.c $(WIN_LIBS)
 
-windows-tests: build/test_runner.exe build/test_exec_stream.exe build/test_job_io.exe build/test_job_manager.exe
+build/test_watch.exe: tests/test_watch_win.c src/watch.c src/watch.h third_party/cjson/cJSON.c
+	@mkdir -p $(dir $@)
+	$(ZIG) cc -target x86_64-windows-gnu $(WIN_CFLAGS) -o $@ tests/test_watch_win.c src/watch.c third_party/cjson/cJSON.c $(WIN_LIBS)
+
+windows-tests: build/test_runner.exe build/test_exec_stream.exe build/test_job_io.exe build/test_job_manager.exe build/test_watch.exe
 
 windows-exec: $(WIN_EXEC)
 windows-kernel: $(WIN_KERNEL)
+
+# macOS 观察器编译检查：zig 交叉编译两个架构，只证明能编过，不证明运行
+mac-check:
+	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
+	@mkdir -p build
+	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -c src/watch.c -o build/watch-aarch64-macos.o
+	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -c src/watch.c -o build/watch-x86_64-macos.o
+	@echo "macOS 观察器：编译检查通过（未在真机运行）"
 
 # 本地交叉编译 Linux 发布包（x86_64 和 arm64），只用 zig，不需要 sudo
 cross-linux: $(VERSION_H)
@@ -179,7 +191,7 @@ test-win:
 	@if [ "$(NANO_TEST_NO_WINDOWS)" != "1" ] && [ -x "$(ZIG)" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then \
 	  $(MAKE) --no-print-directory windows-exec windows-kernel windows-tests && \
 	  { test -f "$(RG_WIN)" || { echo "没有 $(RG_WIN)：先运行 scripts/fetch-rg.sh"; exit 1; }; } && \
-	  ./build/test_runner.exe && ./build/test_exec_stream.exe && ./build/test_job_io.exe && ./build/test_job_manager.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
+	  ./build/test_runner.exe && ./build/test_exec_stream.exe && ./build/test_job_io.exe && ./build/test_job_manager.exe && ./build/test_watch.exe && python3 tests/test_exec_win.py $(WIN_EXEC) $(RG_WIN); \
 	else echo "（没有 zig 或 WSL interop，跳过 Windows 执行器测试；Windows 上的测试在 CI 的 Windows runner 跑）"; fi
 
 test: build/test_core build/test_watch build/test_runner build/test_exec_stream build/test_job_io build/test_job_manager build/nano-kernel-asan build/nano-exec-asan test-win

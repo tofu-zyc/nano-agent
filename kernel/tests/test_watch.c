@@ -7,9 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <dirent.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <unistd.h>
 #endif
 
@@ -62,7 +63,7 @@ static void touch(const char *dir, const char *name)
 int main(void)
 {
     checks = failures = 0;
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(__APPLE__)
     printf("watch: 这个平台没有实现，跳过\n");
     return 0;
 #else
@@ -85,12 +86,16 @@ int main(void)
     CHECK(ngot == 1);
     CHECK(got[0].count >= 2 && strcmp(got[0].key, "w1") == 0 && !got[0].resync);
 
-    /* 目录登记会带上里面变化的文件名 */
+    /* 目录登记会带上里面变化的文件名（kqueue 只报目录本身，不报子项名字） */
     ngot = 0;
     touch(dir, "b");
     na_watch_ready(w, 2000);
     na_watch_tick(w, 2600, on_event, NULL);
+#if defined(__linux__)
     CHECK(ngot == 1 && strstr(got[0].path, "/b") != NULL);
+#else
+    CHECK(ngot == 1 && strcmp(got[0].key, "w1") == 0);
+#endif
 
     /* 重连后重新下发：现有登记各报一次缺口，不让处理器以为一直没变 */
     ngot = 0;
@@ -100,6 +105,7 @@ int main(void)
     na_watch_tick(w, 3000, on_event, NULL);
     CHECK(ngot == 1 && got[0].resync);
 
+#if defined(__linux__)
     /* 队列溢出：没人读的时候堆满，之后从队列里读到 IN_Q_OVERFLOW 也要报缺口 */
     long limit = 16384;
     FILE *lf = fopen("/proc/sys/fs/inotify/max_queued_events", "r");
@@ -123,6 +129,23 @@ int main(void)
     }
     CHECK(overflow);
     CHECK(na_watch_next(w) == -1);        /* 报过之后不再重复 */
+#else
+    /* macOS：kqueue 没有等价的内核队列溢出；这里验证"改文件名"（重命名）也能报出来 */
+    int64_t at = 4000;
+    na_watch_tick(w, at, on_event, NULL);
+    ngot = 0;
+    char from[1300], to[1300];
+    snprintf(from, sizeof from, "%s/rename-me", dir);
+    snprintf(to, sizeof to, "%s/renamed", dir);
+    touch(dir, "rename-me");
+    na_watch_ready(w, at);
+    na_watch_tick(w, at + 600, on_event, NULL);
+    ngot = 0;
+    rename(from, to);
+    na_watch_ready(w, at + 800);
+    na_watch_tick(w, at + 1400, on_event, NULL);
+    CHECK(ngot >= 1 && strcmp(got[0].key, "w1") == 0);
+#endif
 
     /* 集合里拿掉的登记不再观察 */
     ngot = 0;
