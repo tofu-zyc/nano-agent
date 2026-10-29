@@ -11,7 +11,8 @@ import (
 	"nano-agent/gateway/internal/proto"
 )
 
-func (a *App) LeaseProtocol() int { return 1 }
+func (a *App) LeaseProtocol() int       { return 1 }
+func (a *App) LeaseDetachProtocol() int { return 1 }
 
 func resourceKeys(csv string) []string {
 	if csv == "" {
@@ -75,12 +76,22 @@ func (a *App) leaseRequest(nodeName string, n *node, m *proto.Msg, observed bool
 // Called with App.mu. All disk work is submitted to the single bounded worker.
 func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 	switch m.T {
-	case proto.TLeaseAcquire, proto.TLeaseStarted, proto.TLeaseRelease, proto.TLeaseCancel, proto.TLeaseSync:
+	case proto.TLeaseAcquire, proto.TLeaseStarted, proto.TLeaseRelease, proto.TLeaseCancel, proto.TLeaseSync,
+		proto.TLeaseDetachPrepare, proto.TLeaseDetachCommit, proto.TLeaseDetachAbort:
 	default:
 		return false
 	}
 	n := a.nodes[nodeName]
 	if n == nil || n.info.NodeEpoch == "" || m.NodeEpoch != n.info.NodeEpoch {
+		return true
+	}
+	detachPhase := ""
+	if strings.HasPrefix(m.T, "lease_detach_") {
+		detachPhase = strings.TrimPrefix(m.T, "lease_detach_")
+	}
+	if detachPhase != "" && n.info.Features["lease_detach"] < 1 {
+		a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseDetachResult, LeaseID: m.LeaseID, RequestID: m.RequestID, NodeEpoch: n.info.NodeEpoch,
+			Phase: detachPhase, OK: proto.Bool(false), Detail: "节点没有协商后台租约移交能力"})
 		return true
 	}
 	if a.dispatcher == nil {
@@ -92,10 +103,15 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 		if a.dispatchErr != nil {
 			detail += "：" + a.dispatchErr.Error()
 		}
-		a.hub.Send(nodeName, proto.Msg{T: kind, LeaseID: m.LeaseID, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: detail})
+		if detachPhase != "" {
+			a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseDetachResult, LeaseID: m.LeaseID, RequestID: m.RequestID, NodeEpoch: n.info.NodeEpoch,
+				Phase: detachPhase, OK: proto.Bool(false), Detail: detail})
+		} else {
+			a.hub.Send(nodeName, proto.Msg{T: kind, LeaseID: m.LeaseID, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: detail})
+		}
 		return true
 	}
-	command := dispatch.Command{ID: m.LeaseID, Owner: nodeName + "/" + n.info.NodeEpoch, Node: nodeName}
+	command := dispatch.Command{ID: m.LeaseID, Owner: nodeName + "/" + n.info.NodeEpoch, Node: nodeName, RequestID: m.RequestID}
 	switch m.T {
 	case proto.TLeaseAcquire:
 		req, err := a.leaseRequest(nodeName, n, m, false)
@@ -104,6 +120,12 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 			return true
 		}
 		command.Action, command.Request = "admit", req
+	case proto.TLeaseDetachPrepare:
+		command.Action = "detach_prepare"
+	case proto.TLeaseDetachCommit:
+		command.Action = "detach_commit"
+	case proto.TLeaseDetachAbort:
+		command.Action = "detach_abort"
 	case proto.TLeaseStarted:
 		command.Action = "started"
 	case proto.TLeaseRelease:
@@ -127,6 +149,11 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 		}
 	}
 	if !a.dispatcher.Submit(command) {
+		if strings.HasPrefix(command.Action, "detach_") {
+			a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseDetachResult, LeaseID: m.LeaseID, RequestID: m.RequestID, NodeEpoch: n.info.NodeEpoch,
+				Phase: strings.TrimPrefix(command.Action, "detach_"), OK: proto.Bool(false), Detail: "执行租约队列繁忙，后台移交尚未提交"})
+			return true
+		}
 		if m.T == proto.TLeaseAcquire {
 			a.leaseReply(nodeName, n, m, proto.TLeaseDeny, "执行租约持久队列已满，本次没有受理或执行")
 		} else {
@@ -153,6 +180,15 @@ func (a *App) leaseChanged(change dispatch.Change) {
 	nodeName, epoch, hasNode := strings.Cut(change.Owner, "/")
 	n := a.nodes[nodeName]
 	current := hasNode && n != nil && n.info.NodeEpoch == epoch
+	if current && strings.HasPrefix(change.Action, "detach_") {
+		detail := ""
+		if change.Err != nil {
+			detail = change.Err.Error()
+		}
+		a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseDetachResult, LeaseID: change.ID, RequestID: change.RequestID, NodeEpoch: epoch,
+			Phase: strings.TrimPrefix(change.Action, "detach_"), OK: proto.Bool(change.Err == nil), Detail: detail,
+			Lease: &proto.LeaseSpec{LeaseID: change.ID, Background: change.Lease.Background}})
+	}
 	if change.Err != nil {
 		a.log.Error("执行租约操作未完成", "action", change.Action, "lease", change.ID, "err", change.Err)
 		if current && (change.Action == "admit" || change.Action == "sync") {

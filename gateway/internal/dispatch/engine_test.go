@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,5 +131,46 @@ func TestCorruptLeaseCheckpointIsVisibleAndRetained(t *testing.T) {
 	}
 	if bytes, _ := os.ReadFile(file); string(bytes) != "broken" {
 		t.Fatal("recovery rewrote corrupt source")
+	}
+}
+
+func TestDetachPrepareIsDurableAndCommitWaitsForMatchingOwner(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changes := make(chan Change, 16)
+	e, err := Open(ctx, filepath.Join(root, "leases.json"), Defaults(), func(c Change) { changes <- c })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); <-e.Done() })
+	req := request("job-lease", "source")
+	submit(t, e, Command{Action: "admit", Request: req})
+	next(t, changes)
+	submit(t, e, Command{Action: "detach_prepare", ID: req.ID, Owner: req.Owner, RequestID: "ctl"})
+	prepared := next(t, changes)
+	if prepared.Err != nil || prepared.RequestID != "ctl" || prepared.Lease.Background || prepared.Lease.DetachRequest != "ctl" {
+		t.Fatal(prepared)
+	}
+	durable, err := os.ReadFile(filepath.Join(root, "leases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint Checkpoint
+	if err := json.Unmarshal(durable, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoint.Leases) != 1 || checkpoint.Leases[0].DetachRequest != "ctl" || checkpoint.Leases[0].Background {
+		t.Fatal(checkpoint)
+	}
+	submit(t, e, Command{Action: "detach_commit", ID: req.ID, Owner: "foreign", RequestID: "ctl"})
+	rejected := next(t, changes)
+	if rejected.Err == nil {
+		t.Fatal("foreign execution owner committed")
+	}
+	submit(t, e, Command{Action: "detach_commit", ID: req.ID, Owner: req.Owner, RequestID: "ctl"})
+	committed := next(t, changes)
+	if committed.Err != nil || !committed.Lease.Background {
+		t.Fatal(committed)
 	}
 }

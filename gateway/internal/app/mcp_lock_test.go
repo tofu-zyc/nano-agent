@@ -112,7 +112,24 @@ func TestMCPStopDuringCall(t *testing.T) {
 		e.callMCP(in.SID, "w1", "helper__wait")
 		time.Sleep(100 * time.Millisecond)
 		e.k.send(proto.Msg{T: proto.TExecCancel, SID: in.SID, ID: "w1"})
-		e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusCancelled})
+		e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, RunID: in.RunID, Status: proto.StatusCancelled})
+		// The cancelled RPC can reply before the peer's done frame obtains
+		// App.mu. Finish that run before sending the next independent message;
+		// otherwise this fixture accidentally exercises interjection recovery.
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			e.a.mu.Lock()
+			session := e.a.sessions[in.SID]
+			active := session != nil && session.run != nil
+			e.a.mu.Unlock()
+			if !active {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("cancelled run did not finish")
+			}
+			time.Sleep(time.Millisecond)
+		}
 		res := e.k.expect(proto.TExecResult)
 		if res.OK == nil || *res.OK {
 			t.Fatalf("取消的调用应该回失败：%+v", res)

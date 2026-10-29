@@ -291,6 +291,9 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 	welcome := proto.Msg{T: proto.TWelcome, V: proto.Version}
 	if handler, ok := h.h.(interface{ LeaseProtocol() int }); ok && hello.Feature("machine_leases") > 0 {
 		welcome.Features = map[string]json.RawMessage{"machine_leases": json.RawMessage(fmt.Sprint(handler.LeaseProtocol()))}
+		if detach, ok := h.h.(interface{ LeaseDetachProtocol() int }); ok && hello.Feature("lease_detach") > 0 {
+			welcome.Features["lease_detach"] = json.RawMessage(fmt.Sprint(detach.LeaseDetachProtocol()))
+		}
 	}
 	h.send(c, welcome)
 	h.log.Info("内核已连接", "node", node, "tools", len(hello.Tools), "remote", remote)

@@ -231,3 +231,15 @@ C 增量解码器逐帧验证身份、序号、状态顺序、base64 和帧大�
 不完整终态、重复终态、输出越界、成功状态与取消/超时/退出码矛盾都标为协议失败。
 runner 的输出上限在每次启动前冻结；一个大输出调用不会扩大其他任务的上限。
 这项执行器能力不单独表示节点已经提供 JobManager 或后台控制能力，节点须分别协商。
+
+
+### 后台租约移交准备与提交
+
+节点另外声明 lease_detach=1；Gateway 在 welcome 同名能力确认后，使用
+lease_detach_prepare / lease_detach_commit / lease_detach_abort。每条请求带 node_epoch、
+lease_id 和 request_id，回 lease_detach_result（phase=prepare/commit/abort、ok、detail）。
+
+prepare 可靠预留 agent 后台容量，原执行仍占前台 run 预算和全部机器资源；节点保存自己的
+后台所有权成功后才 commit。commit 才将等待关系转为后台并释放前台预算；保存失败用 abort
+撤销预留，仍保留原命令与前台等待。整个过程不释放真实进程槽或文件锁，重复提交幂等，不能用
+错误请求号或另一节点提交。未协商能力、存储不可用和队列满都给匹配的失败响应，不能让节点误认成功。

@@ -185,3 +185,45 @@ func TestRemoteExecutionTimeoutStartsAfterAdmission(t *testing.T) {
 		t.Fatalf("queue time consumed the execution budget: starts=%d", started)
 	}
 }
+
+func TestNodeLeaseDetachProtocolKeepsForegroundUntilCommit(t *testing.T) {
+	e := setup(t)
+	epoch := "00112233445566778899aabbccddeeff"
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.NodeEpoch = epoch
+	e.a.nodes["test"].info.Features = map[string]int{"machine_leases": 1, "lease_detach": 1}
+	e.a.mu.Unlock()
+	req := dispatch.Request{ID: "l" + epoch + "-1", Owner: "test/" + epoch, Machine: "shared", Session: "source", RunID: "r", CallID: "shell", Agent: "a"}
+	e.a.dispatcher.Submit(dispatch.Command{Action: "admit", Request: req})
+	waitLeaseState(t, e.a, req.ID, "granted")
+	// Consume the grant published to this authenticated execution owner.
+	e.k.expect(proto.TLeaseGrant)
+	roundtrip := func(kind, control, phase string, ok bool) {
+		t.Helper()
+		e.k.send(proto.Msg{T: kind, LeaseID: req.ID, NodeEpoch: epoch, RequestID: control})
+		result := e.k.expect(proto.TLeaseDetachResult)
+		if result.RequestID != control || result.Phase != phase || result.OK == nil || *result.OK != ok {
+			t.Fatalf("handoff reply %+v", result)
+		}
+	}
+	roundtrip(proto.TLeaseDetachPrepare, "first", "prepare", true)
+	cp, _ := e.a.dispatcher.Snapshot()
+	if len(cp.Leases) != 1 || cp.Leases[0].Background || cp.Leases[0].DetachRequest != "first" {
+		t.Fatal("prepare activated ownership", cp)
+	}
+	// A node-side persistence failure aborts the reservation, retaining its
+	// original wait relationship and resources.
+	roundtrip(proto.TLeaseDetachAbort, "first", "abort", true)
+	cp, _ = e.a.dispatcher.Snapshot()
+	if cp.Leases[0].Background || cp.Leases[0].DetachRequest != "" {
+		t.Fatal(cp)
+	}
+	roundtrip(proto.TLeaseDetachPrepare, "second", "prepare", true)
+	roundtrip(proto.TLeaseDetachCommit, "wrong", "commit", false)
+	roundtrip(proto.TLeaseDetachCommit, "second", "commit", true)
+	cp, _ = e.a.dispatcher.Snapshot()
+	if !cp.Leases[0].Background || cp.Leases[0].DetachRequest != "" {
+		t.Fatal("commit did not publish", cp)
+	}
+	roundtrip(proto.TLeaseDetachCommit, "second", "commit", true)
+}

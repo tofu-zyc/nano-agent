@@ -54,6 +54,7 @@ type Request struct {
 }
 
 type Lease struct {
+	DetachRequest string `json:"detach_request,omitempty"`
 	Request
 	State     string    `json:"state"` // queued | granted | running | cancelling | unknown
 	GrantedAt time.Time `json:"granted_at,omitempty"`
@@ -178,7 +179,7 @@ func (s *Scheduler) Admit(req Request, now time.Time) (Lease, []Lease, error) {
 		if sameRun(l.Request, req) && l.State == "queued" {
 			queued++
 		}
-		if l.Background && l.Agent == req.Agent {
+		if (l.Background || l.DetachRequest != "") && l.Agent == req.Agent {
 			bg++
 		}
 	}
@@ -323,7 +324,7 @@ func (s *Scheduler) Detach(id, owner string) (Lease, error) {
 	}
 	n := 0
 	for _, other := range s.leases {
-		if other.Agent == l.Agent && other.Background {
+		if other.Agent == l.Agent && (other.Background || other.DetachRequest != "") {
 			n++
 		}
 	}
@@ -444,5 +445,84 @@ func (s *Scheduler) MarkUnknown(id, owner string) error {
 		return errors.New("执行租约不存在或归属不符")
 	}
 	l.State, l.WaitFor = "unknown", "reconcile"
+	return nil
+}
+
+// PrepareDetach reserves agent background capacity without releasing the
+// foreground run's slot. The node persists its new owner before CommitDetach.
+func (s *Scheduler) PrepareDetach(id, owner, requestID string) (Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.leases[id]
+	if l == nil || l.Owner != owner {
+		return Lease{}, errors.New("执行租约归属不匹配")
+	}
+	if requestID == "" || len(requestID) > 128 {
+		return Lease{}, errors.New("后台移交请求身份无效")
+	}
+	if l.Background {
+		return clone(l), nil
+	}
+	if l.State == "unknown" || l.State == "cancelling" {
+		return Lease{}, errors.New("任务正在停止或状态未知，不能移交")
+	}
+	if l.DetachRequest != "" {
+		if l.DetachRequest != requestID {
+			return clone(l), errors.New("另一后台移交正在保存")
+		}
+		return clone(l), nil
+	}
+	used := 0
+	for _, other := range s.leases {
+		if other.Agent == l.Agent && (other.Background || other.DetachRequest != "") {
+			used++
+		}
+	}
+	if l.Agent == "" || used >= s.cfg.BackgroundPerAgent {
+		return clone(l), errors.New("agent 后台容量已满，保持前台执行")
+	}
+	l.DetachRequest = requestID
+	return clone(l), nil
+}
+func (s *Scheduler) CommitDetach(id, owner, requestID string, now time.Time) (Lease, []Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.leases[id]
+	if l == nil || l.Owner != owner {
+		return Lease{}, nil, errors.New("执行租约归属不匹配")
+	}
+	if l.Background {
+		return clone(l), nil, nil
+	}
+	if requestID == "" || l.DetachRequest != requestID {
+		return clone(l), nil, errors.New("后台移交没有匹配的已保存预留")
+	}
+	if l.State == "unknown" || l.State == "cancelling" {
+		return clone(l), nil, errors.New("任务正在停止或状态未知，不能提交移交")
+	}
+	l.Background = true
+	l.DetachRequest = ""
+	return clone(l), s.promote(now), nil
+}
+func (s *Scheduler) AbortDetach(id, owner, requestID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.leases[id]
+	if l == nil {
+		return nil
+	}
+	if l.Owner != owner {
+		return errors.New("执行租约归属不匹配")
+	}
+	if l.Background {
+		return errors.New("已提交后台所有权，不能撤回到前台")
+	}
+	if l.DetachRequest == "" {
+		return nil
+	}
+	if l.DetachRequest != requestID {
+		return errors.New("后台移交预留身份不匹配")
+	}
+	l.DetachRequest = ""
 	return nil
 }

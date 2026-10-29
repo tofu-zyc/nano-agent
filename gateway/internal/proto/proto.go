@@ -60,23 +60,27 @@ const (
 	TPipeClosed = "pipe_closed" // 内核 → 网关：进程退出了
 
 	// 协议 v11：并行、排队与完整调用身份
-	TToolQueued   = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
-	TToolStarted  = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
-	TExecStarted  = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
-	TExecQueued   = "exec_queued"
-	TInputPending = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
-	TInputReady   = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
-	TInputCommit  = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
-	TLeaseAcquire = "lease_acquire"
-	TLeaseGrant   = "lease_grant"
-	TLeaseQueued  = "lease_queued"
-	TLeaseDeny    = "lease_deny"
-	TLeaseStarted = "lease_started"
-	TLeaseRelease = "lease_release"
-	TLeaseCancel  = "lease_cancel"
-	TLeaseSync    = "lease_sync"
-	TLeaseSynced  = "lease_synced"
-	TModelYield   = "model_yield" // 网关 → 内核：这次生成让位给插话，不算错误、不算停止
+	TToolQueued         = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
+	TToolStarted        = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
+	TExecStarted        = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
+	TExecQueued         = "exec_queued"
+	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
+	TInputReady         = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
+	TInputCommit        = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
+	TLeaseAcquire       = "lease_acquire"
+	TLeaseDetachPrepare = "lease_detach_prepare"
+	TLeaseDetachCommit  = "lease_detach_commit"
+	TLeaseDetachAbort   = "lease_detach_abort"
+	TLeaseDetachResult  = "lease_detach_result"
+	TLeaseGrant         = "lease_grant"
+	TLeaseQueued        = "lease_queued"
+	TLeaseDeny          = "lease_deny"
+	TLeaseStarted       = "lease_started"
+	TLeaseRelease       = "lease_release"
+	TLeaseCancel        = "lease_cancel"
+	TLeaseSync          = "lease_sync"
+	TLeaseSynced        = "lease_synced"
+	TModelYield         = "model_yield" // 网关 → 内核：这次生成让位给插话，不算错误、不算停止
 
 	TPairing = "pairing" // 收到了配对请求，等管理员确认（Code 是确认码）
 	TPaired  = "paired"  // 管理员同意了：Token 是这台电脑专用的口令，内核存好后重新连接
@@ -125,6 +129,7 @@ type LeaseSpec struct {
 }
 
 type Msg struct {
+	Phase      string      `json:"phase,omitempty"`
 	NodeEpoch  string      `json:"node_epoch,omitempty"`
 	LeaseID    string      `json:"lease_id,omitempty"`
 	Lease      *LeaseSpec  `json:"lease,omitempty"`

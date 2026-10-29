@@ -202,3 +202,62 @@ func TestLeaseIdentityAndDuplicateAdmission(t *testing.T) {
 		t.Fatal("duplicate release not idempotent", err)
 	}
 }
+
+func TestDetachReservationDoesNotReleaseRunBudgetBeforeDurableHandoff(t *testing.T) {
+	cfg := Defaults()
+	cfg.HookReserve = 0
+	cfg.PerRun = 1
+	cfg.BackgroundPerAgent = 1
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	shell := request("shell", "source")
+	admit(t, s, shell, now)
+	sibling := shell
+	sibling.ID = "sibling"
+	sibling.CallID = "sibling"
+	sibling.Machine = "other"
+	if got := admit(t, s, sibling, now); got.State != "queued" {
+		t.Fatal(got)
+	}
+	prepared, err := s.PrepareDetach(shell.ID, shell.Owner, "control-1")
+	if err != nil || prepared.Background || prepared.DetachRequest != "control-1" {
+		t.Fatal(prepared, err)
+	}
+	if grants := s.Pump(now); len(grants) != 0 {
+		t.Fatal("prepare released foreground budget", grants)
+	}
+	bg := request("another-background", "other")
+	bg.Background = true
+	if _, _, err := s.Admit(bg, now); err == nil {
+		t.Fatal("prepared capacity was offered to another background")
+	}
+	if _, _, err := s.CommitDetach(shell.ID, shell.Owner, "wrong-control", now); err == nil {
+		t.Fatal("wrong handoff token committed")
+	}
+	if err := s.AbortDetach(shell.ID, shell.Owner, "control-1"); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := s.Lookup(shell.ID)
+	if current.Background || current.DetachRequest != "" {
+		t.Fatal("failed handoff changed owner", current)
+	}
+	if grants := s.Pump(now); len(grants) != 0 {
+		t.Fatal("abort released foreground budget", grants)
+	}
+	if _, err := s.PrepareDetach(shell.ID, shell.Owner, "control-2"); err != nil {
+		t.Fatal(err)
+	}
+	committed, grants, err := s.CommitDetach(shell.ID, shell.Owner, "control-2", now)
+	if err != nil || !committed.Background || committed.DetachRequest != "" || len(grants) != 1 || grants[0].ID != sibling.ID {
+		t.Fatal(committed, grants, err)
+	}
+	if _, grants, err := s.CommitDetach(shell.ID, shell.Owner, "control-2", now); err != nil || len(grants) != 0 {
+		t.Fatal("duplicate commit", grants, err)
+	}
+	if err := s.AbortDetach(shell.ID, shell.Owner, "control-2"); err == nil {
+		t.Fatal("committed ownership silently reverted")
+	}
+}

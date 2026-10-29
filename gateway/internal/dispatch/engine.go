@@ -26,12 +26,14 @@ type Engine struct {
 	lastError string
 }
 type Command struct {
+	RequestID       string
 	Action          string
 	Request         Request
 	ID, Owner, Node string
 	Inventory       []Lease
 }
 type Change struct {
+	RequestID       string
 	Action          string
 	ID, Owner, Node string
 	Lease           Lease
@@ -144,7 +146,7 @@ func (e *Engine) save(checkpoint Checkpoint) error {
 
 func (e *Engine) apply(command Command, now time.Time) {
 	before := e.scheduler.Checkpoint()
-	change := Change{Action: command.Action, ID: command.ID, Owner: command.Owner, Node: command.Node}
+	change := Change{RequestID: command.RequestID, Action: command.Action, ID: command.ID, Owner: command.Owner, Node: command.Node}
 	switch command.Action {
 	case "admit":
 		change.ID, change.Owner = command.Request.ID, command.Request.Owner
@@ -158,6 +160,12 @@ func (e *Engine) apply(command Command, now time.Time) {
 		change.Err = e.scheduler.MarkUnknown(command.ID, command.Owner)
 	case "cancel":
 		change.Grants, change.Err = e.scheduler.Cancel(command.ID, command.Owner, now)
+	case "detach_prepare":
+		change.Lease, change.Err = e.scheduler.PrepareDetach(command.ID, command.Owner, command.RequestID)
+	case "detach_commit":
+		change.Lease, change.Grants, change.Err = e.scheduler.CommitDetach(command.ID, command.Owner, command.RequestID, now)
+	case "detach_abort":
+		change.Err = e.scheduler.AbortDetach(command.ID, command.Owner, command.RequestID)
 	case "detach":
 		change.Lease, change.Err = e.scheduler.Detach(command.ID, command.Owner)
 		if change.Err == nil {
