@@ -982,12 +982,13 @@ def check_living(page, url, nano):
     else:
         fail("自我认知没显示")
     # 会话里：网关放进消息前面的记忆说明折叠显示，不把 [记忆] 原样摊出来
-    sess = os.path.join(nano, "data", "sessions")
+    # 新布局：<data>/v1/sessions/<sid 的 UTF-8 十六进制>.jsonl（internal/session.Key）
+    sess = os.path.join(nano, "data", "v1", "sessions")
     os.makedirs(sess, exist_ok=True)
-    with open(os.path.join(sess, "memtest.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(sess, "memtest".encode().hex() + ".jsonl"), "w", encoding="utf-8") as f:
         f.write(json.dumps({"role": "user", "ts": 1792800000, "content": "[系统] 这个会话没有挂载工作目录\n[记忆]\n这是你的长期记忆\n## 对方：主人\n喜欢手冲\n[/记忆]\n[近况]\n- 10-24 14:00 看了篇讲猫的文章\n[/近况]\n[2026-10-24 周五 15:08 · 网页] 你好呀"}, ensure_ascii=False) + "\n")
         f.write(json.dumps({"role": "assistant", "ts": 1792800001, "content": "你好"}, ensure_ascii=False) + "\n")
-    with open(os.path.join(sess, "@default%2Flife.jsonl"), "w", encoding="utf-8") as f:  # 和网关的 url.PathEscape 一样
+    with open(os.path.join(sess, "@default/life".encode().hex() + ".jsonl"), "w", encoding="utf-8") as f:
         f.write(json.dumps({"role": "user", "ts": 1792800000, "content": "[系统] 现在是 10-24 周五 15:20。你醒着，手头没事。"}, ensure_ascii=False) + "\n")
         f.write(json.dumps({"role": "assistant", "ts": 1792800001, "content": "看了会儿星星的资料，心情不错。"}, ensure_ascii=False) + "\n")
     page.goto(url + "#/sessions/memtest")

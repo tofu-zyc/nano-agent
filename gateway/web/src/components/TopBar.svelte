@@ -15,7 +15,7 @@
     {#if !store.connected}<span class="tag warn">实时连接断开，重连中…</span>{/if}
   </div>
 
-  <button class="jobs" onclick={() => store.open({ type: 'hooks' })} title="事件规则与投递记录"><Icon name="plug" size={15} /><span>事件规则</span></button>
+  <button class="hooks" onclick={() => store.open({ type: 'hooks' })} title="事件规则与投递记录"><Icon name="plug" size={15} /><span>事件规则</span></button>
 
   <button class="jobs" onclick={() => store.open({ type: 'jobs' })} title="查看执行任务和日志"><Icon name="terminal" size={15} /><span>执行任务</span></button>
 
@@ -82,8 +82,8 @@
     font-size: 16px;
     font-weight: 600;
   }
-  .jobs { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px; background: var(--panel); color: var(--text-2); white-space: nowrap; }
-  @media (max-width: 600px) { .jobs span { display: none; } }
+  .jobs, .hooks { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px; background: var(--panel); color: var(--text-2); white-space: nowrap; }
+  @media (max-width: 600px) { .jobs span, .hooks span { display: none; } }
   .search {
     flex: 1;
     max-width: 460px;
