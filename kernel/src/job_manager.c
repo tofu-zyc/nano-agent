@@ -101,7 +101,10 @@ static void runtime_fields(managed_job *j,cJSON *meta)
         const char *sandbox=str(j->start_frame,"sandbox_effective");
         if(sandbox)set_string(meta,"sandbox_effective",sandbox);
     }
-    buf_t text={0};buf_put_utf8(&text,j->tail,j->tail_length);
+    // Keep the preview independent of the lossless cursor log. Reserve space
+    // for JSON escaping plus the final stream frame in every metadata update.
+    size_t preview=j->tail_length>2048?2048:j->tail_length;
+    buf_t text={0};buf_put_utf8(&text,j->tail+j->tail_length-preview,preview);
     set_string(meta,"output_tail",buf_cstr(&text));buf_free(&text);
     observe_unlock(j);
 }
@@ -210,8 +213,15 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
         frozen_args=cJSON_AddObjectToObject(frozen,"args");
     }
     set_number(frozen_args,"timeout",timeout);
-    if(!commit(j,"queued","created")) {
-        snprintf(error,n,"Job 元数据没有可靠受理，未启动命令");
+    // Admission reserves 36 KiB for the bounded terminal frame (16 KiB),
+    // escaped output preview (12 KiB) and lifecycle/ownership fields. Reject
+    // oversized requests before any execution or lease can be published.
+    char *encoded=cJSON_PrintUnformatted(model);
+    bool fits=encoded && strlen(encoded)<=JOB_IO_META_MAX-(36u<<10);
+    free(encoded);
+    if(!fits || !commit(j,"queued","created")) {
+        snprintf(error,n,"%s",fits?"Job 元数据没有可靠受理，未启动命令":
+            "Job 请求元数据超过 28 KiB，无法预留可靠终态空间，未启动命令");
         m->count--;cJSON_Delete(model);free(j);return NULL;
     }
     return j;

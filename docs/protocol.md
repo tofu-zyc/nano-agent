@@ -263,11 +263,18 @@ interrupted，已跨启动边界恢复为 unknown，不重放命令；unknown �
 
 job_control 带 request_id（1–128 字节）、action 和可选 job_id。节点提供
 list/status/output/cancel/detach；output 的 cursor 为绝对原始字节位置，max_bytes 上限 65536，
-每个 Job 同时最多一个日志读取，回 job_state(request_id,ok,job,data,detail)。
+每个 Job 同时最多一个日志读取，回 job_state(request_id,ok,job,job_data,detail)。
+job_data 是按动作定义的对象或数组，和旧管道消息的字符串 data 字段分开：
+list 返回 Job 数组；output 返回 chunks/next_cursor/output_cursor/truncated_before/gap，
+chunk 含 cursor/next_cursor/stream/data（base64 原始字节）。Go 与 C 使用相同字段并通过真实往返校验。
 普通生命周期 job_state 包含 job_id、kind、job；jobs_sync 包含有界 jobs 清单。
+Gateway 只有同时具备可靠任务索引且目标支持 job_stream、machine_leases、lease_detach 时才确认 job_manager；
+缺任一环节继续使用原有前台执行。
 公共任务状态不包含冻结的原命令和执行参数；内部 lease 回执保留完整身份与资源域供网关核验。
 这些节点控制帧由认证的 Gateway 转交；用户权限仍必须由 Gateway 按原始 agent、发起者和可见范围核验。
 
+新任务的初始元数据最多 28 KiB，准入时为终态帧、转义输出摘要及生命周期字段预留空间；
+公共 output_tail 最多 2 KiB 原始字节，完整日志仍由游标读取，不能用较长尾部把可靠终态挤出 64 KiB 元数据上限。
 终态先持久保存，再按 event_seq=1 至少一次发送；events_ack(job_id,event_seq=1) 保存
 notification_state=delivered，重复 ACK 幂等。未确认终态每 5 秒或重连后补发，不推动模型轮询。
 节点恢复失败在 hello/lease_sync 的 job_storage_error 中明确报告，Gateway 拒绝清空已有占用。

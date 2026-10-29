@@ -1289,7 +1289,7 @@ static void job_reply(kernel_t *k,const char *request,job_binding *b,bool ok,con
         cJSON_AddStringToObject(m,"job_id",jobs_id(b->job));
         cJSON_AddItemToObject(m,"job",job_public(b));
     }
-    if(data)cJSON_AddItemToObject(m,"data",data);
+    if(data)cJSON_AddItemToObject(m,"job_data",data);
     link_send(&k->link,m);
 }
 static void job_control_reply(kernel_t *k,job_binding *b,bool ok,const char *detail)

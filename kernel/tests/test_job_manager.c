@@ -102,6 +102,34 @@ int main(int argc,char **argv)
     CHECK(!jobs_background(failure));
     CHECK(plat_remove_tree(path)==0 && plat_rename(backup,path)==0);
     free(path);free(backup);free(dir);
+    // A valid large request plus control-heavy output must still have room
+    // for its durable terminal receipt; output size never strands completion.
+    cJSON *large_origin=cJSON_Parse("{\"agent\":\"owner\",\"sid\":\"large\",\"run_id\":\"large-run\",\"call_id\":\"large-call\"}");
+    cJSON *large_req=cJSON_Parse("{\"tool\":\"Shell\",\"args\":{}}");
+    char *large_command=xmalloc(20001);memset(large_command,'x',20000);large_command[20000]=0;
+    cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(large_req,"args"),"command",large_command);free(large_command);
+    managed_job *large=jobs_create(m,large_origin,large_req,"machine:files","dir:/large",1,error,sizeof error);
+    CHECK(large);
+    if(large) {
+        event(m,jobs_id(large),"created",true);start(m,large);
+        char controls[8192];memset(controls,1,sizeof controls);
+        frame=cJSON_Parse("{\"t\":\"output\",\"stream\":\"stdout\"}");
+        jobs_observe(large,frame,controls,sizeof controls);cJSON_Delete(frame);
+        frame=cJSON_Parse("{\"t\":\"exit\",\"ok\":true,\"exit_code\":0,\"signal\":0,\"timed_out\":false,\"cancelled\":false}");
+        controls[2048]=0;cJSON_AddStringToObject(frame,"content",controls);
+        jobs_observe(large,frame,NULL,0);cJSON_Delete(frame);jobs_process_finished(large);
+        event(m,jobs_id(large),"terminal",true);
+        CHECK(jobs_finished(large));
+    }
+    // Requests that cannot reserve terminal space fail at admission without
+    // adding a record or creating a delayed execution.
+    size_t before_oversize=jobs_count(m);
+    large_command=xmalloc(40001);memset(large_command,'x',40000);large_command[40000]=0;
+    cJSON_ReplaceItemInObjectCaseSensitive(cJSON_GetObjectItemCaseSensitive(large_req,"args"),"command",cJSON_CreateString(large_command));
+    free(large_command);
+    CHECK(!jobs_create(m,large_origin,large_req,"machine:files","dir:/oversize",1,error,sizeof error));
+    CHECK(jobs_count(m)==before_oversize && strstr(error,"28 KiB"));
+    cJSON_Delete(large_origin);cJSON_Delete(large_req);
     // Only a durable completion ACK permits removing logs/metadata. Unknown
     // or still-unacknowledged jobs retain their reserved outbox/storage slot.
     CHECK(!jobs_remove(second,80));

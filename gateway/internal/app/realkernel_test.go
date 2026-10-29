@@ -51,7 +51,7 @@ func realKernelBins(t *testing.T) (kernelBin, execBin string) {
 	return abs1, abs2
 }
 
-func setupRealKernel(t *testing.T) (*env, *exec.Cmd) {
+func setupRealKernel(t *testing.T, wrappers ...func(*App) kernel.Handler) (*env, *exec.Cmd) {
 	t.Helper()
 	kbin, xbin := realKernelBins(t)
 	dir := t.TempDir()
@@ -79,7 +79,11 @@ func setupRealKernel(t *testing.T) (*env, *exec.Cmd) {
 	a.now = func() time.Time { return time.Date(2026, 10, 21, 15, 8, 0, 0, time.UTC) }
 	a.loc = time.UTC
 	a.SetHosts(newFakeHosts())
-	hub := kernel.NewHub("tok", a, log)
+	var handler kernel.Handler = a
+	if len(wrappers) > 0 {
+		handler = wrappers[0](a)
+	}
+	hub := kernel.NewHub("tok", handler, log)
 	a.SetHub(hub)
 	ln, err := kernel.Listen(cfg.Kernel.Listen)
 	if err != nil {

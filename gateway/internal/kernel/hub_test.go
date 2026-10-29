@@ -279,3 +279,39 @@ func TestMachineLeaseNegotiationRequiresValidBootIdentity(t *testing.T) {
 		})
 	}
 }
+
+type jobProtocolHandler struct{ leasedHandler }
+
+func (*jobProtocolHandler) LeaseDetachProtocol() int { return 1 }
+func (*jobProtocolHandler) JobProtocol() int         { return 1 }
+func TestJobNegotiationRequiresTheCompleteExecutionChain(t *testing.T) {
+	for _, missing := range []string{"", "job_manager", "job_stream", "lease_detach", "machine_leases"} {
+		t.Run(missing, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			handler := &jobProtocolHandler{}
+			hub := NewHub("tok", handler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			server, client := net.Pipe()
+			defer client.Close()
+			hub.Attach(ctx, server, true)
+			features := map[string]json.RawMessage{}
+			for _, name := range []string{"job_manager", "job_stream", "lease_detach", "machine_leases"} {
+				if name != missing {
+					features[name] = json.RawMessage("1")
+				}
+			}
+			hello := proto.Msg{T: proto.THello, V: proto.Version, Node: "node", NodeEpoch: "00112233445566778899aabbccddeeff", Features: features}
+			if err := json.NewEncoder(client).Encode(hello); err != nil {
+				t.Fatal(err)
+			}
+			client.SetReadDeadline(time.Now().Add(time.Second))
+			var reply proto.Msg
+			if err := json.NewDecoder(client).Decode(&reply); err != nil {
+				t.Fatal(err)
+			}
+			if (reply.Feature("job_manager") > 0) != (missing == "") {
+				t.Fatal(missing, reply)
+			}
+		})
+	}
+}

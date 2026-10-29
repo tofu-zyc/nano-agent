@@ -295,6 +295,10 @@ func (h *Hub) serve(nc net.Conn, local, trusted bool) {
 			welcome.Features["lease_detach"] = json.RawMessage(fmt.Sprint(detach.LeaseDetachProtocol()))
 		}
 	}
+	if handler, ok := h.h.(interface{ JobProtocol() int }); ok && hello.Feature("job_manager") > 0 &&
+		hello.Feature("job_stream") > 0 && welcome.Feature("lease_detach") > 0 && handler.JobProtocol() > 0 {
+		welcome.Features["job_manager"] = json.RawMessage(fmt.Sprint(min(1, handler.JobProtocol())))
+	}
 	h.send(c, welcome)
 	h.log.Info("内核已连接", "node", node, "tools", len(hello.Tools), "remote", remote)
 	h.h.KernelUp(node, hello, local)

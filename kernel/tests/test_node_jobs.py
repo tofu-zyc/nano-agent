@@ -194,9 +194,9 @@ def check():
             terminal = node.terminal(queued_id)
             assert terminal["status"] == "succeeded" and (node.work / "launches").read_text() == "once", terminal
             output = node.control("logs", "output", queued_id, cursor=0, max_bytes=65536)
-            chunks = output["data"]["chunks"]
+            chunks = output["job_data"]["chunks"]
             assert b"".join(base64.b64decode(c["data"]) for c in chunks) == b"queued-done", output
-            assert output["data"]["next_cursor"] == 11, output
+            assert output["job_data"]["next_cursor"] == 11, output
 
             # Auto yield detaches the existing PID, never starts a replacement.
             auto_gate = node.work / "auto-release"
@@ -423,7 +423,7 @@ def bounded_retention():
         try:
             deadline=time.monotonic()+8
             while True:
-                listing=node.control("retained-list","list")["data"]
+                listing=node.control("retained-list","list")["job_data"]
                 if len(listing)<=224:
                     assert len(listing)==224,len(listing)
                     break

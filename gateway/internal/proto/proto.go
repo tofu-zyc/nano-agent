@@ -67,6 +67,10 @@ const (
 	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
 	TInputReady         = "input_ready"   // 内核 → 网关：到了安全边界，可以写插话了
 	TInputCommit        = "input_commit"  // 网关 → 内核：插话已经写进历史，可以请求下一次模型
+	TJobControl         = "job_control"
+	TJobState           = "job_state"
+	TJobsSync           = "jobs_sync"
+	TEventsAck          = "events_ack"
 	TLeaseAcquire       = "lease_acquire"
 	TLeaseDetachPrepare = "lease_detach_prepare"
 	TLeaseDetachCommit  = "lease_detach_commit"
@@ -129,18 +133,29 @@ type LeaseSpec struct {
 	HostID          string `json:"host_id,omitempty"`
 	Background      bool   `json:"background,omitempty"`
 	Priority        int    `json:"priority,omitempty"`
+	CreatedBy       string `json:"created_by,omitempty"`
+	Silent          bool   `json:"silent,omitempty"`
 }
 
 type Msg struct {
-	LeaseReceipts   []LeaseSpec `json:"lease_receipts,omitempty"`
-	JobStorageError string      `json:"job_storage_error,omitempty"`
-	Phase           string      `json:"phase,omitempty"`
-	NodeEpoch       string      `json:"node_epoch,omitempty"`
-	LeaseID         string      `json:"lease_id,omitempty"`
-	Lease           *LeaseSpec  `json:"lease,omitempty"`
-	Leases          []LeaseSpec `json:"leases,omitempty"`
-	OwnerAgent      string      `json:"owner_agent,omitempty"`
-	Priority        int         `json:"priority,omitempty"`
+	JobID           string          `json:"job_id,omitempty"`
+	Job             *JobSnapshot    `json:"job,omitempty"`
+	Jobs            []JobSnapshot   `json:"jobs,omitempty"`
+	JobData         json.RawMessage `json:"job_data,omitempty"`
+	Kind            string          `json:"kind,omitempty"`
+	EventSeq        uint64          `json:"event_seq,omitempty"`
+	Action          string          `json:"action,omitempty"`
+	Cursor          uint64          `json:"cursor,omitempty"`
+	MaxBytes        int             `json:"max_bytes,omitempty"`
+	LeaseReceipts   []LeaseSpec     `json:"lease_receipts,omitempty"`
+	JobStorageError string          `json:"job_storage_error,omitempty"`
+	Phase           string          `json:"phase,omitempty"`
+	NodeEpoch       string          `json:"node_epoch,omitempty"`
+	LeaseID         string          `json:"lease_id,omitempty"`
+	Lease           *LeaseSpec      `json:"lease,omitempty"`
+	Leases          []LeaseSpec     `json:"leases,omitempty"`
+	OwnerAgent      string          `json:"owner_agent,omitempty"`
+	Priority        int             `json:"priority,omitempty"`
 
 	T string `json:"t"`
 
