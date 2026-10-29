@@ -24,7 +24,8 @@ class StreamProcess:
         self.errors = threading.Thread(target=errors, daemon=True)
         self.reader.start()
         self.errors.start()
-        req = {"tool":"Shell", "args":{"command":command,"timeout":20},
+        # Cold PowerShell on CI runners can take 15-20s just to start; these limits only catch hangs.
+        req = {"tool":"Shell", "args":{"command":command,"timeout":60},
                "dirs":[root],"write":True,"rw":[],"ro":[],"watch_stdin":True,
                "sandbox":"off","stream":1,"job_id":"j_fixture","max_output":4096}
         req.update(options)
@@ -33,7 +34,10 @@ class StreamProcess:
         self.frames = []
 
     def recv(self):
-        line = self.messages.get(timeout=15)
+        try:
+            line = self.messages.get(timeout=60)
+        except queue.Empty:
+            raise AssertionError(("no frame within 60s", self.frames[-1:], bytes(self.raw_stderr))) from None
         assert line is not None, ("stream ended without terminal", self.frames, self.raw_stderr)
         assert len(line) <= 16384, len(line)
         msg = json.loads(line)
