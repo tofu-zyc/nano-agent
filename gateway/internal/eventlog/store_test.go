@@ -273,7 +273,7 @@ func TestCorruptAndFutureRecordsRemainVisibleAndUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	corrupt := bytes.Replace(good, []byte("device.online"), []byte("device.offline"), 1)
-	future := bytes.Replace(good, []byte(`"version":1`), []byte(`"version":2`), 1)
+	future := bytes.Replace(good, []byte(`"version":1`), []byte(`"version":3`), 1)
 	for i, data := range [][]byte{corrupt, future, append(bytes.Clone(corrupt), good...), []byte("bad complete line\n")} {
 		path := filepath.Join(dir, fmt.Sprint(i))
 		os.WriteFile(path, data, 0600)

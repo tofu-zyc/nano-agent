@@ -108,20 +108,23 @@ type EventRecord struct {
 	DeliveryIDs []string `json:"deliveries,omitempty"`
 }
 type Delivery struct {
-	ID        string          `json:"delivery_id"`
-	EventID   string          `json:"event_id"`
-	HookID    string          `json:"hook_id"`
-	Revision  uint64          `json:"hook_revision"`
-	AgentID   string          `json:"agent_id"`
-	Creator   string          `json:"creator"`
-	Silent    bool            `json:"silent"`
-	TargetSID string          `json:"target_sid,omitempty"`
-	Rule      json.RawMessage `json:"rule"`
-	Status    string          `json:"status"`
-	Attempt   int             `json:"attempt"`
-	NextAt    int64           `json:"next_at,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Result    string          `json:"result,omitempty"`
+	ObjectKey  string          `json:"object_key,omitempty"`
+	UpdatedMS  int64           `json:"updated_ms,omitempty"`
+	Registered bool            `json:"registered_rule,omitempty"`
+	ID         string          `json:"delivery_id"`
+	EventID    string          `json:"event_id"`
+	HookID     string          `json:"hook_id"`
+	Revision   uint64          `json:"hook_revision"`
+	AgentID    string          `json:"agent_id"`
+	Creator    string          `json:"creator"`
+	Silent     bool            `json:"silent"`
+	TargetSID  string          `json:"target_sid,omitempty"`
+	Rule       json.RawMessage `json:"rule"`
+	Status     string          `json:"status"`
+	Attempt    int             `json:"attempt"`
+	NextAt     int64           `json:"next_at,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	Result     string          `json:"result,omitempty"`
 }
 
 func DeliveryID(event, hook string, revision uint64) string {
@@ -147,6 +150,8 @@ func deliveryDone(status string) bool {
 }
 
 type Match struct {
+	Coalesce   bool       `json:"coalesce,omitempty"`
+	Checked    bool       `json:"check_registered_rules,omitempty"`
 	EventID    string     `json:"event_id"`
 	Deliveries []Delivery `json:"deliveries"`
 }
@@ -155,19 +160,20 @@ type Match struct {
 // set after the caller has verified a live invocation or a durable recovery
 // proof. An observation alone cannot activate an unknown Job.
 type Transaction struct {
-	Admit    bool      `json:"admit,omitempty"`
-	Job      *Job      `json:"job,omitempty"`
-	Event    *Event    `json:"event,omitempty"`
-	Match    *Match    `json:"match,omitempty"`
-	Delivery *Delivery `json:"delivery,omitempty"`
+	Rule     *RuleChange `json:"rule,omitempty"`
+	Admit    bool        `json:"admit,omitempty"`
+	Job      *Job        `json:"job,omitempty"`
+	Event    *Event      `json:"event,omitempty"`
+	Match    *Match      `json:"match,omitempty"`
+	Delivery *Delivery   `json:"delivery,omitempty"`
 	// Forget removes already matched events and completed delivery bodies.
 	// The Job's terminal identity stays as the deduplication receipt.
 	Forget []string `json:"forget,omitempty"`
 }
 type Stats struct {
-	Jobs, Events, Deliveries, Sources, Reserved, Queued int
-	LiveBytes, JournalBytes, ReservedBytes              int64
-	Err                                                 error
+	Jobs, Events, Deliveries, Sources, Rules, Reserved, Queued int
+	LiveBytes, JournalBytes, ReservedBytes                     int64
+	Err                                                        error
 }
 
 func terminal(status string) bool {
@@ -228,6 +234,8 @@ func sameDelivery(a, b Delivery) bool {
 	b.Attempt = 0
 	a.NextAt = 0
 	b.NextAt = 0
+	a.UpdatedMS = 0
+	b.UpdatedMS = 0
 	a.Error = ""
 	b.Error = ""
 	a.Result = ""

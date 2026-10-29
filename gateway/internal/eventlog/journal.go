@@ -28,7 +28,12 @@ func encode(seq uint64, p patch) ([]byte, error) {
 		return nil, errors.New("可靠日志记录过大")
 	}
 	hash := sha256.Sum256(raw)
-	line, err := json.Marshal(record{1, seq, raw, hex.EncodeToString(hash[:])})
+	line, err := json.Marshal(record{func() int {
+		if len(p.Rules) > 0 {
+			return 2
+		}
+		return 1
+	}(), seq, raw, hex.EncodeToString(hash[:])})
 	return append(line, '\n'), err
 }
 func (s *Store) replay() error {
@@ -64,12 +69,25 @@ func (s *Store) replay() error {
 			return fmt.Errorf("偏移 %d: %w", offset, err)
 		}
 		hash := sha256.Sum256(entry.Data)
-		if entry.Version != 1 || entry.Seq != s.seq+1 || entry.Hash != hex.EncodeToString(hash[:]) {
+		if (entry.Version != 1 && entry.Version != 2) || entry.Seq != s.seq+1 || entry.Hash != hex.EncodeToString(hash[:]) {
 			return fmt.Errorf("偏移 %d 的日志版本、顺序或校验损坏", offset)
 		}
 		var p patch
 		if len(entry.Data) > maxTransaction || json.Unmarshal(entry.Data, &p) != nil || empty(p) {
 			return fmt.Errorf("偏移 %d 的事务损坏", offset)
+		}
+		if entry.Version < 2 && len(p.Rules) > 0 {
+			return errors.New("v1 日志不能发布 Hook 规则")
+		}
+		for _, r := range p.Rules {
+			if err = r.valid(); err != nil {
+				return err
+			}
+			if old, ok := s.rules[r.ID]; ok {
+				if err = replayRule(old, r); err != nil {
+					return err
+				}
+			}
 		}
 		for _, c := range p.Cursors {
 			if !c.valid() {
@@ -112,9 +130,12 @@ func (s *Store) replay() error {
 			}
 		}
 		s.apply(p)
-		if len(s.cursors) > s.limits.Sources || len(s.jobs) > s.limits.Jobs || len(s.events)+s.reserved > s.limits.Events ||
+		if len(s.rules) > maxRules || len(s.cursors) > s.limits.Sources || len(s.jobs) > s.limits.Jobs || len(s.events)+s.reserved > s.limits.Events ||
 			len(s.deliveries) > s.limits.Deliveries || s.live+s.reserveBytes > s.limits.LiveBytes {
 			return ErrCapacity
+		}
+		if entry.Version == 2 {
+			s.v2 = true
 		}
 		s.seq = entry.Seq
 		offset += int64(len(line))
@@ -124,6 +145,16 @@ func (s *Store) replay() error {
 	return err
 }
 func (s *Store) checkState() error {
+	operations := map[string]bool{}
+	for _, rule := range s.rules {
+		if err := rule.valid(); err != nil {
+			return err
+		}
+		if operations[rule.OperationID] {
+			return errors.New("同一 Hook 创建操作出现多个身份")
+		}
+		operations[rule.OperationID] = true
+	}
 	for _, e := range s.events {
 		if e.JobID == "" {
 			c, ok := s.cursors[cursorKey(e.SourceID, e.SourceEpoch)]
@@ -151,6 +182,12 @@ func (s *Store) checkState() error {
 		}
 	}
 	for _, d := range s.deliveries {
+		if d.Registered {
+			rule, exists := s.rules[d.HookID]
+			if !exists || rule.AgentID != d.AgentID || rule.Creator != d.Creator || rule.Revision < d.Revision {
+				return errors.New("注册规则投递缺少固定权限来源")
+			}
+		}
 		e, ok := s.events[d.EventID]
 		if !ok || !e.Matched {
 			return errors.New("投递没有已匹配的事件来源")
@@ -168,6 +205,11 @@ func (s *Store) checkState() error {
 	return nil
 }
 func (s *Store) append(p patch) error {
+	if len(p.Rules) > 0 && !s.v2 && s.bytes > 0 {
+		if err := s.backupV1(); err != nil {
+			return err
+		}
+	}
 	line, err := encode(s.seq+1, p)
 	if err != nil {
 		return err
@@ -192,6 +234,9 @@ func (s *Store) append(p patch) error {
 	}
 	s.mu.Lock()
 	s.seq++
+	if len(p.Rules) > 0 {
+		s.v2 = true
+	}
 	s.bytes += int64(len(line))
 	s.mu.Unlock()
 	return nil
@@ -215,6 +260,10 @@ func (s *Store) compact() error {
 	deliveries := make([]Delivery, 0, len(s.deliveries))
 	for _, d := range s.deliveries {
 		deliveries = append(deliveries, d)
+	}
+	rules := make([]RuleRecord, 0, len(s.rules))
+	for _, r := range s.rules {
+		rules = append(rules, r)
 	}
 	s.mu.RUnlock()
 	next := s.path + ".next"
@@ -242,6 +291,13 @@ func (s *Store) compact() error {
 	for _, c := range cursors {
 		if err = write(patch{Cursors: []Cursor{c}}); err != nil {
 			break
+		}
+	}
+	if err == nil {
+		for _, r := range rules {
+			if err = write(patch{Rules: []RuleRecord{r}}); err != nil {
+				break
+			}
 		}
 	}
 	if err == nil {
@@ -318,7 +374,7 @@ func Verify(path string) error {
 			return errors.New("可靠日志 JSON 损坏")
 		}
 		hash := sha256.Sum256(e.Data)
-		if e.Version != 1 || e.Seq != seq+1 || e.Hash != hex.EncodeToString(hash[:]) {
+		if (e.Version != 1 && e.Version != 2) || e.Seq != seq+1 || e.Hash != hex.EncodeToString(hash[:]) {
 			return errors.New("可靠日志校验失败")
 		}
 		seq = e.Seq

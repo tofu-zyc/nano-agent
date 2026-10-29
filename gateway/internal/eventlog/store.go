@@ -14,6 +14,7 @@ import (
 const maxTransaction = 64 << 10
 
 type patch struct {
+	Rules            []RuleRecord  `json:"rules,omitempty"`
 	Cursors          []Cursor      `json:"cursors,omitempty"`
 	Jobs             []JobRecord   `json:"jobs,omitempty"`
 	Events           []EventRecord `json:"events,omitempty"`
@@ -30,9 +31,12 @@ type Store struct {
 	limits       Limits
 	file         *os.File // single worker only after Open
 	seq          uint64
+	v2           bool
+	ruleVersion  uint64
 	bytes        int64
 	compactAt    int64
 	mu           sync.RWMutex
+	rules        map[string]RuleRecord
 	cursors      map[string]Cursor
 	jobs         map[string]JobRecord
 	events       map[string]EventRecord
@@ -54,7 +58,7 @@ func Open(ctx context.Context, path string, limits Limits) (*Store, error) {
 		return nil, errors.New("可靠事件容量配置无效")
 	}
 	s := &Store{path: path, limits: limits, jobs: map[string]JobRecord{}, cursors: map[string]Cursor{},
-		events: map[string]EventRecord{}, deliveries: map[string]Delivery{},
+		events: map[string]EventRecord{}, deliveries: map[string]Delivery{}, rules: map[string]RuleRecord{},
 		queue: make(chan pending, limits.Queue), done: make(chan struct{})}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
@@ -170,7 +174,7 @@ func (s *Store) run() {
 	}
 }
 func empty(p patch) bool {
-	return len(p.Jobs)+len(p.Events)+len(p.Deliveries)+len(p.Cursors)+len(p.ForgetEvents)+len(p.ForgetDeliveries) == 0
+	return len(p.Rules)+len(p.Jobs)+len(p.Events)+len(p.Deliveries)+len(p.Cursors)+len(p.ForgetEvents)+len(p.ForgetDeliveries) == 0
 }
 func size(v any) int64 { raw, _ := json.Marshal(v); return int64(len(raw)) }
 func (s *Store) prepare(tx Transaction) (patch, error) {
@@ -178,6 +182,9 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 	defer s.mu.RUnlock()
 	p := patch{}
 	modes := 0
+	if tx.Rule != nil {
+		modes++
+	}
 	if tx.Job != nil || tx.Event != nil {
 		modes++
 	}
@@ -192,6 +199,11 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 	}
 	if modes != 1 || (tx.Admit && tx.Job == nil) {
 		return p, errors.New("可靠事件事务操作不完整")
+	}
+	if tx.Rule != nil {
+		if err := s.prepareRule(*tx.Rule, &p); err != nil {
+			return p, err
+		}
 	}
 	if tx.Job != nil {
 		j := *tx.Job
@@ -298,14 +310,31 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 		if !found || len(m.Deliveries) > 64 {
 			return p, errors.New("待匹配事件不存在或投递过多")
 		}
+		if err := s.claimRules(*m, e, &p); err != nil {
+			return p, err
+		}
 		ids := map[string]bool{}
 		for _, d := range m.Deliveries {
+			if d.Registered && !m.Checked {
+				return p, errors.New("注册规则投递必须验证规则修订")
+			}
+			d.Registered = m.Checked
 			if err := d.valid(); err != nil {
 				return p, err
 			}
 			if d.EventID != m.EventID || d.Status != "pending" || d.Attempt != 0 || ids[d.ID] ||
 				d.AgentID != e.AgentID || d.HookID == e.OriginHook || e.Silent && !d.Silent {
 				return p, errors.New("Hook 初次投递身份、状态或因果来源无效")
+			}
+			if m.Coalesce && m.Checked && !e.Matched && d.ObjectKey != "" {
+				for _, older := range s.deliveries {
+					if older.ID != d.ID && older.HookID == d.HookID && older.Revision == d.Revision && older.ObjectKey == d.ObjectKey &&
+						(older.Status == "pending" || older.Status == "retry") {
+						older.Status = "cancelled"
+						older.Error = "已去抖合并到更新的事件"
+						p.Deliveries = append(p.Deliveries, older)
+					}
+				}
 			}
 			ids[d.ID] = true
 			if old, exists := s.deliveries[d.ID]; exists {
@@ -346,6 +375,12 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 			(deliveryDone(old.Status) && (d.Status != old.Status || d.Attempt != old.Attempt)) {
 			return p, errors.New("Hook 投递不存在或固定身份、终态、重试序号改变")
 		}
+		if d.Registered && d.Status == "running" && old.Status != "running" {
+			rule, ok := s.rules[d.HookID]
+			if !ok || rule.Deleted || !rule.Enabled {
+				return p, errors.New("Hook 已撤回，排队投递不能开始执行")
+			}
+		}
 		if d.Status == "running" && d.Attempt > old.Attempt && old.Status != "pending" && old.Status != "retry" {
 			return p, errors.New("不确定或结束的投递不能直接重新执行")
 		}
@@ -354,6 +389,12 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 		}
 		if d.Status == "running" && d.Attempt == old.Attempt && old.Status != "running" {
 			return p, errors.New("开始执行必须持久增加一次尝试")
+		}
+		if d.Status == "succeeded" {
+			if rule, ok := s.rules[d.HookID]; ok && rule.Once && rule.Revision == d.Revision && rule.ClaimedBy == d.EventID {
+				rule.Enabled = false
+				p.Rules = append(p.Rules, rule)
+			}
 		}
 		p.Deliveries = append(p.Deliveries, d)
 	}
@@ -385,6 +426,15 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 	jobs, events, deliveries, reserved, live := len(s.jobs), len(s.events), len(s.deliveries), s.reserved, s.live
 	reserveBytes := s.reserveBytes
 	sources := len(s.cursors)
+	rules := len(s.rules)
+	for _, r := range p.Rules {
+		if old, ok := s.rules[r.ID]; ok {
+			live -= size(old)
+		} else {
+			rules++
+		}
+		live += size(r)
+	}
 	for _, c := range p.Cursors {
 		if old, ok := s.cursors[cursorKey(c.SourceID, c.Epoch)]; ok {
 			live -= size(old)
@@ -434,7 +484,7 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 		live -= size(s.deliveries[id])
 		deliveries--
 	}
-	if sources > s.limits.Sources || jobs > s.limits.Jobs || events+reserved > s.limits.Events || deliveries > s.limits.Deliveries || live+reserveBytes > s.limits.LiveBytes {
+	if rules > maxRules || sources > s.limits.Sources || jobs > s.limits.Jobs || events+reserved > s.limits.Events || deliveries > s.limits.Deliveries || live+reserveBytes > s.limits.LiveBytes {
 		return patch{}, ErrCapacity
 	}
 	return p, nil
@@ -442,6 +492,14 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 
 // Worker owns mutation; readers hold mu and receive copies of immutable bodies.
 func (s *Store) apply(p patch) {
+	for _, r := range p.Rules {
+		s.ruleVersion++
+		if old, ok := s.rules[r.ID]; ok {
+			s.live -= size(old)
+		}
+		s.rules[r.ID] = r
+		s.live += size(r)
+	}
 	for _, c := range p.Cursors {
 		key := cursorKey(c.SourceID, c.Epoch)
 		if old, ok := s.cursors[key]; ok {
@@ -527,7 +585,16 @@ func (s *Store) PendingEvents(limit int) []EventRecord {
 			continue
 		}
 		at := sort.Search(len(out), func(i int) bool {
-			return out[i].ObservedAt > e.ObservedAt || out[i].ObservedAt == e.ObservedAt && out[i].ID > e.ID
+			if out[i].ObservedAt != e.ObservedAt {
+				return out[i].ObservedAt > e.ObservedAt
+			}
+			if out[i].SourceID != e.SourceID {
+				return out[i].SourceID > e.SourceID
+			}
+			if out[i].SourceEpoch != e.SourceEpoch {
+				return out[i].SourceEpoch > e.SourceEpoch
+			}
+			return out[i].Seq > e.Seq
 		})
 		if at >= limit {
 			continue
@@ -545,7 +612,7 @@ func (s *Store) PendingEvents(limit int) []EventRecord {
 func (s *Store) Stats() Stats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return Stats{Jobs: len(s.jobs), Sources: len(s.cursors), Events: len(s.events), Deliveries: len(s.deliveries),
+	return Stats{Rules: len(s.rules), Jobs: len(s.jobs), Sources: len(s.cursors), Events: len(s.events), Deliveries: len(s.deliveries),
 		Reserved: s.reserved, Queued: len(s.queue), LiveBytes: s.live, JournalBytes: s.bytes, ReservedBytes: s.reserveBytes, Err: s.failure}
 }
 
