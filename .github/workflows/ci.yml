@@ -109,6 +109,8 @@ jobs:
           python-version: "3.12"
       - name: Windows NTFS 数据流、发布授权与辅助文件恢复
         run: go -C gateway test ./internal/session -run 'TestNTFS|TestAuxiliary|TestRenameAuxiliary|TestW1S23' -count=1
+      - name: Windows 可靠事件日志、轮转与恢复
+        run: go -C gateway test ./internal/eventlog -count=1
       - name: Windows 每次执行的独立输出限额
         run: |
           .\kernel\build\test_runner.exe
