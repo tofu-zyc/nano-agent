@@ -847,6 +847,8 @@ static cJSON *lease_spec(kernel_t *k, const execq_t *q)
     cJSON_AddNumberToObject(spec, "turn_id", cJSON_IsNumber(turn) ? turn->valueint : q->turn_id);
     cJSON_AddStringToObject(spec, "call_id", sget(origin, "call_id") ? sget(origin, "call_id") : q->id);
     if (sget(origin, "agent")) cJSON_AddStringToObject(spec, "agent", sget(origin, "agent"));
+    if(sget(origin,"created_by"))cJSON_AddStringToObject(spec,"created_by",sget(origin,"created_by"));
+    cJSON_AddBoolToObject(spec,"silent",cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(origin,"silent")));
     const cJSON *priority = cJSON_GetObjectItemCaseSensitive(origin, "priority");
     if (cJSON_IsNumber(priority)) cJSON_AddNumberToObject(spec, "priority", priority->valueint);
     cJSON_AddStringToObject(spec, "name", q->name);
@@ -1233,6 +1235,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         cJSON_AddStringToObject(origin, "call_id", c->id);
         if (sget(pol, "owner_agent")) cJSON_AddStringToObject(origin, "agent", sget(pol, "owner_agent"));
         if(c->from)cJSON_AddStringToObject(origin,"created_by",c->from);
+        cJSON_AddBoolToObject(origin,"silent",cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(pol,"silent")));
         const cJSON *priority = cJSON_GetObjectItemCaseSensitive(pol, "priority");
         cJSON_AddNumberToObject(origin, "priority", cJSON_IsNumber(priority) ? priority->valueint : 0);
         cJSON_AddNumberToObject(req, "max_output", (double)max_output);
@@ -1965,6 +1968,7 @@ static char *build_policy(const cJSON *m, na_mode mode, const char *sandbox)
     /* 这一轮最终的沙箱模式：执行时按它交给执行器，也决定“没有隔离时要不要审批” */
     cJSON_AddStringToObject(p, "sandbox", sandbox && *sandbox ? sandbox : "auto");
     if (sget(m, "owner_agent")) cJSON_AddStringToObject(p, "owner_agent", sget(m, "owner_agent"));
+    cJSON_AddBoolToObject(p,"silent",cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"silent")));
     const cJSON *priority = cJSON_GetObjectItemCaseSensitive(m, "priority");
     if (cJSON_IsNumber(priority)) cJSON_AddNumberToObject(p, "priority", priority->valueint);
     char *s = cJSON_PrintUnformatted(p);

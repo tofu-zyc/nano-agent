@@ -22,6 +22,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/dispatch"
+	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/kernel"
@@ -101,6 +102,9 @@ var helpText = func() string {
 }()
 
 type App struct {
+	jobEvents     *eventlog.Store
+	jobEventsErr  error
+	jobPersist    map[string]*jobPersistence
 	runtimeLimits config.Runtime
 	runWaitSerial uint64
 	dispatcher    *dispatch.Engine
@@ -427,6 +431,12 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	if a.dispatchErr != nil {
 		store.RecordStorageIssue("execution_leases", a.dispatchErr)
 		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
+	}
+	a.jobPersist = map[string]*jobPersistence{}
+	a.jobEvents, a.jobEventsErr = eventlog.Open(ctx, filepath.Join(store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
+	if a.jobEventsErr != nil {
+		store.RecordStorageIssue("runtime_events", a.jobEventsErr)
+		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -1203,7 +1213,7 @@ func (a *App) startRun(s *sess) {
 	r.mode = mode
 	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
-		SandboxMode: r.sandboxMode, OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
+		SandboxMode: r.sandboxMode, Silent: a.branchSilent(s.sid), OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
 	if r.inner || a.isBranchSID(s.sid) {
 		in.Priority = 10
 	}
@@ -1467,6 +1477,9 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.jobEventMessage(node, m) {
+		return
+	}
 	if a.leaseMessage(node, m) {
 		return
 	}
@@ -2042,6 +2055,9 @@ func wireMs(d time.Duration) int {
 func (a *App) Wait() {
 	if a.dispatcher != nil {
 		<-a.dispatcher.Done()
+	}
+	if a.jobEvents != nil {
+		<-a.jobEvents.Done()
 	}
 	a.forkWG.Wait()
 }

@@ -300,7 +300,7 @@ def check():
             # accepted batch before another model turn; completing the run leaves
             # the same background Job alive.
             native_gate = node.work / "native-release"
-            node.send(t="input", sid="native", run_id="native-run", owner_agent="test-agent", mode="auto",
+            node.send(t="input", sid="native", run_id="native-run", owner_agent="test-agent", mode="auto", silent=True,
                       sandbox_mode="off", workspaces=[dict(name="job-test:"+native(node.work),
                       dirs=[native(node.work)], ro=[], rw=[], local=True)], **{"from":"tg:owner"})
             node.wait(lambda m: m["t"] == "model" and m.get("sid") == "native")
@@ -318,7 +318,9 @@ def check():
             node.wait(lambda m: m["t"] == "model" and m.get("sid") == "native")
             node.send(t="turn", sid="native", run_id="native-run", turn_id=2, reason="final")
             node.wait(lambda m: m["t"] == "done" and m.get("sid") == "native")
-            assert node.control("native-still-live", "status", native_id)["job"]["background"]
+            native_state = node.control("native-still-live", "status", native_id)["job"]
+            assert native_state["background"] and native_state["origin"]["silent"] and native_state["lease"]["silent"], native_state
+            assert native_state["created_by"] == native_state["lease"]["created_by"] == "tg:owner", native_state
             native_gate.touch()
             assert node.terminal(native_id)["status"] == "succeeded"
 

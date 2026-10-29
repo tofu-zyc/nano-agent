@@ -96,7 +96,7 @@ func finalReceipt(l Lease) bool {
 	return false
 }
 func sameExecution(a, b Request) bool {
-	return a.ID == b.ID && a.JobID == b.JobID && a.Name == b.Name && a.Machine == b.Machine &&
+	return a.Creator == b.Creator && a.Silent == b.Silent && a.ID == b.ID && a.JobID == b.JobID && a.Name == b.Name && a.Machine == b.Machine &&
 		a.Session == b.Session && a.RunID == b.RunID && a.TurnID == b.TurnID && a.CallID == b.CallID &&
 		a.HostID == b.HostID && a.Agent == b.Agent && a.Priority == b.Priority && a.Shell == b.Shell &&
 		a.Hook == b.Hook && a.Windows == b.Windows && slices.Equal(a.Shared, b.Shared) && slices.Equal(a.Exclusive, b.Exclusive)

@@ -69,6 +69,7 @@ func (a *App) leaseRequest(nodeName string, n *node, m *proto.Msg, observed bool
 			}
 			origin.SID, origin.RunID, origin.TurnID, origin.CallID = s.sid, s.run.runID, s.run.turnID, m.ID
 			origin.Agent = a.execAgentID(s.sid)
+			origin.CreatedBy, origin.Silent = s.run.from, a.branchSilent(s.sid)
 			origin.Priority = 0
 			if s.run.inner || a.isBranchSID(s.sid) {
 				origin.Priority = 10
@@ -79,6 +80,9 @@ func (a *App) leaseRequest(nodeName string, n *node, m *proto.Msg, observed bool
 		origin.SID = "host:" + nodeName
 	}
 	req := dispatch.Request{JobID: spec.JobID, ID: m.LeaseID, Name: spec.Name, Owner: owner, Machine: a.machineOf(nodeName), Session: origin.SID, RunID: origin.RunID, TurnID: origin.TurnID, CallID: origin.CallID, HostID: spec.HostID, Agent: origin.Agent, Priority: origin.Priority, Shell: spec.Name == "Shell", Background: spec.Background, Windows: n.info.OS == "windows", Shared: resourceKeys(spec.Resources), Exclusive: resourceKeys(spec.Exclusive), At: time.Now(), OwnerSlots: min(64, n.info.Features["max_execs"]), OwnerShells: min(64, n.info.Features["max_parallel_shells"])}
+	if req.JobID != "" {
+		req.Creator, req.Silent = origin.CreatedBy, origin.Silent
+	}
 	if req.Shell && len(req.Exclusive) == 0 {
 		return req, errors.New("Shell 没有声明受保护的资源域，未执行")
 	}
@@ -129,6 +133,9 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 		req, err := a.leaseRequest(nodeName, n, m, false)
 		if err != nil {
 			a.leaseReply(nodeName, n, m, proto.TLeaseDeny, err.Error())
+			return true
+		}
+		if req.JobID != "" && !a.jobLeaseReady(nodeName, n, m, req) {
 			return true
 		}
 		command.Action, command.Request = "admit", req

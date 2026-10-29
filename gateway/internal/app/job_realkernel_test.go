@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/session"
 )
 
 // Enable only this contract fixture until the production durable inbox is
@@ -135,15 +137,136 @@ func TestRealCJobControlFramesThroughGoHub(t *testing.T) {
 		terminal.Job.Result == nil || !terminal.Job.Result.OK || terminal.Job.OutputCursor != 12 {
 		t.Fatal(terminal)
 	}
-	e.a.hub.Send(nodeName, proto.Msg{T: proto.TEventsAck, JobID: receipt.JobID, EventSeq: 1})
+	// Production intake must persist the fact before sending this ACK itself.
 	ack := await(func(m proto.Msg) bool { return m.Kind == "ack" && m.JobID == receipt.JobID })
 	if ack.Job == nil || ack.Job.NotificationState != "delivered" {
 		t.Fatal(ack)
+	}
+	saved, ok := e.a.jobEvents.Job(nodeName, receipt.JobID)
+	if !ok || saved.Creator != "fake:u1" || saved.TerminalEventID == "" || saved.Reserved {
+		t.Fatal("node ACK preceded durable Gateway ownership/event", saved)
+	}
+	fact, exists := e.a.jobEvents.Event(saved.TerminalEventID)
+	if !exists || fact.Name != "job.completed" || fact.Matched {
+		t.Fatal(fact, exists)
 	}
 	// A typed array projection is distinct from the string data used by pipes.
 	listing := control("list", "list")
 	var rows []proto.JobSnapshot
 	if err := json.Unmarshal(listing.JobData, &rows); err != nil || len(rows) != 1 || rows[0].JobID != receipt.JobID {
 		t.Fatal(rows, err)
+	}
+
+	// Rebuild actual storage independently: no in-memory hook/event cache can
+	// substitute for the source's durable completion proof.
+	e.a.jobEvents.Close()
+	rebuilt, err := eventlog.Open(context.Background(), filepath.Join(e.a.store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rebuilt.Close()
+	recovered, exists := rebuilt.Job(nodeName, receipt.JobID)
+	_, hasFact := rebuilt.Event(saved.TerminalEventID)
+	if !exists || !hasFact || recovered.Receipt.Status != "succeeded" {
+		t.Fatal(recovered, hasFact)
+	}
+}
+
+// Native C model/tool loop -> durable Job -> silent branch -> completion inbox.
+// The source run finishes while the same command remains blocked on its gate.
+func TestRealCNativeSilentBranchJobRetainsIdentityAfterRun(t *testing.T) {
+	var handler *jobContractHandler
+	e, _ := setupRealKernel(t, func(a *App) kernel.Handler {
+		handler = &jobContractHandler{App: a, observed: make(chan proto.Msg, 128)}
+		return handler
+	})
+	e.a.mu.Lock()
+	nodeName := ""
+	for name := range e.a.nodes {
+		nodeName = name
+		break
+	}
+	work := filepath.Join(e.dir, "home", "branch-job")
+	e.a.wss = []Workspace{{ID: "native-job", Host: e.a.machineOf(nodeName), Path: work, SandboxMode: "off"}}
+	st := e.a.store.Settings(e.sid)
+	st.Mode = "full"
+	st.WorkspacesSet = true
+	st.Workspaces = []string{"native-job"}
+	err := e.a.store.SaveSettings(e.sid, st)
+	if err == nil {
+		err = e.a.store.Append(e.sid, session.Msg{Role: "user", Content: "source context"})
+	}
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gate := filepath.Join(work, "release")
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: e.sid, Title: "quiet native job", RequestID: "job-native-branch", By: "fake:u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"command": "printf quiet; while [ ! -f '" + gate + "' ]; do sleep 0.02; done; printf done",
+		"workspace": e.a.wss[0].Label(), "execution": "background"})
+	if _, err = e.a.SessionBranchAction("continue", branch.BranchSID, "!call Shell "+string(args), "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	var receipt proto.Msg
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for receipt.Job == nil || !receipt.Job.Background {
+		select {
+		case m := <-handler.observed:
+			if m.Job != nil && m.Job.OriginSID == branch.BranchSID {
+				receipt = m
+			}
+		case <-timer.C:
+			t.Fatal("native branch did not detach", readFileTail(filepath.Join(e.dir, "kernel.log")))
+		}
+	}
+	if !receipt.Job.Origin.Silent || receipt.Job.CreatedBy != "fake:u1" || receipt.Job.Lease == nil || !receipt.Job.Lease.Silent {
+		t.Fatal("native policy lost silent/creator", receipt.Job)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.a.mu.Lock()
+		source := e.a.sessions[branch.BranchSID]
+		running := source != nil && source.run != nil
+		e.a.mu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("foreground barrier did not close after detach")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err = os.Stat(gate); !os.IsNotExist(err) {
+		t.Fatal("fixture released too early", err)
+	}
+	if err = os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		saved, ok := e.a.jobEvents.Job(nodeName, receipt.Job.JobID)
+		if ok && saved.TerminalEventID != "" {
+			fact, exists := e.a.jobEvents.Event(saved.TerminalEventID)
+			if !exists || !saved.Silent || !fact.Silent || saved.Receipt.Status != "succeeded" {
+				t.Fatal(saved, fact)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("detached native completion lost")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case text := <-e.ch.sent:
+		t.Fatal("silent Job pushed source chat", text)
+	default:
 	}
 }

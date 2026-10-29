@@ -154,6 +154,7 @@ type Msg struct {
 	LeaseID         string          `json:"lease_id,omitempty"`
 	Lease           *LeaseSpec      `json:"lease,omitempty"`
 	Leases          []LeaseSpec     `json:"leases,omitempty"`
+	Silent          bool            `json:"silent,omitempty"`
 	OwnerAgent      string          `json:"owner_agent,omitempty"`
 	Priority        int             `json:"priority,omitempty"`
 

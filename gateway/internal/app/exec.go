@@ -276,7 +276,7 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 	if r.inner || a.isBranchSID(s.sid) {
 		priority = 10
 	}
-	origin := proto.LeaseSpec{SID: s.sid, RunID: r.runID, TurnID: r.turnID, CallID: m.ID, Agent: a.execAgentID(s.sid), Name: m.Name, Priority: priority}
+	origin := proto.LeaseSpec{CreatedBy: r.from, Silent: a.branchSilent(s.sid), SID: s.sid, RunID: r.runID, TurnID: r.turnID, CallID: m.ID, Agent: a.execAgentID(s.sid), Name: m.Name, Priority: priority}
 	req, _ := json.Marshal(map[string]any{
 		"origin": origin, "tool": m.Name, "args": args, "dirs": spec.Dirs, "ro": spec.RO, "rw": rw, "write": write, "elevated": m.Elevated,
 		"tmp_key": s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,

@@ -238,7 +238,7 @@ func (s *Store) prepare(tx Transaction) (patch, error) {
 			}
 			next.Reserved = false
 			next.TerminalEventID = tx.Event.ID
-		} else if tx.Event != nil && tx.Event.JobID == j.Receipt.JobID {
+		} else if tx.Event != nil {
 			return p, errors.New("活动任务不能占用终态事件预留")
 		}
 		p.Jobs = append(p.Jobs, next)

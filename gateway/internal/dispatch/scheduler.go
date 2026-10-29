@@ -31,6 +31,8 @@ func Defaults() Config {
 }
 
 type Request struct {
+	Creator     string    `json:"creator,omitempty"`
+	Silent      bool      `json:"silent,omitempty"`
 	JobID       string    `json:"job_id,omitempty"`
 	ID          string    `json:"id"`
 	Name        string    `json:"name,omitempty"`

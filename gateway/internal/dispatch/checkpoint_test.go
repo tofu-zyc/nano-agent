@@ -123,7 +123,7 @@ func TestJobSyncMissingAndRebootUnknownRetainResourcesUntilReceipt(t *testing.T)
 }
 func TestJobSyncValidatesAllImmutableIdentityBeforeMutation(t *testing.T) {
 	now := time.Now()
-	for _, field := range []string{"job", "call", "scope", "owner", "background", "pending"} {
+	for _, field := range []string{"job", "call", "scope", "owner", "background", "pending", "creator", "silent"} {
 		t.Run(field, func(t *testing.T) {
 			s, _ := New(Defaults())
 			req := jobRequest()
@@ -133,6 +133,10 @@ func TestJobSyncValidatesAllImmutableIdentityBeforeMutation(t *testing.T) {
 			observed.Owner = "node/newboot"
 			observed.State = "unknown"
 			switch field {
+			case "creator":
+				observed.Creator = "another"
+			case "silent":
+				observed.Silent = !observed.Silent
 			case "job":
 				observed.JobID = "j_oldboot-foreign"
 			case "call":
