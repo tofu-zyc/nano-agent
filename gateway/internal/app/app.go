@@ -277,6 +277,7 @@ type queued struct {
 	trigger bool
 	ticket  uint64 // immutable queue admission order; cleared together with this entry
 	inner   bool   // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
+	report  *session.Report // 宿主生成的报告卡片（分支报告）：随这条消息一起进历史
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -1197,6 +1198,10 @@ func (a *App) startRun(s *sess) {
 	a.remember(s, batch, a.histEnd(s.sid))
 	if !head.trigger {
 		msg := session.Msg{Role: "user", Content: content, Images: images}
+		if head.report != nil {
+			msg.Kind = "branch_report"
+			msg.Report = head.report
+		}
 		if isLifeSID(s.sid) && head.inner {
 			msg.Kind = "life_episode"
 			if s.mind != nil {

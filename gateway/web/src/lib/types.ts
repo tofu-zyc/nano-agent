@@ -240,6 +240,20 @@ export type FieldState = {
 export type ToolCall = { id: string; type: string; function: { name: string; arguments: string } };
 
 export type ExecutionIsolation = { requested?: string; mode?: string; effective?: string; reason?: string };
+// 宿主生成的报告卡片（目前只有分支报告）；用户消息不会带这个字段
+export type Report = {
+  kind: string;
+  branch_sid?: string;
+  parent_sid?: string;
+  title?: string;
+  conclusion?: string;
+  checkpoint?: number;
+  status?: string;
+  evidence?: string[];
+  snapshot_id?: string;
+  at?: number;
+};
+
 export type Msg = {
   run_id?: string; turn_id?: number;
   sandbox?: ExecutionIsolation;
@@ -258,6 +272,7 @@ export type Msg = {
   usage?: Usage;
   ts?: number;
   agent?: string;
+  report?: Report; // 宿主生成的报告卡片内容（kind === 'branch_report' 时才有）
 };
 
 export type Ev = {
@@ -517,6 +532,8 @@ export type BranchInfo = {
   sid: string; parent_sid: string; root_sid?: string; snapshot_id?: string; operation_id?: string;
   title: string; intent?: string; status: string; delivery_policy: string; fork_checkpoint: number;
   created_at: number; ready_at?: number; last_active?: number; note?: string; running?: boolean;
+  progress?: string; // 最近进展（宿主从真实状态生成，不调模型）
+  progress_at?: number;
 };
 export type BranchReport = {
   branch_sid: string; parent_sid: string; title: string; checkpoint: number; snapshot_id?: string;

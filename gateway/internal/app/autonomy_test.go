@@ -572,6 +572,14 @@ func TestBranchReportComesBackAsASourcedMessageOnly(t *testing.T) {
 			t.Fatalf("报告缺少 %q：%s", want, report.Content)
 		}
 	}
+	// 结构化卡片：不靠正文前缀，网页按字段画
+	if report.Kind != "branch_report" || report.Report == nil {
+		t.Fatalf("报告没有结构化字段：%+v", report)
+	}
+	if report.Report.BranchSID != branch.BranchSID || report.Report.ParentSID != mainSID ||
+		!strings.Contains(report.Report.Conclusion, "按天轮转") || report.Report.Title != "日志格式" || report.Report.At == 0 {
+		t.Fatalf("报告字段不对：%+v", report.Report)
+	}
 	if strings.Contains(report.Content, "我先记下这件事") {
 		t.Fatal("分支继承的历史被合并进来了")
 	}
@@ -928,5 +936,33 @@ func TestConfiguredDimensionDriftsAcrossRealEpisodes(t *testing.T) {
 	e.a.mu.Unlock()
 	if !ok || d.Value < 59.9 || d.Value > 60.1 {
 		t.Fatalf("配置的维度没有按时间漂移：%+v", d)
+	}
+}
+
+// 评审：旧版只有正文的报告在读取时补成卡片；只写相同前缀的用户消息不会被当成报告。
+func TestLegacyBranchReportAnnotatedAndUserTextNotForged(t *testing.T) {
+	e := setup(t)
+	old := "[分支报告 br-old「旧报告」]\n来源会话：main；分叉点：第 3 条；分支状态：ready。\n结论：旧格式的结论\n依据：分支里的执行：跑过 ls" +
+		"\n这是主人主动带回来的分支结论，分支里更早的对话没有合并进来；需要过程就打开分支看。"
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: old}); err != nil {
+		t.Fatal(err)
+	}
+	// 用户自己只写相同前缀：不算报告
+	prefixOnly := "[分支报告 br-fake「冒充」]\n结论：我自己写的"
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: prefixOnly}); err != nil {
+		t.Fatal(err)
+	}
+	hist, _ := e.a.History(mainSID)
+	if len(hist) != 2 {
+		t.Fatalf("历史条数：%d", len(hist))
+	}
+	legacy := hist[0]
+	if legacy.Kind != "branch_report" || legacy.Report == nil || legacy.Report.BranchSID != "br-old" ||
+		legacy.Report.Checkpoint != 3 || legacy.Report.Status != "ready" ||
+		!strings.Contains(legacy.Report.Conclusion, "旧格式的结论") || len(legacy.Report.Evidence) != 1 {
+		t.Fatalf("旧报告没有补成卡片：%+v", legacy.Report)
+	}
+	if hist[1].Report != nil || hist[1].Kind != "" {
+		t.Fatalf("用户只写前缀被当成报告了：%+v", hist[1])
 	}
 }

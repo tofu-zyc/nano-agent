@@ -64,6 +64,8 @@ type BranchInfo struct {
 	CreatedAt   int64  `json:"created_at"`
 	ReadyAt     int64  `json:"ready_at,omitempty"`
 	LastActive  int64  `json:"last_active,omitempty"`
+	Progress    string `json:"progress,omitempty"`
+	ProgressAt  int64  `json:"progress_at,omitempty"`
 	Note        string `json:"note,omitempty"`
 	Running     bool   `json:"running,omitempty"`
 }
@@ -493,6 +495,9 @@ func (a *App) startBranchRunLocked(sid, prompt, by string) error {
 	_ = a.store.SetBranch(sid, func(m *session.BranchMeta) {
 		m.Status = session.BranchRunning
 		m.LastActive = a.now().Unix()
+		// 最近进展：从真实执行状态生成，不调模型、不读历史
+		m.Progress = clip("运行中："+strings.TrimSpace(prompt), 200)
+		m.ProgressAt = a.now().Unix()
 	})
 	a.startRun(s)
 	return nil
@@ -573,7 +578,8 @@ func (a *App) branchInfos(parent string) []BranchInfo {
 func (a *App) branchInfo(m session.BranchMeta) BranchInfo {
 	info := BranchInfo{SID: m.SID, ParentSID: m.ParentSID, RootSID: m.RootSID, SnapshotID: m.SnapshotID,
 		OperationID: m.OperationID, Title: m.Title, Intent: m.Intent, Status: m.Status, Delivery: m.Delivery,
-		Checkpoint: m.Checkpoint, CreatedAt: m.CreatedAt, ReadyAt: m.ReadyAt, LastActive: m.LastActive, Note: m.Note}
+		Checkpoint: m.Checkpoint, CreatedAt: m.CreatedAt, ReadyAt: m.ReadyAt, LastActive: m.LastActive, Note: m.Note,
+		Progress: m.Progress, ProgressAt: m.ProgressAt}
 	if s := a.sessions[m.SID]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		info.Running = true
 	}
@@ -685,7 +691,11 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		if action == "archive" {
 			status = session.BranchArchived
 		}
-		if err := a.store.SetBranch(sid, func(m *session.BranchMeta) { m.Status = status }); err != nil {
+		if err := a.store.SetBranch(sid, func(m *session.BranchMeta) {
+			m.Status = status
+			m.Progress = clip(map[string]string{"pause": "已暂停（主人操作）", "archive": "已归档（主人操作）"}[action], 200)
+			m.ProgressAt = a.now().Unix()
+		}); err != nil {
 			return BranchInfo{}, err
 		}
 		if s := a.sessions[sid]; s != nil {
@@ -775,6 +785,10 @@ func (a *App) introduceBranchReportLocked(branchSID, by string, ep endpoint) (Br
 		text += "\n依据：" + strings.Join(report.Evidence, "；")
 	}
 	text += "\n这是主人主动带回来的分支结论，分支里更早的对话没有合并进来；需要过程就打开分支看。"
+	// 结构化报告：网页按它画卡片，不靠正文前缀（用户自己写同样的话不会带这个字段）
+	card := &session.Report{Kind: "branch_report", BranchSID: sid, ParentSID: parent, Title: m.Title,
+		Conclusion: report.Conclusion, Checkpoint: m.Checkpoint, Status: m.Status, Evidence: append([]string(nil), report.Evidence...),
+		SnapshotID: m.SnapshotID, At: a.now().Unix()}
 	// 同一个结论只带回一次：分支之后又做了别的事、结论变了才允许再带
 	for _, old := range a.store.History(parent) {
 		if old.Role == "user" && strings.Contains(old.Content, "[分支报告 "+sid+"「") && strings.Contains(old.Content, "结论："+report.Conclusion) {
@@ -786,7 +800,11 @@ func (a *App) introduceBranchReportLocked(branchSID, by string, ep endpoint) (Br
 	if !a.queueFits(s, msg) {
 		return BranchReport{}, errors.New("父会话的等待队列已满，稍后再试")
 	}
-	s.queue = append(s.queue, queued{m: msg, ep: ep, who: by})
+	s.queue = append(s.queue, queued{m: msg, ep: ep, who: by, report: card})
+	_ = a.store.SetBranch(sid, func(m *session.BranchMeta) {
+		m.Progress = clip("已把结论带回来源会话："+report.Conclusion, 200)
+		m.ProgressAt = a.now().Unix()
+	})
 	report.Injected = true
 	a.publish(events.Event{T: "branch", SID: sid, Kind: "report"})
 	if s.run == nil && !s.compacting {

@@ -393,3 +393,41 @@ func TestAutonomousBranchRespectsPauseAndBudget(t *testing.T) {
 	}
 	e.k.none()
 }
+
+// 分支的"最近进展"：从真实执行状态生成、可持久化，重启后还在；旧记录没有进展也能正常显示。
+func TestBranchRecentProgressComesFromRealState(t *testing.T) {
+	e := setup(t)
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "种子"}); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "有进展", RequestID: "progress-1", By: "fake:u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.SessionBranchAction("continue", branch.BranchSID, "看看日志", "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	e.k.expect(proto.TInput)
+	// 开始跑：先记下"运行中：…"
+	info := e.a.Branches()
+	if len(info) != 1 || !strings.Contains(info[0].Progress, "运行中") {
+		t.Fatalf("开始之后没有进展：%+v", info)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: branch.BranchSID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: branch.BranchSID, Status: proto.StatusOK})
+	waitIdle(t, e, branch.BranchSID)
+	info = e.a.Branches()
+	if len(info) != 1 || !strings.Contains(info[0].Progress, "完成") || info[0].ProgressAt == 0 {
+		t.Fatalf("结束之后没有进展：%+v", info)
+	}
+	// 持久化：重新打开存储也能读到
+	reopened, err := session.New(e.a.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reopened.Branch(branch.BranchSID)
+	if !ok || got.Progress != info[0].Progress || got.ProgressAt != info[0].ProgressAt {
+		t.Fatalf("进展没有落盘：%+v", got)
+	}
+}

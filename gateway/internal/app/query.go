@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"nano-agent/gateway/internal/agents"
@@ -281,6 +282,7 @@ func (a *App) History(sid string) ([]session.Msg, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	h := slices.Clone(a.store.History(sid))
+	annotateLegacyReports(h)
 	summary := a.store.Settings(sid).Summary
 	if (a.isBranchSID(sid) || isHookSID(sid)) && (a.sessions[sid] == nil || a.sessions[sid].run == nil) {
 		a.store.UnloadHistory(sid)
@@ -553,4 +555,69 @@ func (a *App) interruptedCount(sid string) int {
 		}
 	}
 	return n
+}
+
+// annotateLegacyReports 给旧版（只有正文、没有结构化字段）的分支报告补上卡片信息。
+// 只认完整的老模板（含结尾那句宿主说明），用户只写相同前缀不会被当成报告。
+func annotateLegacyReports(history []session.Msg) {
+	for i := range history {
+		m := &history[i]
+		if m.Role != "user" || m.Kind != "" || m.Report != nil {
+			continue
+		}
+		if card := parseLegacyReport(m.Content); card != nil {
+			m.Kind, m.Report = "branch_report", card
+		}
+	}
+}
+
+const legacyReportTail = "\n这是主人主动带回来的分支结论，分支里更早的对话没有合并进来；需要过程就打开分支看。"
+
+func parseLegacyReport(text string) *session.Report {
+	if !strings.HasPrefix(text, "[分支报告 ") || !strings.HasSuffix(text, legacyReportTail) {
+		return nil
+	}
+	body := strings.TrimSuffix(text, legacyReportTail)
+	head, rest, ok := strings.Cut(strings.TrimPrefix(body, "[分支报告 "), "]\n")
+	if !ok {
+		return nil
+	}
+	// head 形如 "<sid>「<title>」"
+	sid, title, ok := strings.Cut(head, "「")
+	if !ok {
+		return nil
+	}
+	title = strings.TrimSuffix(title, "」")
+	lines := strings.Split(rest, "\n")
+	card := &session.Report{Kind: "branch_report", BranchSID: sid, Title: title}
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "来源会话："):
+			fields := strings.Split(strings.TrimPrefix(line, "来源会话："), "；")
+			for _, field := range fields {
+				if v, ok := strings.CutPrefix(field, "分叉点：第 "); ok {
+					v = strings.TrimSuffix(strings.TrimSuffix(v, " 条"), "条")
+					if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+						card.Checkpoint = n
+					}
+				} else if v, ok := strings.CutPrefix(field, "分支状态："); ok {
+					card.Status = strings.TrimSuffix(strings.TrimSpace(v), "。")
+				} else {
+					card.ParentSID = strings.TrimSpace(field)
+				}
+			}
+		case strings.HasPrefix(line, "结论："):
+			card.Conclusion = strings.TrimPrefix(line, "结论：")
+		case strings.HasPrefix(line, "依据："):
+			for _, e := range strings.Split(strings.TrimPrefix(line, "依据："), "；") {
+				if e = strings.TrimSpace(e); e != "" {
+					card.Evidence = append(card.Evidence, e)
+				}
+			}
+		}
+	}
+	if card.BranchSID == "" || card.Conclusion == "" {
+		return nil
+	}
+	return card
 }

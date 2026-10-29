@@ -194,6 +194,11 @@
                 <span class="tag">{branchStatus[b.status] ?? b.status}{b.running ? ' · 正在跑' : ''}</span>
               </div>
               <p class="p-note p-small">分叉点第 {b.fork_checkpoint} 条 · {b.delivery_policy === 'silent' ? '安静运行' : b.delivery_policy}{b.last_active ? ' · 最近活动 ' + ago(b.last_active * 1000) : ''}</p>
+              {#if b.progress}
+                <p class="p-note p-small">最近进展：{b.progress}{b.progress_at ? '（' + ago(b.progress_at * 1000) + '）' : ''}</p>
+              {:else}
+                <p class="p-note p-small">还没有进展记录。</p>
+              {/if}
               <div class="p-actions tight">
                 <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(b.sid, 'continue')}>继续</button>
                 <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(b.sid, 'pause')}>暂停</button>

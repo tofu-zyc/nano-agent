@@ -3,6 +3,7 @@
   import { store } from '../lib/state.svelte';
   import { api, ApiError, sidPath, uploadImage } from '../lib/api';
   import { buildBlocks, groupEpisodes, type Block } from '../lib/conv';
+  import ReportCard from './ReportCard.svelte';
   import { markdown } from '../lib/markdown';
   import { channelMeta, clock, endpointLabel, homeShort, modeMeta, pct, shortPath, viaChannel } from '../lib/format';
   import type { Attachment, CommandInfo, Msg, SessionInfo } from '../lib/types';
@@ -457,6 +458,8 @@
             <summary><Icon name={b.kind === 'life' ? 'sparkles' : 'brain'} size={12} />{noteTitle[b.kind]}<span class="muted">（网关放进这一轮的，点开看）</span></summary>
             <pre>{b.text}</pre>
           </details>
+        {:else if b.type === 'report'}
+          <ReportCard report={b.report} />
         {:else if b.type === 'user'}
           <div class="msg user">
             <div class="meta">

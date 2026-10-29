@@ -509,7 +509,25 @@ func (a *App) lifeDone(s *sess, r *run, status, body string) {
 // 也不能让同一项活动的总账少算一次。调用方持有锁。
 func (a *App) branchDone(s *sess, r *run) {
 	meta, ok := a.store.Branch(s.sid)
-	if !ok || meta.OwnerAgent == "" {
+	if !ok {
+		return
+	}
+	// 最近进展：只从这一轮的真实结局生成（失败原因、做了多久、用了多少），不调模型也不读历史
+	progress, status := "完成：这一轮做了「"+clip(strings.TrimSpace(r.asked), 80)+"」", session.BranchCompleted
+	switch r.outcome {
+	case "", proto.StatusOK:
+	case proto.StatusCancelled:
+		progress, status = "已取消：这一轮被打断", session.BranchPaused
+	default:
+		progress, status = clip("失败（"+r.outcome+"）："+clip(strings.TrimSpace(r.final), 100), 200), session.BranchNeedsAttention
+	}
+	_ = a.store.SetBranch(s.sid, func(m *session.BranchMeta) {
+		m.Status = status
+		m.Progress = clip(progress, 200)
+		m.ProgressAt = a.now().Unix()
+		m.LastActive = a.now().Unix()
+	})
+	if meta.OwnerAgent == "" {
 		return
 	}
 	ag, ok := a.agentByID(meta.OwnerAgent)

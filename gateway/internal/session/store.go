@@ -49,6 +49,9 @@ type Msg struct {
 	//   ParentRun 这条插话属于哪一次 run（历史分组、压缩、撤回按它识别，不把一次任务拆成几次）
 	//   SourceID  平台上的原始消息 ID；Sender 平台确认的发送者
 	Kind      string `json:"kind,omitempty"`
+	// Report 是宿主生成的报告卡片内容（目前只有分支报告）；Kind=branch_report 时才有，
+	// 网页按它画卡片，不靠正文前缀判断。
+	Report *Report `json:"report,omitempty"`
 	ParentRun string `json:"parent_run_id,omitempty"`
 	SourceID  string `json:"source_id,omitempty"`
 	Sender    string `json:"sender,omitempty"`
@@ -1201,4 +1204,18 @@ func (s *Store) Delete(sid string) error {
 		return fmt.Errorf("删除会话时登记删除状态或清理文件失败（墓碑已生效，可以重试）：%w", firstErr)
 	}
 	return nil
+}
+
+// Report 是宿主生成的一张报告卡片的内容。只有宿主能写：用户消息即使正文一模一样也不会带这个字段。
+type Report struct {
+	Kind       string   `json:"kind"` // branch_report
+	BranchSID  string   `json:"branch_sid,omitempty"`
+	ParentSID  string   `json:"parent_sid,omitempty"`
+	Title      string   `json:"title,omitempty"`
+	Conclusion string   `json:"conclusion,omitempty"`
+	Checkpoint int      `json:"checkpoint,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	Evidence   []string `json:"evidence,omitempty"`
+	SnapshotID string   `json:"snapshot_id,omitempty"`
+	At         int64    `json:"at,omitempty"`
 }

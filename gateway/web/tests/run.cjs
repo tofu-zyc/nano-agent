@@ -90,3 +90,19 @@ test('job output exposes rotation gaps, rejects backwards pages and bounds its l
   assert.equal(log.text.endsWith('new'),true);
   assert.throws(() => log.append(page(200003, Buffer.alloc(65537), 265540)));
 });
+
+test('宿主报告卡片：结构化字段画卡片，普通用户同样正文仍是气泡', () => {
+  const report = { kind: 'branch_report', branch_sid: 'br-1', parent_sid: 'main', title: '日志格式',
+    conclusion: '按天轮转，保留 7 天。', checkpoint: 3, status: 'completed', evidence: ['跑过 ls'],
+    snapshot_id: 'snap-1', at: 100 };
+  const blocks = buildBlocks([
+    { role: 'user', content: '[分支报告 br-1「日志格式」]\n结论：按天轮转', kind: 'branch_report', report },
+    { role: 'user', content: '[分支报告 br-1「日志格式」]\n结论：按天轮转' },
+  ]);
+  assert.equal(blocks[0].type, 'report');
+  assert.equal(blocks[0].report.branch_sid, 'br-1');
+  assert.equal(blocks[0].report.checkpoint, 3);
+  // 用户消息只有正文、没有结构化字段：还是普通气泡，不冒充报告
+  assert.equal(blocks[1].type, 'user');
+  assert.match(blocks[1].text, /分支报告/);
+});

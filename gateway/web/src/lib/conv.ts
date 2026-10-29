@@ -1,5 +1,5 @@
 // 把会话历史整理成对话视图要显示的块
-import type { Attachment, Msg, Usage, ExecutionIsolation, ToolCall } from './types';
+import type { Attachment, Msg, Report, Usage, ExecutionIsolation, ToolCall } from './types';
 import { parseUser, type NoteKind } from './format';
 
 export type ToolView = { sandbox?: ExecutionIsolation; id: string; name: string; detail: string; args: string; ok?: boolean; result?: string; media?: Attachment[] };
@@ -9,6 +9,7 @@ export type Block =
   | { type: 'note'; kind: NoteKind; text: string }
   | { type: 'wake'; text: string; episode?: boolean; ts?: number; reason?: string }
   | { type: 'user'; text: string; time?: string; via?: string; sender?: string; images?: Attachment[] }
+  | { type: 'report'; report: Report }
   | { type: 'assistant'; text: string; reasoning?: string; usage?: Usage; tools: ToolView[]; proposed?: ToolCall[]; ts?: number; sender?: string; agent?: string; proactive?: boolean; reason?: string; episode?: string; agenda?: string };
 
 export function toolDetail(name: string, args: string): string {
@@ -54,6 +55,9 @@ export function buildBlocks(history: Msg[], inner = false, room = false): Block[
       for (const n of p.notes) out.push({ type: 'note', kind: n.kind, text: n.text });
       const text = [...p.env, p.text].filter((x) => x.trim()).join('\n');
       if (text) out.push({ type: 'wake', text, episode: m.kind === 'life_episode', ts: m.ts, reason: m.reason });
+    } else if (m.role === 'user' && m.report) {
+      // 宿主生成的报告：画卡片，不按正文画气泡（旧版报告由网关在读历史时补上同样的字段）
+      out.push({ type: 'report', report: m.report });
     } else if (m.role === 'user') {
       const p = parseUser(m.content ?? '');
       for (const e of p.env) out.push({ type: 'env', text: e });

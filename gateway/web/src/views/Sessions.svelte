@@ -36,6 +36,10 @@
     return m;
   });
   let expanded = $state<Record<string, boolean>>({});
+  const branchStatus: Record<string, string> = {
+    preparing: '准备中', pending_boundary: '等边界', ready: '就绪', running: '运行中', paused: '已暂停',
+    needs_attention: '需要处理', completed: '已完成', archived: '已归档', cancelled: '已取消',
+  };
   const counts = $derived.by(() => {
     const m: Record<string, number> = {};
     for (const s of store.ov?.sessions ?? []) for (const c of sessionChannels(s)) m[c] = (m[c] ?? 0) + 1;
@@ -117,9 +121,12 @@
                     <span class="when">{c.last_at ? ago(c.last_at * 1000) : ''}</span>
                   </div>
                   <div class="s">
-                    <span class="eps">安静分支 · {c.branch?.status ?? ''}</span>
+                    <span class="eps">安静分支 · {branchStatus[c.branch?.status ?? ''] ?? c.branch?.status ?? ''}</span>
                     {#if store.phase[c.sid]}<span class="live">● 正在跑</span>{/if}
                   </div>
+                  {#if c.branch?.progress}
+                    <div class="prog" title={c.branch.progress_at ? ago(c.branch.progress_at * 1000) : ''}>{c.branch.progress}</div>
+                  {/if}
                 </div>
               </a>
             {/each}
@@ -297,6 +304,17 @@
   }
   .item:hover {
     background: var(--panel-2);
+  }
+  .prog {
+    margin: -2px 0 6px 44px;
+    font-size: 11px;
+    color: var(--text-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .item.child {
+    margin-left: 10px;
   }
   .item.child {
     padding-left: 28px;

@@ -68,6 +68,9 @@ type BranchMeta struct {
 	Checkpoint int    `json:"fork_checkpoint"`
 	Generation int64  `json:"generation,omitempty"`
 	LastActive int64  `json:"last_active,omitempty"`
+	// Progress 是最近进展的一句话（由宿主从真实执行状态生成，不调模型）；ProgressAt 是它的时间
+	Progress   string `json:"progress,omitempty"`
+	ProgressAt int64  `json:"progress_at,omitempty"`
 	Note       string `json:"note,omitempty"`
 }
 
