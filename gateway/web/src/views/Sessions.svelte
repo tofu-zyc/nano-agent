@@ -80,7 +80,7 @@
       {/each}
     </div>
     <div class="items">
-      {#each top as s (s.sid, s.branch)}
+      {#each top as s (s.sid)}
         {@const branch = s.branch}
         {@const children = kids[s.sid] ?? []}
         {@const open = expanded[s.sid] || children.some((x) => x.sid === current)}

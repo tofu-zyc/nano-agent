@@ -799,6 +799,19 @@
     flex-direction: column;
     gap: 14px;
   }
+  /* 消息包在片段里以后照旧竖排：靠右的用户消息、浮动的记忆标签都靠这层 flex */
+  .episode,
+  .episode > div {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .episode > .btn {
+    align-self: flex-start;
+  }
+  .episode > div[hidden] {
+    display: none;
+  }
   .msg {
     display: flex;
     flex-direction: column;

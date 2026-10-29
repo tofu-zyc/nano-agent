@@ -994,14 +994,14 @@ def check_living(page, url, nano):
     page.goto(url + "#/sessions/memtest")
     page.wait_for_selector(".memnote", timeout=8000)
     conv = page.locator(".conv").inner_text()
-    if "带上了长期记忆" in conv and "它最近自己做的事" in conv and "[记忆]" not in conv and "你好呀" in conv:
+    if "带上了长期记忆" in conv and "最近的经历" in conv and "[记忆]" not in conv and "你好呀" in conv:
         ok("会话里：记忆说明、近况折叠成小标签，正文照常显示")
     else:
         fail("会话里记忆说明没折叠：" + conv[:300])
     page.screenshot(path=os.path.join(SHOTS, "conv-memory.png"))
     # 工具结果里 images 和 sent 是同一个附件：历史要能画出来（v0.7.6 的 each_key_duplicate 回归）
     media_id = "a" * 64
-    with open(os.path.join(sess, "@default%2Fmediatest.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(sess, "@default/mediatest".encode().hex() + ".jsonl"), "w", encoding="utf-8") as f:
         f.write(json.dumps({"role": "assistant", "ts": 1792800010, "content": "看图测试",
             "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{\"path\":\"x.png\"}"}}]}, ensure_ascii=False) + "\n")
         f.write(json.dumps({"role": "tool", "ts": 1792800011, "tool_call_id": "c1", "content": "图",
