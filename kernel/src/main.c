@@ -184,6 +184,7 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft,"job_allow_no_timeout",k->conf.max_job_timeout==0?1:0);
     cJSON_AddNumberToObject(ft,"job_control_tool",1);
  cJSON_AddNumberToObject(ft,"hook_tool",1);
+ cJSON_AddNumberToObject(ft,"hook_check",1);
  cJSON_AddNumberToObject(ft,"hook_input",k->exec_hook_input);
     cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
     cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
@@ -1835,8 +1836,19 @@ static void pump(kernel_t *k, int64_t now)
             cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
             cJSON_AddStringToObject(m, "text", c->text ? c->text : "");
             break;
+        case NA_CMD_HOOK_CHECK: {
+            m=msg_new("hook_check",c->sid);
+            cJSON_AddStringToObject(m,"id",c->id);cJSON_AddStringToObject(m,"request_id",c->id);
+            cJSON_AddStringToObject(m,"run_id",c->run_id);cJSON_AddNumberToObject(m,"turn_id",c->turn_id);
+            cJSON_AddStringToObject(m,"name",c->name);cJSON_AddStringToObject(m,"from",c->from);
+            cJSON *args=cJSON_Parse(c->args?c->args:"{}");
+            if(args)cJSON_AddItemToObject(m,"args",args);
+            cJSON_AddBoolToObject(m,"elevated",c->elevated);
+            break;
+        }
         case NA_CMD_APPROVE_REQ: {
             m = msg_new("approve_req", c->sid);
+            if(c->force_approval)cJSON_AddBoolToObject(m,"force_approval",true);
             cJSON_AddStringToObject(m, "id", c->id);
             if (c->run_id && *c->run_id) cJSON_AddStringToObject(m, "run_id", c->run_id);
             cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
@@ -2263,6 +2275,7 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         ev.approval_timeout_ms = cJSON_IsNumber(at) ? at->valueint : 0;
         ev.max_parallel_tools = cJSON_IsNumber(mp) ? mp->valueint : 0;
         ev.elevate = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "elevate"));
+        ev.hook_checks=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"hook_checks"));
         /* 这一轮最终的沙箱模式：节点自己的 on/off 优先，其余听网关的请求 */
         const char *sb = effective_sandbox(k, sget(m, "sandbox_mode"));
         ev.sandbox = !strcmp(sb, "off") ? NA_SB_OFF : k->landlock > 0 ? NA_SB_YES : NA_SB_NO;
@@ -2363,6 +2376,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         }
         ev.calls = calls;
         ev.ncalls = ncalls;
+    } else if(!strcmp(t,"hook_result")){
+        const char *request=sget(m,"request_id"),*id=sget(m,"id");
+        if(!request||!id||strcmp(request,id))return;
+        ev.type=NA_EV_HOOK_RESULT;ev.run_id=sget(m,"run_id");ev.id=id;
+        const cJSON *tid=cJSON_GetObjectItemCaseSensitive(m,"turn_id");
+        ev.turn_id=cJSON_IsNumber(tid)?tid->valueint:0;
+        ev.ok=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"ok"));
+        ev.require_approval=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"force_approval"));
+        ev.detail=sget(m,"detail");
     } else if (!strcmp(t, "approve")) {
         ev.type = NA_EV_APPROVE;
         ev.run_id = sget(m, "run_id");

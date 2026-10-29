@@ -16,6 +16,7 @@ type Execution struct {
 	Spec     Spec
 }
 type Result struct {
+	Decision  string
 	RunSID    string
 	Summary   string
 	Err       error
@@ -30,6 +31,7 @@ type Executor interface {
 	Execute(context.Context, Execution, func(Result))
 }
 type active struct {
+	check     *preflight
 	context   context.Context
 	work      Execution
 	cancel    context.CancelFunc
@@ -132,6 +134,10 @@ func (e *Engine) worker(queue <-chan *active) {
 		case <-e.ctx.Done():
 			return
 		case job := <-queue:
+			if job.check != nil {
+				e.runCheck(job.check)
+				continue
+			}
 			if job.work.Delivery.ID == "" {
 				continue
 			}
@@ -173,6 +179,12 @@ func (e *Engine) step() {
 	e.refreshRules()
 	e.due(now)
 	for _, event := range e.store.PendingEvents(16) {
+		if event.Name == "tool.before" {
+			if event.ObservedAt+4 < now.Unix() {
+				_ = e.store.Commit(e.ctx, eventlog.Transaction{Match: &eventlog.Match{EventID: event.ID, Checked: true, Deliveries: []eventlog.Delivery{}}})
+			}
+			continue
+		}
 		e.refreshRules()
 		deliveries := []eventlog.Delivery{}
 		for _, record := range e.rules {
@@ -203,6 +215,18 @@ func (e *Engine) step() {
 	e.cursor = next
 	for _, d := range rows {
 		if !d.Registered {
+			continue
+		}
+		if d.Preflight {
+			if (d.Status == "pending" || d.Status == "running") && d.UpdatedMS+4000 < now.UnixMilli() {
+				d.Status = "cancelled"
+				if d.Attempt > 0 {
+					d.Status = "uncertain"
+				}
+				d.Error = "前置检查已失去原调用，不自动重放"
+				d.UpdatedMS = now.UnixMilli()
+				_ = e.store.Commit(e.ctx, eventlog.Transaction{Delivery: &d})
+			}
 			continue
 		}
 		e.mu.Lock()

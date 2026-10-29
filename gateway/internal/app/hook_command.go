@@ -15,6 +15,7 @@ import (
 	"nano-agent/gateway/internal/skills"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -211,6 +212,10 @@ func (x hookExecutor) command(ctx context.Context, w hooks.Execution, done func(
 		return
 	}
 	summary := cutRunes(output.Summary, 1000)
+	if slices.Contains(w.Spec.On, "tool.before") {
+		done(hooks.Result{Summary: summary, Decision: output.Decision})
+		return
+	}
 	if output.Trigger != nil && *output.Trigger && summary != "" {
 		result := x.notify(ctx, w, summary)
 		if result.Err != nil {

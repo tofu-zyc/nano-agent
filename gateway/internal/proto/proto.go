@@ -62,6 +62,8 @@ const (
 	// 协议 v11：并行、排队与完整调用身份
 	TToolQueued         = "tool_queued"  // 内核 → 网关：这个调用在等执行槽或等资源
 	TToolStarted        = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
+	THookCheck          = "hook_check"
+	THookResult         = "hook_result"
 	TExecStarted        = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
 	TExecQueued         = "exec_queued"
 	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
@@ -138,6 +140,8 @@ type LeaseSpec struct {
 }
 
 type Msg struct {
+	HookChecks      bool            `json:"hook_checks,omitempty"`
+	ForceApproval   bool            `json:"force_approval,omitempty"`
 	JobID           string          `json:"job_id,omitempty"`
 	Job             *JobSnapshot    `json:"job,omitempty"`
 	Jobs            []JobSnapshot   `json:"jobs,omitempty"`

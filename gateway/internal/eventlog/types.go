@@ -109,6 +109,7 @@ type EventRecord struct {
 	DeliveryIDs []string `json:"deliveries,omitempty"`
 }
 type Delivery struct {
+	Preflight  bool            `json:"preflight,omitempty"`
 	RunSID     string          `json:"run_sid,omitempty"`
 	ObjectKey  string          `json:"object_key,omitempty"`
 	UpdatedMS  int64           `json:"updated_ms,omitempty"`

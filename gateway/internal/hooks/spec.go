@@ -34,6 +34,7 @@ type Filter struct {
 	Glob      string            `json:"path_glob,omitempty"`
 }
 type Handler struct {
+	Decision     string `json:"decision,omitempty"`
 	Type         string `json:"type"`
 	Text         string `json:"text,omitempty"`
 	Command      string `json:"command,omitempty"`
@@ -114,6 +115,12 @@ func Normalize(s Spec) (Spec, error) {
 		!slices.Contains([]string{"none", "readonly", "ask", "auto", "full"}, s.Scope.Mode) {
 		return s, errors.New("Hook 处理器、目标或权限模式无效")
 	}
+	if before && len(s.On) != 1 {
+		return s, errors.New("前置和后置事件请登记为独立规则")
+	}
+	if s.Handler.Decision != "" && (!before || !slices.Contains([]string{"allow", "deny", "approval"}, s.Handler.Decision)) {
+		return s, errors.New("声明式 decision 仅用于 tool.before：allow/deny/approval")
+	}
 	if before && s.Handler.Type != "command" {
 		return s, errors.New("tool.before 只允许短命令或声明式判断")
 	}
@@ -124,7 +131,7 @@ func Normalize(s Spec) (Spec, error) {
 		return s, errors.New("Hook 配置超过时限、正文、字段或重试上限")
 	}
 	if s.Handler.Type == "command" {
-		if s.Handler.Command == "" && s.Handler.Script == "" {
+		if s.Handler.Command == "" && s.Handler.Script == "" && s.Handler.Decision == "" {
 			return s, errors.New("命令处理器需要 command 或已登记的 script")
 		}
 		if s.Handler.Command != "" && s.Handler.Script != "" {

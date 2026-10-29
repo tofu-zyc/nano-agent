@@ -504,6 +504,7 @@ export type JobResponse = {job?:JobInfo;jobs?:JobInfo[];output?:JobOutput;next?:
 export type HookSpec = {
   name:string;on:string[];match?:{job_id?:string;workspace_id?:string;status?:string[];fields?:Record<string,string>;path_glob?:string};
   handler:{type:'notify'|'command'|'agent';text?:string;command?:string;script?:string;digest?:string;prompt?:string;
+    decision?:'allow'|'deny'|'approval';
     conversation?:'temporary'|'origin'|'life'|'branch';branch_sid?:string;timeout_ms?:number;token_budget?:number;retry_safe?:boolean};
   scope?:{source_sid?:string;mode?:string;workspaces?:string[];endpoints?:{channel:string;chat:string;fingerprint?:string}[]};
   deliver?:'creator'|'origin'|'none';debounce_ms?:number;cooldown_ms?:number;retries?:number;priority?:number;on_error?:'allow'|'deny';
@@ -512,5 +513,5 @@ export type HookSpec = {
 export type HookRule = {id:string;revision:number;agent_id:string;creator:string;enabled:boolean;once:boolean;silent:boolean;
   claimed_by?:string;deleted?:boolean;spec:HookSpec;paused_reason?:string};
 export type HookDelivery = {delivery_id:string;event_id:string;hook_id:string;hook_revision:number;agent_id:string;creator:string;silent:boolean;
-  target_sid?:string;run_sid?:string;status:string;attempt:number;next_at?:number;updated_ms?:number;error?:string;result?:string};
+  target_sid?:string;run_sid?:string;status:string;attempt:number;next_at?:number;updated_ms?:number;error?:string;result?:string;preflight?:boolean};
 export type HookResponse = {rules?:HookRule[];rule?:HookRule;deliveries?:HookDelivery[];next?:string;matched?:boolean};

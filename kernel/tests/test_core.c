@@ -48,6 +48,7 @@ static const char *drain(na_core *c)
         case NA_CMD_MODEL:       snprintf(item, sizeof item, "MODEL(%s)", m->sid); break;
         case NA_CMD_QUEUED:      snprintf(item, sizeof item, "QUEUED(%s,%s)", m->id, m->text); break;
         case NA_CMD_RESULT:      snprintf(item, sizeof item, "RESULT(%s,%s,%s)", m->id, m->ok ? "ok" : "err", m->text); break;
+        case NA_CMD_HOOK_CHECK: snprintf(item,sizeof item,"HOOK_CHECK(%s,%s)",m->id,m->name);break;
         case NA_CMD_APPROVE_REQ: snprintf(item, sizeof item, "APPROVE_REQ(%s,%s,%s)", m->id, m->name, m->from); break;
         case NA_CMD_NOTICE:      snprintf(item, sizeof item, "NOTICE(%s)", m->text); break;
         case NA_CMD_DONE:        snprintf(item, sizeof item, "DONE(%s)", m->status); break;
@@ -990,8 +991,43 @@ static void test_hook_management_policy(void)
     na_core_free(c);
 }
 
+
+static void test_pretool_hook_barrier(void)
+{
+    na_core *c=mk(16);
+    na_event in={.type=NA_EV_INPUT,.sid="h",.run_id="run",.from="user",.mode=NA_MODE_AUTO,.elevate=true,.hook_checks=true};
+    CHECK(na_core_feed(c,0,&in)==0);drain(c);
+    na_call calls[]={{.id="read",.name="Read",.args="{}",.args_ok=true},
+                    {.id="write",.name="Write",.args="{}",.args_ok=true}};
+    na_event turn_ev={.type=NA_EV_TURN,.sid="h",.run_id="run",.turn_id=1,.reason=NA_TURN_TOOL_USE,.calls=calls,.ncalls=2};
+    CHECK(na_core_feed(c,10,&turn_ev)==0);
+    EXPECT(c,"HOOK_CHECK(read,Read) HOOK_CHECK(write,Write)");
+    int running=9,queued=9;na_core_call_counts(c,"h",&running,&queued);CHECK(running==0 && queued==0);
+    na_event verdict={.type=NA_EV_HOOK_RESULT,.sid="h",.run_id="old",.turn_id=1,.id="read",.ok=true};
+    CHECK(na_core_feed(c,20,&verdict)==-1);EXPECT(c,"");
+    verdict.run_id="run";verdict.ok=false;verdict.detail="guard denied";
+    CHECK(na_core_feed(c,20,&verdict)==0);EXPECT(c,"RESULT(read,err,guard denied)");
+    verdict.id="write";verdict.ok=true;verdict.require_approval=true;
+    CHECK(na_core_feed(c,20,&verdict)==0);EXPECT(c,"APPROVE_REQ(write,Write,user)");
+    na_core_free(c);
+    c=mk(16);in.mode=NA_MODE_ASK;CHECK(na_core_feed(c,0,&in)==0);drain(c);
+    turn_ev.ncalls=1;turn_ev.calls=&calls[1];CHECK(na_core_feed(c,10,&turn_ev)==0);EXPECT(c,"HOOK_CHECK(write,Write)");
+    verdict.require_approval=false;CHECK(na_core_feed(c,20,&verdict)==0);
+    EXPECT(c,"APPROVE_REQ(write,Write,user)"); /* allow cannot remove original approval */
+    na_core_free(c);
+    c=mk(16);CHECK(na_core_feed(c,0,&in)==0);drain(c);CHECK(na_core_feed(c,10,&turn_ev)==0);drain(c);
+    na_event tick={.type=NA_EV_TICK};CHECK(na_core_feed(c,2010,&tick)==0);
+    EXPECT(c,"RESULT(write,err,前置 Hook 超时（2 秒），未执行) MODEL(h)");
+    CHECK(na_core_feed(c,2011,&verdict)==-1);EXPECT(c,"");
+    na_core_free(c);
+    c=mk(16);in.mode=NA_MODE_READONLY;CHECK(na_core_feed(c,0,&in)==0);drain(c);
+    CHECK(na_core_feed(c,10,&turn_ev)==0);EXPECT(c,"RESULT(write,err,当前是只读模式，只能用 Read 和 Grep) MODEL(h)");
+    na_core_free(c);
+}
+
 int main(void)
 {
+    test_pretool_hook_barrier();
     test_hook_management_policy();
     test_schedule_policy_and_deadlines();
     test_public_read_all_modes();

@@ -10,6 +10,7 @@
  * 派发到 started 之间另有一个受限的等待。 */
 typedef enum {
     CALL_VALIDATED,      /* 刚收到，还没决定怎么处理 */
+    CALL_WAIT_HOOK,      /* bounded preflight; no process slot or resource lock */
     CALL_WAIT_APPROVAL,  /* 等管理员审批 */
     CALL_QUEUED,         /* 等执行槽或等资源 */
     CALL_DISPATCHED,     /* 已经交给宿主，等它确认真的开始了 */
@@ -21,6 +22,7 @@ typedef struct {
     char *id, *name, *args, *res_keys, *res_xkeys;
     const na_tool_policy *tool;
     bool elevated;
+    bool hook_ask;
     bool sent;           /* EXEC 已经发给宿主了：它占着宿主那边的槽位 */
     int  turn_id;        /* 产生这个调用的模型轮次 */
     call_state st;
@@ -33,6 +35,7 @@ typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
 typedef struct run {
     char *sid, *run_id, *from, *policy;
     na_mode mode;
+    bool hook_checks;
     bool elevate;        /* 这个身份能不能提权 */
     bool sandbox;        /* 这一轮执行工具的机器有没有沙箱 */
     run_state st;
@@ -494,6 +497,7 @@ static int on_input(na_core *c, int64_t now, const na_event *ev)
     r->policy = dupstr(ev->policy ? ev->policy : "{}");
     r->mode = ev->mode;
     r->elevate = ev->elevate;
+    r->hook_checks=ev->hook_checks;
     r->sandbox = ev->sandbox == NA_SB_DEFAULT ? c->cfg.sandbox : ev->sandbox == NA_SB_YES;
     /* 网关每一轮带上自己的设置（大于 0 是上限，小于 0 不限）；没带（旧网关）用内核配置 */
     int run_ms = ev->run_timeout_ms ? ev->run_timeout_ms : c->cfg.run_timeout_ms;
@@ -596,6 +600,12 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
             result(c, r, k, false, in->error);
         } else if (d == DECIDE_DENY) {
             result(c, r, k, false, why);
+        } else if(r->hook_checks){
+            k->hook_ask=d==DECIDE_ASK;
+            k->st=CALL_WAIT_HOOK;k->deadline=now+2000;
+            na_cmd *m=push(c,NA_CMD_HOOK_CHECK,r->sid);
+            m->id=dupstr(k->id);m->name=dupstr(k->name);m->args=dupstr(k->args);
+            m->from=dupstr(r->from);m->run_id=dupstr(r->run_id);m->turn_id=k->turn_id;m->elevated=k->elevated;
         } else if (d == DECIDE_ASK) {
             na_cmd *m = push(c, NA_CMD_APPROVE_REQ, r->sid);
             m->id = dupstr(k->id);
@@ -619,6 +629,34 @@ static int on_turn(na_core *c, int64_t now, const na_event *ev)
         }
     }
     maybe_advance(c, r);
+    return 0;
+}
+
+static int on_hook_result(na_core *c,int64_t now,const na_event *ev)
+{
+    run_t *r=find_run(c,ev->sid);
+    if(!r || !same_run(r,ev))return -1;
+    call_t *k=find_call(r,ev->id);
+    if(!k || k->st!=CALL_WAIT_HOOK || (ev->turn_id>0 && k->turn_id!=ev->turn_id))return -1;
+    if(!ev->ok || now>=k->deadline){
+        result(c,r,k,false,ev->detail&&*ev->detail?ev->detail:"前置 Hook 拒绝或超时，未执行");
+        dispatch(c,now,r);maybe_advance(c,r);return 0;
+    }
+    if(k->hook_ask || ev->require_approval){
+        na_cmd *m=push(c,NA_CMD_APPROVE_REQ,r->sid);
+        m->id=dupstr(k->id);m->name=dupstr(k->name);m->args=dupstr(k->args);m->from=dupstr(r->from);
+        m->run_id=dupstr(r->run_id);m->turn_id=k->turn_id;m->force_approval=ev->require_approval;
+        k->st=CALL_WAIT_APPROVAL;
+        k->deadline=r->approval_timeout_ms>0?now+r->approval_timeout_ms:-1;
+    }else{
+        if(r->queued_limit>0 && run_queued(r)>=r->queued_limit){
+            result_err(c,r,k,"这一轮排队的工具调用已经有 %d 个（上限），这个没有执行。请分几轮来做",r->queued_limit);
+            maybe_advance(c,r);return 0;
+        }
+        k->st=CALL_QUEUED;k->deadline=r->queued_timeout_ms>0?now+r->queued_timeout_ms:-1;
+        if(!has_free_slot(r)||!can_start(r,k))queued_notice(c,r,k,"等前面的工具执行完");
+        dispatch(c,now,r);
+    }
     return 0;
 }
 
@@ -758,6 +796,8 @@ static void on_tick(na_core *c, int64_t now)
             } else if (k->st == CALL_DISPATCHED) {
                 kill_call(c, r, k);
                 result(c, r, k, false, "派发超时：执行节点一直没能开始这个调用，已取消");
+            } else if(k->st==CALL_WAIT_HOOK){
+                result(c,r,k,false,"前置 Hook 超时（2 秒），未执行");
             } else if (k->st == CALL_WAIT_APPROVAL) {
                 result(c, r, k, false, "审批超时，未执行");
             } else if (k->st == CALL_QUEUED) {
@@ -785,6 +825,7 @@ int na_core_feed(na_core *c, int64_t now, const na_event *ev)
     switch (ev->type) {
     case NA_EV_INPUT:        return on_input(c, now, ev);
     case NA_EV_TURN:         return on_turn(c, now, ev);
+    case NA_EV_HOOK_RESULT:  return on_hook_result(c,now,ev);
     case NA_EV_APPROVE:      return on_approve(c, now, ev);
     case NA_EV_CANCEL:       return on_cancel(c, ev);
     case NA_EV_MODEL_YIELD:  return on_model_yield(c, now, ev);

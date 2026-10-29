@@ -61,7 +61,7 @@ func (x hookExecutor) Visible(r eventlog.RuleRecord, event eventlog.Event, s hoo
 		if !ok || j.Receipt.OriginSID != s.Scope.SID || !a.canAccessJob(r.Creator, s.Scope.SID, j) {
 			return false
 		}
-	} else if event.OriginSID != "" && event.OriginSID != s.Scope.SID {
+	} else if event.OriginSID != "" && event.OriginSID != s.Scope.SID && (a.sessionHook(event.OriginSID) == nil || a.sessionHook(event.OriginSID).work.Spec.Scope.SID != s.Scope.SID) {
 		return false
 	}
 	return true

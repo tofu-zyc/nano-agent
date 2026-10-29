@@ -1078,6 +1078,13 @@ func (a *App) startRun(s *sess) {
 			return
 		}
 	}
+	if node != "" && a.hasBeforeHooks(s.sid) && a.nodes[node] != nil && a.nodes[node].info.Features["hook_check"] < 1 {
+		text := "这个会话已启用前置 Hook，但内核不支持检查屏障；请更新内核。未执行。"
+		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
+		a.deliver(head.ep, text, "")
+		s.queue = nil
+		return
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
@@ -1272,6 +1279,7 @@ func (a *App) startRun(s *sess) {
 	r.mode = mode
 	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
+		HookChecks:  a.nodes[node].info.Features["hook_check"] >= 1 && a.hookEngine != nil && a.hasBeforeHooks(s.sid),
 		SandboxMode: r.sandboxMode, Silent: a.branchSilent(s.sid), OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
 	if r.inner || a.isBranchSID(s.sid) {
 		in.Priority = 10
@@ -1597,6 +1605,8 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		return
 	}
 	switch m.T {
+	case proto.THookCheck:
+		a.preToolCheck(s, m)
 	case proto.TModel:
 		// 完整调用身份：内核告诉我们这是第几次模型请求，后面 approve / exec_result 原样带回去
 		s.run.turnID = m.TurnID
@@ -1667,7 +1677,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 			Text: resultDetail(m.Content), Data: clip(m.Content, 4000), Sandbox: m.Sandbox})
 	case proto.TApproveReq:
 		a.emitRuntimeEvent("approval.waiting", s.sid, s.run, map[string]string{"tool": m.Name, "call_id": m.ID})
-		if s.run.full {
+		if s.run.full && !m.ForceApproval {
 			a.autoApprove(s, m)
 		} else {
 			a.askApproval(s, m)

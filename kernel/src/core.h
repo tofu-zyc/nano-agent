@@ -68,6 +68,7 @@ typedef struct {
 typedef enum {
     NA_EV_INPUT,        /* 会话收到新输入，开启 run：sid, run_id, from, mode, policy */
     NA_EV_TURN,         /* 模型完成一轮：sid, run_id, turn_id, reason, calls, detail */
+    NA_EV_HOOK_RESULT,  /* synchronous pre-tool verdict; never grants more permission */
     NA_EV_APPROVE,      /* 审批结果：sid, run_id, turn_id, id, ok */
     NA_EV_CANCEL,       /* 用户要求停止：sid */
     NA_EV_CALL_QUEUED,  /* 宿主：收到了，但在等执行槽或等资源；排队不占执行槽，执行时限还没开始 */
@@ -125,6 +126,8 @@ typedef struct {
     /* INPUT：这一轮最多请求几次模型、总时限、审批时限。大于 0 是上限，0 用内核配置，小于 0 表示不限 */
     int max_steps, run_timeout_ms, approval_timeout_ms;
     int max_parallel_tools; /* INPUT：这一轮的并行上限。大于 0 是上限，0 用内核配置，小于 0 表示不限 */
+    bool hook_checks;     /* INPUT: validated calls must pass the bounded Gateway barrier */
+    bool require_approval; /* HOOK_RESULT: may add manual approval */
     bool elevate;         /* INPUT：这个身份的会话能不能提权（访客不能） */
     na_sandbox sandbox;   /* INPUT：这一轮的工具在哪里执行，那里有没有沙箱 */
     const char *policy;   /* 工作目录等执行约束，内核不解析，原样交给执行器 */
@@ -142,6 +145,7 @@ typedef enum {
     /* 发往网关 */
     NA_CMD_MODEL,        /* 请模型基于会话上下文生成下一轮：sid, run_id, turn_id */
     NA_CMD_RESULT,       /* 工具结果：sid, run_id, turn_id, id, ok, text */
+    NA_CMD_HOOK_CHECK,   /* validated call, before approval and queue admission */
     NA_CMD_APPROVE_REQ,  /* 请求管理员审批：sid, run_id, turn_id, id, name, args, from */
     NA_CMD_QUEUED,       /* 调用进入排队（等执行槽或等资源）：sid, run_id, turn_id, id, name, text */
     NA_CMD_NOTICE,       /* 给用户看的提示：sid, text */
@@ -160,6 +164,7 @@ typedef struct na_cmd {
     const char *status;  /* DONE："ok" "budget" "timeout" "cancelled" "refused" "error" */
     bool ok;
     bool elevated;
+    bool force_approval;
     int  timeout_ms;
     struct na_cmd *next;
 } na_cmd;

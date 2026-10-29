@@ -159,6 +159,37 @@ def leftover(tag):
     return subprocess.run(["pgrep", "-f", tag], capture_output=True, text=True).stdout.strip()
 
 
+@case("前置 Hook：拒绝、额外审批、迟到回执与独立超时", approvals=True)
+def t_hook_preflight(gw):
+    with open(os.path.join(WORK, "hook-read.txt"), "w") as f:
+        f.write("hook-read-proof")
+    for label, verdict in (("deny", False), ("allow", True), ("approve", True), ("timeout", None)):
+        sid = "hook-" + label
+        gw.send(t="input", sid=sid, run_id=sid, **{"from": "admin"}, mode="auto",
+                elevate=True, hook_checks=True, workspaces=[local_ws()])
+        model = gw.expect("model", sid=sid)
+        gw.send(t="turn", sid=sid, run_id=sid, turn_id=model["turn_id"], reason="tool_use",
+                calls=[{"id": "read", "name": "Read", "args": {"path": "hook-read.txt"}}])
+        check = gw.expect("hook_check", sid=sid, id="read", request_id="read")
+        assert check["run_id"] == sid and check["turn_id"] == model["turn_id"], check
+        if verdict is not None:
+            gw.send(t="hook_result", sid=sid, run_id=sid, turn_id=check["turn_id"], id="read",
+                    request_id="read", ok=verdict, force_approval=(label == "approve"), detail="guard denied")
+        if label == "approve":
+            approval = gw.expect("approve_req", sid=sid, id="read")
+            assert approval.get("force_approval") is True, approval
+            gw.send(t="approve", sid=sid, run_id=sid, turn_id=check["turn_id"], id="read", ok=True)
+            gw.expect("notice", sid=sid)
+        result = gw.expect("result", sid=sid, id="read")
+        assert result["ok"] is (label in ("allow", "approve")), result
+        gw.expect("model", sid=sid)
+        gw.send(t="turn", sid=sid, run_id=sid, reason="final")
+        gw.expect("done", sid=sid)
+        if label == "timeout":
+            gw.send(t="hook_result", sid=sid, run_id=sid, turn_id=check["turn_id"],
+                    id="read", request_id="read", ok=True)
+
+
 @case("定时任务策略：管理员 ask 创建需审批、readonly 可列出；网络工具访客可用", approvals=True)
 def t_schedule(gw):
     gw.send(t="input", sid="cron-policy", mode="ask", elevate=True, workspaces=[],
@@ -1060,7 +1091,7 @@ def main():
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
+            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
