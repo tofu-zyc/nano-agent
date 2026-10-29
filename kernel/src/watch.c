@@ -66,6 +66,7 @@ struct na_watch {
     bool        thread_started, stop;
     struct { int kind; watch_entry *e; unsigned gen; } cmdq[NA_WATCH_MAX]; /* 0 空 / 1 挂接 / 2 摘除 */
     int         cmd_head, cmd_tail;
+    unsigned    cmd_sent, cmd_done; /* 主线程排了几条命令 / 工作线程做完几条：挂接要等自己那条做完 */
     unsigned    slot_gen[NA_WATCH_MAX]; /* 工作线程这边每个槽位当前的代际 */
 #elif defined(_WIN32)
     HANDLE      iocp;       /* 完成端口：目录变化完成和命令都从这里出来 */
@@ -295,6 +296,10 @@ static void *mac_thread(void *ud)
                     pthread_mutex_unlock(&w->lock);
                     if (kind == 1) mac_open(w, e, gen);
                     else if (kind == 2) mac_close(w, e, gen);
+                    pthread_mutex_lock(&w->lock);
+                    w->cmd_done++;
+                    pthread_cond_broadcast(&w->cond);
+                    pthread_mutex_unlock(&w->lock);
                 }
                 continue;
             }
@@ -308,6 +313,11 @@ static void *mac_thread(void *ud)
             mac_wake(w);
         }
     }
+    /* 线程退出（停止或 kqueue 出错）：别让还在等挂接的主线程干等 */
+    pthread_mutex_lock(&w->lock);
+    w->stop = true;
+    pthread_cond_broadcast(&w->cond);
+    pthread_mutex_unlock(&w->lock);
     return NULL;
 }
 
@@ -372,21 +382,32 @@ static void be_free(na_watch *w)
     pthread_cond_destroy(&w->cond);
 }
 
-/* 主线程：登记/摘除都排队给工作线程，避免两边同时改 kqueue。 */
+/* 主线程：登记/摘除都排队给工作线程，避免两边同时改 kqueue。
+ * 挂接要等工作线程真的登记进 kqueue 再返回：和 inotify / Windows 一样，
+ * 登记返回之后的变化一定看得见；不等的话紧接着的写入会在挂上之前发生、整个丢掉。 */
 static int be_attach(na_watch *w, watch_entry *e)
 {
     e->gen = ++w->gen;
     pthread_mutex_lock(&w->lock);
+    e->wd = 1; /* 真正的 fd 由工作线程持有；打不开时它改回 -1 */
     w->cmdq[w->cmd_tail].kind = 1;
     w->cmdq[w->cmd_tail].e = e;
     w->cmdq[w->cmd_tail].gen = e->gen;
     w->cmd_tail = (w->cmd_tail + 1) % NA_WATCH_MAX;
+    unsigned ticket = ++w->cmd_sent;
     pthread_mutex_unlock(&w->lock);
     char b = 1;
     ssize_t n = write(w->cmd[1], &b, 1);
     (void)n;
-    e->wd = 1; /* 已交给工作线程；真正的 fd 由工作线程持有 */
-    return 1;
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 2; /* 工作线程卡住时不把主循环一起卡死 */
+    pthread_mutex_lock(&w->lock);
+    while ((int)(w->cmd_done - ticket) < 0 && !w->stop)
+        if (pthread_cond_timedwait(&w->cond, &w->lock, &until) != 0) break;
+    int wd = e->wd;
+    pthread_mutex_unlock(&w->lock);
+    return wd;
 }
 
 static void be_detach(na_watch *w, watch_entry *e)
@@ -397,6 +418,7 @@ static void be_detach(na_watch *w, watch_entry *e)
     w->cmdq[w->cmd_tail].e = e;
     w->cmdq[w->cmd_tail].gen = e->gen; /* 退订绑定这一代，不按"现在槽位里是谁"猜 */
     w->cmd_tail = (w->cmd_tail + 1) % NA_WATCH_MAX;
+    w->cmd_sent++;
     pthread_mutex_unlock(&w->lock);
     char b = 1;
     ssize_t n = write(w->cmd[1], &b, 1);
