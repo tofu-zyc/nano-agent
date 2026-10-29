@@ -105,6 +105,9 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 	}
 	// An ACK confirms journal durability, not Hook delivery or an external
 	// side effect. The latter has a separate fixed delivery record.
+	if finalJob(j.Receipt.Status) {
+		a.signalJobCompletion(nodeName, j.Receipt.JobID)
+	}
 	if terminal && current {
 		a.hub.Send(nodeName, proto.Msg{T: proto.TEventsAck, NodeEpoch: epoch, JobID: j.Receipt.JobID, EventSeq: j.Receipt.LastEventSeq})
 	}

@@ -288,3 +288,22 @@ func TestBackgroundReceiptNeverBecomesCompletionEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestJobQueriesRequireActualSuccessfulCompletionEvidence(t *testing.T) {
+	for _, test := range []struct {
+		action, status string
+		verified       bool
+	}{
+		{"status", "queued", false}, {"wait", "running", false}, {"status", "unknown", false},
+		{"status", "failed", false}, {"status", "succeeded", true}, {"wait", "succeeded", true},
+		{"output", "succeeded", false}, {"cancel", "succeeded", false}, {"detach", "succeeded", false}, {"list", "succeeded", false},
+	} {
+		t.Run(test.action+"-"+test.status, func(t *testing.T) {
+			r := &run{turnID: 1, callArgs: map[string]proto.Call{"c": {ID: "c", Name: "Job", Args: []byte(`{"action":"` + test.action + `"}`)}}}
+			new(App).recordToolEvidence(r, &proto.Msg{ID: "c", TurnID: 1, OK: proto.Bool(true), Content: `{"job":{"job_id":"j_test","status":"` + test.status + `"}}`})
+			if r.toolEvidence["c"].Verified != test.verified {
+				t.Fatal(r.toolEvidence)
+			}
+		})
+	}
+}

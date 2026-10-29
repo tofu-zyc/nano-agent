@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+
+	"nano-agent/gateway/internal/llm"
 	"os"
 	"path/filepath"
 	"testing"
@@ -268,5 +273,94 @@ func TestRealCNativeSilentBranchJobRetainsIdentityAfterRun(t *testing.T) {
 	case text := <-e.ch.sent:
 		t.Fatal("silent Job pushed source chat", text)
 	default:
+	}
+}
+
+type jobToolModel struct {
+	command, workspace string
+	mu                 sync.Mutex
+	jobID              string
+}
+
+func (m *jobToolModel) Chat(_ context.Context, req llm.Request, _ func(llm.Delta)) (*llm.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	offered := false
+	for _, tool := range req.Tools {
+		if tool.Function.Name == "Job" {
+			offered = true
+		}
+	}
+	if !offered {
+		return nil, fmt.Errorf("Job tool was not capability-gated into the real model request")
+	}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		message := req.Messages[i]
+		if message.Role != "tool" {
+			continue
+		}
+		if message.ToolCallID == "job-status" {
+			var out JobResponse
+			at := strings.Index(message.Content, "{")
+			if at < 0 || json.NewDecoder(strings.NewReader(message.Content[at:])).Decode(&out) != nil || out.Job == nil || out.Job.JobID != m.jobID {
+				return nil, fmt.Errorf("Job tool did not reach Gateway: %s", message.Content)
+			}
+			return &llm.Result{Reason: llm.ReasonFinal, Content: "Job tool path completed"}, nil
+		}
+		if message.ToolCallID == "job-shell" {
+			var receipt struct {
+				JobID string `json:"job_id"`
+			}
+			at := strings.Index(message.Content, "{")
+			if at < 0 || json.NewDecoder(strings.NewReader(message.Content[at:])).Decode(&receipt) != nil || receipt.JobID == "" {
+				return nil, fmt.Errorf("background receipt missing: %s", message.Content)
+			}
+			m.jobID = receipt.JobID
+			raw, _ := json.Marshal(JobRequest{Action: "status", JobID: m.jobID})
+			return &llm.Result{Reason: llm.ReasonToolUse, Calls: []llm.ToolCall{{ID: "job-status", Type: "function",
+				Function: llm.FunctionCall{Name: "Job", Arguments: string(raw)}}}}, nil
+		}
+	}
+	raw, _ := json.Marshal(map[string]string{"command": m.command, "workspace": m.workspace, "execution": "background"})
+	return &llm.Result{Reason: llm.ReasonToolUse, Calls: []llm.ToolCall{{ID: "job-shell", Type: "function",
+		Function: llm.FunctionCall{Name: "Shell", Arguments: string(raw)}}}}, nil
+}
+func TestRealCJobToolAndGatewayCancel(t *testing.T) {
+	e, _ := setupRealKernel(t, func(a *App) kernel.Handler { return &jobContractHandler{App: a, observed: make(chan proto.Msg, 128)} })
+	work := filepath.Join(e.dir, "home", "job-tool")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	nodeName := ""
+	for name := range e.a.nodes {
+		nodeName = name
+		break
+	}
+	workspace := Workspace{ID: "job-tool-work", Host: e.a.machineOf(nodeName), Path: work, SandboxMode: "off"}
+	e.a.wss = []Workspace{workspace}
+	st := e.a.store.Settings(e.sid)
+	st.Mode = "full"
+	st.WorkspacesSet = true
+	st.Workspaces = []string{workspace.ID}
+	err := e.a.store.SaveSettings(e.sid, st)
+	model := &jobToolModel{command: "printf started; while [ ! -f '" + filepath.Join(work, "never-release") + "' ]; do sleep 0.02; done", workspace: workspace.Label()}
+	e.a.llm = model
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.say("Run a managed Shell then inspect it using Job")
+	e.ch.wait(t, "Job tool path completed")
+	model.mu.Lock()
+	jobID := model.jobID
+	model.mu.Unlock()
+	result, err := e.a.JobAction(context.Background(), "fake:u1", e.sid, JobRequest{Action: "cancel", JobID: jobID})
+	if err != nil || !result.Accepted {
+		t.Fatal(result, err)
+	}
+	result, err = e.a.JobAction(context.Background(), "fake:u1", e.sid, JobRequest{Action: "wait", JobID: jobID, WaitMS: 5000})
+	if err != nil || result.Job == nil || result.Job.Status != "cancelled" {
+		t.Fatal(result, err)
 	}
 }

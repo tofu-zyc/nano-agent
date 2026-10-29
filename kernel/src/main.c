@@ -178,6 +178,7 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft, "call_identity", 1);
     cJSON_AddNumberToObject(ft, "machine_leases", 1);
     cJSON_AddNumberToObject(ft,"job_stream",k->exec_stream_version);
+    cJSON_AddNumberToObject(ft,"job_control_tool",1);
     cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
     cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
     if(k->jobs_error[0])cJSON_AddStringToObject(m,"job_storage_error",k->jobs_error);
@@ -1166,7 +1167,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
 static bool gateway_tool(const char *name)
 {
     static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
-                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session" };
+                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session", "Job" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(name, names[i])) return true;
     return false;

@@ -130,6 +130,9 @@ func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	}
 	// 会话分叉：任何会话都能用（分支就是从它分出来的）
 	tools = append(tools, toolOf(sessionTool()))
+	if a.jobEvents != nil && n.info.Features["job_control_tool"] >= 1 {
+		tools = append(tools, toolOf(jobTool()))
+	}
 	if admin {
 		tools = append(tools, toolOf(scheduleTool()))
 		for _, spec := range a.gatewayTools() {

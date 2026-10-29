@@ -316,7 +316,15 @@ def check():
             native_id = json.loads(native_results["background"]["content"])["job_id"]
             assert native_results["sibling"]["ok"] and native_results["sibling"]["content"].rstrip().endswith("once")
             node.wait(lambda m: m["t"] == "model" and m.get("sid") == "native")
-            node.send(t="turn", sid="native", run_id="native-run", turn_id=2, reason="final")
+            node.send(t="turn", sid="native", run_id="native-run", turn_id=2, reason="tool_use", calls=[
+                dict(id="job-query", name="Job", args=dict(action="status", job_id=native_id))])
+            forwarded = node.wait(lambda m: m["t"] == "exec" and m.get("name") == "Job")
+            assert forwarded["id"] == "job-query" and forwarded["args"]["job_id"] == native_id, forwarded
+            node.send(t="exec_result", sid="native", run_id="native-run", turn_id=2, id="job-query",
+                      ok=True, content=json.dumps(dict(job=dict(job_id=native_id, status="running"))))
+            node.wait(lambda m: m["t"] == "result" and m.get("id") == "job-query")
+            node.wait(lambda m: m["t"] == "model" and m.get("sid") == "native")
+            node.send(t="turn", sid="native", run_id="native-run", turn_id=3, reason="final")
             node.wait(lambda m: m["t"] == "done" and m.get("sid") == "native")
             native_state = node.control("native-still-live", "status", native_id)["job"]
             assert native_state["background"] and native_state["origin"]["silent"] and native_state["lease"]["silent"], native_state
@@ -362,7 +370,7 @@ def check():
             for ident in ["fore", "queued", "block", "auto", "denied", "race", "reconnect", "cancel-block", "cancel-queued", "manual", "stop-running", "restart-live", "restart-queued"]:
                 results = [m for m in node.history if m["t"] == "run_result" and m["id"] == ident]
                 assert len(results) == 1, (ident, results)
-            print("node jobs: 13 host requests + native 2-call batch; queued/auto/handoff race/cancel/reconnect/rebuild/one result passed")
+            print("node jobs: 13 host requests + native 2-call batch + gateway Job tool; queued/auto/handoff race/cancel/reconnect/rebuild/one result passed")
         except BaseException:
             print("JOB NODE HISTORY", json.dumps(node.history[-30:], ensure_ascii=False, indent=2), file=sys.stderr)
             print((node.root / "node.log").read_text()[-8000:], file=sys.stderr)

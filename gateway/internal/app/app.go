@@ -51,6 +51,9 @@ type Command struct {
 
 var Commands = []Command{
 	{Name: "help", Desc: "列出命令"},
+	{Name: "jobs", Desc: "查看已登记的长时间和后台任务"},
+	{Name: "bg", Args: "[job_id]", Desc: "把当前前台命令原地转后台"},
+	{Name: "job", Args: "<job_id> [status|output [游标]|wait [秒]|cancel|detach]", Desc: "查看日志、短等待或停止一个任务"},
 	{Name: "cron", Args: "[run|on|off|rm <编号>]", Desc: "查看和管理定时任务", Admin: true},
 	{Name: "whoami", Desc: "查看你的身份、这个窗口和它接着的会话"},
 	{Name: "agent", Desc: "查看你在和哪个 agent 说话"},
@@ -102,15 +105,17 @@ var helpText = func() string {
 }()
 
 type App struct {
-	jobEvents     *eventlog.Store
-	jobEventsErr  error
-	jobPersist    map[string]*jobPersistence
-	runtimeLimits config.Runtime
-	runWaitSerial uint64
-	dispatcher    *dispatch.Engine
-	dispatchErr   error
-	dispatchBoot  string
-	dispatchWait  map[string]func(dispatch.Change)
+	jobControls    map[string]jobControlWait
+	jobCompletions map[string]jobCompletionWait
+	jobEvents      *eventlog.Store
+	jobEventsErr   error
+	jobPersist     map[string]*jobPersistence
+	runtimeLimits  config.Runtime
+	runWaitSerial  uint64
+	dispatcher     *dispatch.Engine
+	dispatchErr    error
+	dispatchBoot   string
+	dispatchWait   map[string]func(dispatch.Change)
 
 	forkWG            sync.WaitGroup
 	forkWork          map[string]chan struct{}
@@ -433,6 +438,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
 	}
 	a.jobPersist = map[string]*jobPersistence{}
+	a.jobControls = map[string]jobControlWait{}
+	a.jobCompletions = map[string]jobCompletionWait{}
 	a.jobEvents, a.jobEventsErr = eventlog.Open(ctx, filepath.Join(store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
 	if a.jobEventsErr != nil {
 		store.RecordStorageIssue("runtime_events", a.jobEventsErr)
@@ -741,7 +748,14 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			a.mu.Unlock()
 		}()
 		return
+	case "jobs", "bg", "job":
+		a.cmdJobs(c, cmd, arg)
+		return
 	case "stop":
+		if strings.HasPrefix(arg, "j_") {
+			a.cmdJobs(c, "job", arg+" cancel")
+			return
+		}
 		a.stop(c)
 		return
 	case "undo":
@@ -1477,6 +1491,9 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.jobControlReply(node, m) {
+		return
+	}
 	if a.jobEventMessage(node, m) {
 		return
 	}

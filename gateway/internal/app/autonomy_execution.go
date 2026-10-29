@@ -119,6 +119,13 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 	if json.Unmarshal([]byte(m.Content), &receipt) == nil {
 		completed = mcpOutcomeVerified(receipt)
 	}
+	if call.Name == "Job" {
+		var args JobRequest
+		var out JobResponse
+		completed = json.Unmarshal(call.Args, &args) == nil && json.Unmarshal([]byte(m.Content), &out) == nil &&
+			(args.Action == "status" || args.Action == "wait") && out.Job != nil &&
+			out.Job.JobID != "" && out.Job.Status == "succeeded"
+	}
 	turn := m.TurnID
 	if turn == 0 {
 		turn = r.turnID

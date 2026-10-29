@@ -548,3 +548,62 @@ func (s *Store) Stats() Stats {
 	return Stats{Jobs: len(s.jobs), Sources: len(s.cursors), Events: len(s.events), Deliveries: len(s.deliveries),
 		Reserved: s.reserved, Queued: len(s.queue), LiveBytes: s.live, JournalBytes: s.bytes, ReservedBytes: s.reserveBytes, Err: s.failure}
 }
+
+// Jobs returns one bounded page of immutable headers without logs or lease scopes. after is an opaque,
+// stable source/job key; permission filtering belongs to the authenticated App.
+func (s *Store) Jobs(after string, limit int) ([]JobRecord, string) {
+	limit = min(max(limit, 1), 128)
+	type row struct {
+		key string
+		job JobRecord
+	}
+	s.mu.RLock()
+	rows := make([]row, 0, limit+1)
+	for key, j := range s.jobs {
+		if key <= after {
+			continue
+		}
+		at := sort.Search(len(rows), func(i int) bool { return rows[i].key > key })
+		if at > limit {
+			continue
+		}
+		rows = append(rows, row{})
+		copy(rows[at+1:], rows[at:])
+		rows[at] = row{key, j}
+		if len(rows) > limit+1 {
+			rows = rows[:limit+1]
+		}
+	}
+	s.mu.RUnlock()
+	next := ""
+	if len(rows) > limit {
+		next = rows[limit-1].key
+		rows = rows[:limit]
+	}
+	out := make([]JobRecord, len(rows))
+	for i, r := range rows {
+		out[i] = r.job
+		out[i].Receipt.Result = nil
+		out[i].Receipt.OutputTail = ""
+		out[i].Receipt.Lease = nil
+		out[i].Receipt.Origin.Resources = ""
+		out[i].Receipt.Origin.Exclusive = ""
+	}
+	return copyValue(out), next
+}
+func (s *Store) FindJob(id string) (JobRecord, bool) {
+	s.mu.RLock()
+	var found JobRecord
+	count := 0
+	for _, j := range s.jobs {
+		if j.Receipt.JobID == id {
+			found = j
+			count++
+			if count > 1 {
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	return copyValue(found), count == 1
+}
