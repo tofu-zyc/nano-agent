@@ -144,16 +144,28 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 
 type startedKey struct{}
 
-// WithStarted observes the actual process creation, after any queue or probe.
-func WithStarted(ctx context.Context, fn func()) context.Context {
-	var once sync.Once
-	return context.WithValue(ctx, startedKey{}, func() { once.Do(fn) })
+// StartInfo is a verified managed execution policy. TimeoutMS is zero for
+// legacy starts, positive for a Job deadline, and -1 for an unlimited Job.
+type StartInfo struct {
+	JobID     string
+	TimeoutMS int64
 }
-func Started(ctx context.Context) {
-	if fn, ok := ctx.Value(startedKey{}).(func()); ok {
-		fn()
+
+func WithStartedInfo(ctx context.Context, fn func(StartInfo)) context.Context {
+	var once sync.Once
+	return context.WithValue(ctx, startedKey{}, func(info StartInfo) { once.Do(func() { fn(info) }) })
+}
+
+// WithStarted observes actual process creation after any queue or probe.
+func WithStarted(ctx context.Context, fn func()) context.Context {
+	return WithStartedInfo(ctx, func(StartInfo) { fn() })
+}
+func NotifyStarted(ctx context.Context, info StartInfo) {
+	if fn, ok := ctx.Value(startedKey{}).(func(StartInfo)); ok {
+		fn(info)
 	}
 }
+func Started(ctx context.Context) { NotifyStarted(ctx, StartInfo{}) }
 
 // run 运行 cmd，把 input 写进它的 stdin。keepOpen 时 stdin 一直开着，直到进程结束或者 ctx 结束
 // （执行器看到 stdin 关闭就停下，ssh 会把 EOF 传给服务器上的执行器）。ctx 结束后过一会儿还没退出就杀掉。

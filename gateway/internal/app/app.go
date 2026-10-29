@@ -1498,7 +1498,12 @@ func (a *App) execStarted(node string, m *proto.Msg) {
 	if n == nil || n.info.Proto < 11 {
 		return
 	}
-	a.hub.Send(node, proto.Msg{T: proto.TExecStarted, SID: m.SID, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID})
+	notice := proto.Msg{T: proto.TExecStarted, SID: m.SID, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID}
+	if m.JobID != "" && n.info.Features["exec_started_timeout"] >= 1 {
+		notice.JobID = m.JobID
+		notice.TimeoutMs = m.TimeoutMs
+	}
+	a.hub.Send(node, notice)
 }
 
 // ---- 内核事件（kernel.Handler） ----
@@ -1533,9 +1538,7 @@ func (a *App) KernelMsg(node string, m *proto.Msg) {
 		return
 	}
 	if m.T == proto.TRunStarted {
-		if wait, ok := a.hostWaits[m.ID]; ok && wait.node == node && wait.started != nil {
-			go wait.started()
-		}
+		a.notifyHostStarted(node, m.ID, m.JobID, int64(m.TimeoutMs), true)
 		return
 	}
 	if m.T == proto.TLsResult || m.T == proto.TRunResult {

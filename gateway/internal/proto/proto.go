@@ -208,7 +208,7 @@ type Msg struct {
 	// exec：在哪个工作目录上执行（Skill 没有）、工具的时限和输出上限
 	Workspace string `json:"workspace,omitempty"`
 	Elevated  bool   `json:"elevated,omitempty"`
-	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	TimeoutMs int64  `json:"timeout_ms,omitempty"`
 	MaxOutput int    `json:"max_output,omitempty"`
 	// run：交给执行器的完整请求；skill_put：技能名和文件
 	Req   json.RawMessage `json:"req,omitempty"`

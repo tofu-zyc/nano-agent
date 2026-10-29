@@ -256,10 +256,8 @@ func (a *App) leaseChanged(change dispatch.Change) {
 	}
 	if change.Action == "started" {
 		l := change.Lease
-		if wait, ok := a.hostWaits[l.HostID]; ok && wait.node == nodeName && wait.started != nil {
-			go wait.started()
-		}
-		if s := a.sessions[l.Session]; s != nil && s.run != nil && s.run.runID == l.RunID && s.run.turnID == l.TurnID && s.run.node != nodeName {
+		a.notifyHostStarted(nodeName, l.HostID, l.JobID, 0, false)
+		if s := a.sessions[l.Session]; l.JobID == "" && s != nil && s.run != nil && s.run.runID == l.RunID && s.run.turnID == l.TurnID && s.run.node != nodeName {
 			a.execStarted(s.run.node, &proto.Msg{SID: l.Session, RunID: l.RunID, TurnID: l.TurnID, ID: l.CallID})
 		}
 	}

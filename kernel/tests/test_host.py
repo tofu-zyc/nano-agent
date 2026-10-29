@@ -677,6 +677,24 @@ def t_streamed_host(gw):
     assert result["sandbox"]["effective"]=="none",result
 
 
+@case("异机 Job 的实际执行时限覆盖旧工具时限")
+def t_gateway_started_timeout(gw):
+    gw.send_started = False
+    try:
+        start_gateway_run(gw, "job-deadline")
+        call(gw, "job-deadline", ("c1", "Shell", {"command": "remote-placeholder"}))
+        msg = gw.expect("exec", sid="job-deadline", id="c1")
+        gw.send(t="exec_started", sid=msg["sid"], id=msg["id"],
+                run_id=msg.get("run_id", ""), turn_id=msg.get("turn_id", 0),
+                job_id="j_target-1", timeout_ms=1000)
+        gw.expect("exec_cancel", timeout=3, sid="job-deadline", id="c1")
+        result = gw.expect("result", sid="job-deadline", id="c1", ok=False)
+        assert "执行超时（1 秒）" in result["content"], result
+        finish(gw, "job-deadline")
+    finally:
+        gw.send_started = True
+
+
 @case("网关不同步确认 exec_started：结果一样能闭合，不会一直挂着")
 def t_no_exec_started(gw):
     gw.send_started = False
@@ -1029,8 +1047,10 @@ def main():
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
-                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_streamed_host, t_reconnect):
-                t(gw)
+                      t_stale_result, t_model_yield, t_sandbox_off_via_kernel, t_workspace_sandbox, t_oversized_wire_batch, t_resource_domains, t_streamed_host, t_gateway_started_timeout, t_reconnect):
+                selected = os.environ.get("NANO_HOST_CASE", "")
+                if not selected or selected == t.__name__:
+                    t(gw)
 
             # 内核退出时，正在跑的命令也要被清理
             start_run(gw, "s14")

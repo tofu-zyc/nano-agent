@@ -293,18 +293,27 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 	// 内核自己也计时，超时会发 exec_cancel；这里多留一点余量兜底
 	var lease dispatch.Request
 	ctx, cancel := context.WithCancel(a.ctx)
-	ctx = host.WithStarted(ctx, func() {
+	ctx = host.WithStartedInfo(ctx, func(info host.StartInfo) {
 		if ctx.Err() != nil {
 			return
 		}
-		timer := time.AfterFunc(timeout, cancel)
-		context.AfterFunc(ctx, func() { timer.Stop() })
+		// The target C JobManager owns its deadline. The old tool watchdog
+		// must not terminate a managed 30-minute command at 610 seconds.
+		if info.JobID == "" {
+			timer := time.AfterFunc(timeout, cancel)
+			context.AfterFunc(ctx, func() { timer.Stop() })
+		}
 		if lease.ID != "" {
 			a.executionLeaseStarted(lease)
 		}
 		a.mu.Lock()
 		if s.run == r {
-			a.execStarted(node, m)
+			started := *m
+			started.JobID = info.JobID
+			if info.JobID != "" {
+				started.TimeoutMs = info.TimeoutMS
+			}
+			a.execStarted(node, &started)
 		}
 		a.mu.Unlock()
 	})

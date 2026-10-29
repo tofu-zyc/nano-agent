@@ -176,6 +176,7 @@ static void send_hello(kernel_t *k)
     /* 能力集合：网关按机器分别协商，缺能力时不暴露相应参数 */
     cJSON *ft = cJSON_AddObjectToObject(m, "features");
     cJSON_AddNumberToObject(ft, "call_identity", 1);
+    cJSON_AddNumberToObject(ft, "exec_started_timeout", 1);
     cJSON_AddNumberToObject(ft, "machine_leases", 1);
     cJSON_AddNumberToObject(ft,"job_stream",k->exec_stream_version);
     cJSON_AddNumberToObject(ft,"job_control_tool",1);
@@ -2152,8 +2153,19 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         gwjob_t *g = gw_find(k, sget(m, "sid"), sget(m, "run_id"), cJSON_IsNumber(gid) ? gid->valueint : 0,
                              sget(m, "id"));
         if (!g || g->started) return;
+        const cJSON *limit=cJSON_GetObjectItemCaseSensitive(m,"timeout_ms");
+        int64_t duration=0;
+        if(limit) {
+            if(!cJSON_IsNumber(limit)||limit->valuedouble < -1 || limit->valuedouble > 31536000000.0 ||
+               limit->valuedouble!=(double)(int64_t)limit->valuedouble) {
+                log_warn("exec_started 的实际执行时限无效，保留原派发等待");return;
+            }
+            duration=(int64_t)limit->valuedouble;
+        }
         g->started = true;
-        call_started(k, g->sid, g->run_id, g->turn_id, g->id, now);
+        na_event started={.type=NA_EV_CALL_STARTED,.sid=g->sid,.run_id=g->run_id,
+            .turn_id=g->turn_id,.id=g->id,.started_timeout_ms=duration};
+        na_core_feed(k->core,now,&started);
         return;
     }
     if (!strcmp(t, "exec_result")) {

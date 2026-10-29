@@ -28,7 +28,7 @@ func (k kernelHost) call(ctx context.Context, m proto.Msg, cancel string) (proto
 	a.hostSeq++
 	m.ID = fmt.Sprintf("h%s-%d", a.dispatchBoot, a.hostSeq)
 	ch := make(chan proto.Msg, 1)
-	wait := hostWait{node: k.node, ch: ch, started: func() { host.Started(ctx) }}
+	wait := hostWait{node: k.node, ch: ch, started: func(info host.StartInfo) { host.NotifyStarted(ctx, info) }}
 	if m.T == proto.TRun {
 		var req struct {
 			Tool   string           `json:"tool"`
@@ -112,7 +112,8 @@ func (k kernelHost) PutFiles(ctx context.Context, dir string, files []host.File)
 
 // hostWait 是一个等内核回复的请求
 type hostWait struct {
-	started func()
+	jobID   string // bound after reliable Job admission, never inferred from a start packet
+	started func(host.StartInfo)
 	tool    string
 	origin  *proto.LeaseSpec
 	node    string

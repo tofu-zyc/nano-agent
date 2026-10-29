@@ -25,6 +25,7 @@ typedef struct {
     int  turn_id;        /* 产生这个调用的模型轮次 */
     call_state st;
     int64_t deadline;    /* -1 表示不限（一直等审批 / 一直排队） */
+    int64_t execution_timeout_ms; /* 实际开始时确认的执行时限，用于结果说明 */
 } call_t;
 
 typedef enum { RUN_WAIT_MODEL, RUN_WAIT_TOOLS } run_state;
@@ -673,6 +674,7 @@ static int on_call_started(na_core *c, int64_t now, const na_event *ev)
     if (ev->turn_id > 0 && k->turn_id && ev->turn_id != k->turn_id) return -1;
     k->st = CALL_RUNNING;
     int64_t timeout=ev->started_timeout_ms?ev->started_timeout_ms:k->tool->timeout_ms;
+    k->execution_timeout_ms=timeout;
     k->deadline = timeout > 0 ? now + timeout : -1;
     return 0;
 }
@@ -751,7 +753,7 @@ static void on_tick(na_core *c, int64_t now)
             if (k->deadline < 0 || now < k->deadline) continue;
             if (k->st == CALL_RUNNING) {
                 kill_call(c, r, k);
-                result_err(c, r, k, "执行超时（%d 秒），已终止", k->tool->timeout_ms / 1000);
+                result_err(c, r, k, "执行超时（%lld 秒），已终止", (long long)(k->execution_timeout_ms / 1000));
             } else if (k->st == CALL_DISPATCHED) {
                 kill_call(c, r, k);
                 result(c, r, k, false, "派发超时：执行节点一直没能开始这个调用，已取消");

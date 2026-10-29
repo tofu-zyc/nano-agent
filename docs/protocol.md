@@ -205,6 +205,15 @@ exec_queued 是协调内核对 Gateway 排队的确认，停止派发等待时�
 exec_started 才开始执行时限，tool_started 向平台展示完整调用身份。代执行用 run_started(id)
 确认真实进程启动。排队调用的启动失败/拒绝可以直接给终态失败，不伪造 started。
 
+协调内核声明 `features.exec_started_timeout=1` 时，Gateway 可在 `exec_started` 中
+携带已验证的 `job_id / timeout_ms`，覆盖旧工具的固定等待时限；时限为 64 位毫秒，
+`-1` 表示已获准的不限时，`0` 或未提供保留旧工具默认值。
+代执行的 `run_started` 为 Job 带上原始秒数换算的毫秒（不限时为 0）；
+Gateway 必须从同一已持久化 Job/host wait 的完整来源、启动 epoch 和策略验证，
+再向协调节点转发。`lease_started` 先到也使用同一可靠记录，只消费一次开始通知。
+已受管理 Job 的执行截止由目标 C JobManager 负责，Gateway 不再套旧的 610 秒工具看门狗；
+run 总预算和前台取消规则继续独立生效。旧协调节点没有此能力时保留旧工具协议。
+
 Gateway 直接/SSH 调用及 MCP/网络/网关工具也参与统一 per-run 仲裁。MCP 默认每个服务独占，
 网络操作另有有界槽；网关状态操作按 agent 串行。不能从直接执行器取得启动前的可信路径域时，
 保守占用 machine:files 独占锁，不能用未经核实的路径别名缩小资源。SSH 不明确的连接丢失结果

@@ -103,6 +103,16 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 		}
 		return
 	}
+	if current && j.Receipt.NodeEpoch == epoch && j.Receipt.Lease != nil {
+		q := j.Receipt
+		if wait, ok := a.hostWaits[q.Lease.HostID]; ok && wait.node == nodeName && wait.origin != nil &&
+			wait.origin.SID == q.OriginSID && wait.origin.RunID == q.OriginRunID && wait.origin.CallID == q.OriginCallID &&
+			wait.origin.TurnID == q.Origin.TurnID && wait.origin.Agent == q.OwnerAgent && wait.origin.CreatedBy == q.CreatedBy &&
+			wait.origin.Silent == j.Silent {
+			wait.jobID = q.JobID
+			a.hostWaits[q.Lease.HostID] = wait
+		}
+	}
 	// An ACK confirms journal durability, not Hook delivery or an external
 	// side effect. The latter has a separate fixed delivery record.
 	if finalJob(j.Receipt.Status) {
