@@ -455,7 +455,8 @@ export type Target =
   | { type: 'memory'; agent?: string } // 上下文整理和长期记忆；agent 是要看谁的记忆
   | { type: 'skills' }
   | { type: 'mcp' } // MCP 服务
-  | { type: 'schedules' };
+  | { type: 'schedules' }
+  | { type: 'jobs'; node?: string; job_id?: string };
 
 // /api/devices：SSH 连接、配对请求、配对过的电脑、电脑接入地址
 export type SshConnection = {
@@ -487,3 +488,14 @@ export interface AgentDoing {
   text: string; // 带着在跟谁聊、几点醒
   brief: string; // 短说法
 }
+
+export type JobInfo = {
+  node:string;job_id:string;revision:number;agent:string;created_by:string;
+  origin_sid:string;origin_run_id:string;origin_turn_id:number;origin_call_id:string;
+  status:string;execution:string;background:boolean;silent:boolean;online:boolean;
+  created_at:number;started_at?:number;ended_at?:number;deadline_at?:number;
+  sandbox_effective?:string;output_cursor:number;output_gap:boolean;error?:string;
+};
+export type JobOutput = {chunks:{cursor:number;next_cursor:number;stream:string;data:string}[];
+  next_cursor:number;output_cursor:number;truncated_before:number;gap:boolean;error?:string};
+export type JobResponse = {job?:JobInfo;jobs?:JobInfo[];output?:JobOutput;next?:string;accepted?:boolean;action?:string;wait_expired?:boolean};

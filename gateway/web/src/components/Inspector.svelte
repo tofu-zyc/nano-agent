@@ -25,6 +25,7 @@
   import MachinesPanel from './panels/MachinesPanel.svelte';
   import WorkspacePanel from './panels/WorkspacePanel.svelte';
   import Icon from './Icon.svelte';
+  import JobsPanel from './panels/JobsPanel.svelte';
 
   const target = $derived(store.inspector!);
   const ov = $derived(store.ov!);
@@ -116,6 +117,8 @@
         return { icon: 'plug', color: 'var(--c-mcp)', title: 'MCP 服务',
           sub: list.length ? `${list.length} 个服务 · ${list.filter((m) => m.online).length} 个连着 · ${list.reduce((n, m) => n + (m.enabled ? m.tool_count : 0), 0)} 个工具` : '外部工具：文件系统、浏览器、computer use……' };
       }
+      case 'jobs':
+        return { icon: 'terminal', color: 'var(--c-kernel)', title: '执行任务', sub: '后台任务、日志和执行状态' };
       case 'schedules': {
         const sc = ov.schedules;
         return { icon: 'clock', color: 'var(--c-cron)', title: '定时任务', sub: sc?.total ? `${sc.total} 个任务 · ${sc.enabled} 个开着` : '还没有任务' };
@@ -183,6 +186,8 @@
         <SkillsPanel />
       {:else if target.type === 'mcp'}
         <MCPPanel />
+      {:else if target.type === 'jobs'}
+        <JobsPanel node={target.node} job_id={target.job_id} />
       {:else if target.type === 'schedules'}
         <SchedulesPanel />
       {:else if target.type === 'kernel'}

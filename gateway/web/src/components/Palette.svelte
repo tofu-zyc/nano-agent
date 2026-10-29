@@ -70,6 +70,7 @@
       node('n:memory', { type: 'memory' }, 'brain', 'var(--c-memory)', '上下文与记忆', '每个 agent 的长期记忆；上下文自动整理、归档', '上下文 记忆 长期记忆 知识库 整理 压缩 归档 做梦 memory context compact'),
       node('n:skills', { type: 'skills' }, 'book', 'var(--c-skill)', '技能', '技能列表和目录', '技能 skill'),
       node('n:mcp', { type: 'mcp' }, 'plug', 'var(--c-mcp)', 'MCP 服务', '外部工具：本机进程、远程地址，或挂在别的电脑上', 'MCP mcp 工具 服务 computer use 浏览器'),
+      { id: 'n:jobs', icon: 'terminal', color: 'var(--c-kernel)', title: '执行任务', sub: '后台任务、日志、短等待、取消和转后台', kind: '操作', text: '执行任务 后台 Shell job jobs 日志 取消 转后台', run: () => { store.open({ type: 'jobs' }); close(); } },
       node('n:schedules', { type: 'schedules' }, 'clock', 'var(--c-cron)', '定时任务', '查看、新建、编辑、立即运行', '定时任务 cron schedule 提醒'),
       node('n:machines', { type: 'machines' }, 'laptop', 'var(--c-kernel)', '接入机器', '别的电脑装内核连进来、添加 SSH 服务器、确认配对', '设备 电脑 服务器 安装 配对 SSH Windows Linux 连接 devices'),
       node('n:workspaces', { type: 'workspace' }, 'folder', 'var(--c-dir)', '工作目录', '全部工作目录、添加', '工作目录 目录 workspace'),

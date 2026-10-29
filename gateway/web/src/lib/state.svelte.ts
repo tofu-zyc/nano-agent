@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { AgentInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import type { AgentInfo, JobInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
 import { HOMES } from './nodes';
 
 export type Toast = {
@@ -36,6 +36,8 @@ function parseHash(): { route: Route; legacy?: Legacy } {
       return { route: topo, legacy: { target: { type: 'gateway' }, focus: params.get('focus') ?? undefined } };
     case 'devices':
       return { route: topo, legacy: { target: { type: 'machines' } } };
+    case 'jobs':
+      return { route: topo, legacy: { target: { type: 'jobs', job_id: arg, node: params.get('node') ?? undefined } } };
     case 'schedules':
       return { route: topo, legacy: { target: { type: 'schedules' } } };
     case 'personas': {
@@ -83,6 +85,7 @@ class Store {
   closedRun = $state<Record<string,string>>({});
   phase = $state<Record<string, string>>({}); // 会话正在做什么：thinking / writing / tool
   log = $state<Ev[]>([]);
+  lastJob = $state<JobInfo | null>(null);
   toasts = $state<Toast[]>([]);
   inspector = $state<Target | null>(null);
   focus = $state<string | null>(null); // 节点面板里要高亮的配置项
@@ -458,6 +461,10 @@ class Store {
     const ov = this.ov;
     const sid = e.sid ?? '';
     switch (e.t) {
+      case 'job':
+        // A background fact updates the task panel, without opening or notifying a chat.
+        if (e.data) this.lastJob = e.data;
+        break;
       case 'kernel':
         if (ov) {
           ov.kernels = ov.kernels.filter((k) => k.node !== e.name);

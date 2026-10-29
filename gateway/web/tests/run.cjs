@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 
 const compiled = mkdtempSync(path.join(tmpdir(), 'nano-web-test-'));
 after(() => rmSync(compiled, { recursive: true, force: true }));
-const result = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '--ignoreConfig', '--target', 'ES2022', '--module', 'CommonJS', '--skipLibCheck', '--outDir', compiled, 'src/lib/conv.ts'], { encoding: 'utf8' });
+const result = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '--ignoreConfig', '--target', 'ES2022', '--module', 'CommonJS', '--skipLibCheck', '--outDir', compiled, 'src/lib/conv.ts', 'src/lib/jobs.ts'], { encoding: 'utf8' });
 if (result.status !== 0) throw new Error(result.stdout + result.stderr);
 writeFileSync(path.join(compiled, 'package.json'), '{"type":"commonjs"}');
 const { buildBlocks } = require(path.join(compiled, 'conv.js'));
@@ -44,4 +44,49 @@ test('unaccepted proposals stay inspectable without becoming executed tool cards
   const result = buildBlocks([{role:'assistant',proposed_calls:[proposal],kind:'unaccepted_tool_proposal'}]);
   assert.equal(result[0].tools.length,0);
   assert.deepEqual(result[0].proposed,[proposal]);
+});
+
+
+const { JobLog, mergeJob } = require(path.join(compiled, 'jobs.js'));
+const job = (id, revision, status = 'running', node = 'node') => ({ job_id: id, node, revision, status });
+
+test('a late job response cannot roll back completion or confuse node-local IDs', () => {
+  const done = job('same', 5, 'succeeded');
+  assert.equal(mergeJob(done, job('same', 4, 'running')), done);
+  assert.equal(mergeJob(done, job('same', 6, 'running')), done);
+  assert.equal(mergeJob(done, job('same', 6, 'succeeded')).revision, 6);
+  assert.equal(mergeJob(done, job('same', 1, 'running', 'other')).node, 'other');
+});
+
+const page = (cursor, bytes, end, stream='stdout') => ({
+  chunks: [{cursor, next_cursor:end, stream, data:Buffer.from(bytes).toString('base64')}],
+  next_cursor:end, output_cursor:end, truncated_before:0, gap:false,
+});
+test('job output preserves a UTF-8 character across chunks and separate cursor reads', () => {
+  const log = new JobLog();
+  const bytes = Buffer.from('中文🙂');
+  log.append(page(0, bytes.subarray(0,2), 2));
+  assert.equal(log.text, '');
+  log.append(page(2, bytes.subarray(2,7), 7));
+  assert.equal(log.text, '中文');
+  log.append(page(7, bytes.subarray(7), 10), true);
+  assert.equal(log.text, '中文🙂');
+  assert.equal(log.cursor, 10);
+});
+
+test('job output exposes rotation gaps, rejects backwards pages and bounds its live text', () => {
+  const log = new JobLog();
+  const block = Buffer.alloc(65536, 65);
+  log.append(page(0, block, 65536));
+  log.append(page(65536, block, 131072));
+  log.append(page(131072, block, 196608));
+  assert.equal(log.text.length, 131072);
+  assert.throws(() => log.append(page(0, Buffer.from('old'), 3)));
+  const rotated = page(200000, Buffer.from('new'), 200003);
+  rotated.truncated_before=200000;
+  rotated.gap=true;
+  log.append(rotated);
+  assert.equal(log.gap,true);
+  assert.equal(log.text.endsWith('new'),true);
+  assert.throws(() => log.append(page(200003, Buffer.alloc(65537), 265540)));
 });

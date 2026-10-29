@@ -19,6 +19,7 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/media"
@@ -28,6 +29,11 @@ import (
 )
 
 func setup(t *testing.T) (*httptest.Server, *Server, *config.Store) {
+	t.Helper()
+	return setupSeededJobs(t, nil)
+}
+
+func setupSeededJobs(t *testing.T, jobs []eventlog.Job) (*httptest.Server, *Server, *config.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "personas"), 0o755)
@@ -43,8 +49,22 @@ func setup(t *testing.T) (*httptest.Server, *Server, *config.Store) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	if len(jobs) != 0 {
+		journal, err := eventlog.Open(ctx, filepath.Join(store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range jobs {
+			if err := journal.Commit(ctx, eventlog.Transaction{Admit: true, Job: &job}); err != nil {
+				journal.Close()
+				t.Fatal(err)
+			}
+		}
+		journal.Close()
+	}
 	p := persona.New(cfg.Persona.Dir, log)
 	a := app.New(ctx, cfg, &llm.Mock{}, store, p, log)
+	t.Cleanup(func() { cancel(); a.Wait() })
 	a.SetHub(kernel.NewHub("k", a, log))
 	ms, err := models.Open(cfg.Session.DataDir, cfg)
 	if err != nil {
