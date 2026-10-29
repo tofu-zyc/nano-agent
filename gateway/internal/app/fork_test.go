@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
 )
@@ -270,3 +272,74 @@ func TestBranchListIsLightweight(t *testing.T) {
 }
 
 func jsonRaw(s string) []byte { return []byte(s) }
+
+type messageAttemptModel struct{ asked int }
+
+func (m *messageAttemptModel) Chat(_ context.Context, req llm.Request, _ func(llm.Delta)) (*llm.Result, error) {
+	m.asked++
+	if m.asked > 1 {
+		return &llm.Result{Reason: llm.ReasonFinal, Content: "结论留在分支里"}, nil
+	}
+	return &llm.Result{Reason: llm.ReasonToolUse, Calls: []llm.ToolCall{{ID: "say-main", Type: "function",
+		Function: llm.FunctionCall{Name: "Message", Arguments: `{"to":"chat:main","text":"分支里想对外说的一句话"}`}}}}, nil
+}
+
+// §12.5：安静分支里的 Message 不向来源聊天发声，结论留在分支历史里。
+func TestSilentBranchMessageNeverReachesTheSourceChat(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "来源会话的上下文"}); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "安静", RequestID: "silent-msg", By: "fake:u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	e.a.llm = &messageAttemptModel{}
+	e.a.mu.Unlock()
+	if _, err = e.a.SessionBranchAction("continue", branch.BranchSID, "在分支里准备结论", "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	in := e.k.expect(proto.TInput)
+	if !in.Silent || in.SID != branch.BranchSID {
+		t.Fatalf("分支这一轮不是安静的：%+v", in)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	turn := e.k.expect(proto.TTurn)
+	if len(turn.Calls) != 1 || turn.Calls[0].Name != "Message" {
+		t.Fatalf("测试模型没有发出 Message：%+v", turn.Calls)
+	}
+	e.k.send(proto.Msg{T: proto.TExec, SID: in.SID, ID: turn.Calls[0].ID, Name: "Message", Args: turn.Calls[0].Args})
+	res := e.k.expect(proto.TExecResult)
+	if res.OK == nil || *res.OK || !strings.Contains(res.Content, "安静分支") {
+		t.Fatalf("安静分支的 Message 没有被拒绝：%+v", res)
+	}
+	e.k.send(proto.Msg{T: proto.TResult, SID: in.SID, ID: turn.Calls[0].ID, OK: proto.Bool(false), Content: res.Content})
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitIdle(t, e, in.SID)
+	select {
+	case text := <-e.ch.sent:
+		t.Fatal("安静分支把消息发给来源聊天了", text)
+	default:
+	}
+	main := e.a.store.History(mainSID)
+	for _, m := range main {
+		if strings.Contains(m.Content, "分支里想对外说的一句话") || strings.Contains(m.Content, "结论留在分支里") {
+			t.Fatalf("安静分支的产出漏进来源会话：%+v", m)
+		}
+	}
+	inBranch := false
+	for _, m := range e.a.store.History(branch.BranchSID) {
+		if strings.Contains(m.Content, "结论留在分支里") {
+			inBranch = true
+		}
+	}
+	if !inBranch {
+		t.Fatal("结论没有留在分支历史里")
+	}
+}

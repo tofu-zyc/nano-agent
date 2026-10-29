@@ -494,6 +494,11 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 		reply(false, "to 和 text 都要有")
 		return
 	}
+	// 安静分支不对外发消息：产出留在分支里，主人「引入结论」时才带回来源会话（设计 §8.7 / §12.5）
+	if a.silentBranch(fromSID) {
+		reply(false, "这是安静分支，不往聊天、群或别的 agent 发消息；结论写在这里，来源会话里用「引入结论」带回")
+		return
+	}
 	a.mu.Lock()
 	if target, ok := strings.CutPrefix(to, "chat:"); ok {
 		out, err := a.messageChat(fromSID, strings.TrimSpace(target), text)
@@ -912,4 +917,12 @@ func (a *App) lastEndpoint(sid string) (endpoint, bool) {
 		}
 	}
 	return best, found
+}
+
+// silentBranch 表示这个会话是安静分支：它的每一轮都不对外发声，只能把结论留在分支里。
+func (a *App) silentBranch(sid string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	meta, ok := a.store.Branch(sid)
+	return ok && meta.Delivery == session.BranchDeliverySilent
 }
