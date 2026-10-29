@@ -543,3 +543,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestBranchRunLeavesAnAdminOnlyExperience`（分支轮次留一条 admin 经历、非主人视图看不到、空轮次不记）；`go test ./internal/app ./internal/experience ./internal/session`、`go vet` 通过。
 
 未做：网页分支卡片上的经历入口和真实浏览器回归；分支经历的目录/清理仍沿用现有 `experience/<agent>.jsonl` 上限。
+
+### P6 心智数值编辑（B4）
+
+`autonomy.State.SetNumber` 是唯一的范围校验点：想法 `interest`/`novelty` 1–5、`cost_minutes` 1–240，目标 `priority` 1–5、`progress` 0–100，认识 `confidence` 0–1；非整数、越界和找不到的对象都明确报错。网页 agent 节点给想法、目标、认识都加了数字输入，走既有 `POST /api/agents/<id>/autonomy` 的 `set_number`；聊天入口是 `/autonomy set <编号或认识主题> <字段>=<数值>`，仅管理员可用，`/autonomy` 列表同时显示新颖、优先级和置信度。
+
+生效：想法仍按兴趣+新颖排序、目标按优先级排序（都是现有挑选逻辑），改完下一次挑选立即使用新值；内心简报里的认识带上置信度，低于 0.5 标「还没确认」。验证：`TestSetNumberValidatesAndChangesThePick`（越界/小数/不存在被拒绝，想法与目标的挑选顺序真的翻转）与 `TestAutonomySetNumberFromWebAndCommand`（网页、命令、访客被拒）；`go test ./internal/autonomy ./internal/app`、`go vet`、网页 check/test/build 通过。
+
+未做：可选行为维度（curiosity/social_drive/focus/energy）与阈值预设（设计 §7.3）整块未做；数值目前存在 agent 的心智状态文件里，没有 `agents.json` 级别的默认值/权重配置；`confidence=0` 仍与「没标过」共用 0 值。

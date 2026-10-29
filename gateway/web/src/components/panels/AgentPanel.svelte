@@ -79,6 +79,16 @@
     await autonomy('drop_idea', { id: item });
     store.toast({ kind: 'ok', text: '已放弃' }, 1800);
   }
+  // 心智数值（设计 §7.2）：兴趣/新颖/优先级/进度/置信度都能在面板里改，改完立刻参与挑选
+  async function setNumber(id: string, field: string, value: number) {
+    if (!Number.isFinite(value)) return;
+    try {
+      await api.post('/api/agents/' + encodeURIComponent(id) + '/autonomy', { action: 'set_number', id, field, value });
+      await store.refresh();
+    } catch (err) {
+      store.fail(err);
+    }
+  }
   async function deferIdea(item: string) {
     await autonomy('defer_idea', { id: item, when: '明天 09:00' });
     store.toast({ kind: 'ok', text: '推迟到明天上午再看' }, 1800);
@@ -260,7 +270,9 @@
             <div class="p-sub">在推进的目标</div>
             {#each auto.intentions as it (it.id)}
               <div class="mind-line">
-                {it.title} <span class="muted p-small">{mindState[it.state] ?? it.state} · 进度 {it.progress}{#if it.blocked} · {it.blocked}{/if}</span>
+                {it.title} <span class="muted p-small">{mindState[it.state] ?? it.state}{#if it.blocked} · {it.blocked}{/if}</span>
+                <label class="num" title="优先级（1–5）">优先<input type="number" min="1" max="5" value={it.priority ?? 1} disabled={busy} onchange={(e)=>void setNumber(it.id, 'priority', +e.currentTarget.value)}/></label>
+                <label class="num" title="进度（0–100）">进度<input type="number" min="0" max="100" value={it.progress} disabled={busy} onchange={(e)=>void setNumber(it.id, 'progress', +e.currentTarget.value)}/></label>
               </div>
             {/each}
           {/if}
@@ -268,7 +280,9 @@
             <div class="p-sub">想到的事</div>
             {#each auto.ideas as x (x.id)}
               <div class="p-row mind-item">
-                <span class="p-grow">{x.text} <span class="muted p-small">兴趣 {x.interest} · 来源：{x.source}</span></span>
+                <span class="p-grow">{x.text} <span class="muted p-small">来源：{x.source}</span></span>
+                <label class="num" title="兴趣（1–5）">趣<input type="number" min="1" max="5" value={x.interest} disabled={busy} onchange={(e)=>void setNumber(x.id, 'interest', +e.currentTarget.value)}/></label>
+                <label class="num" title="新颖（1–5）">新<input type="number" min="1" max="5" value={x.novelty} disabled={busy} onchange={(e)=>void setNumber(x.id, 'novelty', +e.currentTarget.value)}/></label>
                 <button class="btn sm ghost" title="推迟到明天再想" disabled={busy} onclick={() => deferIdea(x.id)}>推迟</button>
                 <button class="btn sm ghost" title="放弃这个想法" disabled={busy} onclick={() => dropIdea(x.id, x.text)}><Icon name="x" size={12} /></button>
               </div>
@@ -306,7 +320,9 @@
             <div class="p-sub">认知</div>
             {#if auto.beliefs.length}
               {#each auto.beliefs as b (b.subject + b.at)}
-                <div class="mind-line"><b>{b.subject}</b>：{b.value} <span class="muted p-small">来源：{b.source || '—'}{#if b.confidence} · 置信度 {Math.round(b.confidence * 100)}%{/if} · {when(b.at * 1000)}</span></div>
+                <div class="mind-line"><b>{b.subject}</b>：{b.value} <span class="muted p-small">来源：{b.source || '—'} · {when(b.at * 1000)}</span>
+                  <label class="num" title="置信度（0–100%，低于 50% 会当成还没确认）">置信<input type="number" min="0" max="100" value={Math.round((b.confidence ?? 0) * 100)} disabled={busy} onchange={(e)=>void setNumber(b.subject, 'confidence', +e.currentTarget.value / 100)}/>%</label>
+                </div>
               {/each}
             {:else}
               <p class="p-note p-small">还没有形成明确的认识。</p>
@@ -469,6 +485,22 @@
 {/if}
 
 <style>
+  .num {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .num input {
+    width: 54px;
+    padding: 2px 4px;
+    font-size: 11px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
   .styles {
     display: grid;
     grid-template-columns: 1fr 1fr;

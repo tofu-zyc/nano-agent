@@ -351,3 +351,79 @@ func TestInterestsNeedSourceAndCanBeRemoved(t *testing.T) {
 		t.Fatal("删过以后再删应该返回 false")
 	}
 }
+
+func TestSetNumberValidatesAndChangesThePick(t *testing.T) {
+	s := New()
+	now := at(10, 0)
+	low, err := s.AddIdea(Idea{Text: "低分想法", Interest: 1, Novelty: 1, CostMinutes: 10, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := s.AddIdea(Idea{Text: "高分想法", Interest: 3, Novelty: 3, CostMinutes: 10, Source: "test"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.OpenIdeas(now); len(got) != 2 || got[0].ID != high.ID {
+		t.Fatalf("初始排序：%+v", got)
+	}
+	for _, bad := range []struct {
+		id, field string
+		value     float64
+	}{{low.ID, "interest", 6}, {low.ID, "interest", 0}, {low.ID, "interest", 4.5}, {low.ID, "novelty", 9},
+		{low.ID, "cost_minutes", 999}, {"i-999", "interest", 3}, {high.ID, "priority", 3}} {
+		if err := s.SetNumber(bad.id, bad.field, bad.value, now); err == nil {
+			t.Fatalf("%s=%v 应该被拒绝", bad.field, bad.value)
+		}
+	}
+	if err := s.SetNumber(low.ID, "interest", 5, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNumber(low.ID, "novelty", 5, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.OpenIdeas(now); got[0].ID != low.ID || got[0].Interest != 5 || got[0].Novelty != 5 {
+		t.Fatalf("改数值没有影响挑选：%+v", got)
+	}
+	first, err := s.AddIntention(Intention{Title: "甲", Priority: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.AddIntention(Intention{Title: "乙", Priority: 3}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ActiveIntentions(); got[0].ID != second.ID {
+		t.Fatalf("初始优先级顺序：%+v", got)
+	}
+	if err := s.SetNumber(first.ID, "priority", 5, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ActiveIntentions(); got[0].ID != first.ID || got[0].Priority != 5 {
+		t.Fatalf("改优先级没有影响挑选：%+v", got)
+	}
+	if err := s.SetNumber(first.ID, "progress", 101, now); err == nil {
+		t.Fatal("进度越界应该被拒绝")
+	}
+	if err := s.SetNumber(first.ID, "progress", 60, now); err != nil {
+		t.Fatal(err)
+	}
+	found := Intention{}
+	for _, in := range s.Intentions {
+		if in.ID == first.ID {
+			found = in
+		}
+	}
+	if found.Progress != 60 {
+		t.Fatalf("进度没改上：%+v", found)
+	}
+	s.SetBelief("部署在哪", "本机", "测试", 0.9, now)
+	if err := s.SetNumber("部署在哪", "confidence", 1.5, now); err == nil {
+		t.Fatal("置信度越界应该被拒绝")
+	}
+	if err := s.SetNumber("部署在哪", "confidence", 0.2, now); err != nil || s.Beliefs[0].Confidence != 0.2 {
+		t.Fatal(err, s.Beliefs)
+	}
+	if err := s.SetNumber("没有这条", "confidence", 0.5, now); err == nil {
+		t.Fatal("不存在的认识应该被拒绝")
+	}
+}

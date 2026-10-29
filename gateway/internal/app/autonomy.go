@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -724,10 +725,12 @@ func (a *App) mindExternal(agentID, source, text string) {
 
 // AutonomyActionReq 是网页 / 聊天里对自主活动的操作。
 type AutonomyActionReq struct {
-	Action string `json:"action"` // pause | resume | cancel_agenda | move_agenda | complete_agenda | drop_idea | defer_idea
-	ID     string `json:"id"`
-	When   string `json:"when"`
-	Note   string `json:"note"`
+	Action string  `json:"action"` // pause | resume | cancel_agenda | move_agenda | complete_agenda | drop_idea | defer_idea | set_number
+	ID     string  `json:"id"`
+	When   string  `json:"when"`
+	Note   string  `json:"note"`
+	Field  string  `json:"field"` // set_number：interest / novelty / cost_minutes / priority / progress / confidence
+	Value  float64 `json:"value"`
 }
 
 // AutonomyAgent 是某个 agent 的自主活动概况。
@@ -812,6 +815,10 @@ func (a *App) AutonomyAction(id string, x AutonomyActionReq) (autonomy.View, err
 		if err := st.DeferIdea(x.ID, at.Unix(), now); err != nil {
 			return autonomy.View{}, err
 		}
+	case "set_number":
+		if err := st.SetNumber(x.ID, x.Field, x.Value, now); err != nil {
+			return autonomy.View{}, err
+		}
 	default:
 		return autonomy.View{}, fmt.Errorf("不认识的操作 %q", x.Action)
 	}
@@ -859,13 +866,13 @@ func (a *App) cmdAutonomy(c in, arg string) {
 		if len(v.Intentions) > 0 {
 			b.WriteString("在推进：\n")
 			for _, in := range v.Intentions {
-				fmt.Fprintf(&b, "- %s（%s，进度 %d，%s）\n", in.Title, autonomy.StatusLabel(in.State), in.Progress, in.ID)
+				fmt.Fprintf(&b, "- %s（%s，进度 %d，优先 %d，%s）\n", in.Title, autonomy.StatusLabel(in.State), in.Progress, in.Priority, in.ID)
 			}
 		}
 		if len(v.Ideas) > 0 {
 			b.WriteString("想到的事：\n")
 			for _, x := range v.Ideas {
-				fmt.Fprintf(&b, "- %s（%s，兴趣 %d）\n", x.Text, x.ID, x.Interest)
+				fmt.Fprintf(&b, "- %s（%s，兴趣 %d，新颖 %d，约 %d 分钟）\n", x.Text, x.ID, x.Interest, x.Novelty, x.CostMinutes)
 			}
 		}
 		fmt.Fprintf(&b, "今天用了 %d token", v.Budget.Tokens)
@@ -873,7 +880,7 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			fmt.Fprintf(&b, "（上限 %d）", v.Budget.Limit)
 		}
 		b.WriteString("\n最近的经历（已经结束，不是待办）：\n" + experience.Render(a.experienceOf(ag.ID).Recent(a.viewerOf(c.s.sid, c.who), c.s.sid, 3, now), a.loc, 1200))
-		b.WriteString("\n/autonomy pause 暂停，/autonomy resume 恢复，/autonomy wake 现在叫醒。")
+		b.WriteString("\n/autonomy pause 暂停，/autonomy resume 恢复，/autonomy wake 现在叫醒，/autonomy set <编号> <字段>=<数值> 改数值。")
 		a.answer(c, b.String())
 	case "pause", "resume":
 		if !a.isAdmin(c.who) {
@@ -906,6 +913,26 @@ func (a *App) cmdAutonomy(c in, arg string) {
 		}
 		a.answer(c, ag.Name+" 醒了（网页的 agent 节点里能看到它在做什么）。")
 	default:
-		a.answer(c, "用法：/autonomy [pause | resume | wake]")
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(arg), "set "); ok {
+			if !a.isAdmin(c.who) {
+				a.answer(c, "只有管理员能改这些数值")
+				return
+			}
+			id, rhs, ok := strings.Cut(strings.TrimSpace(rest), " ")
+			field, raw, ok2 := strings.Cut(rhs, "=")
+			value, convErr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if !ok || !ok2 || convErr != nil {
+				a.answer(c, "用法：/autonomy set <编号或认识主题> <字段>=<数值>，字段可以是 interest、novelty、cost_minutes、priority、progress、confidence")
+				return
+			}
+			if err := st.SetNumber(strings.TrimSpace(id), strings.ToLower(strings.TrimSpace(field)), value, now); err != nil {
+				a.answer(c, "没改成："+err.Error())
+				return
+			}
+			a.afterMindChange(st, ag, now)
+			a.answer(c, fmt.Sprintf("%s 的 %s 改成 %g 了。想法按兴趣+新颖排序，目标按优先级排序，下一次挑选就会用新值。", id, field, value))
+			return
+		}
+		a.answer(c, "用法：/autonomy [pause | resume | wake | set <编号> <字段>=<数值>]")
 	}
 }

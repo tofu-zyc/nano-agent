@@ -17,6 +17,7 @@ package autonomy
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -729,6 +730,79 @@ func (s *State) AddIdea(x Idea, now time.Time, ttl time.Duration) (*Idea, error)
 	s.Ideas = append(s.Ideas, x)
 	s.Touch()
 	return &s.Ideas[len(s.Ideas)-1], nil
+}
+
+// SetNumber 改一个可以直接编辑的心智数值（设计 §7.2）：想法的兴趣/新颖/预计耗时、
+// 目标的优先级/进度、认识的置信度。范围和单位只在这一处校验，命令、网页和工具共用；
+// 改完的数值立刻参与选择（想法按兴趣+新颖排序，目标按优先级排序），不是只写给人看。
+func (s *State) SetNumber(id, field string, value float64, now time.Time) error {
+	if value != math.Trunc(value) && field != "confidence" {
+		return errors.New(field + " 只能是整数")
+	}
+	n := int(value)
+	switch field {
+	case "interest", "novelty", "cost_minutes":
+		for i := range s.Ideas {
+			if s.Ideas[i].ID != id {
+				continue
+			}
+			lo, hi := 1, 5
+			if field == "cost_minutes" {
+				lo, hi = 1, 240
+			}
+			if n < lo || n > hi {
+				return fmt.Errorf("%s 只能是 %d–%d", field, lo, hi)
+			}
+			switch field {
+			case "interest":
+				s.Ideas[i].Interest = n
+			case "novelty":
+				s.Ideas[i].Novelty = n
+			default:
+				s.Ideas[i].CostMinutes = n
+			}
+			s.Ideas[i].Updated = now.Unix()
+			s.Touch()
+			return nil
+		}
+		return errors.New("没有这个想法")
+	case "priority", "progress":
+		for i := range s.Intentions {
+			if s.Intentions[i].ID != id {
+				continue
+			}
+			lo, hi := 1, 5
+			if field == "progress" {
+				lo, hi = 0, 100
+			}
+			if n < lo || n > hi {
+				return fmt.Errorf("%s 只能是 %d–%d", field, lo, hi)
+			}
+			if field == "priority" {
+				s.Intentions[i].Priority = n
+			} else {
+				s.Intentions[i].Progress = n
+			}
+			s.Intentions[i].Updated = now.Unix()
+			s.Touch()
+			return nil
+		}
+		return errors.New("没有这个目标")
+	case "confidence":
+		if value < 0 || value > 1 {
+			return errors.New("confidence 只能是 0–1")
+		}
+		for i := range s.Beliefs {
+			if s.Beliefs[i].Subject != id {
+				continue
+			}
+			s.Beliefs[i].Confidence = value
+			s.Touch()
+			return nil
+		}
+		return errors.New("没有这条认识")
+	}
+	return errors.New("可以改的数值：interest、novelty、cost_minutes、priority、progress、confidence")
 }
 
 // OpenIdeas 是现在可以用来探索的想法：候选、没被推迟、没过期。

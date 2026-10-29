@@ -139,7 +139,14 @@ func (s *State) BriefForModel(now time.Time, loc *time.Location) string {
 	if len(s.Beliefs) > 0 {
 		b.WriteString("【最近的认识和反思】\n")
 		for _, belief := range s.Beliefs[max(0, len(s.Beliefs)-5):] {
-			fmt.Fprintf(&b, "- %s：%s（来源：%s）\n", belief.Subject, clip(belief.Value, 200), belief.Source)
+			line := fmt.Sprintf("- %s：%s（来源：%s", belief.Subject, clip(belief.Value, 200), belief.Source)
+			if belief.Confidence > 0 {
+				line += fmt.Sprintf("，置信度 %.0f%%", belief.Confidence*100)
+			}
+			if belief.Confidence > 0 && belief.Confidence < 0.5 {
+				line += "，还没确认"
+			}
+			b.WriteString(line + "）\n")
 		}
 	}
 	open := s.OpenAgenda()

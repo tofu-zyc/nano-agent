@@ -348,3 +348,56 @@ func TestMindToolUpdatesInterestsBeliefsAndReflections(t *testing.T) {
 		t.Fatalf("View 里缺兴趣/认知/反思: %+v", view)
 	}
 }
+
+func TestAutonomySetNumberFromWebAndCommand(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	setNow(e, time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC))
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	st := e.a.mind("default")
+	now := e.a.now()
+	idea, err := st.AddIdea(autonomy.Idea{Text: "半夜整理日志", Interest: 1, Novelty: 1, CostMinutes: 15, Source: "测试"}, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intention, err := st.AddIntention(autonomy.Intention{Title: "把文档补完", Priority: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Unlock()
+	// 网页 / API
+	view, err := e.a.AutonomyAction("default", AutonomyActionReq{Action: "set_number", ID: idea.ID, Field: "interest", Value: 5})
+	if err != nil || view.Ideas[0].Interest != 5 {
+		t.Fatal(view, err)
+	}
+	if _, err := e.a.AutonomyAction("default", AutonomyActionReq{Action: "set_number", ID: idea.ID, Field: "interest", Value: 9}); err == nil {
+		t.Fatal("越界数值没有被拒绝")
+	}
+	// 聊天命令
+	e.say("/autonomy set " + intentID(intention) + " priority=4")
+	e.ch.wait(t, "的 priority 改成 4")
+	e.a.mu.Lock()
+	priority := 0
+	for _, in := range e.a.mind("default").ActiveIntentions() {
+		if in.ID == intentID(intention) {
+			priority = in.Priority
+		}
+	}
+	e.a.mu.Unlock()
+	if priority != 4 {
+		t.Fatalf("命令没有改上优先级：%d", priority)
+	}
+	// 访客不能改
+	e.say("/autonomy set "+idea.ID+" interest=1", from("u2", "李四"))
+	e.ch.wait(t, "只有管理员")
+	e.a.mu.Lock()
+	interest := e.a.mind("default").OpenIdeas(e.a.now())[0].Interest
+	e.a.mu.Unlock()
+	if interest != 5 {
+		t.Fatalf("访客改动了数值：%d", interest)
+	}
+}
+
+func intentID(in *autonomy.Intention) string { return in.ID }
