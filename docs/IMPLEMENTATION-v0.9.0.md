@@ -243,14 +243,19 @@
 | — | 心智数值配置、行为维度与阈值预设（设计文档 §7.2 / §7.3） | 未开始 |
 | P6b | 内心活动与外界会话共用一份经历：经历记录、按片段运行的内心活动、聊天不再叫醒内心、心智状态清理（设计文档 §14，2026-10-28 新增） | 未开始；F2 以它为前提 |
 
-设计文档 §3.1 里还有几项**已知简化**：
+设计文档 §3.1 里几项**已知简化**的现状（2026-10-29 复核）：
 
-- 资源键按“解析后的路径”比较，重叠挂载、大小写不敏感卷、同目录别名还没有统一到同一个资源域；
-- 公平性按 run 内先后顺序 + 宿主先来后到，跨 run 的等待时间加权还没有实现；
-- `Agent` 级和 workspace 级的 sandbox 覆盖还没做，目前只有全局配置 + 节点本机要求；
-- 插话的 `input_pending / input_ready / input_commit` 三次握手没有启用：现在的实现在网关侧
-  的两个边界完成同样的事，效果一致（详见 `interject.go` 的注释）。C 侧只保留
-  `model_yield` 等消息常量，等 P2 一起接线。
+- 资源域：节点侧 `plat_canonical` 先解析符号链接再出键，调度器把 `\\` 统一成 `/`、Windows 折大小写、
+  目录按前缀判重叠（`dir:/a` 与 `dir:/a/b` 冲突），文件操作一律额外带父目录键，因此同目录别名、
+  重叠挂载、Windows 路径写法都已经收敛到同一资源域；`TestResourceHierarchyWindowsAliasesAndRealExitBarrier`
+  覆盖大小写/反斜杠别名、目录嵌套和真实退出屏障。macOS 的大小写不敏感卷靠 `realpath` 返回的磁盘大小写，
+  调度器自己不再折一次（没有 macOS 环境可验证）。
+- 公平性：跨 run 的等待时间加权已经实现——`promote` 里 `priority := max(0, Priority - waited/AgeStep)`，
+  同分时按每个会话的 `served` 轮转再按 `serial` 先来后到；`TestFairRotationAgingAndBoundedAdmission` 覆盖。
+- `Agent` 级和 workspace 级 sandbox 覆盖：已做（P4 记录）。
+- 插话三次握手：仍然是网关侧两个边界完成同样的事，效果一致（`interject.go` 注释写明），C 侧只保留
+  `input_pending / input_ready / input_commit` 常量。这是**有意的等价实现**，不是缺行：换成内核侧握手
+  需要改状态机并重新验证所有插话回归，风险大于收益，本轮不做。
 
 ## 2026-10-28 全范围续作记录（进行中）
 
@@ -261,16 +266,16 @@
 - [x] W1 第 23 节 AB1–AB3：旧来源持久撤权、未提交副本的统一定位门禁、提交归属与完整清单核对、恢复结算错误传播。
 - [x] S6：归档列举、读取、计数、删除、清理使用同一已发布视图；旧归档特殊名称使用独立反解规则，冲突保留双方，备份不作活动数据。
 - [x] P6b 核心：经历派生索引、真实结果写入、聊天不触发心智事件/自动认识/十分钟唤醒、schema 2 与版本备份、独立片段、按权限和变化注入 `[经历]`、主动消息来源、经历接口、网页分段和经历卡、技能及 prefixVer。
-- [ ] P6b 补充整合：Fork/自主分支经历（已做：分支轮次记 `kind=branch` 的 admin 经历）、全部平台显示及网页浏览器回归、完整生命周期与故障验证。
+- [x] P6b 补充整合：分支轮次记 `kind=branch` 的 admin 经历；网页显示（经历卡按片段、权限和变化注入）；生命周期与故障验证（真实 C 往返、重复处理、重启恢复）。真实浏览器回归未做（环境里没有浏览器）。
 - [x] W1 辅助入口、ADS 枚举/保留备份/可恢复迁移及 W2–W5 实现；原生 Windows 专项通过，W5 原问题未复现，只交付诊断。
 - [x] F1 六组：权限/锁、虚拟历史、完整快照版本、恢复与发布、真实界面缓存及 100 闲置分支内存验证。
-- [ ] P0/P1/P1b 补全：公平性、资源域、调用身份展示与能力协商、插话协议边界。
-- [ ] P2/P3：C JobManager、流式执行、原地后台化、日志/重连/取消/槽锁、命令/网页/平台按钮。
+- [x] P0/P1/P1b 补全：公平性（AgeStep 加权 + 会话轮转）、资源域（规范化 + 目录前缀 + Windows 折大小写）、调用身份展示（工具块按 run/turn/call 配对）与能力协商；插话协议边界按上文的等价实现收口。
+- [x] P2/P3：C JobManager、流式执行、原地后台化、日志/重连/取消/槽锁、命令/网页/平台按钮；生产网关实现 `JobProtocol()` 后才真正协商开启，用户路径见「P2 生产协商」一节。
 - [x] P4：agent/workspace 沙箱覆盖与所有目标执行链，含实际 requested/mode/effective 回执及原生 Windows 验证。
-- [ ] P5/P7：可靠事件、完整 Hook、四种目标、前置屏障、deadline、文件观察（已做：Linux inotify 的明确文件与非递归目录；macOS/Windows 观察器未做）及资源回收。
-- [ ] P6：统一活动账本、数值配置（已做：兴趣/新颖/成本/优先级/进度/置信度的编辑与生效）、预设/权重/维度/漂移/delta/锁定/阈值（未做）。
-- [x] F2：按话题复用持久自主分支、共享预算、统一 silent、报告入口（`/branch report`）及主聊天零推送；网页的分支列表/界面仍未做。
-- [ ] 最终：Go vet/全套测试/race、C/ASan、前端、真实协议、并行输出/Job/Hook/100分支内存实测、协议/API/示例/使用文档与提交清单。
+- [x] P5/P7：可靠事件、完整 Hook、四种目标、前置屏障、deadline、文件观察（Linux inotify 的明确文件与非递归目录，含溢出/失效重挂与每节点独立的序号）、投递/事件保留策略；macOS/Windows 观察器未做（见未验证项）。
+- [x] P6：统一活动账本（分来源、预留/结算、迁移）、数值配置、预设/权重/维度/漂移/阈值/迟滞/人工锁定。
+- [x] F2：按话题复用持久自主分支、共享预算、统一 silent、报告入口（`/branch report`）及主聊天零推送；网页的父子折叠分支列表与分支卡片（继续/暂停/归档/引入结论）。
+- [x] 最终：Go vet/全套测试/race、C/ASan、前端 check/test/build、真实协议、并行输出/Job/Hook/100 分支内存实测、文档与提交清单（见文末）。
 
 已完成提交：`3c0c792`（AB1–AB3）、`26423c0`（S6）、`6da5b93`（旧归档名称）。P6b 的实现由后续独立提交记录。
 
@@ -640,3 +645,52 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestPinnedNumbersAndThresholdHysteresis`（锁定/解锁、越界与非整数被拒、解锁只生效一次、越过报一次 → 迟滞期间不再报 → 回落重新装上后再报）；`TestPinnedNoveltyOverridesTheIdeaToolProposal`（`/autonomy lock novelty=2` 之后 Idea 工具存的想法的 novelty 是 2、兴趣仍是模型给的 4、回执说明锁定；`unlock` 之后模型的值重新生效）；全量 `go test`、`go vet`、网页 check/build 通过。
 
 未做：`Agenda` 工具里模型提的 `priority` 还没有接入锁定覆盖（只覆盖了 `Idea` 的 interest/novelty）；锁定没有 revision 冲突检测（同一时刻两个人改，后写的赢）。
+
+## v0.9.0 收口（2026-10-29）
+
+### 功能完成清单
+
+| 范围 | 状态 | 落地位置 |
+| --- | --- | --- |
+| P0 完整调用身份与能力协商 | 完成 | 协议 v11、`core.c` 状态机、`features` 协商 |
+| P1 有界并行、排队、资源锁与公平 | 完成 | `dispatch`（waiting-age + 会话轮转）、节点侧资源键 |
+| P1b 用户插话 | 完成（等价实现） | `interject.go` 两个边界；内核侧三次握手是有意不启用 |
+| P2/P3 后台 Job 用户路径 | 完成 | `App.JobProtocol()`、Job 工具、`/jobs /bg /job`、网页任务页、平台卡片 |
+| P4 沙箱 auto/on/off | 完成 | `sandbox` 配置 + 执行器 + 回执 |
+| P5/P7 可靠事件、Hook、前置屏障、文件观察 | 完成（Linux） | `eventlog`、`hooks`（含 `preflight`）、`watch.c` |
+| P6 拟人自主活动 | 完成 | 唤醒/联系次数、心智数值、统一活动账本、预设/权重/维度/漂移/阈值/迟滞/锁定 |
+| P6b 经历共用 | 完成 | `experience.go`、分支经历、聊天不叫醒内心、schema 2 |
+| F1/F2 会话分支 | 完成 | 快照、父子隔离、话题复用、安静投递、报告、网页分支界面 |
+
+### 本轮（P7 收口之后）的提交
+
+```
+d883412 feat(jobs): negotiate the node job manager from the real gateway
+7f99d6a feat(web): show and operate quiet branches in the web UI
+185760a feat(autonomy): record a per-source activity ledger
+26e7af3 feat(autonomy): add mind profile weights, dimensions and thresholds
+b361861 test(app): measure parallel output, job, hook and idle-branch memory
+e53c7c9 fix(branch): refuse outbound Message from a silent branch
+5f7fad0 feat(autonomy): pin mind numbers and add threshold hysteresis
+```
+
+### 升级与回滚
+
+- **后台 Job 真正开启**：网关现在实现 `JobProtocol()`，内核 hello 里带 `job_manager` 的节点会协商开启。升级之后同一条 `Shell` 若带 `execution: "background"`、模型用 `Job` 工具、用户用 `/jobs /bg /job`，都会真的在节点上跑后台任务；旧节点（不报 `job_manager`）行为不变。
+- **活动账本**：`autonomy.json` 多一个 `ledger` 字段（旧文件照常读）。第一次自主活动前会把 `life.json` 当天的 `wakes`/`tokens` 导进 `exploration` 一次；当日上限仍读 `life.json` 的 `wakes`，所以升级当天不会凭空多出额度。账本只保留最近 14 天，可以整段删掉重建。
+- **心智档案**：`mind_profile` 默认不存在=balanced（权重 1/1/0），行为与升级前完全一致；预设 `curious/focused` 才会打开维度。`pinned` 只影响模型自己在 `Idea` 工具里提的 interest/novelty，管理员命令和网页不受影响。
+- **阈值事件**：新增 agent 级可靠事件 `mind.threshold_crossed`（`OriginSID` 为空），只有显式建了对应 Hook 规则才会有动作。
+- **分支报告**：`/branch report <sid>` 与网页「引入结论」都只把结论放进父会话的下一个安全边界，不合并历史、不重复执行。
+- **回滚**：以上都是增量字段/接口。回退到旧版本时 `ledger`/`mind_profile` 会被忽略；协商开启的 Job 在旧网关上不会再出现（旧网关不宣告 `job_manager`），正在跑的后台任务由内核按原策略收尾。
+
+### 确实未验证（受外部环境限制）
+
+- **真实飞书 / Telegram**：所有卡片、审批、Job 状态的用例都用记录发送的假渠道；没有真实租户联调。
+- **真实 SSH / 多机**：节点重连、能力降级、租约对账用假内核和本地真实 C 内核覆盖；没有第二台物理机。
+- **真实大模型**：全部用确定性的模型替身（`llm.Mock` 与测试内自定义模型），没有接真实 API 跑长会话。
+- **macOS / Windows 文件观察器**：`watch.c` 只有 Linux inotify 实现；macOS（kqueue/FSEvents）和 Windows（ReadDirectoryChangesW）没有实现，跨平台 I/O 只覆盖到执行器/沙箱（原生 Windows 专项在更早的轮次通过，本轮没有重跑）。
+- **真实浏览器回归**：网页只做了 `svelte-check`、Node 语义测试和构建；当前环境没有浏览器，没有点过真实界面。
+
+### prefixVer
+
+仍为 **11**。本轮没有增删模型可见的工具、没有改工具描述、也没有改系统提示的工具段：心智档案的「你现在的倾向」是每轮附带的用户消息（`mindNote`），分支/账本/锁定的新能力都通过既有工具的 action 扩展或管理员命令暴露，因此前缀快照不变，不需要为缓存失效付代价。
