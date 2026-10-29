@@ -1,9 +1,9 @@
 <script lang="ts">
   import { store } from '../../lib/state.svelte';
   import { api, sidPath } from '../../lib/api';
-  import { channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath } from '../../lib/format';
+  import { ago, channelMeta, endpointLabel, homeShort, machineMeta, modeMeta, num, pct, shortPath } from '../../lib/format';
   import { portal } from '../../lib/portal';
-  import type { EndpointInfo, SessionInfo } from '../../lib/types';
+  import type { BranchInfo, EndpointInfo, SessionInfo } from '../../lib/types';
   import WorkspacePicker from '../WorkspacePicker.svelte';
   import Icon from '../Icon.svelte';
   import AgentSwitcher from '../AgentSwitcher.svelte';
@@ -76,6 +76,47 @@
       store.fail(err);
     }
   }
+  // ---- 安静分支：看得到、能继续、能把结论带回来源会话（设计 §8.8） ----
+  const branchStatus: Record<string, string> = {
+    preparing: '准备中', pending_boundary: '等边界', ready: '就绪', running: '运行中', paused: '已暂停',
+    needs_attention: '需要处理', completed: '已完成', archived: '已归档', cancelled: '已取消',
+  };
+  let branches = $state<BranchInfo[]>([]);
+  let branchPrompt = $state('');
+  let branchBusy = $state(false);
+  $effect(() => {
+    const id = sid;
+    let live = true;
+    api
+      .get<{ branches: BranchInfo[] }>(`${sidPath(id)}/branches`)
+      .then((out) => {
+        if (live) branches = out.branches ?? [];
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  });
+  async function branchAct(target: string, kind: string) {
+    if (branchBusy) return;
+    branchBusy = true;
+    try {
+      const prompt = kind === 'continue' ? branchPrompt.trim() || '接着上一次没做完的事继续' : '';
+      await api.post(`/api/branches/${encodeURIComponent(target)}`, { action: kind, prompt });
+      store.toast(
+        {
+          kind: 'ok',
+          text: kind === 'continue' ? '分支在它自己的上下文里继续跑，结果留在分支里' : kind === 'report' ? '分支结论已经放进来源会话的下一个边界' : kind === 'pause' ? '已暂停这个分支' : kind === 'archive' ? '已归档这个分支' : '已提交',
+        },
+        2600,
+      );
+      store.refreshSession(sid);
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      branchBusy = false;
+    }
+  }
   async function remove() {
     if (!sess || !confirm(`删除会话「${sess.title}」？它的历史和设置都会删掉，接着它的窗口下次说话时重新接（管理员接回主会话）。`)) return;
     try {
@@ -121,6 +162,47 @@
           <button class="btn sm" onclick={() => store.open({ type: 'room', id: room!.id })}>去群节点</button>
         </div>
         <p class="p-note p-small">这里的每一条都会转给群里的 {room.members.map((m) => store.agent(m)?.name ?? m).join('、')}；被 @ 或叫到名字的会回。</p>
+      </div>
+    {/if}
+    {#if sess.branch}
+      <div class="p-card">
+        <div class="p-row">
+          <Icon name="hub" size={15} />
+          <span class="p-grow">安静分支「{sess.branch.title || sess.sid}」</span>
+          <span class="tag">{branchStatus[sess.branch.status] ?? sess.branch.status}</span>
+        </div>
+        <p class="p-note p-small">分叉点第 {sess.branch.fork_checkpoint} 条 · 结果默认留在这里，不会发回来源会话，也不会弹提醒。</p>
+        <div class="p-actions tight">
+          <a class="btn sm" href="#/sessions/{encodeURIComponent(sess.branch.parent_sid)}" onclick={() => (store.inspector = null)}>去来源会话</a>
+          <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(sess.sid, 'report')}>把结论带回来源会话</button>
+        </div>
+      </div>
+    {:else}
+      <div class="p-card">
+        <div class="p-row">
+          <Icon name="hub" size={15} />
+          <span class="p-grow">安静分支</span>
+          <span class="tag">{branches.length}</span>
+        </div>
+        {#if branches.length === 0}
+          <p class="p-note p-small">还没有分支。需要保留完整上下文、跨多次继续做一件事时，模型会用 Session 工具在这里分一个安静分支。</p>
+        {:else}
+          {#each branches as b (b.sid)}
+            <div class="branch-row">
+              <div class="p-row">
+                <a class="p-grow" href="#/sessions/{encodeURIComponent(b.sid)}" onclick={() => (store.inspector = null)}>{b.title || b.sid}</a>
+                <span class="tag">{branchStatus[b.status] ?? b.status}{b.running ? ' · 正在跑' : ''}</span>
+              </div>
+              <p class="p-note p-small">分叉点第 {b.fork_checkpoint} 条 · {b.delivery_policy === 'silent' ? '安静运行' : b.delivery_policy}{b.last_active ? ' · 最近活动 ' + ago(b.last_active * 1000) : ''}</p>
+              <div class="p-actions tight">
+                <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(b.sid, 'continue')}>继续</button>
+                <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(b.sid, 'pause')}>暂停</button>
+                <button class="btn sm" disabled={branchBusy} onclick={() => branchAct(b.sid, 'report')}>引入结论</button>
+              </div>
+            </div>
+          {/each}
+          <label class="p-note p-small">继续时要做的事（可空）<input class="p-input" bind:value={branchPrompt} placeholder="空表示：接着上一次没做完的事继续" /></label>
+        {/if}
       </div>
     {/if}
     {#if sess.group}

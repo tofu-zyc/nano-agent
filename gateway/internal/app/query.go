@@ -72,6 +72,8 @@ type SessionInfo struct {
 	Compacted   int                 `json:"compacted"`
 	// Interrupted 是"上次中断、还没处理完"的用户补充条数（持久状态，重启后仍然算得到）
 	Interrupted int `json:"interrupted,omitempty"`
+	// Branch 是这个会话本身是分支时的元信息（网页按父子折叠、显示安静运行状态用）
+	Branch *BranchInfo `json:"branch,omitempty"`
 }
 
 // MountInfo 是会话挂载的一个工作目录。How：local（跑这一轮的内核在同一台机器上，自己执行）、
@@ -169,6 +171,10 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		SandboxMode: a.sandboxModeFor(sid), Mode: w.mode, Thinking: a.thinkingOf(sid), ThinkingLevels: a.levelsOf(sid),
 		Model: st.Model, Compacted: st.Base, Context: context}
 	info.Interrupted = a.interruptedCount(sid)
+	if meta, ok := a.store.Branch(sid); ok {
+		info.Branch = &BranchInfo{}
+		*info.Branch = a.branchInfo(meta)
+	}
 	info.AgentFixed = fixedAgentSID(sid) || branch
 	info.SwitchBlocked = a.agentSwitchBlocked(sid)
 	info.CanSwitchAgent = info.SwitchBlocked == "" && a.agentStore != nil

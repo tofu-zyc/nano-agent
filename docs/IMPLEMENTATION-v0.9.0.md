@@ -583,3 +583,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 验证：`TestRealCJobUserPathFromChatToHook`（真 C 内核、不带包装：模型在聊天里起后台 Shell → 网关登记 → `Job` 工具 status 到达网关 → `/jobs` 列出该任务 → 完成后 `job.completed` 经可靠日志投递给 Hook，终态持久且有 `TerminalEventID`）；既有真实 C Job 专项（移交/取消/按钮原地转后台/安静分支保留身份）与全量 `go test ./internal/app` 通过。
 
 未做：真实飞书/Telegram 卡片联调（需要真实渠道账号），SSH 目标节点能力降级的现场验证。
+
+### §8.8 网页分支界面（F1/F2 收尾）
+
+网页现在真的能看到、操作安静分支：会话列表按父子折叠（来源会话下面一枚「展开 N 个分支」，展开后缩进显示，分支行标「安静分支 · 状态」），会话信息（`SessionInfo.branch`）带上分支元信息；会话面板新增分支卡片——本身是分支时显示分叉点、安静运行和「把结论带回来源会话」，普通会话则列出自己的分支，可继续（可填这一轮要做什么）、暂停、引入结论。新增两个只读/操作接口：`GET /api/sessions/{sid}/branches`、`POST /api/branches/{sid}`（action=continue/pause/archive/inspect/report，身份 `web:admin`，报告回复走网页通道）。
+
+验证：`TestBranchHTTPListReportAndActions`（未登录 401、列表字段 `delivery_policy=silent`、`SessionInfo.branch.parent_sid`、空分支报告 400、暂停、归档后继续被拒绝、未知 action 400）；网页 `npm run check` 0 errors / 0 warnings、`npm test` 6/6、`npm run build` 通过。这一轮没有在真实浏览器里点一遍（当前环境没有浏览器），只做了类型检查和构建。
+
+未做：设计 §8.8 里"分支报告在父会话按 kind=branch_report 显示成卡片"仍是一条带 `[分支报告]` 标记的普通消息；会话列表还没有分支的活动摘要（最近进展）。

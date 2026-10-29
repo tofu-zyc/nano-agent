@@ -678,6 +678,30 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 	return a.branchInfo(got), nil
 }
 
+// BranchesForSession 是某个会话的分支（网页父子折叠和分支卡片用）。
+func (a *App) BranchesForSession(sid string) []BranchInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sid == "" {
+		return []BranchInfo{}
+	}
+	if out := a.branchInfos(sid); out != nil {
+		return out
+	}
+	return []BranchInfo{}
+}
+
+// BranchReport 以网页管理员的身份把分支结论带回父会话，回复走网页通道。
+func (a *App) BranchReport(branchSID, by string) (BranchReport, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ep := endpoint{}
+	if meta, ok := a.store.Branch(branchSID); ok && meta.ParentSID != "" {
+		ep = endpoint{ch: "web", chat: meta.ParentSID}
+	}
+	return a.introduceBranchReportLocked(branchSID, by, ep)
+}
+
 // BranchReport 是主人主动从分支带回来的结论（设计 §8.7）：只有来源、分叉点和证据引用，
 // 不合并分支历史，也不切换当前窗口。
 type BranchReport struct {

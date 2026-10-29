@@ -24,6 +24,18 @@
       .filter((s) => !q || (s.title + ' ' + s.sid).toLowerCase().includes(q.toLowerCase())),
   );
   const current = $derived(store.route.arg);
+  // 分支按父子折叠：默认只显示来源会话，点开才露出它的安静分支（设计 §8.8）
+  const top = $derived(sessions.filter((x) => !x.branch));
+  const kids = $derived.by(() => {
+    const m: Record<string, typeof sessions> = {};
+    for (const x of sessions) {
+      const parent = x.branch?.parent_sid;
+      if (!parent) continue;
+      (m[parent] ??= []).push(x);
+    }
+    return m;
+  });
+  let expanded = $state<Record<string, boolean>>({});
   const counts = $derived.by(() => {
     const m: Record<string, number> = {};
     for (const s of store.ov?.sessions ?? []) for (const c of sessionChannels(s)) m[c] = (m[c] ?? 0) + 1;
@@ -64,7 +76,10 @@
       {/each}
     </div>
     <div class="items">
-      {#each sessions as s (s.sid)}
+      {#each top as s (s.sid, s.branch)}
+        {@const branch = s.branch}
+        {@const children = kids[s.sid] ?? []}
+        {@const open = expanded[s.sid] || children.some((x) => x.sid === current)}
         {@const main = s.sid === 'main'}
         {@const m = channelMeta[s.channel]}
         <a class="item" class:active={current === s.sid} href="#/sessions/{encodeURIComponent(s.sid)}" style="--c: {main ? 'var(--accent)' : (m?.color ?? 'var(--c-session)')}">
@@ -75,7 +90,10 @@
               <span class="when">{s.last_at ? ago(s.last_at * 1000) : ''}</span>
             </div>
             <div class="s">
-              {#if store.phase[s.sid]}
+              {#if branch}
+                <span class="eps">安静分支 · {branch.status}</span>
+                <span class="n">· {s.messages} 条</span>
+              {:else if store.phase[s.sid]}
                 <span class="live">● 处理中</span>
               {:else}
                 <span class="eps">{s.channel === 'life' ? '内心活动 · 只能看' : s.endpoints?.length ? s.endpoints.map(endpointLabel).join('、') : '网页'}</span>
@@ -85,9 +103,32 @@
             </div>
           </div>
         </a>
-      {:else}
-        <div class="none muted">{q ? '没有匹配的会话' : '还没有会话'}</div>
+        {#if children.length}
+          <button class="kids" onclick={() => (expanded[s.sid] = !expanded[s.sid])} title="安静分支：默认不推送、不抢当前聊天">
+            {open ? '收起' : '展开'} {children.length} 个分支
+          </button>
+          {#if open}
+            {#each children as c (c.sid)}
+              <a class="item child" class:active={current === c.sid} href="#/sessions/{encodeURIComponent(c.sid)}" style="--c: var(--c-session)">
+                <div class="av"><Icon name="hub" size={14} /></div>
+                <div class="txt">
+                  <div class="t">
+                    <span class="name">{c.title}</span>
+                    <span class="when">{c.last_at ? ago(c.last_at * 1000) : ''}</span>
+                  </div>
+                  <div class="s">
+                    <span class="eps">安静分支 · {c.branch?.status ?? ''}</span>
+                    {#if store.phase[c.sid]}<span class="live">● 正在跑</span>{/if}
+                  </div>
+                </div>
+              </a>
+            {/each}
+          {/if}
+        {/if}
       {/each}
+      {#if top.length === 0}
+        <div class="none muted">{q ? '没有匹配的会话' : '还没有会话'}</div>
+      {/if}
     </div>
   </aside>
 
@@ -256,6 +297,26 @@
   }
   .item:hover {
     background: var(--panel-2);
+  }
+  .item.child {
+    padding-left: 28px;
+    border-left: 2px solid var(--line);
+    border-radius: 0 11px 11px 0;
+    margin-left: 10px;
+  }
+  .kids {
+    margin: 0 0 6px 44px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-3);
+    background: none;
+    border: 1px dashed var(--line);
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .kids:hover {
+    color: var(--text);
+    border-color: var(--accent);
   }
   .item.active {
     background: color-mix(in srgb, var(--accent) 14%, transparent);

@@ -248,6 +248,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/reset", s.auth(s.resetSession))
 	mux.HandleFunc("POST /api/sessions/{sid}/stop", s.auth(s.stopSession))
 	mux.HandleFunc("POST /api/sessions/{sid}/undo", s.auth(s.undoSession))
+	mux.HandleFunc("GET /api/sessions/{sid}/branches", s.auth(s.branches))
+	mux.HandleFunc("POST /api/branches/{sid}", s.auth(s.branchAction))
 	mux.HandleFunc("POST /api/chat", s.auth(s.chat))
 	mux.HandleFunc("PUT /api/endpoints/{key}", s.auth(s.setEndpoint))
 	mux.HandleFunc("POST /api/endpoints/{key}/admin", s.auth(s.makeAdmin))

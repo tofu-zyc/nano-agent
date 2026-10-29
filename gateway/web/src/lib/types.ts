@@ -106,6 +106,7 @@ export type SessionInfo = {
   persona_file: string;
   usage: Usage;
   compacted: number;
+  branch?: BranchInfo; // 这个会话本身是分支时的元信息
 };
 
 export type Approval = { n: number; sid: string; id: string; name: string; detail: string; from: string; at: number };
@@ -500,6 +501,17 @@ export type JobInfo = {
 export type JobOutput = {chunks:{cursor:number;next_cursor:number;stream:string;data:string}[];
   next_cursor:number;output_cursor:number;truncated_before:number;gap:boolean;error?:string};
 export type JobResponse = {job?:JobInfo;jobs?:JobInfo[];output?:JobOutput;next?:string;accepted?:boolean;action?:string;wait_expired?:boolean};
+
+// 一个安静分支的元信息（父子折叠、继续、引入结论用）
+export type BranchInfo = {
+  sid: string; parent_sid: string; root_sid?: string; snapshot_id?: string; operation_id?: string;
+  title: string; intent?: string; status: string; delivery_policy: string; fork_checkpoint: number;
+  created_at: number; ready_at?: number; last_active?: number; note?: string; running?: boolean;
+};
+export type BranchReport = {
+  branch_sid: string; parent_sid: string; title: string; checkpoint: number; snapshot_id?: string;
+  conclusion: string; evidence?: string[]; injected: boolean;
+};
 
 export type HookSpec = {
   name:string;on:string[];match?:{job_id?:string;workspace_id?:string;status?:string[];fields?:Record<string,string>;path_glob?:string};

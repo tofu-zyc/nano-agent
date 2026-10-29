@@ -292,6 +292,38 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"sid": req.SID})
 }
 
+// branches 列出一个会话的安静分支（网页按父子折叠展示）。
+func (s *Server) branches(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"branches": s.app.BranchesForSession(r.PathValue("sid"))})
+}
+
+// branchAction 继续、暂停、归档一个分支，或者把它的结论带回来源会话。
+func (s *Server) branchAction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"`
+		Prompt string `json:"prompt"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	sid := r.PathValue("sid")
+	if req.Action == "report" {
+		report, err := s.app.BranchReport(sid, "web:admin")
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"report": report})
+		return
+	}
+	info, err := s.app.SessionBranchAction(req.Action, sid, req.Prompt, "web:admin")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"branch": info})
+}
+
 // setEndpoint 把一个聊天窗口改接到别的会话。
 func (s *Server) setEndpoint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
