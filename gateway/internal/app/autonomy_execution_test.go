@@ -206,6 +206,11 @@ func TestMCPExplicitUnverifiedEffectIsNotEvidence(t *testing.T) {
 		{map[string]any{"verified": false}, false},
 		{map[string]any{"success": false}, false},
 		{map[string]any{"effect": "unverifiable"}, false},
+		{map[string]any{"status": "backgrounded", "ok": true}, false},
+		{map[string]any{"status": "queued"}, false},
+		{map[string]any{"status": "unknown"}, false},
+		{map[string]any{"status": "cancelled"}, false},
+		{map[string]any{"status": "succeeded"}, true},
 		{map[string]any{"verified": true, "effect": "applied"}, true},
 	} {
 		if got := mcpOutcomeVerified(x.value); got != x.want {
@@ -265,5 +270,21 @@ func TestAutonomyDoesNotFallbackToHomeForDeletedWorkspace(t *testing.T) {
 	}
 	if s := e.a.sessions[lifeSID("default")]; s != nil && s.run != nil {
 		t.Fatal("删除目录后仍启动了任务")
+	}
+}
+
+func TestBackgroundReceiptNeverBecomesCompletionEvidence(t *testing.T) {
+	for _, status := range []string{"backgrounded", "queued", "running", "unknown", "succeeded"} {
+		t.Run(status, func(t *testing.T) {
+			r := &run{turnID: 1, callArgs: map[string]proto.Call{"c": {ID: "c", Name: "Shell"}}}
+			new(App).recordToolEvidence(r, &proto.Msg{ID: "c", TurnID: 1, OK: proto.Bool(true), Content: `{"status":"` + status + `","job_id":"j_test"}`})
+			evidence := r.toolEvidence["c"]
+			if evidence.Verified != (status == "succeeded") {
+				t.Fatal(evidence)
+			}
+			if status != "succeeded" && !strings.Contains(r.experienceActions[0], "尚无完成凭据") {
+				t.Fatal(r.experienceActions)
+			}
+		})
 	}
 }

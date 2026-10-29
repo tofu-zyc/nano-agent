@@ -129,13 +129,14 @@ type LeaseSpec struct {
 }
 
 type Msg struct {
-	Phase      string      `json:"phase,omitempty"`
-	NodeEpoch  string      `json:"node_epoch,omitempty"`
-	LeaseID    string      `json:"lease_id,omitempty"`
-	Lease      *LeaseSpec  `json:"lease,omitempty"`
-	Leases     []LeaseSpec `json:"leases,omitempty"`
-	OwnerAgent string      `json:"owner_agent,omitempty"`
-	Priority   int         `json:"priority,omitempty"`
+	JobStorageError string      `json:"job_storage_error,omitempty"`
+	Phase           string      `json:"phase,omitempty"`
+	NodeEpoch       string      `json:"node_epoch,omitempty"`
+	LeaseID         string      `json:"lease_id,omitempty"`
+	Lease           *LeaseSpec  `json:"lease,omitempty"`
+	Leases          []LeaseSpec `json:"leases,omitempty"`
+	OwnerAgent      string      `json:"owner_agent,omitempty"`
+	Priority        int         `json:"priority,omitempty"`
 
 	T string `json:"t"`
 

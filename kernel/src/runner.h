@@ -24,6 +24,7 @@ typedef struct job {
     exec_stream *stream; /* stdout reader owns it until the process is drained */
     char   *sandbox_requested;
     char   *sandbox;               /* 启动时的沙箱模式快照（auto / on / off） */
+    void   *managed;               /* host lifecycle binding; never accessed by readers */
     int     kind, tag;             /* 调用方自己定义的任务类型和附加信息 */
     bool    close_in;              /* 输入写完就关掉 stdin（上传文件时，对方要读到 EOF） */
     pid_t   pid;

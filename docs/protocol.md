@@ -243,3 +243,33 @@ prepare 可靠预留 agent 后台容量，原执行仍占前台 run 预算和全
 后台所有权成功后才 commit。commit 才将等待关系转为后台并释放前台预算；保存失败用 abort
 撤销预留，仍保留原命令与前台等待。整个过程不释放真实进程槽或文件锁，重复提交幂等，不能用
 错误请求号或另一节点提交。未协商能力、存储不可用和队列满都给匹配的失败响应，不能让节点误认成功。
+
+### C 节点任务所有权（job_manager=1）
+
+节点只有成功恢复本地 Job 存储且执行器支持 job_stream=1 才报 job_manager=1 / lease_detach=1。
+welcome 必须同时确认 job_manager、lease_detach 和 machine_leases，才为 Shell 使用持久任务链；
+不支持的组合拒绝显式 background/auto，不把后台请求悄悄当成长前台调用执行。
+
+每个 Shell 在申请执行租约之前保存 queued；取得授权且满足本机真实槽/锁之后保存 starting，再启动
+同一个流式执行器。真实 started 才开始前台执行时限。原生工具使用完整 run/turn/call 身份，
+代执行等待使用独立 wait_id；原始 origin 和 created_by 固定保存。Job 存储按配置文件旁的
+`<配置文件名去扩展名>.jobs/<job_id>/meta.json` 隔离，不复用聊天历史。
+
+节点把本地后台所有权保存后发送 lease_detach_commit；原前台只在提交 ACK 后收到一个
+status=backgrounded 的结果。任务如果在提交 ACK 前退出，仍等待已保存的移交完成，再产生唯一原调用
+结果；独立终态通过 job_state 发送。容量拒绝/保存失败保持原进程与前台等待。断线保留已移交的运行
+和排队任务；重新连接先 lease_sync，再补 jobs_sync。节点主动重启回收进程，未启动恢复为
+interrupted，已跨启动边界恢复为 unknown，不重放命令；unknown 保留执行资源占用等待对账。
+
+job_control 带 request_id（1–128 字节）、action 和可选 job_id。节点提供
+list/status/output/cancel/detach；output 的 cursor 为绝对原始字节位置，max_bytes 上限 65536，
+每个 Job 同时最多一个日志读取，回 job_state(request_id,ok,job,data,detail)。
+普通生命周期 job_state 包含 job_id、kind、job；jobs_sync 包含有界 jobs 清单。
+公共任务状态不包含冻结的原命令和执行参数；内部 lease 回执保留完整身份与资源域供网关核验。
+这些节点控制帧由认证的 Gateway 转交；用户权限仍必须由 Gateway 按原始 agent、发起者和可见范围核验。
+
+终态先持久保存，再按 event_seq=1 至少一次发送；events_ack(job_id,event_seq=1) 保存
+notification_state=delivered，重复 ACK 幂等。未确认终态每 5 秒或重连后补发，不推动模型轮询。
+节点恢复失败在 hello/lease_sync 的 job_storage_error 中明确报告，Gateway 拒绝清空已有占用。
+Gateway 的 Job 索引/订阅/用户命令须分别实现后才协商开启该能力；流式解码或节点控制测试不代表
+渠道用户路径已经交付。

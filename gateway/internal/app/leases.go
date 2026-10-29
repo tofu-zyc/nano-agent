@@ -133,6 +133,10 @@ func (a *App) leaseMessage(nodeName string, m *proto.Msg) bool {
 	case proto.TLeaseCancel:
 		command.Action = "cancel"
 	case proto.TLeaseSync:
+		if m.JobStorageError != "" {
+			a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseSynced, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: "节点 Job 恢复失败，保留已有执行占用：" + m.JobStorageError})
+			return true
+		}
 		command.Action = "sync"
 		if len(m.Leases) > 256 {
 			a.hub.Send(nodeName, proto.Msg{T: proto.TLeaseSynced, NodeEpoch: n.info.NodeEpoch, OK: proto.Bool(false), Detail: "节点执行清单超过上限"})

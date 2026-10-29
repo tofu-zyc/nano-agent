@@ -341,6 +341,8 @@ static int recover(job_io *io,cJSON *records,char *error,size_t error_len)
             cJSON_AddNumberToObject(m,"ended_at",(double)time(NULL));
             cJSON_DeleteItemFromObjectCaseSensitive(m,"notification_state");
             cJSON_AddStringToObject(m,"notification_state","pending");
+            cJSON_DeleteItemFromObjectCaseSensitive(m,"last_event_seq");
+            cJSON_AddNumberToObject(m,"last_event_seq",1);
             char *json=cJSON_PrintUnformatted(m);
             rc=plat_write_durable(path,json,strlen(json),0600);cJSON_free(json);
         }

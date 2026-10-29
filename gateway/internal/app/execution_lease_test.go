@@ -6,6 +6,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/proto"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,4 +227,24 @@ func TestNodeLeaseDetachProtocolKeepsForegroundUntilCommit(t *testing.T) {
 		t.Fatal("commit did not publish", cp)
 	}
 	roundtrip(proto.TLeaseDetachCommit, "second", "commit", true)
+}
+
+func TestNodeJobRecoveryErrorPreservesLeases(t *testing.T) {
+	e := setup(t)
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.NodeEpoch = "job-boot"
+	e.a.mu.Unlock()
+	request := dispatch.Request{ID: "ljob-boot-1", Owner: "test/job-boot", Machine: "job-machine", Session: "job-source",
+		Exclusive: []string{"machine:files"}}
+	if !e.a.dispatcher.Submit(dispatch.Command{Action: "admit", Request: request}) {
+		t.Fatal("admit")
+	}
+	waitLeaseState(t, e.a, request.ID, "granted")
+	e.k.expect(proto.TLeaseGrant)
+	e.k.send(proto.Msg{T: proto.TLeaseSync, NodeEpoch: "job-boot", JobStorageError: "future metadata version"})
+	reply := e.k.expect(proto.TLeaseSynced)
+	if reply.OK == nil || *reply.OK || !strings.Contains(reply.Detail, "future metadata version") {
+		t.Fatal(reply)
+	}
+	waitLeaseState(t, e.a, request.ID, "granted")
 }

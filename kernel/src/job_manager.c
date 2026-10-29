@@ -16,7 +16,7 @@ struct managed_job {
     int timeout_seconds;
     atomic_flag observation_lock;
     int64_t created_mono,yield_ms;
-    bool created,spawn_ready,spawned,started_reported,process_done,terminal_saved,auto_reported;
+    bool created,spawn_ready,spawned,started_reported,process_done,terminal_saved,auto_reported,cancel_requested;
     char *failure_status,*failure_detail;
     char tail[8192];
     size_t tail_length;
@@ -135,6 +135,12 @@ job_manager *jobs_open(const char *root,const char *epoch,na_wake *wake,char *er
         const cJSON *revision=cJSON_GetObjectItemCaseSensitive(item,"revision");
         if(cJSON_IsNumber(revision) && revision->valuedouble>=0)j->revision=(uint64_t)revision->valuedouble;
         atomic_store(&j->gap,cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item,"output_gap")));
+        const char *tail=str(item,"output_tail");
+        if(tail) {
+            size_t length=strlen(tail);
+            if(length>sizeof j->tail)tail+=length-sizeof j->tail,length=sizeof j->tail;
+            memcpy(j->tail,tail,length);j->tail_length=length;
+        }
     }
     cJSON_Delete(records);return m;
 }
@@ -184,6 +190,12 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
     cJSON_AddNumberToObject(model,"created_at",(double)time(NULL));
     cJSON_AddBoolToObject(model,"background",false);
     cJSON_AddItemToObject(model,"request",cJSON_Duplicate(request,true));
+    for(const char *const *key=(const char *const[]){"wait_id","wait_sid","lease",NULL};*key;key++) {
+        const cJSON *value=cJSON_GetObjectItemCaseSensitive(request,*key);
+        if(value)cJSON_AddItemToObject(model,*key,cJSON_Duplicate(value,true));
+    }
+    cJSON *lease=cJSON_GetObjectItemCaseSensitive(model,"lease");
+    if(cJSON_IsObject(lease))set_string(lease,"job_id",id);
     managed_job *j=allocate(m,model);
     snprintf(j->execution,sizeof j->execution,"%s",execution);
     j->created_mono=now_ms();j->yield_ms=10000;j->timeout_seconds=timeout;
@@ -206,10 +218,10 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
 }
 bool jobs_prepare_start(managed_job *j)
 {
-    if(!j->created || j->pending || j->spawned || j->process_done || j->terminal_saved)return false;
+    if(!j->created || j->pending || j->spawned || j->process_done || j->terminal_saved || j->cancel_requested)return false;
     return commit(j,"starting","start");
 }
-bool jobs_spawn_ready(const managed_job *j){return j->spawn_ready && !j->spawned && !j->process_done;}
+bool jobs_spawn_ready(const managed_job *j){return j->spawn_ready && !j->spawned && !j->process_done && !j->cancel_requested;}
 void jobs_did_spawn(managed_job *j){j->spawn_ready=false;j->spawned=true;}
 void jobs_observe(void *value,const cJSON *frame,const void *data,size_t n)
 {
@@ -242,6 +254,7 @@ void jobs_observe(void *value,const cJSON *frame,const void *data,size_t n)
     }
     if(j->manager->wake)plat_wake_signal(j->manager->wake);
 }
+void jobs_cancelling(managed_job *j){j->cancel_requested=true;j->spawn_ready=false;}
 void jobs_process_finished(managed_job *j){j->process_done=true;j->spawn_ready=false;}
 void jobs_fail(managed_job *j,const char *status,const char *detail)
 {
@@ -252,7 +265,7 @@ void jobs_fail(managed_job *j,const char *status,const char *detail)
 bool jobs_detach(managed_job *j,uint64_t request_id,char *error,size_t n)
 {
     if(jobs_background(j))return true;
-    if(j->process_done || atomic_load(&j->observed_exit) || j->terminal_saved) {
+    if(j->cancel_requested || j->process_done || atomic_load(&j->observed_exit) || j->terminal_saved) {
         snprintf(error,n,"任务已结束，不能再转后台");return false;
     }
     if(!j->created || j->pending){snprintf(error,n,"任务状态正在保存，稍后可重试后台化");return false;}
@@ -265,6 +278,16 @@ bool jobs_detach(managed_job *j,uint64_t request_id,char *error,size_t n)
     return accepted;
 }
 void jobs_detach_denied(managed_job *j){j->auto_reported=true;}
+bool jobs_acknowledge(managed_job *j,uint64_t seq)
+{
+    if(!j->terminal_saved || j->pending || seq!=1)return false;
+    if(str(j->model,"notification_state") && !strcmp(str(j->model,"notification_state"),"delivered"))return true;
+    cJSON *old=cJSON_Duplicate(j->model,true);
+    set_string(j->model,"notification_state","delivered");
+    bool accepted=commit(j,str(j->model,"status"),"ack");
+    if(!accepted){cJSON_Delete(j->model);j->model=old;}else cJSON_Delete(old);
+    return accepted;
+}
 bool jobs_background(const managed_job *j){return j->published && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j->published,"background"));}
 bool jobs_finished(const managed_job *j){return j->terminal_saved;}
 bool jobs_created(const managed_job *j){return j->created;}
@@ -348,6 +371,9 @@ static void pump(job_manager *m,int64_t now)
         }
         if(j->created && !j->pending && !j->terminal_saved) {
             if(j->process_done)terminal_commit(j);
+            else if(j->cancel_requested) {
+                if(strcmp(str(j->model,"status"),"cancelling"))commit(j,"cancelling","cancelling");
+            }
             else if(atomic_load(&j->observed_start) && strcmp(str(j->model,"status"),"running"))
                 commit(j,"running","running");
             else if(!j->auto_reported && !jobs_background(j) &&
@@ -364,6 +390,18 @@ bool jobs_poll(job_manager *m,int64_t now,job_event *event)
     *event=m->events[m->event_head];
     m->event_head=(m->event_head+1)%JOB_IO_QUEUE;m->event_count--;
     return true;
+}
+int64_t jobs_next_deadline(job_manager *m)
+{
+    int64_t next=-1;
+    for(size_t i=0;i<m->count;i++) {
+        managed_job *j=m->jobs[i];
+        if(!j->created || j->pending || j->auto_reported || j->process_done || j->terminal_saved || j->cancel_requested ||
+           strcmp(j->execution,"auto"))continue;
+        int64_t deadline=j->created_mono+j->yield_ms;
+        if(next<0 || deadline<next)next=deadline;
+    }
+    return next;
 }
 cJSON *jobs_list(job_manager *m)
 {

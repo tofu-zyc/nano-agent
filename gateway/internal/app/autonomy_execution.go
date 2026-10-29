@@ -26,6 +26,7 @@ func mcpOutcomeVerified(value any) bool {
 		Verified *bool  `json:"verified"`
 		Success  *bool  `json:"success"`
 		Effect   string `json:"effect"`
+		Status   string `json:"status"`
 	}
 	if json.Unmarshal(b, &outcome) != nil {
 		return true // 普通数组/标量结果没有声明失败
@@ -34,6 +35,11 @@ func mcpOutcomeVerified(value any) bool {
 		return false
 	}
 	if outcome.Success != nil && !*outcome.Success {
+		return false
+	}
+	switch outcome.Status {
+	case "backgrounded", "queued", "starting", "running", "cancelling", "unknown", "interrupted",
+		"failed", "cancelled", "timed_out", "pending":
 		return false
 	}
 	switch outcome.Effect {
@@ -108,6 +114,11 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 	if !ok {
 		return
 	}
+	completed := true
+	var receipt any
+	if json.Unmarshal([]byte(m.Content), &receipt) == nil {
+		completed = mcpOutcomeVerified(receipt)
+	}
 	turn := m.TurnID
 	if turn == 0 {
 		turn = r.turnID
@@ -132,6 +143,8 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 		}
 		if m.OK != nil && !*m.OK {
 			label += "（失败）"
+		} else if !completed {
+			label += "（已登记，尚无完成凭据）"
 		} else {
 			label += "（已执行）"
 		}
@@ -150,7 +163,7 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 		return
 	}
 	r.toolEvidence[m.ID] = autonomy.ToolEvidence{ID: m.ID, Name: call.Name,
-		OK: m.OK == nil || *m.OK, Verified: (m.OK == nil || *m.OK) && !r.unverifiedTools[m.ID], Result: cutRunes(m.Content, 1000)}
+		OK: m.OK == nil || *m.OK, Verified: (m.OK == nil || *m.OK) && completed && !r.unverifiedTools[m.ID], Result: cutRunes(m.Content, 1000)}
 }
 
 func taskEvidence(name string) bool {

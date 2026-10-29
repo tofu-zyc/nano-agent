@@ -120,6 +120,8 @@ jobs:
           .\kernel\build\test_job_manager.exe $env:TEMP
       - name: Windows 执行器
         run: python kernel/tests/test_exec_win.py kernel/build/nano-exec.exe build/tools/rg/windows-x86_64.exe
+      - name: Windows Job 实际节点生命周期
+        run: python kernel/tests/test_node_jobs.py kernel/build/nano-kernel.exe kernel/build/nano-exec.exe
       - name: Windows 安装（含任务计划程序）
         env:
           NANO_TEST_SERVICE: "1"

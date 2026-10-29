@@ -35,11 +35,11 @@ RUNNER := src/runner.c
 PIPE   :=
 endif
 
-SRCS  := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
+SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c $(RUNNER) src/link.c src/pipe.c $(PIPE) src/util.c $(PLAT)
 XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c $(SB) src/util.c $(PLAT)
 XWIN_SRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_win.c src/util.c src/plat_win.c
-KWIN_SRCS := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
-MAC_SRCS  := src/main.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
+KWIN_SRCS := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner_win.c src/link.c src/pipe.c src/pipe_win.c src/util.c src/plat_win.c
+MAC_SRCS  := src/main.c src/job_manager.c src/job_io.c src/exec_stream.c src/runner_stream.c src/core.c src/conf.c src/tools.c src/update.c src/ctl.c src/runner.c src/link.c src/pipe.c src/util.c src/plat_posix.c
 MAC_XSRCS := src/nexec_main.c src/nexec_fs.c src/nexec_proc.c src/sandbox_stub.c src/util.c src/plat_posix.c
 OBJS  := $(SRCS:%.c=build/%.o) build/cJSON.o
 XOBJS := $(XSRCS:%.c=build/%.o) build/cJSON.o
@@ -90,7 +90,7 @@ build/.static-tried: $(XOBJS)
 	@touch $@
 
 $(BIN): $(OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -pthread -o $@ $^
 
 # 执行器：内核每次调用工具都启动它一次，在沙箱里执行
 $(EXEC): $(XOBJS)
@@ -146,18 +146,18 @@ windows-kernel: $(WIN_KERNEL)
 cross-linux: $(VERSION_H)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
 	@mkdir -p $(CROSS_DIR)/linux-x86_64 $(CROSS_DIR)/linux-aarch64
-	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -pthread -static -o $(CROSS_DIR)/linux-x86_64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target x86_64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-x86_64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
-	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -pthread -static -o $(CROSS_DIR)/linux-aarch64/nano-kernel $(SRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target aarch64-linux-musl $(CROSS_CFLAGS) -static -o $(CROSS_DIR)/linux-aarch64/nano-exec $(XSRCS) third_party/cjson/cJSON.c
 
 # macOS 第一版没有沙箱（landlock=0）；只交叉编译，实际运行测试交给 macOS runner
 cross-macos: $(VERSION_H)
 	@test -x "$(ZIG)" || { echo "没有 zig：先运行 scripts/fetch-zig.sh"; exit 1; }
 	@mkdir -p $(CROSS_DIR)/macos-aarch64 $(CROSS_DIR)/macos-x86_64
-	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-aarch64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -pthread -o $(CROSS_DIR)/macos-aarch64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target aarch64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-aarch64/nano-exec $(MAC_XSRCS) third_party/cjson/cJSON.c
-	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-x86_64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
+	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -pthread -o $(CROSS_DIR)/macos-x86_64/nano-kernel $(MAC_SRCS) third_party/cjson/cJSON.c
 	$(ZIG) cc -target x86_64-macos $(MAC_CFLAGS) -o $(CROSS_DIR)/macos-x86_64/nano-exec $(MAC_XSRCS) third_party/cjson/cJSON.c
 
 $(WIN_EXEC): $(XWIN_SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
@@ -186,6 +186,7 @@ test: build/test_core build/test_runner build/test_exec_stream build/test_job_io
 	./build/test_job_manager
 	python3 tests/test_exec.py build/nano-exec-asan
 	python3 tests/test_host.py build/nano-kernel-asan build/nano-exec-asan
+	python3 tests/test_node_jobs.py build/nano-kernel-asan build/nano-exec-asan
 
 # 执行器的 ASan 版本
 build/nano-exec-asan: $(XSRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
@@ -195,7 +196,7 @@ build/nano-exec-asan: $(XSRCS) third_party/cjson/cJSON.c $(wildcard src/*.h)
 # 整个内核的 ASan 版本，给宿主层集成测试用
 build/nano-kernel-asan: $(SRCS) third_party/cjson/cJSON.c $(wildcard src/*.h) $(VERSION_H)
 	@mkdir -p $(dir $@)
-	$(CC) $(STD) $(CPPFLAGS) -O1 -g $(SAN) -o $@ $(SRCS) third_party/cjson/cJSON.c
+	$(CC) $(STD) $(CPPFLAGS) -pthread -O1 -g $(SAN) -o $@ $(SRCS) third_party/cjson/cJSON.c
 
 clean:
 	rm -rf build $(BIN) $(EXEC) $(SRCTAR) nano-exec-static

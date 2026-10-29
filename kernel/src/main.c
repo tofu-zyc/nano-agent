@@ -12,6 +12,7 @@
 #include "pipe.h"
 #include "plat.h"
 #include "runner.h"
+#include "job_manager.h"
 #include "tools.h"
 #include "update.h"
 #include "util.h"
@@ -57,6 +58,18 @@ typedef struct gwjob {
 
 /* 已经派发、在等本机执行槽的调用：槽位腾出来之后按派发顺序启动。启动之前不发
  * CALL_STARTED，所以状态机那边的执行时限还没有开始走。 */
+typedef struct job_binding {
+    managed_job *job;
+    job_t *process;  /* retained until the terminal metadata fence is acknowledged */
+    char *sid,*run_id,*id,*lease_id,*lease_spec;
+    int turn_id,kind,detach_phase;
+    bool wait_closed,terminal_handled,long_notice,recovered,process_drained,lease_registered,detach_requested,unknown_reported;
+    int64_t admitted_at,started_at,next_event,next_detach;
+    char *control_request,*read_request;
+    uint64_t read_id;
+    struct job_binding *next;
+} job_binding;
+
 typedef struct execq {
     char  *sid, *run_id, *id, *name;
     char  *res_keys, *res_xkeys;   /* 这个请求要占的资源键 */
@@ -65,6 +78,7 @@ typedef struct execq {
     int    kind;                   /* JOB_TOOL / JOB_HOST */
     char *lease_id, *lease_spec;
     bool lease_asked, lease_granted;
+    job_binding *managed;
     cJSON *req;
     struct execq *next;
 } execq_t;
@@ -90,6 +104,11 @@ typedef struct {
     int             gw_ver;      /* 网关的协议版本（welcome 里带的）；旧网关要少等一些消息 */
     bool            rg;
     bool leasing, lease_synced;
+    bool jobs_mode,detach_capable;
+    job_manager *jobs;
+    job_binding *job_bindings;
+    char jobs_error[512];
+    uint64_t job_request_seq;
     int exec_stream_version;
     char node_epoch[33];
     unsigned long long lease_seq;
@@ -159,6 +178,9 @@ static void send_hello(kernel_t *k)
     cJSON_AddNumberToObject(ft, "call_identity", 1);
     cJSON_AddNumberToObject(ft, "machine_leases", 1);
     cJSON_AddNumberToObject(ft,"job_stream",k->exec_stream_version);
+    cJSON_AddNumberToObject(ft,"job_manager",k->jobs && k->exec_stream_version>=1?1:0);
+    cJSON_AddNumberToObject(ft,"lease_detach",k->jobs && k->exec_stream_version>=1?1:0);
+    if(k->jobs_error[0])cJSON_AddStringToObject(m,"job_storage_error",k->jobs_error);
     cJSON_AddNumberToObject(ft, "max_parallel_shells", k->conf.max_parallel_shells);
     cJSON_AddNumberToObject(ft, "bounded_parallel", 1);
     cJSON_AddNumberToObject(ft, "max_calls_per_turn", 32);
@@ -660,6 +682,12 @@ static bool res_busy(const kernel_t *k, const char *shared, const char *xkeys)
 {
     for (const job_t *j = k->runner.jobs; j; j = j->next)
         if (res_conflict(j->res_keys, j->res_xkeys, shared, xkeys)) return true;
+    for(const job_binding *b=k->job_bindings;b;b=b->next) {
+        if(b->terminal_handled || (!b->recovered && !b->process_drained))continue;
+        const cJSON *request=jobs_request(b->job);
+        const cJSON *spec=cJSON_GetObjectItemCaseSensitive(request,"lease");
+        if(res_conflict(sget(spec,"res_keys"),sget(spec,"res_xkeys"),shared,xkeys))return true;
+    }
     return false;
 }
 
@@ -710,7 +738,7 @@ static const char *effective_sandbox(const kernel_t *k, const char *requested)
  * 调用方必须先确认本机还有执行槽（见 exec_admit）。 */
 static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *run_id, int turn_id,
                          const char *id, const char *name, int kind, const char *sandbox,
-                         const char *res_keys, const char *res_xkeys, char *err, size_t errlen)
+                         const char *res_keys, const char *res_xkeys, job_binding *managed, char *err, size_t errlen)
 {
     const char *final_sb = effective_sandbox(k, sandbox);
     bool ok = !(sandbox && !strcmp(sandbox, "on") && k->sb_mode == SB_OFF);
@@ -742,9 +770,12 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
             if(k->exec_stream_version<1 || !job_id || !*job_id || strlen(job_id)>128 || strcmp(name,"Shell")) {
                 snprintf(err,errlen,"目标执行器不支持所需流式协议，或 Job 身份无效，未执行");
                 free(line);
-            } else j=runner_start_streamed(&k->runner,argv,sid,id,name,line,strlen(line),job_id,NULL,NULL,err,errlen);
+            } else j=runner_start_streamed(&k->runner,argv,sid,id,name,line,strlen(line),job_id,managed?jobs_observe:NULL,managed?managed->job:NULL,err,errlen);
         } else j = runner_start_bounded(&k->runner, argv, sid, id, name, line, strlen(line), out_cap, err, errlen);
         if (j) {
+            j->managed=managed;
+            j->detached=managed && jobs_background(managed->job);
+            if(managed)managed->process=j;
             j->run_id = xstrdup(run_id ? run_id : "");
             j->turn_id = turn_id;
             j->kind = kind;
@@ -761,6 +792,14 @@ static job_t *spawn_exec(kernel_t *k, cJSON *req, const char *sid, const char *r
 /* 代执行的结果要等启动之后才发，声明放前面 */
 static void send_run_result(kernel_t *k, const char *id, bool ok, const char *content);
 
+static void pump_jobs(kernel_t *k,int64_t now);
+static void managed_detach(kernel_t *k,job_binding *binding,int64_t now);
+static void job_control(kernel_t *k,const cJSON *message,int64_t now);
+static void job_detach_result(kernel_t *k,const cJSON *message,int64_t now);
+static void sync_jobs(kernel_t *k);
+static cJSON *job_public(job_binding *binding);
+static void managed_close_wait(kernel_t *k,job_binding *binding,bool detached,int64_t now);
+static void managed_state(kernel_t *k,job_binding *binding,const char *kind,const char *error);
 /* ---- 本机执行槽（设计文档 §3.1） ----
  *
  * 机器级的真实槽位在这里管：同时跑几个执行器（max_execs）、其中几个 Shell
@@ -775,7 +814,16 @@ static bool is_shell_tool(const char *name)
 /* 网关请这台机器代跑的（JOB_HOST）也算真实执行器；它没有调用身份，sid 是空的 */
 static int exec_slots_used(const kernel_t *k)
 {
-    return (int)runner_count(&k->runner);
+    int used=(int)runner_count(&k->runner);
+    for(const job_binding *b=k->job_bindings;b;b=b->next) {
+        if(b->process && b->process->exited) {
+            bool in_runner=false;
+            for(const job_t *process=k->runner.jobs;process;process=process->next)if(process==b->process)in_runner=true;
+            if(!in_runner)used++;
+        }
+        if(b->recovered && !b->terminal_handled)used++;
+    }
+    return used;
 }
 
 static void lease_send(kernel_t *k, const char *type, const char *id)
@@ -806,13 +854,17 @@ static cJSON *lease_spec(kernel_t *k, const execq_t *q)
     cJSON_AddStringToObject(spec, "res_xkeys", q->res_xkeys);
     cJSON_AddStringToObject(spec, "state", "queued");
     if (q->kind == JOB_HOST) cJSON_AddStringToObject(spec, "host_id", q->id);
+    if(q->managed) {
+        cJSON_AddStringToObject(spec,"job_id",jobs_id(q->managed->job));
+        cJSON_AddBoolToObject(spec,"background",jobs_background(q->managed->job));
+    }
     (void)k;
     return spec;
 }
 
 static void lease_ask(kernel_t *k, execq_t *q)
 {
-    if (!k->leasing || !k->lease_synced || q->lease_asked) return;
+    if (!k->leasing || !k->lease_synced || q->lease_asked || (q->managed && !jobs_created(q->managed->job))) return;
     cJSON *m = msg_new("lease_acquire", q->sid);
     cJSON_AddStringToObject(m, "id", q->id);
     cJSON_AddStringToObject(m, "run_id", q->run_id);
@@ -841,12 +893,34 @@ static void lease_sync(kernel_t *k, int64_t now)
         cJSON *item = cJSON_Parse(j->lease_spec);
         cJSON_DeleteItemFromObjectCaseSensitive(item, "state");
         cJSON_AddStringToObject(item, "state", j->killed || j->exited ? "cancelling" : "running");
+        if(j->managed) {
+            job_binding *b=j->managed;
+            cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
+            cJSON_AddBoolToObject(item,"background",jobs_background(b->job));
+            cJSON_AddStringToObject(item,"job_id",jobs_id(b->job));
+        }
         cJSON_AddItemToArray(items, item);
     }
     for (execq_t *q = k->execq; q; q = q->next) {
         if (!q->lease_id) continue;
-        cJSON_AddItemToArray(items, cJSON_Parse(q->lease_spec));
+        if(q->managed && !jobs_created(q->managed->job))continue;
+        cJSON *item=cJSON_Parse(q->lease_spec);
+        if(q->managed) {
+            cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
+            cJSON_AddBoolToObject(item,"background",jobs_background(q->managed->job));
+        }
+        cJSON_AddItemToArray(items,item);
     }
+    for(job_binding *b=k->job_bindings;b;b=b->next) {
+        if(!b->lease_spec || !b->recovered || b->terminal_handled)continue;
+        cJSON *item=cJSON_Parse(b->lease_spec);
+        cJSON_DeleteItemFromObjectCaseSensitive(item,"state");
+        cJSON_AddStringToObject(item,"state","unknown");
+        cJSON_DeleteItemFromObjectCaseSensitive(item,"background");
+        cJSON_AddBoolToObject(item,"background",jobs_background(b->job));
+        cJSON_AddItemToArray(items,item);
+    }
+    if(k->jobs_error[0])cJSON_AddStringToObject(m,"job_storage_error",k->jobs_error);
     link_send(&k->link, m);
     k->next_lease_sync = now + 5000;
 }
@@ -880,8 +954,13 @@ static bool execq_drop(kernel_t *k, const char *sid, const char *id)
     for (execq_t **pp = &k->execq; *pp; pp = &(*pp)->next) {
         execq_t *q = *pp;
         if (strcmp(q->sid, sid ? sid : "") || strcmp(q->id, id ? id : "")) continue;
+        if(q->managed && jobs_background(q->managed->job))return true;
+        if(q->managed) {
+            q->managed->wait_closed=true;
+            jobs_fail(q->managed->job,"cancelled","原前台等待已停止，未启动命令");
+        }
         *pp = q->next;
-        lease_send(k, "lease_release", q->lease_id);
+        if(!q->managed)lease_send(k, "lease_release", q->lease_id);
         execq_free(q);
         return true;
     }
@@ -890,13 +969,17 @@ static bool execq_drop(kernel_t *k, const char *sid, const char *id)
 
 static void execq_clear(kernel_t *k)
 {
-    while (k->execq) {
-        execq_t *q = k->execq;
-        k->execq = q->next;
-        lease_send(k, "lease_release", q->lease_id);
+    execq_t **pp=&k->execq;
+    while(*pp) {
+        execq_t *q=*pp;
+        if(q->managed && jobs_background(q->managed->job)){pp=&q->next;continue;}
+        *pp=q->next;
+        if(q->managed) {
+            q->managed->wait_closed=true;
+            jobs_fail(q->managed->job,"cancelled","连接断开，前台排队已取消，未启动命令");
+        } else lease_send(k,"lease_release",q->lease_id);
         execq_free(q);
     }
-    k->nshells = 0;
 }
 
 /* 有了空槽就从队头挑第一个资源也拿得到的启动起来（不能插队：总是从头扫） */
@@ -908,9 +991,16 @@ static void pump_execq(kernel_t *k, int64_t now)
         execq_t *pick = NULL;
         for (execq_t **pp = &k->execq; *pp; pp = &(*pp)->next) {
             execq_t *q = *pp;
+            if(q->managed && (!jobs_created(q->managed->job) || jobs_finished(q->managed->job) ||
+                ((q->managed->wait_closed && !jobs_background(q->managed->job)))))continue;
+            /* Ownership publication wins over starting a background request. */
+            if(q->managed && q->managed->detach_phase)continue;
             if (k->leasing && !q->lease_granted) { lease_ask(k, q); continue; }
             if (is_shell_tool(q->name) && k->nshells >= k->conf.max_parallel_shells) continue;
             if (res_busy(k, q->res_keys, q->res_xkeys)) continue;
+            if(q->managed && !jobs_spawn_ready(q->managed->job)) {
+                jobs_prepare_start(q->managed->job);continue;
+            }
             *pp = q->next;
             pick = q;
             break;
@@ -918,21 +1008,25 @@ static void pump_execq(kernel_t *k, int64_t now)
         if (!pick) return;
         char err[1024] = "";
         job_t *j = spawn_exec(k, pick->req, pick->sid, pick->run_id, pick->turn_id, pick->id, pick->name,
-                              pick->kind, pick->sandbox, pick->res_keys, pick->res_xkeys, err, sizeof err);
+                              pick->kind, pick->sandbox, pick->res_keys, pick->res_xkeys, pick->managed, err, sizeof err);
         pick->req = NULL;   /* spawn_exec 接管了（成功失败都由它释放） */
         if (j) {
             j->lease_id = pick->lease_id ? xstrdup(pick->lease_id) : NULL;
             j->lease_spec = pick->lease_spec ? xstrdup(pick->lease_spec) : NULL;
-            lease_send(k, "lease_started", j->lease_id);
+            if(pick->managed)jobs_did_spawn(pick->managed->job);
+            else lease_send(k, "lease_started", j->lease_id);
             j->tag = is_shell_tool(pick->name) ? 1 : 0;
             if (j->tag) k->nshells++;
             log_info("执行 %s（%s）", pick->name, pick->id);
-            if (pick->kind == JOB_TOOL) call_started(k, pick->sid, pick->run_id, pick->turn_id, pick->id, now);
+            if(pick->managed) { /* Real started frame will close the admission timer. */ }
+            else if (pick->kind == JOB_TOOL) call_started(k, pick->sid, pick->run_id, pick->turn_id, pick->id, now);
             else { cJSON *m=msg_new("run_started",NULL); cJSON_AddStringToObject(m,"id",pick->id); link_send(&k->link,m); }
         } else {
-            lease_send(k, "lease_release", pick->lease_id);
+            if(pick->managed)jobs_fail(pick->managed->job,"failed",err);
+            else lease_send(k, "lease_release", pick->lease_id);
             log_warn("无法执行 %s：%s", pick->name, err);
-            if (pick->kind == JOB_TOOL) tool_done(k, pick->sid, pick->run_id, pick->turn_id, pick->id, false, err, now);
+            if(pick->managed) { /* Durable terminal event owns the original result. */ }
+            else if (pick->kind == JOB_TOOL) tool_done(k, pick->sid, pick->run_id, pick->turn_id, pick->id, false, err, now);
             else send_run_result(k, pick->id, false, err);
         }
         execq_free(pick);
@@ -974,9 +1068,15 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
     }
     bool has_slot = exec_slots_used(k) < k->conf.max_execs &&
                     (!shell || k->nshells < k->conf.max_parallel_shells);
-    if (!k->leasing && has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
+    const cJSON *job_args=cJSON_GetObjectItemCaseSensitive(req,"args");
+    const char *execution=sget(job_args,"execution");
+    if(shell && execution && strcmp(execution,"foreground") && !k->jobs_mode) {
+        snprintf(err,errlen,"目标节点尚未协商后台 Job 能力，未执行");cJSON_Delete(req);return false;
+    }
+    bool managed=shell && k->jobs_mode;
+    if (!managed && !k->leasing && has_slot && !k->execq && !res_busy(k, res_keys, res_xkeys)) {
         job_t *j = spawn_exec(k, req, sid, run_id, turn_id, id, name, kind, sandbox, res_keys, res_xkeys,
-                              err, errlen);
+                              NULL, err, errlen);
         if (!j) return false;
         j->tag = shell ? 1 : 0;
         if (shell) k->nshells++;
@@ -1007,6 +1107,29 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
         cJSON *spec = lease_spec(k, q);
         q->lease_spec = cJSON_PrintUnformatted(spec);
         cJSON_Delete(spec);
+    }
+    if(managed) {
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"sandbox");
+        cJSON_AddStringToObject(req,"sandbox",effective_sandbox(k,sandbox));
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"wait_id");
+        cJSON_AddStringToObject(req,"wait_id",q->id);
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"wait_sid");
+        cJSON_AddStringToObject(req,"wait_sid",q->sid);
+        cJSON_DeleteItemFromObjectCaseSensitive(req,"lease");
+        cJSON_AddItemToObject(req,"lease",cJSON_Parse(q->lease_spec));
+        managed_job *owned=jobs_create(k->jobs,cJSON_GetObjectItemCaseSensitive(req,"origin"),req,
+                                      q->res_keys,q->res_xkeys,kind,err,errlen);
+        if(!owned){execq_free(q);return false;}
+        job_binding *b=xcalloc(1,sizeof *b);
+        b->job=owned;b->sid=xstrdup(q->sid);b->run_id=xstrdup(q->run_id);
+        b->turn_id=q->turn_id;b->id=xstrdup(q->id);b->kind=kind;b->admitted_at=now;
+        b->lease_id=xstrdup(q->lease_id);
+        q->managed=b;
+        cJSON *spec=lease_spec(k,q);
+        free(q->lease_spec);q->lease_spec=cJSON_PrintUnformatted(spec);cJSON_Delete(spec);
+        b->lease_spec=xstrdup(q->lease_spec);
+        cJSON_Delete(q->req);q->req=cJSON_Duplicate(jobs_request(owned),true);
+        b->next=k->job_bindings;k->job_bindings=b;
     }
     execq_t **pp = &k->execq;
     while (*pp) pp = &(*pp)->next;
@@ -1090,6 +1213,7 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
         cJSON_AddNumberToObject(origin, "turn_id", c->turn_id);
         cJSON_AddStringToObject(origin, "call_id", c->id);
         if (sget(pol, "owner_agent")) cJSON_AddStringToObject(origin, "agent", sget(pol, "owner_agent"));
+        if(c->from)cJSON_AddStringToObject(origin,"created_by",c->from);
         const cJSON *priority = cJSON_GetObjectItemCaseSensitive(pol, "priority");
         cJSON_AddNumberToObject(origin, "priority", cJSON_IsNumber(priority) ? priority->valueint : 0);
         cJSON_AddNumberToObject(req, "max_output", (double)max_output);
@@ -1106,6 +1230,315 @@ static void exec_tool(kernel_t *k, const na_cmd *c, int64_t now)
     tool_done(k, c->sid, c->run_id, c->turn_id, c->id, false, err, now);
 }
 
+
+/* The node owns every managed process. A run owns only its foreground wait. */
+static job_binding *binding_find(kernel_t *k,const char *id)
+{
+    if(!id)return NULL;
+    for(job_binding *b=k->job_bindings;b;b=b->next)if(!strcmp(jobs_id(b->job),id))return b;
+    return NULL;
+}
+static cJSON *job_public(job_binding *b)
+{
+    cJSON *state=jobs_snapshot(b->job);
+    cJSON_DeleteItemFromObjectCaseSensitive(state,"request");
+    cJSON_DeleteItemFromObjectCaseSensitive(state,"res_keys");
+    cJSON_DeleteItemFromObjectCaseSensitive(state,"res_xkeys");
+    /* Lease receipts contain immutable identity/resources, never command text. */
+    return state;
+}
+static void managed_state(kernel_t *k,job_binding *b,const char *kind,const char *error)
+{
+    if(k->link.fd==NA_SOCK_NONE || !k->jobs_mode)return;
+    cJSON *m=msg_new("job_state",NULL);
+    cJSON_AddStringToObject(m,"node_epoch",k->node_epoch);
+    cJSON_AddStringToObject(m,"job_id",jobs_id(b->job));
+    cJSON_AddStringToObject(m,"kind",kind);
+    if(error && *error)cJSON_AddStringToObject(m,"detail",error);
+    cJSON_AddItemToObject(m,"job",job_public(b));
+    if(jobs_finished(b->job))cJSON_AddNumberToObject(m,"event_seq",1);
+    link_send(&k->link,m);
+}
+static void job_reply(kernel_t *k,const char *request,job_binding *b,bool ok,const char *detail,cJSON *data)
+{
+    cJSON *m=msg_new("job_state",NULL);
+    cJSON_AddStringToObject(m,"node_epoch",k->node_epoch);
+    cJSON_AddStringToObject(m,"request_id",request?request:"");
+    cJSON_AddBoolToObject(m,"ok",ok);
+    if(detail)cJSON_AddStringToObject(m,"detail",detail);
+    if(b) {
+        cJSON_AddStringToObject(m,"job_id",jobs_id(b->job));
+        cJSON_AddItemToObject(m,"job",job_public(b));
+    }
+    if(data)cJSON_AddItemToObject(m,"data",data);
+    link_send(&k->link,m);
+}
+static void job_control_reply(kernel_t *k,job_binding *b,bool ok,const char *detail)
+{
+    if(b->control_request)job_reply(k,b->control_request,b,ok,detail,NULL);
+    free(b->control_request);b->control_request=NULL;
+}
+static void detach_send(kernel_t *k,job_binding *b,const char *phase,int64_t now)
+{
+    if(!k->detach_capable || !k->lease_synced || k->link.fd==NA_SOCK_NONE)return;
+    char *type=xasprintf("lease_detach_%s",phase);
+    cJSON *m=msg_new(type,NULL);free(type);
+    cJSON_AddStringToObject(m,"node_epoch",k->node_epoch);
+    cJSON_AddStringToObject(m,"lease_id",b->lease_id);
+    cJSON_AddStringToObject(m,"request_id",jobs_id(b->job));
+    link_send(&k->link,m);b->next_detach=now+2000;
+}
+static void managed_detach(kernel_t *k,job_binding *b,int64_t now)
+{
+    if(jobs_background(b->job)) {
+        job_control_reply(k,b,true,"任务已经由后台 Job 持有");return;
+    }
+    if(b->wait_closed || jobs_finished(b->job) || b->process_drained) {
+        b->detach_requested=false;
+        job_control_reply(k,b,false,"任务已经结束");return;
+    }
+    if(!k->detach_capable || !k->jobs_mode || !b->lease_id) {
+        job_control_reply(k,b,false,"执行节点没有协商后台移交能力");return;
+    }
+    b->detach_requested=true;
+    if(b->detach_phase || !b->lease_registered)return;
+    b->detach_phase=1;detach_send(k,b,"prepare",now);
+}
+static void managed_close_wait(kernel_t *k,job_binding *b,bool detached,int64_t now)
+{
+    if(b->wait_closed)return;
+    b->wait_closed=true;
+    cJSON *state=jobs_snapshot(b->job);
+    const cJSON *result=cJSON_GetObjectItemCaseSensitive(state,"result");
+    const char *status=sget(state,"status");
+    bool ok=status && !strcmp(status,"succeeded");
+    char *content=NULL;
+    if(detached) {
+        cJSON *receipt=cJSON_CreateObject();
+        cJSON_AddStringToObject(receipt,"status","backgrounded");
+        cJSON_AddStringToObject(receipt,"job_id",jobs_id(b->job));
+        cJSON_AddStringToObject(receipt,"state",status?status:"unknown");
+        cJSON_AddNullToObject(receipt,"exit_code");
+        cJSON_AddStringToObject(receipt,"output_tail",sget(state,"output_tail")?sget(state,"output_tail"):"");
+        content=cJSON_PrintUnformatted(receipt);cJSON_Delete(receipt);ok=true;
+    } else {
+        const char *text=sget(result,"content");
+        if(!text)text=sget(state,"error");
+        content=xstrdup(text?text:"执行没有完整终态");
+    }
+    cJSON *sandbox=cJSON_CreateObject();
+    const cJSON *request=jobs_request(b->job);
+    const char *requested=sget(request,"sandbox");
+    cJSON_AddStringToObject(sandbox,"requested",requested?requested:"auto");
+    cJSON_AddStringToObject(sandbox,"mode",effective_sandbox(k,requested));
+    cJSON_AddStringToObject(sandbox,"effective",sget(state,"sandbox_effective")?sget(state,"sandbox_effective"):"unknown");
+    if(b->kind==JOB_HOST) {
+        cJSON *m=msg_new("run_result",NULL);
+        cJSON_AddStringToObject(m,"id",b->id);cJSON_AddBoolToObject(m,"ok",ok);
+        cJSON_AddStringToObject(m,"content",content);
+        cJSON_AddStringToObject(m,"job_id",jobs_id(b->job));
+        if(detached)cJSON_AddStringToObject(m,"status","backgrounded");
+        cJSON_AddItemToObject(m,"sandbox",cJSON_Duplicate(sandbox,true));link_send(&k->link,m);
+    } else if(detached) {
+        na_event ev={.type=NA_EV_CALL_DETACHED,.sid=b->sid,.run_id=b->run_id,.turn_id=b->turn_id,
+                     .id=b->id,.ok=true,.content=content};
+        na_core_feed(k->core,now,&ev);
+    } else tool_done_state(k,b->sid,b->run_id,b->turn_id,b->id,ok,content,sandbox,now);
+    cJSON_Delete(sandbox);cJSON_Delete(state);free(content);
+}
+static void job_detach_result(kernel_t *k,const cJSON *m,int64_t now)
+{
+    if(!sget(m,"node_epoch") || strcmp(sget(m,"node_epoch"),k->node_epoch))return;
+    job_binding *b=binding_find(k,sget(m,"request_id"));
+    if(!b || !b->lease_id || !sget(m,"lease_id") || strcmp(b->lease_id,sget(m,"lease_id")))return;
+    const char *phase=sget(m,"phase");
+    bool ok=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m,"ok"));
+    const char *detail=sget(m,"detail");
+    if(phase && !strcmp(phase,"prepare") && b->detach_phase==1) {
+        if(!ok) {
+            b->detach_phase=0;b->detach_requested=false;jobs_detach_denied(b->job);
+            managed_state(k,b,"detach_denied",detail);job_control_reply(k,b,false,detail);return;
+        }
+        b->detach_phase=5; /* Wait for any preceding durable status write. */
+    } else if(phase && !strcmp(phase,"commit") && b->detach_phase==3) {
+        if(!ok) {
+            /* Ownership is durable here: never roll back to an already-ended run. */
+            managed_state(k,b,"detach_reconcile",detail);b->next_detach=now+5000;return;
+        }
+        b->detach_phase=0;managed_close_wait(k,b,true,now);
+        managed_state(k,b,"detached",NULL);job_control_reply(k,b,true,"已转入后台，命令继续执行");
+    } else if(phase && !strcmp(phase,"abort") && b->detach_phase==4 && ok) {
+        b->detach_phase=0;b->detach_requested=false;
+    }
+}
+static void sync_jobs(kernel_t *k)
+{
+    if(!k->jobs_mode)return;
+    cJSON *m=msg_new("jobs_sync",NULL);
+    cJSON_AddStringToObject(m,"node_epoch",k->node_epoch);
+    cJSON *items=cJSON_AddArrayToObject(m,"jobs");
+    for(job_binding *b=k->job_bindings;b;b=b->next)if(jobs_created(b->job))
+        cJSON_AddItemToArray(items,job_public(b));
+    link_send(&k->link,m);
+}
+static void pump_jobs(kernel_t *k,int64_t now)
+{
+    if(!k->jobs)return;
+    job_event event;
+    while(jobs_poll(k->jobs,now,&event)) {
+        job_binding *b=binding_find(k,event.id);
+        if(!b){jobs_event_free(&event);continue;}
+        if(!strcmp(event.kind,"created")) {
+            if(event.ok) {
+                managed_state(k,b,"queued",NULL);
+                const cJSON *args=cJSON_GetObjectItemCaseSensitive(jobs_request(b->job),"args");
+                if(sget(args,"execution") && !strcmp(sget(args,"execution"),"background"))managed_detach(k,b,now);
+            } else {
+                jobs_fail(b->job,"failed",event.error);
+                managed_close_wait(k,b,false,now);
+                managed_state(k,b,"storage_error",event.error);
+            }
+        } else if(!strcmp(event.kind,"start") && !event.ok) {
+            jobs_fail(b->job,"failed",event.error);
+        } else if(!strcmp(event.kind,"started")) {
+            b->started_at=now;lease_send(k,"lease_started",b->lease_id);
+            cJSON *state=jobs_snapshot(b->job);
+            const cJSON *timeout=cJSON_GetObjectItemCaseSensitive(state,"timeout_seconds");
+            int64_t duration=cJSON_IsNumber(timeout)?(int64_t)timeout->valueint*1000:1800000;
+            if(!b->wait_closed && b->kind==JOB_TOOL) {
+                na_event ev={.type=NA_EV_CALL_STARTED,.sid=b->sid,.run_id=b->run_id,
+                    .turn_id=b->turn_id,.id=b->id,.started_timeout_ms=duration>0?duration:-1};
+                na_core_feed(k->core,now,&ev);
+            } else if(!b->wait_closed) {
+                cJSON *out=msg_new("run_started",NULL);cJSON_AddStringToObject(out,"id",b->id);
+                cJSON_AddStringToObject(out,"job_id",jobs_id(b->job));
+                cJSON_AddNumberToObject(out,"timeout_ms",(double)duration);link_send(&k->link,out);
+            }
+            cJSON_Delete(state);
+        } else if(!strcmp(event.kind,"detach_ready")) {
+            managed_detach(k,b,now);
+        } else if(!strcmp(event.kind,"detached")) {
+            if(event.ok) {
+                if(b->process)b->process->detached=true;
+                b->detach_phase=3;detach_send(k,b,"commit",now);
+            } else {
+                b->detach_phase=4;b->detach_requested=false;detach_send(k,b,"abort",now);
+                job_control_reply(k,b,false,event.error);
+                managed_state(k,b,"storage_error",event.error);
+            }
+        } else if(!strcmp(event.kind,"terminal") && event.ok) {
+            managed_state(k,b,"terminal",NULL);b->next_event=now+5000;
+        } else if(!strcmp(event.kind,"output")) {
+            if(b->read_request && b->read_id==event.request_id) {
+                job_reply(k,b->read_request,b,event.ok,event.error,cJSON_Duplicate(event.data,true));
+                free(b->read_request);b->read_request=NULL;
+            }
+        } else if(!event.ok)managed_state(k,b,"storage_error",event.error);
+        else if(!strcmp(event.kind,"running") || !strcmp(event.kind,"cancelling"))managed_state(k,b,event.kind,NULL);
+        else if(!strcmp(event.kind,"ack"))managed_state(k,b,"ack",NULL);
+        jobs_event_free(&event);
+    }
+    for(job_binding *b=k->job_bindings;b;b=b->next) {
+        if(b->detach_requested && !b->detach_phase && !jobs_background(b->job))managed_detach(k,b,now);
+        if(b->detach_phase==5) {
+            char error[512]="";
+            if(jobs_detach(b->job,++k->job_request_seq,error,sizeof error))b->detach_phase=2;
+            else if(jobs_finished(b->job) || b->process_drained) {
+                b->detach_phase=4;detach_send(k,b,"abort",now);
+                job_control_reply(k,b,false,"任务已经结束");
+            }
+        }
+        if(b->detach_phase && now>=b->next_detach) {
+            if(b->detach_phase==1)detach_send(k,b,"prepare",now);
+            if(b->detach_phase==3)detach_send(k,b,"commit",now);
+            if(b->detach_phase==4)detach_send(k,b,"abort",now);
+        }
+        if(jobs_finished(b->job) && !b->terminal_handled && !b->recovered) {
+            /* Durable detach wins even if exit follows before the commit reply. */
+            if(!jobs_background(b->job))managed_close_wait(k,b,false,now);
+            if(b->detach_phase==3 || b->detach_phase==2 || b->detach_phase==5)continue;
+            cJSON *state=jobs_snapshot(b->job);
+            const char *status=sget(state,"status");
+            if(status && !strcmp(status,"unknown")) {
+                if(!b->unknown_reported)lease_send(k,"lease_cancel",b->lease_id);
+                b->unknown_reported=true;cJSON_Delete(state);continue;
+            }
+            cJSON_Delete(state);
+            lease_send(k,"lease_release",b->lease_id);b->terminal_handled=true;
+            if(b->process) {
+                if(b->process->tag==1 && k->nshells>0)k->nshells--;
+                job_free(b->process);b->process=NULL;
+            }
+        }
+        if(jobs_finished(b->job) && now>=b->next_event) {
+            cJSON *state=jobs_snapshot(b->job);
+            const char *notification=sget(state,"notification_state");
+            if(notification && !strcmp(notification,"pending"))managed_state(k,b,"terminal",NULL);
+            cJSON_Delete(state);b->next_event=now+5000;
+        }
+        if(!b->long_notice && !b->wait_closed && b->started_at && now-b->started_at>=10000) {
+            managed_state(k,b,"long_running","命令仍在执行，可以 /bg 转后台、/job 查看输出或停止");
+            b->long_notice=true;
+        }
+    }
+    /* Closed queue entries cannot be allowed to launch after a cancellation fence. */
+    execq_t **pp=&k->execq;
+    while(*pp) {
+        execq_t *q=*pp;
+        if(q->managed && (jobs_finished(q->managed->job) || (q->managed->wait_closed && !jobs_background(q->managed->job)))) {
+            *pp=q->next;execq_free(q);
+        } else pp=&q->next;
+    }
+}
+static void job_control(kernel_t *k,const cJSON *m,int64_t now)
+{
+    const char *request=sget(m,"request_id"),*action=sget(m,"action");
+    if(!request || !*request || strlen(request)>128 || !action)return;
+    if(!k->jobs || !k->jobs_mode) {job_reply(k,request,NULL,false,"节点后台 Job 能力不可用",NULL);return;}
+    if(!strcmp(action,"list")) {
+        cJSON *items=cJSON_CreateArray();
+        for(job_binding *b=k->job_bindings;b;b=b->next)if(jobs_created(b->job))cJSON_AddItemToArray(items,job_public(b));
+        job_reply(k,request,NULL,true,NULL,items);return;
+    }
+    job_binding *b=binding_find(k,sget(m,"job_id"));
+    if(!b || !jobs_created(b->job)){job_reply(k,request,NULL,false,"任务不存在或尚未可靠保存",NULL);return;}
+    if(!strcmp(action,"status"))job_reply(k,request,b,true,NULL,NULL);
+    else if(!strcmp(action,"output")) {
+        const cJSON *cursor=cJSON_GetObjectItemCaseSensitive(m,"cursor");
+        const cJSON *maximum=cJSON_GetObjectItemCaseSensitive(m,"max_bytes");
+        if((cursor && (!cJSON_IsNumber(cursor) || cursor->valuedouble<0 || cursor->valuedouble>9007199254740991.0 ||
+                       cursor->valuedouble!=(double)(uint64_t)cursor->valuedouble)) ||
+           (maximum && (!cJSON_IsNumber(maximum) || maximum->valuedouble<1 || maximum->valuedouble>65536))) {
+            job_reply(k,request,b,false,"日志游标或字节上限无效",NULL);return;
+        }
+        if(b->read_request) {job_reply(k,request,b,false,"本任务已有日志读取正在进行",NULL);return;}
+        uint64_t sequence=++k->job_request_seq;
+        if(!jobs_read(b->job,cursor?(uint64_t)cursor->valuedouble:0,maximum?(size_t)maximum->valueint:16384,sequence)) {
+            job_reply(k,request,b,false,"日志读取队列繁忙",NULL);return;
+        }
+        b->read_id=sequence;b->read_request=xstrdup(request);
+    } else if(!strcmp(action,"detach")) {
+        if(b->control_request && strcmp(b->control_request,request)) {job_reply(k,request,b,false,"移交正在进行",NULL);return;}
+        if(!b->control_request)b->control_request=xstrdup(request);
+        managed_detach(k,b,now);
+    } else if(!strcmp(action,"cancel")) {
+        if(b->recovered && !b->terminal_handled) {job_reply(k,request,b,false,"节点重启后状态未知，不能确认旧进程已停止",NULL);return;}
+        if(jobs_finished(b->job)) {job_reply(k,request,b,true,"任务已结束",NULL);return;}
+        jobs_cancelling(b->job);
+        if(b->process) {
+            runner_stop(b->process);
+            if(!b->detach_phase)lease_send(k,"lease_cancel",b->lease_id);
+        }
+        else {
+            jobs_fail(b->job,"cancelled","用户停止，未启动命令");
+            execq_t **pp=&k->execq;
+            while(*pp && (*pp)->managed!=b)pp=&(*pp)->next;
+            if(*pp){execq_t *q=*pp;*pp=q->next;execq_free(q);}
+        }
+        job_reply(k,request,b,true,"已请求停止，等待进程回收与终态保存",NULL);
+    } else job_reply(k,request,b,false,"未知 Job 操作",NULL);
+}
+
 /* ---- 网关请这台机器代为执行（工作目录在这台机器上，但这一轮由别的内核跑） ---- */
 
 static void send_run_result(kernel_t *k, const char *id, bool ok, const char *content)
@@ -1120,6 +1553,8 @@ static void send_run_result(kernel_t *k, const char *id, bool ok, const char *co
 static void handle_run(kernel_t *k, const cJSON *m, int64_t now)
 {
     const char *id = sget(m, "id");
+    for(job_binding *b=k->job_bindings;b;b=b->next)
+        if(id && b->kind==JOB_HOST && !strcmp(id,b->id))return;
     const cJSON *req = cJSON_GetObjectItemCaseSensitive(m, "req");
     const char *tool = sget(req, "tool");
     char err[1024] = "";
@@ -1355,6 +1790,10 @@ static void pump(kernel_t *k, int64_t now)
                 cJSON_AddNumberToObject(m, "turn_id", c->turn_id);
                 gw_free(g);
             } else if (!execq_drop(k, c->sid, c->id)) {
+                for(job_binding *b=k->job_bindings;b;b=b->next)
+                    if(!strcmp(b->sid,c->sid) && !strcmp(b->id,c->id) &&
+                       !strcmp(b->run_id,c->run_id?c->run_id:"") && b->turn_id==c->turn_id &&
+                       !jobs_background(b->job))jobs_cancelling(b->job);
                 runner_kill(&k->runner, c->sid, c->id);
             }
             log_info("终止 %s", c->id);
@@ -1498,6 +1937,12 @@ static void save_token(kernel_t *k, const char *token, int64_t now)
 static void handle_update(kernel_t *k, const cJSON *m)
 {
     const char *ver = sget(m, "version");
+    for(job_binding *b=k->job_bindings;b;b=b->next)if(!jobs_finished(b->job)) {
+        cJSON *reply=msg_new("update_result",NULL);cJSON_AddBoolToObject(reply,"ok",false);
+        cJSON_AddStringToObject(reply,"detail","节点仍有 Job，延后自动更新；主动重启会中断任务");
+        if(ver)cJSON_AddStringToObject(reply,"version",ver);
+        link_send(&k->link,reply);return;
+    }
     log_info("网关推来新版本 %s，开始更新", ver ? ver : "?");
     char err[512] = "";
     bool ok = update_apply(m, k->conf.exec, err, sizeof err) == 0;
@@ -1529,13 +1974,27 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
         const cJSON *leases = cJSON_GetObjectItemCaseSensitive(features, "machine_leases");
         k->leasing = cJSON_IsNumber(leases) && leases->valueint >= 1;
         k->lease_synced = !k->leasing;
+        const cJSON *detach=cJSON_GetObjectItemCaseSensitive(features,"lease_detach");
+        const cJSON *manager=cJSON_GetObjectItemCaseSensitive(features,"job_manager");
+        k->detach_capable=k->leasing && cJSON_IsNumber(detach) && detach->valueint>=1;
+        k->jobs_mode=k->jobs && k->exec_stream_version>=1 && k->detach_capable &&
+                     cJSON_IsNumber(manager) && manager->valueint>=1;
         if (k->leasing) lease_sync(k, now);
+        if(k->jobs_mode)sync_jobs(k);
         set_state(k, "connected", NULL, NULL);
         if (k->update_deadline) {
             update_confirm();
             k->update_deadline = 0;
             log_info("更新到 %s 成功", NA_VERSION);
         }
+        return;
+    }
+    if(!strcmp(t,"lease_detach_result")) {job_detach_result(k,m,now);return;}
+    if(!strcmp(t,"job_control")) {job_control(k,m,now);return;}
+    if(!strcmp(t,"events_ack")) {
+        const cJSON *seq=cJSON_GetObjectItemCaseSensitive(m,"event_seq");
+        managed_job *owned=k->jobs && sget(m,"job_id")?jobs_find(k->jobs,sget(m,"job_id")):NULL;
+        if(owned && cJSON_IsNumber(seq) && seq->valuedouble==1)jobs_acknowledge(owned,1);
         return;
     }
     if (!strcmp(t, "lease_synced")) {
@@ -1560,10 +2019,15 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
             return;
         }
         execq_t *q = *pp;
+        if(q->managed && strcmp(t,"lease_deny")) {
+            q->managed->lease_registered=true;
+            if(q->managed->detach_requested)managed_detach(k,q->managed,now);
+        }
         if (!strcmp(t, "lease_grant")) { q->lease_granted = true; pump_execq(k, now); }
         else if (!strcmp(t, "lease_deny")) {
             *pp = q->next;
-            if (q->kind == JOB_TOOL) tool_done(k, q->sid, q->run_id, q->turn_id, q->id, false, sget(m, "detail"), now);
+            if(q->managed)jobs_fail(q->managed->job,"failed",sget(m,"detail"));
+            else if (q->kind == JOB_TOOL) tool_done(k, q->sid, q->run_id, q->turn_id, q->id, false, sget(m, "detail"), now);
             else send_run_result(k, q->id, false, sget(m, "detail"));
             execq_free(q);
         } else if (q->kind == JOB_TOOL) {
@@ -1648,7 +2112,11 @@ static void handle_msg(kernel_t *k, const cJSON *m, int64_t now)
     if (!strcmp(t, "run_cancel")) {
         /* 还没启动的先从队列里拿掉：光杀进程没用，排队的请求会在槽位空出来之后自己跑起来 */
         const char *cid = sget(m, "id");
-        if (!execq_drop(k, "", cid)) runner_kill(&k->runner, "", cid);
+        if (!execq_drop(k, "", cid)) {
+            for(job_binding *b=k->job_bindings;b;b=b->next)
+                if(cid && b->kind==JOB_HOST && !strcmp(b->id,cid) && !jobs_background(b->job))jobs_cancelling(b->job);
+            runner_kill(&k->runner, "", cid);
+        }
         log_info("取消代执行 %s", cid ? cid : "?");
         return;
     }
@@ -1866,7 +2334,15 @@ static void disconnect(kernel_t *k, int64_t now, const char *why)
     pipes_reset(&k->pipes);
     na_event ev = { .type = NA_EV_RESET };
     na_core_feed(k->core, now, &ev);
+    for(job_binding *b=k->job_bindings;b;b=b->next) {
+        if(!jobs_background(b->job))b->wait_closed=true;
+        free(b->control_request);b->control_request=NULL;
+        free(b->read_request);b->read_request=NULL;
+        if(b->detach_phase && jobs_background(b->job))b->detach_phase=3;
+        else b->detach_phase=0;
+    }
     execq_clear(k);
+    runner_kill_foreground(&k->runner);
     pendin_clear(k);
     pump(k, now);   /* 只剩 KILL：终止所有正在执行的工具 */
     while (k->gwjobs) {
@@ -1883,6 +2359,16 @@ static void collect_finished(kernel_t *k, int64_t now)
 {
     job_t *j;
     while ((j = runner_take_finished(&k->runner, now))) {
+        if(j->managed) {
+            job_binding *b=j->managed;
+            cJSON *receipt=runner_result_object(j);
+            if(j->killed && !receipt)jobs_fail(b->job,"cancelled","停止后进程已回收，执行器未保留完整终态");
+            else if(!receipt)jobs_fail(b->job,"unknown","执行器流式协议没有完整且有效终态，不能确认命令结果");
+            else jobs_process_finished(b->job);
+            cJSON_Delete(receipt);b->process_drained=true;
+            /* Keep the real lease and binding until terminal metadata is durable. */
+            continue;
+        }
         if (!j->killed) {
             bool ok;
             char *res = job_result(j, &ok);
@@ -1921,6 +2407,8 @@ static void collect_finished(kernel_t *k, int64_t now)
 static int64_t next_wakeup(kernel_t *k, int64_t now)
 {
     int64_t wake = now + 1000;   /* 至少每秒醒一次，顺带处理退出后迟迟不关管道的进程 */
+    int64_t job_deadline=k->jobs?jobs_next_deadline(k->jobs):-1;
+    if(job_deadline>=0 && job_deadline<wake)wake=job_deadline;
     int64_t dl = na_core_next_deadline(k->core);
     if (dl >= 0 && dl < wake) wake = dl;
     if (k->link.fd != NA_SOCK_NONE) {
@@ -2009,6 +2497,8 @@ static void loop(kernel_t *k)
         pipes_poll(&k->pipes, pfds + pbase, prefs + pbase, np - pbase, now);
         pump_pipes(k);
         collect_finished(k, now);
+        pump_jobs(k,now);
+        pump_execq(k,now);
 
         na_event tick = { .type = NA_EV_TICK };
         na_core_feed(k->core, now, &tick);
@@ -2198,6 +2688,35 @@ int main(int argc, char **argv)
     k.runner.wake = &g_wake;
 
     setup_signals();
+    char *job_root=ctl_sidecar(conf_path,".jobs");
+    k.jobs=jobs_open(job_root,k.node_epoch,&g_wake,k.jobs_error,sizeof k.jobs_error);
+    free(job_root);
+    if(!k.jobs)log_error("Job 存储恢复失败，后台能力停用并保留已有租约：%s",k.jobs_error);
+    else {
+        cJSON *records=jobs_list(k.jobs);
+        const cJSON *record;
+        cJSON_ArrayForEach(record,records) {
+            job_binding *b=xcalloc(1,sizeof *b);
+            b->job=jobs_find(k.jobs,sget(record,"job_id"));b->recovered=true;b->wait_closed=true;
+            b->sid=xstrdup(sget(record,"wait_sid")?sget(record,"wait_sid"):"");
+            b->id=xstrdup(sget(record,"wait_id")?sget(record,"wait_id"):"");
+            const cJSON *origin=cJSON_GetObjectItemCaseSensitive(record,"origin");
+            b->run_id=xstrdup(sget(origin,"run_id")?sget(origin,"run_id"):"");
+            const cJSON *turn=cJSON_GetObjectItemCaseSensitive(origin,"turn_id");
+            b->turn_id=cJSON_IsNumber(turn)?turn->valueint:0;
+            const cJSON *kind=cJSON_GetObjectItemCaseSensitive(record,"wait_kind");
+            b->kind=cJSON_IsNumber(kind)?kind->valueint:JOB_HOST;
+            const cJSON *spec=cJSON_GetObjectItemCaseSensitive(record,"lease");
+            if(cJSON_IsObject(spec)) {
+                b->lease_spec=cJSON_PrintUnformatted(spec);
+                b->lease_id=xstrdup(sget(spec,"lease_id")?sget(spec,"lease_id"):"");
+            }
+            b->terminal_handled=!sget(record,"status") || strcmp(sget(record,"status"),"unknown");
+            if(!b->terminal_handled)k.nshells++;
+            b->next=k.job_bindings;k.job_bindings=b;
+        }
+        cJSON_Delete(records);
+    }
     loop(&k);
 
     log_info(k.restart ? "重启" : "退出");
@@ -2207,6 +2726,18 @@ int main(int argc, char **argv)
     }
     plat_signals_remove();
     runner_shutdown(&k.runner, 2500);
+    /* Shutdown preserves the durable queued records for interrupted recovery. */
+    while(k.execq){execq_t *next=k.execq->next;execq_free(k.execq);k.execq=next;}
+    pendin_clear(&k);
+    while(k.gwjobs){gwjob_t *next=k.gwjobs->next;gw_free(k.gwjobs);k.gwjobs=next;}
+    for(job_binding *b=k.job_bindings;b;) {
+        job_binding *next=b->next;
+        /* Only drained processes removed from runner are retained by the binding. */
+        if(b->process_drained && b->process)job_free(b->process);
+        free(b->sid);free(b->run_id);free(b->id);free(b->lease_id);free(b->lease_spec);
+        free(b->control_request);free(b->read_request);free(b);b=next;
+    }
+    jobs_close(k.jobs);
     pipes_shutdown(&k.pipes);
     if (k.restart && k.link.fd != NA_SOCK_NONE) link_flush(&k.link);   /* 把 update_result 发出去 */
     link_close(&k.link);
