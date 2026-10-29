@@ -75,7 +75,7 @@ var Commands = []Command{
 	{Name: "status", Desc: "查看网关状态：版本、运行时长、内核、渠道、待重启设置", Admin: true},
 	{Name: "restart", Desc: "检查配置后重启网关", Admin: true},
 	{Name: "update", Desc: "有新版本就更新网关（起不来自动退回）", Admin: true},
-	{Name: "stop", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
+	{Name: "stop", Args: "[all | job_id]", Desc: "停止当前任务（任务进行中直接发「停」也行）"},
 	{Name: "undo", Desc: "撤回最近一条消息，已经回复的连同回复从上下文里删掉（直接发「撤回」也行）"},
 	{Name: "reset", Desc: "清空本会话的上下文"},
 	{Name: "sandbox", Args: "[global|agent|workspace ID] [auto|on|off|default]", Desc: "查看、设置执行隔离；审批和文件权限独立", Admin: true},
@@ -182,6 +182,7 @@ type App struct {
 	jobHints       map[string]*jobHint
 	jobCards       map[string]*jobPresentation
 	jobButtons     map[string]jobButtonAction
+	jobStopGroups  map[string]bool
 	outboxes       map[string]chan outItem
 	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
 	wss            []Workspace       // 工作目录列表（workspaces.go）
@@ -444,6 +445,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.jobHints = map[string]*jobHint{}
 	a.jobCards = map[string]*jobPresentation{}
 	a.jobButtons = map[string]jobButtonAction{}
+	a.jobStopGroups = map[string]bool{}
 	a.jobPersist = map[string]*jobPersistence{}
 	a.jobControls = map[string]jobControlWait{}
 	a.jobCompletions = map[string]jobCompletionWait{}
@@ -776,6 +778,10 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		a.cmdJobs(c, cmd, arg)
 		return
 	case "stop":
+		if arg == "all" {
+			a.cmdStopAllJobs(c)
+			return
+		}
 		if strings.HasPrefix(arg, "j_") {
 			a.cmdJobs(c, "job", arg+" cancel")
 			return

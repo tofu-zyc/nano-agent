@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/proto"
-	"nano-agent/gateway/internal/redact"
 )
 
 func jobTool() proto.ToolSpec {
@@ -153,6 +152,9 @@ func (a *App) cmdJobs(c in, command, arg string) {
 		if len(fields) > 1 {
 			request.Action = fields[1]
 		}
+		if request.Action == "logs" {
+			request.Action = "output"
+		}
 		if request.Action == "stop" {
 			request.Action = "cancel"
 		}
@@ -175,6 +177,7 @@ func (a *App) cmdJobs(c in, command, arg string) {
 		}
 	}
 	// User commands bypass the message/model queue and take no run budget.
+	ch, agent := a.chans[c.ep.ch], a.execAgentID(c.s.sid)
 	ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
 	go func() {
 		defer cancel()
@@ -186,10 +189,7 @@ func (a *App) cmdJobs(c in, command, arg string) {
 			text = renderJobResponse(result)
 		}
 		a.mu.Lock()
-		if redact.Needed(a.cfg.Security.Redact, false, c.ep.ch != "web" && c.ep.ch != "cli") {
-			text = redact.ToolResult(text, a.knownSecrets())
-		}
-		a.answer(c, text)
+		a.jobReply(ch, c.ep, agent, c.s.sid, text)
 		a.mu.Unlock()
 	}()
 }

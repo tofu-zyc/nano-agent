@@ -45,18 +45,34 @@ func jobStateLabel(status string) string {
 	}
 	return status
 }
-func (a *App) jobCardOrigin(p *jobPresentation) bool {
-	if a.ctx.Err() != nil || p.info.Silent || a.branchSilent(p.info.SID) || a.chans[p.ep.ch] != p.ch ||
-		!a.allowed(p.ep.key()) || !a.agentExists(p.info.Agent) {
+
+// All asynchronous Job replies use the original channel/agent scope. Binding
+// changes may revoke a delivery; they never retarget it.
+func (a *App) jobEndpointValid(ch channel.Channel, ep endpoint, agent, sid string) bool {
+	if a.ctx.Err() != nil || ch == nil || a.chans[ep.ch] != ch || !a.allowed(ep.key()) ||
+		!a.agentExists(agent) || a.execAgentID(sid) != agent {
 		return false
 	}
-	if ep := a.eps[p.ep.key()]; ep != nil && a.execAgentID(ep.Session) != p.info.Agent {
+	if record := a.eps[ep.key()]; record != nil && a.execAgentID(record.Session) != agent {
 		return false
 	}
-	if p.ep.ch != "cli" && p.ep.ch != "web" && a.agentForChannel(p.ep.ch) != p.info.Agent && !a.hasExplicitAgent(p.info.SID) {
+	if ep.ch != "cli" && ep.ch != "web" && a.agentForChannel(ep.ch) != agent && !a.hasExplicitAgent(sid) {
 		return false
 	}
 	return true
+}
+func (a *App) jobReply(ch channel.Channel, ep endpoint, agent, sid, text string) bool {
+	if !a.jobEndpointValid(ch, ep, agent, sid) {
+		return false
+	}
+	if redact.Needed(a.cfg.Security.Redact, false, ep.ch != "web" && ep.ch != "cli") {
+		text = redact.ToolResult(text, a.knownSecrets())
+	}
+	a.tell(sid, ep, text)
+	return true
+}
+func (a *App) jobCardOrigin(p *jobPresentation) bool {
+	return !p.info.Silent && !a.branchSilent(p.info.SID) && a.jobEndpointValid(p.ch, p.ep, p.info.Agent, p.info.SID)
 }
 func (a *App) removeJobCard(p *jobPresentation) {
 	for _, token := range p.tokens {
@@ -329,9 +345,6 @@ func (a *App) jobButton(ch channel.Channel, ep endpoint, m channel.Message, by s
 		}
 		// An explicit click returns to its original endpoint/session. It does
 		// not attach a window, write model history, or select another chat.
-		if redact.Needed(a.cfg.Security.Redact, false, p.ep.ch != "web" && p.ep.ch != "cli") {
-			text = redact.ToolResult(text, a.knownSecrets())
-		}
-		a.tell(p.info.SID, p.ep, strings.TrimSpace(text))
+		a.jobReply(p.ch, p.ep, p.info.Agent, p.info.SID, strings.TrimSpace(text))
 	}()
 }
