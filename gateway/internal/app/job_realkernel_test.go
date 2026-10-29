@@ -16,6 +16,7 @@ import (
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/eventlog"
+	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
@@ -439,5 +440,77 @@ func TestRealCForegroundHintButtonDetachesSameExecution(t *testing.T) {
 	launched, err := os.ReadFile(marker)
 	if err != nil || string(launched) != "launch" {
 		t.Fatal("command executed more than once", string(launched), err)
+	}
+}
+
+// 用户路径：聊天里让模型起一个后台 Shell → Job 工具查到它 → /jobs 能看到 →
+// 完成后经可靠日志投递给 job.completed 的 Hook。全程用真正的 C 内核，不带测试包装。
+func TestRealCJobUserPathFromChatToHook(t *testing.T) {
+	e, _ := setupRealKernel(t)
+	work := filepath.Join(e.dir, "home", "job-user")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	nodeName := ""
+	for name := range e.a.nodes {
+		nodeName = name
+		break
+	}
+	negotiated := e.a.nodes[nodeName].info.Features["job_manager"] >= 1
+	e.a.mu.Unlock()
+	if !negotiated {
+		t.Skip("内核没有协商开启后台 Job")
+	}
+	workspace := Workspace{ID: "job-user", Host: e.a.machineOf(nodeName), Path: work, SandboxMode: "off"}
+	e.a.mu.Lock()
+	e.a.wss = []Workspace{workspace}
+	st := e.a.store.Settings(mainSID)
+	st.Mode = "full"
+	st.WorkspacesSet = true
+	st.Workspaces = []string{workspace.ID}
+	err := e.a.store.SaveSettings(mainSID, st)
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	model := &jobToolModel{command: "printf started; sleep 0.2; printf done", workspace: workspace.Label()}
+	e.a.llm = model
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := hooks.Spec{Name: "任务完成", On: []string{"job.completed"}, Handler: hooks.Handler{Type: "notify", Text: "任务完成 {{event_name}}"}, Deliver: "none"}
+	view, err := e.a.HookAction(context.Background(), mainSID, "fake:u1", HookRequest{Action: "create", OperationID: "job-done", Spec: &spec})
+	if err != nil || view.Rule == nil {
+		t.Fatal(view, err)
+	}
+	e.say("起一个后台命令，然后用 Job 看看它")
+	e.ch.wait(t, "Job tool path completed")
+	model.mu.Lock()
+	jobID := model.jobID
+	model.mu.Unlock()
+	if jobID == "" {
+		t.Fatal("后台任务没有经过网关登记")
+	}
+	e.say("/jobs")
+	e.ch.wait(t, jobID)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		rows, _ := e.a.jobEvents.Deliveries("", 128)
+		done := false
+		for _, d := range rows {
+			if d.HookID == view.Rule.ID && d.Status == "succeeded" {
+				done = true
+			}
+		}
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job.completed 没有投递给 Hook（%d 条投递）", len(rows))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	saved, ok := e.a.jobEvents.Job(nodeName, jobID)
+	if !ok || saved.Receipt.Status != "succeeded" || saved.TerminalEventID == "" {
+		t.Fatal(saved, ok)
 	}
 }

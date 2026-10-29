@@ -14,6 +14,10 @@ import (
 func (a *App) LeaseProtocol() int       { return 1 }
 func (a *App) LeaseDetachProtocol() int { return 1 }
 
+// JobProtocol 开启节点上的后台 Job 能力：网关先可靠登记任务身份和终态名额，
+// 再给 lease_acquire 授权（见 jobs.go / job_events.go）。
+func (a *App) JobProtocol() int { return 1 }
+
 func resourceKeys(csv string) []string {
 	if csv == "" {
 		return nil

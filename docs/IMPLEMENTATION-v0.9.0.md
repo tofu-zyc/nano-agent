@@ -575,3 +575,11 @@ C 内核在调用通过身份与声明校验后进入 `CALL_WAIT_HOOK`，发 `ho
 全量 app 测试偶发的 `TestMountsOnSeveralMachines` / `TestKernelMachineWorkspace` 失败也定位到了：假内核夹具不回答网关在后台规范化工作目录时发的 `ls`，那条请求留在缓冲里被后面的断言当成别的消息读走。夹具改成和真实内核一样随手回 `ls_result`（断言不变）。连续 6 次全量 app 测试在修正后全部通过。
 
 验证：新增 `TestFileWatchKeepsGaplessSequencesPerNodeEpoch`（两个节点交错上报时各自序号为 1、2 和 1）；全量 `go test ./...`、`go vet`、app/hooks race 与连续全量 app 运行通过。
+
+### P2 生产协商：后台 Job 用户路径打通
+
+`App` 现在实现 `JobProtocol()`，内核 hello 里 `job_manager`/`job_stream`/`lease_detach` 都在时真正协商开启节点上的后台 Job；此前只有测试包装器实现了它，生产网关从不宣告，所以后台化、Job 工具、`/jobs /bg /job`、网页任务页和平台卡片都停在“底盘已实现但不启用”。网关仍在任务身份与终态名额可靠落盘之后才给执行授权（既有 `jobs.go`/`job_events.go` 路径）。
+
+验证：`TestRealCJobUserPathFromChatToHook`（真 C 内核、不带包装：模型在聊天里起后台 Shell → 网关登记 → `Job` 工具 status 到达网关 → `/jobs` 列出该任务 → 完成后 `job.completed` 经可靠日志投递给 Hook，终态持久且有 `TerminalEventID`）；既有真实 C Job 专项（移交/取消/按钮原地转后台/安静分支保留身份）与全量 `go test ./internal/app` 通过。
+
+未做：真实飞书/Telegram 卡片联调（需要真实渠道账号），SSH 目标节点能力降级的现场验证。
