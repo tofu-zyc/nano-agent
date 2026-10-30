@@ -56,7 +56,7 @@ static const builtin BUILTINS[] = {
       "在工作目录所在的机器上执行一条命令，返回标准输出和标准错误（合在一起）以及非零的退出码。"
       "Linux 和 macOS 上用 /bin/sh，Windows 上用 PowerShell（见系统消息里的环境说明）。"
       "每次调用都是新的 shell，cd 和环境变量不会保留到下一次。命令可以读这台机器上的文件，"
-      "默认只能写工作目录和临时目录；需要写工作目录外时设 elevated: true，会请用户批准。命令结束时它启动的后台进程会被清理。不要运行需要交互输入的命令。",
+      "默认只能写工作目录和临时目录；需要写工作目录外时设 elevated: true，会请用户批准。命令结束时它启动的后台进程会被清理：要并行就在同一条命令里写「慢命令 & 快命令; wait」；要跑很久，用 Job 或定时任务，它们不会跟着命令退出。不要运行需要交互输入的命令。",
       "{\"type\":\"object\",\"properties\":{"
       "\"command\":{\"type\":\"string\",\"description\":\"要执行的命令\"},"
       "\"timeout\":{\"type\":\"integer\",\"description\":\"超时秒数，默认 120，最大 600\"}," WS_PROP "," ELEV_PROP "},"

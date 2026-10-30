@@ -25,7 +25,9 @@ GET /api/hooks?agent=default 返回规则；action=runs&id=<编号> 查看有界
 }}
 ```
 
-规则登记时固定来源会话、agent、创建者、权限上限、工作目录、工具集合和原窗口凭据指纹；运行时取其与当前权限的交集。删掉或卸载工作目录会暂停，不会回退 HOME。临时会话为固定的 hook:<delivery_id>（其他 agent 带 @agent/ 前缀），不复制来源整段历史，完成或异常退出后释放 App 和 Store 缓存。life 写一条确定性外部经历，再开启独立片段；branch 复用同一 delivery_id 的持久 Fork，结果不投回来源。
+规则登记时固定来源会话、agent、创建者、权限上限、工作目录和原窗口凭据指纹；agent 处理器另外固定登记时能用的工具集合（来源工具超过上限时不冻结，按运行时的工具表执行），notify 和 command 不调用工具，不登记工具集合。运行时取其与当前权限的交集。删掉或卸载工作目录会暂停，不会回退 HOME。临时会话为固定的 hook:<delivery_id>（其他 agent 带 @agent/ 前缀），不复制来源整段历史，完成或异常退出后释放 App 和 Store 缓存。life 写一条确定性外部经历，再开启独立片段；branch 复用同一 delivery_id 的持久 Fork，结果不投回来源。
+
+来源可以是主人的会话、公开群聊，或者这个 agent 自己的内心活动（life）。内心活动没有聊天窗口：notify 登记时直接拒绝（它只会发到冻结的窗口，登记了也响不了），要叫醒它用 `handler.type=agent` 加 `conversation=life`，结果记进它自己的经历，不再投影回聊天。
 
 notify 只替换固定模板变量。command 从标准输入读取最多 4096 字节的事件 JSON，标准输出必须是单个 JSON 对象，例如 {"trigger":true,"summary":"构建失败"}。默认 5 秒，最长 30 秒，最多 64 KiB 输出。script 使用 agent/hooks 下的相对路径，登记固定内容摘要；执行前重新校验并放入目标节点只读版本缓存，文件改变必须更新规则。普通命令结果不隐式启动模型。
 

@@ -1073,7 +1073,10 @@ func (a *App) canAccessForkContext(by, caller, target string) bool {
 		}
 	}
 	if id, life := strings.CutPrefix(by, "life:"); life {
-		return a.execAgentID(target) == id && (a.isOwnerSID(id, target) || a.isGroupSession(target))
+		// 内心活动是 agent 自己的会话：它可以处理自己的内心上下文（登记 Hook、约回访都要这一条），
+		// 除此以外仍然只能碰主人的会话和公开群聊。
+		ownLife := isLifeSID(target) && a.routeAgentID(target) == id
+		return a.execAgentID(target) == id && (ownLife || a.isOwnerSID(id, target) || a.isGroupSession(target))
 	}
 	if caller != "" && a.isGroupSession(caller) {
 		return false

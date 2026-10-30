@@ -70,6 +70,7 @@ func (a *App) hookToolCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	go func() {
 		out, err := a.HookAction(a.ctx, sid, who, req)
 		if err != nil {
+			a.log.Warn("Hook 操作没有通过", "action", req.Action, "sid", sid, "who", who, "err", err)
 			reply(false, err.Error())
 			return
 		}
@@ -105,13 +106,19 @@ func (a *App) hookScope(sid, who, agent string, s hooks.Spec) (hooks.Spec, error
 	for _, t := range offered {
 		names = append(names, t.Function.Name)
 	}
-	if s.Scope.Tools == nil {
-		s.Scope.Tools = names
-	} else {
+	if s.Scope.Tools != nil {
 		for _, tool := range s.Scope.Tools {
 			if !slices.Contains(names, tool) {
 				return s, fmt.Errorf("来源没有工具 %s", tool)
 			}
+		}
+	} else if s.Handler.Type == "agent" {
+		// 只有会跑模型的处理器需要冻结「登记时能用的工具」；notify 和 command 一个工具都不调用，
+		// 把它们塞进规则只是让 MCP 多的会话永远登记不上（工具表上百条就超过上限）。
+		if len(names) <= hooks.MaxScopedTools {
+			s.Scope.Tools = names
+		} else {
+			a.log.Warn("Hook 来源的工具太多，不冻结工具表", "sid", sid, "tools", len(names), "limit", hooks.MaxScopedTools)
 		}
 	}
 	if s.Scope.SID != "" && s.Scope.SID != sid {
@@ -145,6 +152,11 @@ func (a *App) hookScope(sid, who, agent string, s hooks.Spec) (hooks.Spec, error
 		s.Scope.Endpoints = append(s.Scope.Endpoints, hooks.Endpoint{Channel: target.ch, Chat: target.chat, Fingerprint: a.hookFingerprint(target.ch)})
 	}
 	slices.SortFunc(s.Scope.Endpoints, func(x, y hooks.Endpoint) int { return strings.Compare(x.Channel+":"+x.Chat, y.Channel+":"+y.Chat) })
+	// notify 只会往登记时冻结的窗口发；没有窗口的会话（内心活动、安静分支）建了也永远不会响，
+	// 与其让它在投递时反复重试，不如登记的时候就说清楚。
+	if s.Handler.Type == "notify" && s.Deliver != "none" && len(s.Scope.Endpoints) == 0 && !a.branchSilent(sid) {
+		return s, errors.New("这个会话没有投递窗口：notify 只发到登记时冻结的聊天窗口；内心活动请用 handler.type=agent 加 conversation=life，或者把 deliver 设成 none")
+	}
 	if s.Handler.Conversation == "life" {
 		ag, _ := a.agentByID(agent)
 		if !ag.Life() {

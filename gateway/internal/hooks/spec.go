@@ -67,6 +67,10 @@ type Spec struct {
 	Watch      *Watch   `json:"watch,omitempty"`
 }
 
+// MaxScopedTools 是规则里冻结的工具名上限。网关在登记时把"来源会话当时能用的工具"
+// 写进 scope.tools（只对会跑模型的 agent 处理器有意义），配置总长另有 4 KiB 上限。
+const MaxScopedTools = 128
+
 var EventNames = []string{"run.started", "run.finished", "approval.waiting", "tool.before", "tool.after", "tool.failed",
 	"job.completed", "job.failed", "job.cancelled", "job.timed_out", "message.received", "device.online", "device.offline",
 	"file.changed", "mind.threshold_crossed", "deadline.at"}
@@ -100,20 +104,47 @@ func Normalize(s Spec) (Spec, error) {
 	if before && s.Handler.TimeoutMS > 2000 {
 		s.Handler.TimeoutMS = 2000
 	}
-	if len(s.On) == 0 || len(s.On) > 16 || len(s.Name) > 120 || len(s.Scope.SID) > 256 || len(s.Scope.Tools) > 128 || len(s.Scope.Workspaces) > 16 || len(s.Scope.Endpoints) > 8 {
-		return s, errors.New("Hook 事件、名称或来源范围超限")
+	// 每个上限单独说清是哪一个：合成一句话的时候没人能看出是哪一项挡住的。
+	if len(s.On) == 0 {
+		return s, errors.New("Hook 至少要登记一个事件（on）")
+	}
+	if len(s.On) > 16 {
+		return s, fmt.Errorf("Hook 事件最多 16 个，收到 %d 个", len(s.On))
+	}
+	if len(s.Name) > 120 {
+		return s, fmt.Errorf("Hook 名称最长 120 字节，收到 %d 字节", len(s.Name))
+	}
+	if len(s.Scope.SID) > 256 {
+		return s, fmt.Errorf("Hook 来源会话 ID 最长 256 字节，收到 %d 字节", len(s.Scope.SID))
+	}
+	if len(s.Scope.Tools) > MaxScopedTools {
+		return s, fmt.Errorf("Hook 冻结的工具最多 %d 个，收到 %d 个", MaxScopedTools, len(s.Scope.Tools))
+	}
+	if len(s.Scope.Workspaces) > 16 {
+		return s, fmt.Errorf("Hook 来源工作目录最多 16 个，收到 %d 个", len(s.Scope.Workspaces))
+	}
+	if len(s.Scope.Endpoints) > 8 {
+		return s, fmt.Errorf("Hook 投递窗口最多 8 个，收到 %d 个", len(s.Scope.Endpoints))
 	}
 	for _, name := range s.On {
 		if !slices.Contains(EventNames, name) {
 			return s, fmt.Errorf("不支持的 Hook 事件 %q", name)
 		}
 	}
-	if !slices.Contains([]string{"notify", "command", "agent"}, s.Handler.Type) ||
-		!slices.Contains([]string{"temporary", "origin", "life", "branch"}, s.Handler.Conversation) ||
-		!slices.Contains([]string{"creator", "origin", "none"}, s.Deliver) ||
-		!slices.Contains([]string{"allow", "deny"}, s.OnError) ||
-		!slices.Contains([]string{"none", "readonly", "ask", "auto", "full"}, s.Scope.Mode) {
-		return s, errors.New("Hook 处理器、目标或权限模式无效")
+	if !slices.Contains([]string{"notify", "command", "agent"}, s.Handler.Type) {
+		return s, fmt.Errorf("handler.type 只能是 notify/command/agent，收到 %q", s.Handler.Type)
+	}
+	if !slices.Contains([]string{"temporary", "origin", "life", "branch"}, s.Handler.Conversation) {
+		return s, fmt.Errorf("handler.conversation 只能是 temporary/origin/life/branch，收到 %q", s.Handler.Conversation)
+	}
+	if !slices.Contains([]string{"creator", "origin", "none"}, s.Deliver) {
+		return s, fmt.Errorf("deliver 只能是 creator/origin/none，收到 %q", s.Deliver)
+	}
+	if !slices.Contains([]string{"allow", "deny"}, s.OnError) {
+		return s, fmt.Errorf("on_error 只能是 allow/deny，收到 %q", s.OnError)
+	}
+	if !slices.Contains([]string{"none", "readonly", "ask", "auto", "full"}, s.Scope.Mode) {
+		return s, fmt.Errorf("scope.mode 只能是 none/readonly/ask/auto/full，收到 %q", s.Scope.Mode)
 	}
 	if before && len(s.On) != 1 {
 		return s, errors.New("前置和后置事件请登记为独立规则")
@@ -124,11 +155,31 @@ func Normalize(s Spec) (Spec, error) {
 	if before && s.Handler.Type != "command" {
 		return s, errors.New("tool.before 只允许短命令或声明式判断")
 	}
-	if len(s.Handler.Text) > 2000 || len(s.Handler.Command) > 2000 || len(s.Handler.Script) > 1024 || len(s.Handler.Prompt) > 2000 ||
-		len(s.Match.Fields) > 16 || len(s.Match.Status) > 16 || len(s.Match.Glob) > 256 ||
-		s.DebounceMS < 0 || s.DebounceMS > 60000 || s.CooldownMS < 0 || s.CooldownMS > 86400000 ||
-		s.Retries < 0 || s.Retries > 7 || s.Handler.TimeoutMS < 1 || s.Handler.TimeoutMS > 600000 || s.Handler.TokenBudget < 0 {
-		return s, errors.New("Hook 配置超过时限、正文、字段或重试上限")
+	switch {
+	case len(s.Handler.Text) > 2000:
+		return s, fmt.Errorf("handler.text 最长 2000 字节，收到 %d 字节", len(s.Handler.Text))
+	case len(s.Handler.Prompt) > 2000:
+		return s, fmt.Errorf("handler.prompt 最长 2000 字节，收到 %d 字节", len(s.Handler.Prompt))
+	case len(s.Handler.Command) > 2000:
+		return s, fmt.Errorf("handler.command 最长 2000 字节，收到 %d 字节", len(s.Handler.Command))
+	case len(s.Handler.Script) > 1024:
+		return s, fmt.Errorf("handler.script 最长 1024 字节，收到 %d 字节", len(s.Handler.Script))
+	case len(s.Match.Fields) > 16:
+		return s, fmt.Errorf("match.fields 最多 16 项，收到 %d 项", len(s.Match.Fields))
+	case len(s.Match.Status) > 16:
+		return s, fmt.Errorf("match.status 最多 16 项，收到 %d 项", len(s.Match.Status))
+	case len(s.Match.Glob) > 256:
+		return s, fmt.Errorf("match.path_glob 最长 256 字节，收到 %d 字节", len(s.Match.Glob))
+	case s.DebounceMS < 0 || s.DebounceMS > 60000:
+		return s, fmt.Errorf("debounce_ms 需在 0-60000 毫秒之间，收到 %d", s.DebounceMS)
+	case s.CooldownMS < 0 || s.CooldownMS > 86400000:
+		return s, fmt.Errorf("cooldown_ms 需在 0-86400000 毫秒之间，收到 %d", s.CooldownMS)
+	case s.Retries < 0 || s.Retries > 7:
+		return s, fmt.Errorf("retries 需在 0-7 之间，收到 %d", s.Retries)
+	case s.Handler.TimeoutMS < 1 || s.Handler.TimeoutMS > 600000:
+		return s, fmt.Errorf("handler.timeout_ms 需在 1-600000 毫秒之间，收到 %d", s.Handler.TimeoutMS)
+	case s.Handler.TokenBudget < 0:
+		return s, fmt.Errorf("handler.token_budget 不能是负数，收到 %d", s.Handler.TokenBudget)
 	}
 	if s.Handler.Type == "command" {
 		if s.Handler.Command == "" && s.Handler.Script == "" && s.Handler.Decision == "" {
@@ -162,7 +213,7 @@ func Normalize(s Spec) (Spec, error) {
 	}
 	raw, _ := json.Marshal(s)
 	if len(raw) > 4096 {
-		return s, errors.New("Hook 固定配置最多 4 KiB")
+		return s, fmt.Errorf("Hook 固定配置最多 4 KiB，这条序列化后是 %d 字节（先缩小 scope 或 match）", len(raw))
 	}
 	return s, nil
 }
