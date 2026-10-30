@@ -375,3 +375,29 @@ func TestSilentBranchCannotPushThroughUpdatingExistingSchedule(t *testing.T) {
 		t.Fatalf("主人修改任务被挡住了：%v", err)
 	}
 }
+
+// 改了 prompt 却还按老规矩办：定时任务这一轮的系统说明要明确，以前说定的
+// 「没消息就回 [不回复]」这类约定不能压过这次的任务正文。
+func TestScheduleSystemNoteOverridesStaleConventions(t *testing.T) {
+	e := setup(t)
+	task := newSchedule(t, e, ScheduleRequest{})
+	if _, err := e.a.ScheduleAction(e.sid, "fake:u1", ScheduleRequest{Action: "run_now", ID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	m := e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: m.SID})
+	e.k.expect(proto.TTurn)
+	system := e.llm.lastReq().Messages[0]
+	if system.Role != "system" || !strings.Contains(system.Content, "[定时任务]") || !strings.Contains(system.Content, "以这次为准") {
+		t.Fatalf("定时任务这一轮的系统说明没有说清老约定不算数：%q", system.Content)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: m.SID, Status: proto.StatusOK})
+	e.ch.wait(t, "[定时任务 早报]")
+	// 普通会话的系统提示里不该出现这条说明
+	e.a.mu.Lock()
+	plain, _, _, _ := e.a.contextParts(mainSID)
+	e.a.mu.Unlock()
+	if strings.Contains(plain, cronGuide) {
+		t.Fatalf("普通会话的系统提示混进了定时任务说明：%q", plain)
+	}
+}

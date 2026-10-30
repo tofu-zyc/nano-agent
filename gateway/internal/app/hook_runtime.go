@@ -282,7 +282,10 @@ func (a *App) finishHook(s *sess, r *run, note string) {
 	// At most one model Hook per agent is active. The delivery remains running
 	// until its explicit projection has returned; no unbounded detached sender.
 	go func() {
-		if result.Err == nil && inv.work.Spec.Handler.Conversation != "branch" {
+		// 结果要不要再投一遍，取决于登记时有没有冻结的窗口：内心活动（life）本来就没有聊天窗口，
+		// 它的结果已经写进自己的经历和这次 run 里，再去找窗口只会把投递标成不确定。
+		deliverable := len(inv.work.Spec.Scope.Endpoints) > 0 && inv.work.Spec.Deliver != "none"
+		if result.Err == nil && inv.work.Spec.Handler.Conversation != "branch" && deliverable {
 			ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
 			sent := (hookExecutor{a}).notify(ctx, inv.work, result.Summary)
 			cancel()
