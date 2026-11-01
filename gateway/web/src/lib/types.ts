@@ -242,6 +242,7 @@ export type Overview = {
   agents?: AgentInfo[]; // 所有 agent（v0.5 起）
   bots?: BotInfo[]; // 所有机器人
   rooms?: RoomInfo[]; // 网关内部的群聊
+  scene_tools?: string[]; // 场景里可选的工具（后端从登记表推出）
   mcp?: MCPInfo[]; // MCP 服务（阶段 11）
 };
 
@@ -462,7 +463,7 @@ export type MemoryView = { agent: string; on: boolean; self: string; entries: Me
 // 网关内部的群聊（房间）：成员是 agent，聊天记录是一个会话（sid）
 /** 场景规则：内部群存在群里，外部群存在会话设置里（两边字段一样）。tools 为 null 表示沿用默认，[] 表示不给工具 */
 export type SceneRules = {
-  mode?: 'mention' | 'free';
+  mode?: 'mention' | 'free' | 'turns' | 'director';
   observe?: boolean;
   brief?: string;
   roles?: Record<string, { prompt?: string; eagerness?: string }>;
@@ -471,8 +472,11 @@ export type SceneRules = {
   guard?: { run?: number; ping_pong?: number };
   budget?: number;
   budget_total?: number;
+  order?: string[]; // 轮流的发言顺序，空表示按成员顺序
+  rounds?: number;
+  channels?: { id: string; name: string; members: string[] }[];
 };
-export type SceneUse = { day_tokens: number; total: number; since?: number; over: boolean };
+export type SceneUse = { day_tokens: number; total: number; since?: number; round?: number; over: boolean };
 export type ObserveRecord = {
   at: number;
   scene: string;

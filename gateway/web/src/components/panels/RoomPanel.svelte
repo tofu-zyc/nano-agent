@@ -4,6 +4,7 @@
   import { api } from '../../lib/api';
   import Icon from '../Icon.svelte';
   import SceneRules from '../SceneRules.svelte';
+  import RoomStage from '../RoomStage.svelte';
 
   let { id }: { id: string } = $props();
   const r = $derived(store.room(id));
@@ -77,6 +78,8 @@
     <div class="p-card">
       <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
     </div>
+
+    <RoomStage {r} onsave={patch} />
 
     <SceneRules rules={r} use={r.use} sceneKey={'room:' + r.id} members={r.members} onsave={patch}
       onreset={() => patch({ reset: true })} />

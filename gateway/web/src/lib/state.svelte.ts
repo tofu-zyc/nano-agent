@@ -376,6 +376,11 @@ class Store {
     return this.ov?.rooms ?? [];
   }
 
+  /** 场景里可选的工具（后端从登记表推出） */
+  get sceneTools(): string[] {
+    return this.ov?.scene_tools ?? [];
+  }
+
   room(id: string | undefined): RoomInfo | undefined {
     return id ? this.rooms.find((r) => r.id === id) : undefined;
   }

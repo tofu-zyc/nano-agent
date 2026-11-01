@@ -25,8 +25,8 @@
     onreset?: () => void;
   } = $props();
 
-  // 场景里可选的工具（登记表里 scene 为真的）
-  const sceneTools = ['WebSearch', 'WebFetch', 'Skill', 'Knowledge', 'FollowUp', 'SendFile'];
+  // 场景里可选的工具：由后端从登记表返回
+  const sceneTools = $derived(store.sceneTools);
   const agentName = (id: string) => store.agents.find((a) => a.id === id)?.name ?? id;
   const eagerLabels: Record<string, string> = { '': '沿用 agent 的设置', off: '不主动插话', low: '低', normal: '中', high: '高' };
 
@@ -90,6 +90,10 @@
         <option value="">默认（{external ? '自由' : '点名'}）</option>
         <option value="mention">点名：只有被 @ 或者叫到名字才说</option>
         <option value="free">自由：安静下来按积极度自己插话</option>
+        {#if !external}
+          <option value="turns">轮流：人或旁白说一句之后，按顺序每人说一句（要设轮数）</option>
+          <option value="director">导演：只有导演点到的那一个会说话</option>
+        {/if}
       </select>
     </label>
     <label class="p-row"><input type="checkbox" checked={!!rules.observe} onchange={(e) => onsave({ observe: (e.target as HTMLInputElement).checked })} />
@@ -114,7 +118,7 @@
         <input class="p-input" inputmode="numeric" value={rules.style?.max_len ?? 0} onchange={(e) => onsave({ style: { ...rules.style, max_len: num(e) } })} /></label>
       <label class="p-label">最多拆成几条（0 沿用，最多 5）
         <input class="p-input" inputmode="numeric" value={rules.style?.parts ?? 0} onchange={(e) => onsave({ style: { ...rules.style, parts: num(e) } })} /></label>
-    {:else}
+    {:else if rules.mode !== 'turns' && rules.mode !== 'director'}
       <label class="p-label">连续几条 agent 发言就暂停（0 默认 8，范围 2–50）
         <input class="p-input" inputmode="numeric" value={rules.guard?.run ?? 0} onchange={(e) => onsave({ guard: { ...rules.guard, run: num(e) } })} /></label>
       <label class="p-label">两个 agent 来回几轮就暂停（0 默认 6，范围 2–50）

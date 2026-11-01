@@ -231,3 +231,6 @@ func unofferedCall(calls []llm.ToolCall, offered []llm.Tool) string {
 	}
 	return ""
 }
+
+// SceneToolNames 是场景里可选的工具（登记表里 scene 为真的），网页用它列选项。
+func (a *App) SceneToolNames() []string { return sceneToolNames() }

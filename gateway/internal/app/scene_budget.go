@@ -150,12 +150,13 @@ type SceneUsage struct {
 	DayTokens int   `json:"day_tokens"`
 	Total     int   `json:"total"`
 	Since     int64 `json:"since,omitempty"`
-	Over      bool  `json:"over"` // 现在超了预算（外部群当天不再调用模型）
+	Round     int   `json:"round,omitempty"` // 轮流已经转了几轮
+	Over      bool  `json:"over"`            // 现在超了预算（外部群当天不再调用模型）
 }
 
 // sceneUsageOf 是场景现在的用量。调用方持有锁。
 func (a *App) sceneUsageOf(key string, rules scene.Rules) SceneUsage {
 	u := a.sceneUseView(key)
 	over := rules.Budget > 0 && u.DayTokens >= rules.Budget || rules.BudgetTotal > 0 && u.Total >= rules.BudgetTotal
-	return SceneUsage{DayTokens: u.DayTokens, Total: u.Total, Since: u.Since, Over: over}
+	return SceneUsage{DayTokens: u.DayTokens, Total: u.Total, Since: u.Since, Round: u.Round, Over: over}
 }
