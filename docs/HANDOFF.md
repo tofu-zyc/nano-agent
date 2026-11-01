@@ -22,6 +22,8 @@
 make test
 cd gateway && go build ./... && go vet ./... && go test ./... -count=1
 cd gateway && go test -race ./internal/session ./internal/autonomy ./internal/schedule
+cd gateway && go test -race ./internal/journal ./internal/outbox ./internal/health ./internal/channel
+# 模型能看到的内容变了（系统提示、工具定义）：go test ./internal/app -run TestModelSurface -update，并检查 prefixVer
 cd gateway/web && npm run check && npm test && npm run build
 ~~~
 

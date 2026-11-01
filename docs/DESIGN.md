@@ -107,7 +107,7 @@
 - 同一目标严格有序；临时失败退避重试；目标永久不可达才丢弃。
 - 保证"至少一次"，不承诺恰好一次。
 
-现状：**未做**。现在每个渠道一个容量 256 的内存队列：满了丢弃，失败只记日志，重启后丢失（`App.enqueue`、`App.AddChannel`）。
+现状：**已有**（第 1 步，2026-10-31）。外部平台渠道的消息经 `internal/outbox` 先落盘再发送，细节见 [运行时](RUNTIME.md#可靠出站与健康状态)。命令行、网页、Job 卡片、审批卡片、Hook 通知和流式回复不经过它，仍走内存协程。
 
 ## 4 工作契约
 
@@ -204,7 +204,7 @@
 
 | 步骤 | 内容 | 服务于 | 前置收敛项 |
 | --- | --- | --- | --- |
-| 1 事实层 | 可靠出站（作为从 App 拆出的投递服务）；健康状态（每个部件认领一个条目，只由它写）；模型面快照测试 | 全部 | R1、R12、R3 的投递部分 |
+| 1 事实层（已完成） | 可靠出站（作为从 App 拆出的投递服务）；健康状态（每个部件认领一个条目，只由它写）；模型面快照测试 | 全部 | R1、R12、R3 的投递部分 |
 | 2 场景 | 内部群升级为场景：角色提示词、可见性、发言规则、时钟、预算池、结束条件、场内工具；外部群可绑定场景配置，群聊规则从 agent 移到场景；主动行为 `observe` 档 | 全部 | R6 |
 | 3 剧场 | 导演台（插入事件、暂停、禁言、分出平行世界、倒带）；统一时间线；导出时间轴字幕；可重放记录 | 剧场 | — |
 | 4 承诺 | 共用契约和阶段函数；Report 工具；"等我处理"汇总；分支新增 attention 投递档（只发就绪、问题和受阻，现有 silent 不变） | 陪伴、团队 | R2、R7 |
@@ -224,9 +224,9 @@
 
 | 编号 | 内容 | 安排 |
 | --- | --- | --- |
-| R1 | 删除空函数和失去生产调用的代码：`mindHeard`、`mindFollowUp`、`config.isSecretKey`、`web.personaPath`、`session.jsonCheck`/`jsonlCheck`、`lifeRecentNote` 等 | 低风险，先做 |
+| R1 | 删除空函数和失去生产调用的代码：`mindHeard`、`mindFollowUp`、`config.isSecretKey`、`web.personaPath`、`session.jsonCheck`/`jsonlCheck`、`lifeRecentNote` 等 | 已完成（第 1 步） |
 | R2 | 自主活动只留一份权威状态：`life.json` 与 `autonomy.json` 现在双写（如 `mirrorNextCheck`），统一到 autonomy，旧文件只导入一次；先写清各类预算的计入口径 | 承诺层前置 |
-| R3 | 从 App 划出状态所有者：Run 协调、执行服务、Agent 活动、投递服务。先在同一个包内划分，锁逐步细拆 | 分批进行 |
+| R3 | 从 App 划出状态所有者：Run 协调、执行服务、Agent 活动、投递服务。先在同一个包内划分，锁逐步细拆 | 分批进行；投递服务已划出（`internal/outbox`） |
 | R4 | 统一普通配置文件的"同目录临时文件替换"原语；可靠日志保留更强的同步语义 | 局部 |
 | R5 | life、dream 的默认技能正文只维护一份，由 Go 嵌入和打包共同使用 | 局部 |
 | R6 | 网关工具元信息集中登记（名字、schema、处理入口、所需能力、可见范围、租约类别）；C 侧的执行策略保留 | 场景层前置 |
@@ -235,7 +235,7 @@
 | R9 | 给存储兼容层定退出条件 | 单独迁移 |
 | R10 | 前端拆出拓扑布局计算、SSE 状态归并和共享的资源操作 | 局部 |
 | R11 | `kernel/src/main.c` 按宿主子系统拆分 | 局部 |
-| R12 | 修正失真的代码注释（`mcp/store.go`、`app/nodes.go`、`session/settings.go` 中的旧说法）；按主题整理用阶段编号命名的测试文件 | 低风险，先做 |
+| R12 | 修正失真的代码注释（`mcp/store.go`、`app/nodes.go`、`session/settings.go` 中的旧说法）；按主题整理用阶段编号命名的测试文件 | 注释已修正（第 1 步）；测试文件整理未做 |
 | R13 | 可靠事件日志（`internal/eventlog`）改用第 1 步新建的 `internal/journal`，去掉两份相同的写盘逻辑；磁盘格式不变。eventlog 现在有版本 1 和 2 两种记录，迁移前日志包要支持在一份日志里接受多个版本号 | 第 1 步之后单独做 |
 
 ## 10 文档规则
@@ -251,264 +251,9 @@
 2. 工单从 Agenda 的明确约定扩展而来，还是作为承诺的新种类单独建对象（第 4 步前定）。
 3. 外部 agent 执行器如何开启，在沙箱中怎样联网、凭据放在哪里；先做小规模试验再定（第 5 步前定）。
 
-## 12 第 1 步实施设计：事实层
+## 12 第 1 步：事实层
 
-状态：**待确认**。确认后按 12.7 的顺序实现；实现完成后，本节缩成一句话，细节移入现状文档。
-
-### 12.1 范围
-
-包含五部分：
-
-- 1a 通用日志包 `internal/journal`；
-- 1b 可靠出站 `internal/outbox`；
-- 1c 健康状态 `internal/health`；
-- 1d 模型面快照测试；
-- 1e 前置清理 R1、R12。
-
-不包含：
-
-- 流式回复（`RunView`）、审批卡片、Hook 的 notify：它们各有自己的投递规则，Hook 的投递本来就有可靠记录和重试。
-- Job 卡片的刷新：卡片从持久的 Job 状态重新投影，继续走现在的内存队列。
-- 平台侧的去重键（飞书 `uuid`、微信 `client_id`）。
-- 可靠事件日志迁移到新日志包（R13）。
-
-行为不变的要求：
-
-- `deliver`、`deliverReply`、`tell`、`answer`、`notify`、`sendParts`、SendFile 等约 230 个调用点一律不改，替换只发生在 `App.enqueue` 内部。
-- 用户看到的消息内容、顺序和分条节奏不变。
-- 存储坏了的时候，退回现在的内存直发，不比现在更差。
-
-### 12.2 1a 通用日志包 `internal/journal`
-
-照 `internal/eventlog/journal.go` 的规则写一个独立的包，本步不改 eventlog。
-
-- **格式**：一行一条 `{"version":N,"seq":n,"data":<JSON>,"sha256":"<data 原始字节的十六进制 SHA-256>"}`，以换行结尾；`seq` 从 1 开始连续。
-- **重放**：只截掉没有换行结尾的最后半条。完整记录损坏、版本不支持、顺序不连续时拒绝打开，原文件保持不动。
-- **追加**：写入并 fsync 之后才算提交。一次写入或同步失败后进入冻结状态，此后所有追加都返回错误。
-- **改写（压缩）**：调用方给出当前有效的记录。先写 `<path>.next`（`seq` 从 1 重排）并 fsync，再原子替换原文件：POSIX 用 rename 加目录 fsync，Windows 照 `journal_windows.go` 用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`。改写中途中断后再打开，读到的是旧文件。
-- **上限**：单条记录和整个文件都有字节上限，超出返回明确的错误。
-- **并发**：不加锁，由使用方的一个写协程独占。
-
-~~~go
-package journal
-
-type Limits struct{ Record, File int64 }
-
-func Open(path string, version int, limits Limits, replay func(seq uint64, data json.RawMessage) error) (*Journal, error)
-func (j *Journal) Append(data any) error
-func (j *Journal) Rewrite(records []any) error
-func (j *Journal) Size() int64
-func (j *Journal) Close() error
-~~~
-
-测试：截掉半条、中间损坏时拒绝打开、顺序错乱、改写中断、冻结后拒绝追加；Windows 原生运行。
-
-### 12.3 1b 可靠出站 `internal/outbox`
-
-**职责**：从 App 拆出的投递服务（R3 的投递部分）。它拥有待发消息、回执和发送协程。只处理外部平台渠道（Telegram、飞书、QQ、微信，包括它们另外添加的机器人）；命令行和网页是本机的实时视图（网页的 `Send` 本身是空操作），继续走现在的路径。
-
-**接口草案**：
-
-~~~go
-package outbox
-
-type Item struct {
-	Channel  string            // 渠道名，发送时按名字取当前的渠道对象
-	Chat     string
-	Parts    []string          // 已按渠道实际的发法切好的段；媒体消息为空
-	Markdown bool              // 入队时的请求：按 Markdown 发
-	Plain    bool              // Parts 的结果：逐段用 Send 发；否则用 SendMarkdown 发
-	ReplyTo  string            // 只用于第一段
-	Delay    time.Duration     // 第一段之前的停顿，保留群聊和私聊分条的节奏
-	Media    *media.Attachment // 只存引用，发送时从媒体库读
-	SID      string            // 来源会话，只用于展示
-	Kind     string            // reply | notice | proactive | command，只用于统计
-}
-
-type Deps struct {
-	Channel func(name string) channel.Channel // 当前的渠道对象；nil 表示暂时没有
-	Media   func(id string) ([]byte, error)
-	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选：只发附件本身；默认用渠道的 MediaSender
-	MediaNote func(att media.Attachment, err error) string // 说明的文字；err 为 nil 表示渠道不能发文件。App 传入和现在 sendMedia 一样的两种写法
-	Now     func() time.Time
-	Log     *slog.Logger
-	Health  *health.Handle
-}
-
-func Open(ctx context.Context, path string, deps Deps) (*Outbox, error) // 存储损坏时仍返回一个拒绝受理的 *Outbox 和错误
-func (o *Outbox) Enqueue(it Item) (id string, err error) // 不等磁盘、不阻塞；ErrFull 是明确拒绝（App 记警告，`enqueue` 返回 false，不退回内存直发）；ErrTooLarge、ErrStorage、ErrClosed 退回内存直发
-func (o *Outbox) DropChannel(name string)                // 机器人被删除：它的待发消息以 channel_removed 结局
-func (o *Outbox) Stats() Stats                           // 各渠道待发数、最老一条的时间、失败中的条数、24 小时内的丢弃数及原因
-func (o *Outbox) Recent(n int) []Record                  // 最近的失败和丢弃，供网页和 /status
-func (o *Outbox) Close()                                 // 停止受理，等写协程排空，取消在途发送
-~~~
-
-**锁**：`Enqueue` 在 App 总锁 `a.mu` 下调用，只能做内存操作，不能写盘或等待。出站调用 `Deps` 里的函数时不持有自己的锁。锁的顺序只能是 `a.mu` → 出站内部锁，不能反过来。`Deps.Channel` 建议由 App 维护一份原子替换的渠道快照，不去拿 `a.mu`。
-
-**切段**：渠道包新增一个可选接口：
-
-~~~go
-// Parter 按渠道实际的发法，把一条消息切成要逐段发送的段：plain 为 true 时每段用 Send 发，
-// 否则用 SendMarkdown 发。
-// 实现必须保证：逐段发送和整条调用 Send/SendMarkdown，平台收到的内容和顺序完全一样。
-type Parter interface {
-	Parts(text string, markdown bool) (parts []string, plain bool)
-}
-~~~
-
-- Telegram：没有 `SendMarkdown`，都按 4000 字切，`plain` 为 true。
-- 飞书：Markdown 按 6000 字切，`plain` 为 false（富文本消息）；纯文字按 8000 字切，`plain` 为 true。
-- QQ：都按 4000 字切，`plain` 为 `!markdown`。
-- 微信：只能显示纯文字，Markdown 先转成纯文字再按 2000 字切，纯文字直接按 2000 字切，`plain` 都是 true。先切原文再转换会让分条结果和代码围栏处理变化，所以切段必须在渠道里按它实际的顺序做。
-- `App.enqueue` 用 `Parts` 切段，把结果和 `plain` 一起记进 `Item`。每段重试时按 `plain` 选 `Send` 或 `SendMarkdown`，回复引用只用于第一段。
-- 没实现这个接口的渠道不切段，整条重试。
-- 每个实现有一个测试：拿一段超过上限的长文本（Markdown 的那组让代码围栏跨过切点），用渠道现有的假服务器比较"整条发"和"按 `Parts` 逐段发"，平台收到的请求序列必须完全相同。
-
-**顺序与并发**：
-
-- 目标指"渠道 + 聊天窗口"。同一目标严格按入队顺序发，一次只发一条。
-- 队头连续失败 3 次后，允许后面的消息先发；队头继续按退避重试。这样一条坏消息不会卡住整个对话，同时它已经在健康状态里显示为问题。
-- 不同目标并行，每个渠道同时最多 4 个目标在发。这是常量，不做成设置。
-- `Delay` 从这条成为队头时开始计时；重启后不再等。
-
-**重试与结局**：
-
-- **临时失败**：退避重试，从 5 秒起翻倍，最长 5 分钟。
-- **限流**：渠道的错误带等待时间时（`channel.RetryAfter(err)`，错误实现 `RetryDelay() time.Duration`；Telegram 429 的 `retry_after`），下次发送推迟到等待时间之后。限流不计入连续失败次数，否则限流会让健康状态变 degraded，还会让后面的消息先发；24 小时过期照常计算。
-- **永久失败**：错误满足 `errors.Is(err, channel.ErrGone)`（直接是 `ErrGone`，或用 `fmt.Errorf("%w", channel.ErrGone)` 包起来，或实现 `Is`），出站立即丢弃，原因记为 `gone`。已知的有 Telegram 的 403（机器人被拉黑或踢出）和 400 `chat not found`；其他平台由实现者对照平台文档补充，拿不准的一律按临时失败处理。目前只有 Telegram 实现。
-- **过期**：入队 24 小时仍未发出，丢弃，原因 `expired`。
-- **渠道暂时不在**（重启中、未上线、被关闭）：等待，不计入失败次数，直到过期。机器人被删除（`App.DeleteBot`）时，App 调 `DropChannel`。
-- **附件读不到**：丢弃，原因 `media_missing`。
-- **附件发送失败**：用户看到的和现在一样，不会反复收到说明。渠道没有 `MediaSender`：只发说明。失败属于 `ErrGone`：丢弃，不发说明。限流：按 `RetryAfter` 等待后重试附件，不发说明。其他错误：发一条说明，说明发出去这条就算已发，同时在 `Recent` 里记一次附件失败；说明也发不出去，就按说明的错误分类重试，下次仍然先试附件。
-- **部分已发**：记录已发段数，重试从下一段接着发。
-- **结果不明**（超时）：按失败重试，所以可能重复。这是"至少一次"，文档里写明。
-
-**持久化**：文件 `data/runtime/outbox.jsonl`，用 `internal/journal`，版本 1。
-
-- 记录分四种：
-  - `enqueue`：整条 Item，带出站分配的 ID `o<seq>`；
-  - `progress`：ID 和已发段数；
-  - `attempt`：ID、失败次数、最后的错误、下次时间；
-  - `settle`：ID、结局（sent 或 dropped）、原因、时间。
-- **先记录后动作**：`Enqueue` 把 `enqueue` 记录交给写协程，持久化成功之后这条才能被发送。`Enqueue` 返回到落盘之间的毫秒级窗口里崩溃，这条会丢，和现在一样；落盘之后的都会发出。
-- 重启时重放，恢复待发集合和最近的结局记录。
-- **压缩**：已结局的条目只保留最近 500 条或 7 天，供展示。文件超过 4 MiB、或已结局记录占多数时改写。
-- **单条上限**：日志的单条记录上限 1 MiB，文件硬上限 32 MiB。超过单条上限的消息不能丢：`Enqueue` 返回 `ErrTooLarge`，App 走内存直发，同时记警告，健康条目报 `degraded`。
-- **同一个窗口一次只发一条**：队列里任何一条在发，整个窗口都等它发完（包括被放行后重试的队头）。渠道的 4 个发送位占满时不空转，等某次发送结束再看。
-- **压缩**：改写后的第一条记录只带当前最大的 ID（`{"t":"seq","id":"o<n>"}`），历史全部过期后 ID 也不会从头开始。
-- **重启后的状态**：待发集合、已发段数、失败次数和下次发送时间都从日志恢复（退避和限流的等待重启后仍然有效）；`Delay` 不再等。
-- **存储失败**（打开时损坏，或运行中写盘失败）：出站停止受理，健康条目报 `error`，保留原文件；`App.enqueue` 退回现在的内存直发，并保持现在"每个渠道按顺序发"的行为；退回之后，出站里还没发完的消息和 App 直接发的新消息，在同一个窗口里可能乱序。运行中写盘失败时，已经受理但还没落盘的消息，和已落盘的一起在内存里照常发送，不再有落盘保证；打开时损坏则 `Open` 仍返回一个拒绝受理的 `*Outbox` 和错误。
-
-**容量**：待发最多 2048 条、正文合计 8 MiB；单个目标最多 256 条（和现在每渠道 256 相当）。满了 `Enqueue` 返回 `ErrFull`，App 记一条警告、健康条目报 `degraded`，`enqueue` 返回 false。不静默丢弃。已结局的记录只留最近 500 条或 7 天，文件超过 4 MiB 且大部分可回收、或已结局记录多过待发时改写。
-
-**App 的改动**：
-
-- `enqueue`：Job 卡片闭包、命令行和网页走每个渠道的内存协程（`AddChannel` 照旧建它，出站不可用时的内存直发也走它）；其余渠道一律进出站（判断是"排除 cli、web"，不列平台名，以后新加的平台自动纳入）。渠道实现了 `Parter` 就先切段，Markdown、`ReplyTo`、`Delay`、附件照搬；`Kind` 只区分 `deliverReply`（reply）和其他（notice）。出站返回 `ErrFull` 记警告、`enqueue` 返回 false；`ErrTooLarge`、`ErrStorage`、`ErrClosed` 走内存直发。
-- `Deps.Channel` 取 App 维护的渠道快照：`AddChannel` 时复制一份再原子换上，不拿 `a.mu`，渠道重启换了新对象也能取到。
-- 文件在 `store.Dir()/runtime/outbox.jsonl`。打开失败时用返回的拒绝受理的对象并记日志，不往存储问题里记（出站有自己的健康条目）。
-- 网关停止时（`App.Wait`）调用 `Outbox.Close`。`DeleteBot` 删除成功后用渠道名（`tg.<id>`，不是 runs 里的键）调 `DropChannel`。
-- `Status` 增加出站统计和最近几条失败、丢弃；`nano-gateway status` 只在有待发或有问题时打印一行概括，网页的网关节点显示同样的信息。
-
-**测试**：
-
-- 崩溃恢复：分别在落盘后、发送中、发送成功但回执未写时杀掉进程，重启后落盘的消息都发出；回执未写的那条再发一次。
-- 顺序：同一目标 100 条消息，中间注入失败，仍按顺序到达；队头失败 3 次后，后面的放行。
-- 分段：第 2 段失败时，重试不重发第 1 段。
-- 永久失败、过期、渠道删除、容量满、存储失败退回内存直发，各有一个用例。
-- 群聊分条的停顿不变。
-- 运行 `go test -race ./internal/outbox ./internal/journal`。
-
-### 12.4 1c 健康状态 `internal/health`
-
-~~~go
-package health
-
-type State string // ok | degraded | error
-
-type Entry struct {
-	Name, Detail string
-	State        State
-	Since        time.Time // 进入当前状态的时间
-}
-
-func NewBoard() *Board
-func (b *Board) Claim(name string) (*Handle, error) // 同名第二次认领返回错误
-func (h *Handle) Set(state State, detail string)    // 只有认领者能写
-func (h *Handle) Release()                          // 撤销认领，可以重复调用
-func (b *Board) Snapshot() []Entry                  // 按名字排序
-~~~
-
-- `Release` 之后条目从 `Snapshot` 里消失，同名可以重新 `Claim`。
-- 释放后，旧 `Handle` 上的 `Set` 一律无效：不报错，也不改条目。渠道协程和 `OnStatus` 回调可能在渠道停止之后才回报，不能写到新认领的同名条目上。
-- `Entry`、`Board`、`Handle` 的方法都可并发调用；`nil` 的 `Handle` 什么也不做。
-
-三种状态的定义：`ok` 正常；`degraded` 能用，但有事要人看；`error` 这一部分现在不能工作。
-
-第一批条目只收拢已有的错误，不新增检查。原来的字段保留，在给它们赋值的地方同时写健康条目：
-
-| 条目 | 认领者 | 来源与档位 |
-| --- | --- | --- |
-| `outbox` | 出站 | 存储失败为 error；有条目连续失败 3 次以上、24 小时内有丢弃或容量满为 degraded |
-| `channel:<名字>` | 渠道管理（`channels.go`） | `chErr` 和渠道的状态：构建失败、渠道报 `error`、启用的渠道停止（`stopped`）或 `Run` 意外退出为 error；连接中、等人接入、在线为 ok |
-| `storage` | App | `session.Store.StorageIssues()`，有问题为 degraded，不影响退出码 |
-| `dispatch` | App | `dispatchErr`，启动失败为 error |
-| `runtime_events` | App | `jobEventsErr`，启动失败为 error |
-| `autonomy` | App | `mindsErr`，读取失败为 error |
-| `schedule` | App | `schedulesErr`，启动失败为 error |
-
-- 渠道自己报的 `error` 持续超过 1 分钟才算 error，在那之前算 degraded：一次网络抖动不该让 `nano-gateway status` 返回 3。只有 online 和 idle 算恢复；出错期间渠道在重试前报的 starting 不算恢复，条目保持 degraded 或 error，计时照走。恢复过又出错的算新的一次，重新计时。构建失败、`Run` 意外退出、启用的渠道停止（`stopped`）不等待，直接是 error。
-- `channel:<名字>` 只在 `channels.go` 里认领和释放：`reconcile` 判定要启用时认领（构建失败也有条目，显示 error），停用、配置变了重启或机器人被删除时释放，别处不写这些条目。停用的渠道不留条目，网页和终端不经过 `reconcile`，没有条目。
-- `storage` 列出问题时跳过 `execution_leases` 和 `runtime_events` 两个 scope，它们由 `dispatch`、`runtime_events` 条目单独报告，同一个故障只在一处出现。其他 scope（`jobs:<节点>`、`hook_event`、会话 ID、`persona`、`interjections` 等）照常算在 `storage` 里。
-- `StorageIssues` 在运行中也会新增，所以 `storage` 在启动后不只设一次：每次取健康状态（`Status`）之前按当前的问题刷新，写入方仍然只有 App。这些问题记上后在进程内不会清除，说明末尾写"修复后重启网关重新检查"。
-- 说明写成概括：`N 处：前三个 scope 等；…`，完整列表在网页概览的存储恢复提示里，不重复。
-
-对外暴露：
-
-- `Status` 增加 `Health []Entry`。
-- 聊天 `/status` 和 `nano-gateway status` 只列出不是 `ok` 的条目；网页网关节点列出全部。
-- `nano-gateway status` 有 `error` 条目时退出码为 3。其余退出码不变：0 运行正常，1 没在运行，2 用法错误。README 写明。
-- 实现者要检查 `scripts/e2e-control.py` 对退出码的预期。
-
-### 12.5 1d 模型面快照测试
-
-- **位置**：`internal/app/model_surface_test.go`，金样放在 `internal/app/testdata/model-surface/<角色>.golden`。
-- **覆盖的角色**：用 `setup(t)` 的夹具为每种角色建一个会话，调用 `contextParts`。角色有：
-  - 挂了工作目录的管理员主会话；
-  - 访客私聊（`guest = none`）和只读访客（`guest = readonly`）；
-  - 外部群聊；
-  - 拟人型 agent 的私聊、life 会话、dream 会话；
-  - 定时任务会话、Hook 临时会话、分支、内部群成员会话。
-- **金样内容**：`prefixVer`、系统提示全文、工具定义的 JSON（按 `contextParts` 返回的顺序，固定缩进），以及两者的字节数。
-- **规则**：
-  1. 内容和金样不同就失败，提示用 `go test ./internal/app -run TestModelSurface -update` 更新，并检查 `prefixVer`。
-  2. 工具定义的字节变了而 `prefixVer` 没变，就失败；带 `-update` 也拒绝写入。
-  3. 每个角色"系统提示加工具定义"的总字节有上限：取现在的值上浮 10%，写在测试里，超了就失败。
-- **夹具**：人格、技能、agent 配置固定；不连 MCP。同样的输入如果得到不同的字节（比如遍历 map 的顺序不固定），按缓存回归修复，不能在测试里绕过。
-
-### 12.6 1e 前置清理
-
-- R1：逐项确认没有生产调用后删除；只为旧入口服务的测试，改写成验证当前入口。
-- R12：修正失真的注释。
-
-### 12.7 提交顺序
-
-每个提交都要通过 `go build ./... && go vet ./... && go test ./... -count=1`，以及相关包的 `-race`。
-
-1. R1 和 R12。
-2. `internal/journal` 及其测试。
-3. `internal/health`，接入已有的错误，加上 status 输出和退出码。
-4. 渠道的 `Parter`、`ErrGone` 和 `RetryAfter`。
-5. `internal/outbox`，接入 App。
-6. 模型面快照测试。
-
-### 12.8 验收与收尾
-
-- 第 7 节里与本步相关的不变量有测试：每条出站消息有回执；各角色模型可见内容有快照和体积上限。
-- [开发说明](HANDOFF.md) 的验证命令全部通过，`scripts/e2e.sh` 和 `scripts/e2e-control.py` 通过；`internal/journal` 的测试在 Windows 原生运行通过。
-- 文档同步：
-  - [架构](ARCHITECTURE.md) 的"持久化边界"改写为出站的实际行为；
-  - README 写上健康状态的输出和 status 的退出码；
-  - 本文 3.7 的出站现状改为"已有"，本节缩成一句话。
+已完成（2026-10-31）：通用日志包 `internal/journal`、可靠出站 `internal/outbox`、健康状态 `internal/health`、模型面快照测试，以及前置清理 R1、R12。已实现的行为见 [运行时](RUNTIME.md#可靠出站与健康状态)，实施过程在 Git 历史里。遗留：eventlog 迁移到 `internal/journal`（R13）、测试文件按主题整理（R12 的后半）。
 
 ## 参考
 

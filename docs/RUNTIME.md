@@ -132,6 +132,46 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 长期记忆使用 Knowledge 和可编辑的知识条目；dream 按策略整理原始记录、画像和自我认知。经历记录、模型上下文和长期知识分别维护，reset 不把已清空上下文从旧经历重新灌回来。策略在 life、dream 等技能中，agent 的自定义技能优先。
 
+## 可靠出站与健康状态
+
+第 1 步（事实层）实现，目标和原则见 [设计原则](DESIGN.md)。
+
+### 日志包 `internal/journal`
+
+只追加的可靠日志，一行一条 `{"version","seq","data","sha256"}`，`seq` 从 1 连续。重放只截掉没有换行结尾的最后半条；完整记录损坏、版本不支持、序号不连续时拒绝打开，原文件不变。追加 fsync 之后才算提交，写入或同步失败后冻结，之后的追加都返回错误；关闭后使用返回 `ErrClosed`。`Rewrite` 先写 `<path>.next` 并 fsync，再原子替换（POSIX 用 rename 加目录 fsync，Windows 用 `MoveFileEx` 的 `REPLACE_EXISTING | WRITE_THROUGH`）。单条记录和整个文件都有字节上限。不加锁，由使用方的一个写协程独占。`internal/eventlog` 还有自己的一份实现，迁移见 R13。
+
+### 可靠出站 `internal/outbox`
+
+外部平台渠道（Telegram、飞书、QQ、微信和另外添加的机器人，凡是不是 `cli`、`web` 的渠道）的消息经 `App.enqueue` 进出站；Job 卡片、审批卡片、Hook 通知、流式回复、命令行和网页不经过它，仍走每个渠道的内存协程。
+
+- **先记录后动作**：`Enqueue` 只做内存操作（可在 App 总锁下调用），`enqueue` 记录由唯一的写协程落盘，落盘之前绝不发送。调用 `Deps` 时不持有出站自己的锁；`Deps.Channel` 取 App 在 `AddChannel` 时原子替换的渠道快照，不拿 `a.mu`。
+- **顺序与并发**：同一个窗口（渠道 + 聊天）严格按入队顺序，一次只发一条；队头连续失败 3 次后才放行后面的，队头继续按退避重试；每个渠道同时最多 4 个窗口在发；渠道发送位占满时不空转，等某次发送结束再看。`Delay` 从这条成为队头时开始计时，重启后不再等。
+- **切段**：渠道实现 `channel.Parter`，按实际的发法切段并说明每段用 `Send` 还是 `SendMarkdown`；`Item` 记下 `Plain`，重试从没发出的段接着发，引用回复只用于第一段。没实现的渠道整条重试。
+- **重试与结局**：临时失败退避 5 秒起翻倍到 5 分钟；限流（`channel.RetryAfter`）按平台给的时间等，不计入连续失败次数；`errors.Is(err, channel.ErrGone)`（目前只有 Telegram 的 403 和 400 `chat not found`）立即丢弃；入队 24 小时仍未发出丢弃为 `expired`；渠道暂时不在就等，不算失败；附件读不到丢弃为 `media_missing`；机器人被删除（`DeleteBot`）时它的待发以 `channel_removed` 结局。保证至少一次，结果不明（超时）和崩溃在回执之前会再发一次。
+- **附件**：渠道没有 `MediaSender` 只发说明；`ErrGone` 丢弃不发说明；限流按 `RetryAfter` 重试附件；其他错误发一条说明，说明发出去就算已发并在 `Recent` 里记一次附件失败，说明也发不出去则重试且仍先试附件。
+- **日志**：`data/runtime/outbox.jsonl`，版本 1，四种记录 `enqueue`、`progress`、`attempt`、`settle`。单条记录上限 1 MiB，文件硬上限 32 MiB。重启后待发集合、已发段数、失败次数和下次发送时间都恢复。已结局的只留最近 500 条或 7 天；文件超过 4 MiB 且大部分可回收、或已结局记录多过待发时改写，改写后的第一条 `{"t":"seq"}` 带最大 ID。
+- **容量与拒绝**：待发最多 2048 条、正文 8 MiB，单个窗口最多 256 条。`ErrFull` 是明确拒绝（记警告，`enqueue` 返回 false）；单条超过上限（`ErrTooLarge`）、存储不可用（`ErrStorage`）、已关闭（`ErrClosed`）退回内存直发。
+- **存储坏了**：打开时损坏则 `Open` 返回一个拒绝受理的对象和错误，原文件不动；运行中写盘失败则停止受理，已受理的在内存里照发。健康条目报 error。退回内存直发后，出站里还没发完的消息和 App 直接发的新消息，在同一个窗口里可能乱序。
+
+`Status.Outbox` 带各渠道的待发数、最老一条的入队时间、失败中的条数、24 小时内的丢弃数及原因、队列满和超限的次数、存储状态，以及最近的失败和丢弃。`nano-gateway status` 在有待发或有问题时打印一行概括，网页的网关节点显示同样的信息。
+
+### 健康状态 `internal/health`
+
+每个部件认领一个条目，只由认领者写：`ok` 正常，`degraded` 能用但有事要人看，`error` 这一部分现在不能工作。`Handle.Release` 撤销认领，释放后旧 `Handle` 上的 `Set` 无效。
+
+| 条目 | 认领者 | 状态 |
+| --- | --- | --- |
+| `outbox` | 出站 | 存储失败 error；有条目连续失败 3 次以上、24 小时内有丢弃、队列满或消息超限 degraded（删除机器人导致的丢弃不算） |
+| `channel:<名字>` | `channels.go`（启用时认领，停用、改配置重启、机器人删除时释放） | 构建失败、`Run` 意外退出、启用的渠道停止为 error；渠道自己报 `error` 持续超过 1 分钟才算 error，之前 degraded；只有 online 和 idle 算恢复 |
+| `storage` | App | `StorageIssues()` 有问题为 degraded（不含 `execution_leases`、`runtime_events`，每次取状态前刷新） |
+| `dispatch`、`runtime_events`、`autonomy`、`schedule` | App | 启动失败（自主状态读取失败）为 error |
+
+`Status.Health` 带全部条目；聊天 `/status` 和 `nano-gateway status` 只列不是 `ok` 的，网页的网关节点列出全部。`nano-gateway status` 有 error 条目时退出码为 3（0 运行正常，1 没在运行，2 用法错误）。
+
+### 模型面快照测试
+
+`internal/app/model_surface_test.go` 为 11 种角色（挂了工作目录的管理员、访客 none / readonly、外部群聊、拟人型私聊、life、dream、定时任务、Hook 临时会话、分支、内部群成员）各建一个会话，调用 `contextParts`，把 `prefixVer`、系统提示全文、工具定义 JSON 和字节数存进 `testdata/model-surface/<角色>.golden`。内容变了就失败，用 `go test ./internal/app -run TestModelSurface -update` 更新并检查 `prefixVer`；工具定义变了而 `prefixVer` 没变，失败，带 `-update` 也拒绝写入。每个角色"系统提示加工具定义"的总字节有上限（当时的值上浮 10%，写在测试里）；同一输入两次得到的字节必须相同。
+
 ## 验收范围与已知边界
 
 v0.9.0 Linux + Windows 范围已验收。2026-10-29 在 c55229b 复验：
