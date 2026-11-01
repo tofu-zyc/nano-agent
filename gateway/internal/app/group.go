@@ -17,7 +17,6 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
-	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -54,8 +53,10 @@ func groupPerHour(v string) (string, int) {
 	return "low", 2
 }
 
-// groupRuleOf 是会话所属 agent 的群聊规则。调用方持有锁。
-func (a *App) groupRuleOf(sid string) groupRule { return a.groupRuleFor(a.agentOf(sid)) }
+// groupRuleOf 是会话生效的群聊规则：agent 的群聊设置，再叠上场景规则。调用方持有锁。
+func (a *App) groupRuleOf(sid string) groupRule {
+	return a.applyScene(sid, a.groupRuleFor(a.agentOf(sid)))
+}
 
 // groupRuleFor 是 agent 的群聊规则。工具型在群里只回被叫到的（不主动插话），拟人型按积极度。
 func (a *App) groupRuleFor(ag agents.Agent) groupRule {
@@ -210,17 +211,22 @@ func (a *App) groupTick() {
 	defer a.mu.Unlock()
 	now := a.now()
 	for _, s := range a.sessions {
-		if s == nil || s.groupEp.chat == "" || !a.isGroupSession(s.sid) {
+		if s == nil || s.groupEp.chat == "" {
+			continue
+		}
+		sc, ok := a.sceneOf(s.sid)
+		if !ok {
 			continue
 		}
 		if s.run != nil || len(s.queue) > 0 || s.compacting || s.groupTimer != nil || !s.groupFresh {
 			continue
 		}
-		// 房间里的成员：点名模式下永远不主动开口，只有自由模式交给这里按额度插话
-		if room, ok := a.roomOfSession(s.sid); ok {
-			if s.sid == roomLogSID(room.ID) || room.Paused || room.Mode != rooms.ModeFree || room.MutedAgent(roomSender(s.sid)) {
-				continue
-			}
+		// 点名模式下永远不主动开口，只有自由模式交给这里按额度插话（内部群默认点名，外部群默认自由）
+		if !sc.free() {
+			continue
+		}
+		if room := sc.Room; room != nil && (s.sid == roomLogSID(room.ID) || room.Paused || room.MutedAgent(roomSender(s.sid))) {
+			continue
 		}
 		rule := a.groupRuleOf(s.sid)
 		if rule.PerHour <= 0 {
@@ -254,12 +260,9 @@ func (a *App) groupTick() {
 	}
 }
 
-// groupTools 是群聊里能用的工具：agent 的群聊白名单，没设就只有搜索和技能。
+// groupTools 是群聊里能用的工具：场景工具表、agent 的群聊白名单，都没设就用默认表（见 sceneToolAllow）。
 func (a *App) groupTools(sid string, all []llm.Tool) []llm.Tool {
-	allow := a.agentOf(sid).GroupTools
-	if len(allow) == 0 {
-		allow = sceneToolNames()
-	}
+	allow := a.sceneToolAllow(sid)
 	out := make([]llm.Tool, 0, len(allow))
 	for _, t := range all {
 		for _, name := range allow {

@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/scene"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,8 @@ type Settings struct {
 	Handoff string `json:"handoff,omitempty"`
 	Group   bool   `json:"group,omitempty"` // 这是某个群聊里的会话：不挂工作目录、只发正文、用群聊的工具
 	Web     bool   `json:"web,omitempty"`   // 网页接着这个会话：在网页里新建的，或者在网页里说过话
+	// Scene 是外部群的场景规则（内部群的规则存在群记录里）。读出来的值当只读用：改的时候复制一份再存。
+	Scene *scene.Rules `json:"scene,omitempty"`
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。

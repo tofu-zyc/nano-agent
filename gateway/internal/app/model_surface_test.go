@@ -14,6 +14,7 @@ import (
 	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/rooms"
+	"nano-agent/gateway/internal/scene"
 	"nano-agent/gateway/internal/schedule"
 )
 
@@ -28,17 +29,19 @@ var updateSurface = flag.Bool("update", false, "更新 testdata/model-surface �
 // surfaceCap 是每个角色“系统提示加工具定义”的总字节上限：当时的值上浮 10%。
 // 超了说明模型面膨胀了，先想想值不值，再来改这里。
 var surfaceCap = map[string]int{
-	"admin-workspace": 21662,
-	"guest-none":      1125,
-	"guest-readonly":  3601,
-	"group-external":  1569,
-	"companion-dm":    36228,
-	"life":            38779,
-	"dream":           9967,
-	"cron":            9057,
-	"hook":            8846,
-	"branch":          3601,
-	"room-member":     6586,
+	"admin-workspace":      21662,
+	"guest-none":           1125,
+	"guest-readonly":       3601,
+	"group-external":       1569,
+	"companion-dm":         36228,
+	"life":                 38779,
+	"dream":                9967,
+	"cron":                 9057,
+	"hook":                 8846,
+	"branch":               3601,
+	"room-member":          6586,
+	"room-member-scene":    0,
+	"group-external-scene": 576,
 }
 
 type surfaceRole struct {
@@ -125,6 +128,39 @@ func surfaceRoles() []surfaceRole {
 			e.a.roomHumanSay(room, "李四", "大家好") // 没点名，不会触发模型
 			e.a.mu.Unlock()
 			return e.a.roomMemberSID(agents.DefaultID, info.ID)
+		}},
+		// 带场景说明、角色提示词和工具表的内部群成员
+		{"room-member-scene", func(t *testing.T, e *env) string {
+			withAgents(t, e)
+			st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+			e.a.SetRooms(st)
+			name, members := "谋杀之夜", []string{agents.DefaultID}
+			roles := map[string]scene.Role{agents.DefaultID: {Prompt: "你是庄园的管家，知道所有人的秘密，但只在被问到时才说。"}}
+			info, err := e.a.CreateRoom(RoomPatch{Name: &name, Members: &members, ScenePatch: ScenePatch{
+				Brief: strptr("晚宴上有人被毒死，大家被困在庄园里。"), Roles: &roles, Tools: json.RawMessage(`["Knowledge"]`)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.a.mu.Lock()
+			room, _ := st.Get(info.ID)
+			e.a.roomHumanSay(room, "李四", "大家好")
+			e.a.mu.Unlock()
+			return e.a.roomMemberSID(agents.DefaultID, info.ID)
+		}},
+		// 带规则的外部群
+		{"group-external-scene", func(t *testing.T, e *env) string {
+			e.sid = "fake:c1"
+			e.say("大家好", group(true), from("u2", "李四"))
+			e.k.expect(proto.TInput)
+			e.a.mu.Lock()
+			defer e.a.mu.Unlock()
+			st := e.a.store.Settings(e.sid)
+			st.Scene = &scene.Rules{Brief: "这是读书会的群，聊书为主。", Tools: []string{},
+				Roles: map[string]scene.Role{agents.DefaultID: {Prompt: "你是读书会的主持人。"}}}
+			if err := e.a.store.SaveSettings(e.sid, st); err != nil {
+				t.Fatal(err)
+			}
+			return e.sid
 		}},
 	}
 }

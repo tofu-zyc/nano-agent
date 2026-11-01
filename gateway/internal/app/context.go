@@ -38,6 +38,10 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		if g := a.groupGuide(a.agentOf(sid).ID); g != "" {
 			system = strings.TrimSpace(system + "\n\n" + g)
 		}
+		// 场景说明和角色提示词紧跟群聊守则；没设规则就没有这一段
+		if t := a.sceneText(sid); t != "" {
+			system = strings.TrimSpace(system + "\n\n" + t)
+		}
 	}
 	var tools []llm.Tool
 	rt, admin, noTools := a.permOf(sid)

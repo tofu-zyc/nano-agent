@@ -21,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/rooms"
+	"nano-agent/gateway/internal/scene"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -208,10 +209,11 @@ func (a *App) roomUsage(room rooms.Room, prompt, completion int) {
 func (a *App) roomGuard(room rooms.Room, speaker string) {
 	st := a.roomState(room.ID)
 	st.Tail = append(st.Tail, speaker)
-	if len(st.Tail) > 12 {
-		st.Tail = st.Tail[len(st.Tail)-12:]
+	if len(st.Tail) > scene.MaxGuard {
+		st.Tail = st.Tail[len(st.Tail)-scene.MaxGuard:]
 	}
-	// 连续 8 条都是 agent 说的（中间没有人说话）就暂停
+	// 连续 N 条（默认 8）都是 agent 说的（中间没有人说话）就暂停
+	runLimit, pingPong := room.Guard.EffectiveGuard()
 	consecutive := 0
 	for i := len(st.Tail) - 1; i >= 0; i-- {
 		if st.Tail[i] == "human" {
@@ -219,19 +221,19 @@ func (a *App) roomGuard(room rooms.Room, speaker string) {
 		}
 		consecutive++
 	}
-	if consecutive >= 8 {
-		a.pauseRoom(room, "群里连续说了 8 条，先暂停，等你说话")
+	if consecutive >= runLimit {
+		a.pauseRoom(room, fmt.Sprintf("群里连续说了 %d 条，先暂停，等你说话", runLimit))
 		return
 	}
-	// 两个 agent 来回超过 6 轮（没有新的人）也暂停
-	if len(st.Tail) >= 6 {
-		tail := st.Tail[len(st.Tail)-6:]
+	// 两个 agent 来回超过 N 轮（默认 6，没有新的人）也暂停
+	if len(st.Tail) >= pingPong {
+		tail := st.Tail[len(st.Tail)-pingPong:]
 		set := map[string]bool{}
 		for _, x := range tail {
 			set[x] = true
 		}
 		if len(set) == 2 && !set["human"] {
-			a.pauseRoom(room, "两个 agent 来回说了 6 轮，先暂停，等你说话")
+			a.pauseRoom(room, fmt.Sprintf("两个 agent 来回说了 %d 轮，先暂停，等你说话", pingPong))
 			return
 		}
 	}
@@ -292,8 +294,8 @@ func (a *App) signalRoomWaiters(roomID, member, text string) {
 func (a *App) roomHumanLine(roomID string) {
 	st := a.roomState(roomID)
 	st.Tail = append(st.Tail, "human")
-	if len(st.Tail) > 12 {
-		st.Tail = st.Tail[len(st.Tail)-12:]
+	if len(st.Tail) > scene.MaxGuard {
+		st.Tail = st.Tail[len(st.Tail)-scene.MaxGuard:]
 	}
 }
 
@@ -345,11 +347,10 @@ func (a *App) Rooms() []RoomInfo {
 type RoomPatch struct {
 	Name    *string   `json:"name"`
 	Members *[]string `json:"members"`
-	Mode    *string   `json:"mode"`
 	Paused  *bool     `json:"paused"`
 	Muted   *[]string `json:"muted"`
-	Budget  *int      `json:"budget"`
 	DM      *bool     `json:"dm"`
+	ScenePatch
 }
 
 // CreateRoom 新建一个房间。
@@ -366,9 +367,11 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 	if p.Members != nil {
 		r.Members = *p.Members
 	}
-	if p.Mode != nil {
-		r.Mode = *p.Mode
+	rules, err := p.ScenePatch.apply(r.Rules)
+	if err != nil {
+		return RoomInfo{}, err
 	}
+	r.Rules = rules
 	for _, m := range r.Members {
 		if _, ok := a.agentByID(m); !ok {
 			return RoomInfo{}, fmt.Errorf("没有这个 agent：%s", m)
@@ -391,6 +394,13 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 			}
 			r.Name = "@" + na + "+" + nb
 		}
+	}
+	kind := scene.Room
+	if r.IsDM() {
+		kind = scene.DMRoom
+	}
+	if err := r.Rules.Validate(kind, sceneToolNames()); err != nil {
+		return RoomInfo{}, err
 	}
 	got, err := a.roomStore.Create(r)
 	if err != nil {
@@ -424,9 +434,6 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 		}
 		r.Members = *p.Members
 	}
-	if p.Mode != nil {
-		r.Mode = *p.Mode
-	}
 	if p.Paused != nil {
 		r.Paused = *p.Paused
 		if !r.Paused {
@@ -438,11 +445,17 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if p.Muted != nil {
 		r.Muted = *p.Muted
 	}
-	if p.Budget != nil {
-		if *p.Budget < 0 {
-			return RoomInfo{}, errors.New("预算不能是负数")
-		}
-		r.Budget = *p.Budget
+	rules, err := p.ScenePatch.apply(r.Rules)
+	if err != nil {
+		return RoomInfo{}, err
+	}
+	r.Rules = rules
+	kind := scene.Room
+	if r.IsDM() {
+		kind = scene.DMRoom
+	}
+	if err := r.Rules.Validate(kind, sceneToolNames()); err != nil {
+		return RoomInfo{}, err
 	}
 	if err := a.roomStore.Update(r); err != nil {
 		return RoomInfo{}, err
@@ -773,7 +786,7 @@ func (a *App) dmRoom(from, to string) (rooms.Room, error) {
 	if ag, ok := a.agentByID(to); ok {
 		nb = ag.Name
 	}
-	return a.roomStore.Create(rooms.Room{Name: "@" + na + "+" + nb, Members: []string{from, to}, Mode: rooms.ModeMention, DM: []string{from, to}})
+	return a.roomStore.Create(rooms.Room{Name: "@" + na + "+" + nb, Members: []string{from, to}, DM: []string{from, to}, Rules: scene.Rules{Mode: rooms.ModeMention}})
 }
 
 // messageChat 把一条消息发到 agent 自己的某个私聊：记进那个会话的历史，发到对方最近说话的那个窗口。

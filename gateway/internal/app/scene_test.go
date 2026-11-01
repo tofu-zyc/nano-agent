@@ -1,0 +1,259 @@
+package app
+
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/rooms"
+	"nano-agent/gateway/internal/scene"
+)
+
+// extGroup 建一个外部群会话（fake:c1 里有人说了话），返回会话 ID。
+func extGroup(t *testing.T, e *env) string {
+	t.Helper()
+	e.sid = "fake:c1"
+	e.say("大家好", group(false), from("u2", "李四"))
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	for _, s := range e.a.sessions {
+		if s != nil && e.a.store.Settings(s.sid).Group {
+			return s.sid
+		}
+	}
+	t.Fatal("没有外部群会话")
+	return ""
+}
+
+func setScene(t *testing.T, e *env, sid string, r *scene.Rules) {
+	t.Helper()
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	st := e.a.store.Settings(sid)
+	st.Scene = r
+	if err := e.a.store.SaveSettings(sid, st); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func strptr(s string) *string { return &s }
+
+// 旧格式的 rooms.json（没有任何规则字段）读入后，生效规则等于现在的行为。
+func TestOldRoomsJSONKeepsBehavior(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	path := filepath.Join(e.dir, "data", "rooms.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	old := `[{"id":"r1","name":"老群","members":["default"],"mode":"free","budget":500,"paused":true,"muted":["x"],"created":1}]`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := rooms.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.SetRooms(st)
+	r, ok := st.Get("r1")
+	if !ok || r.Mode != "free" || r.Budget != 500 || !r.Paused || r.Brief != "" || r.Tools != nil || len(r.Roles) != 0 {
+		t.Fatalf("旧格式读入：%+v", r)
+	}
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	sid := e.a.roomMemberSID("default", "r1")
+	sc, ok := e.a.sceneOf(sid)
+	if !ok || sc.Kind != scene.Room || !sc.free() {
+		t.Fatalf("场景：%+v %v", sc, ok)
+	}
+	run, pp := sc.guard()
+	if run != 8 || pp != 6 {
+		t.Fatalf("防刷屏默认值：%d %d", run, pp)
+	}
+	if rule := e.a.groupRuleOf(sid); rule.Quiet != 20*time.Second || rule.MinGap != 10*time.Second || rule.MaxLen != 300 || rule.Parts != 3 {
+		t.Fatalf("说话样式默认值：%+v", rule)
+	}
+	if e.a.sceneText(sid) != "" {
+		t.Fatal("没设规则就没有场景内容")
+	}
+}
+
+// 没设模式时：内部群点名，外部群自由。
+func TestSceneDefaultMode(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(st)
+	room, _ := st.Create(rooms.Room{Name: "群", Members: []string{"default"}})
+	room.Mode = "" // 旧数据里没有 mode
+	st.Update(room)
+	ext := extGroup(t, e)
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	rsc, _ := e.a.sceneOf(e.a.roomMemberSID("default", room.ID))
+	esc, _ := e.a.sceneOf(ext)
+	if rsc.Kind != scene.Room || rsc.free() || esc.Kind != scene.External || !esc.free() {
+		t.Fatalf("默认模式：内部群 %v/%v 外部群 %v/%v", rsc.Kind, rsc.free(), esc.Kind, esc.free())
+	}
+	cur := e.a.store.Settings(ext)
+	cur.Scene = &scene.Rules{Mode: scene.ModeMention}
+	e.a.store.SaveSettings(ext, cur)
+	if sc, _ := e.a.sceneOf(ext); sc.free() {
+		t.Fatal("外部群设成 mention 就只在被点名时说话")
+	}
+}
+
+// 生效顺序：积极度。
+func TestSceneEagernessOrder(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	ext := extGroup(t, e)
+	eager := func() string {
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		return e.a.groupRuleOf(ext).Eagerness
+	}
+	if got := eager(); got != "off" {
+		t.Fatalf("工具型 agent 默认不主动插话：%s", got)
+	}
+	setScene(t, e, ext, &scene.Rules{Roles: map[string]scene.Role{agents.DefaultID: {Eagerness: "normal"}}})
+	if got := eager(); got != "normal" {
+		t.Fatalf("工具型 agent 在场景角色里明确设了才会插话：%s", got)
+	}
+	setScene(t, e, ext, nil)
+	makeLife(t, e, store, nil)
+	if got := eager(); got != "low" {
+		t.Fatalf("拟人型默认 low：%s", got)
+	}
+	makeLife(t, e, store, func(a *agents.Agent) { a.GroupEagerness = strptr("high") })
+	if got := eager(); got != "high" {
+		t.Fatalf("agent 的群聊积极度：%s", got)
+	}
+	setScene(t, e, ext, &scene.Rules{Roles: map[string]scene.Role{agents.DefaultID: {Eagerness: "off"}}})
+	if got := eager(); got != "off" {
+		t.Fatalf("场景角色优先：%s", got)
+	}
+	setScene(t, e, ext, &scene.Rules{Roles: map[string]scene.Role{"别人": {Eagerness: "off"}}})
+	if got := eager(); got != "high" {
+		t.Fatalf("别的 agent 的角色不影响：%s", got)
+	}
+}
+
+// 生效顺序：说话样式。
+func TestSceneStyleOrder(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	ext := extGroup(t, e)
+	makeLife(t, e, store, func(a *agents.Agent) {
+		a.GroupQuiet = strptr("40s")
+		n := 120
+		a.GroupMaxLen = &n
+	})
+	rule := func() groupRule {
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		return e.a.groupRuleOf(ext)
+	}
+	if r := rule(); r.Quiet != 40*time.Second || r.MaxLen != 120 || r.MinGap != 10*time.Second || r.Parts != 3 {
+		t.Fatalf("agent 的设置：%+v", r)
+	}
+	setScene(t, e, ext, &scene.Rules{Style: scene.Style{Quiet: "5s", Parts: 2}})
+	if r := rule(); r.Quiet != 5*time.Second || r.MaxLen != 120 || r.Parts != 2 {
+		t.Fatalf("场景只覆盖设了的项：%+v", r)
+	}
+}
+
+// 生效顺序：工具。
+func TestSceneToolOrder(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	ext := extGroup(t, e)
+	names := func() []string {
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		_, tools, _, _ := e.a.contextParts(ext)
+		var out []string
+		for _, tl := range tools {
+			out = append(out, tl.Function.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+	eq := func(what string, got []string, want ...string) {
+		t.Helper()
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s：%v，应为 %v", what, got, want)
+		}
+	}
+	eq("默认表（去掉拿不到的）", names(), "Knowledge", "SendFile")
+	addSkill(t, e, "s1")
+	eq("有技能了", names(), "Knowledge", "SendFile", "Skill")
+	setScene(t, e, ext, &scene.Rules{Tools: []string{}})
+	eq("场景 []：不给工具", names())
+	setScene(t, e, ext, &scene.Rules{Tools: []string{"Skill"}})
+	eq("只有场景", names(), "Skill")
+	e.a.mu.Lock()
+	ag, _ := store.Get(agents.DefaultID)
+	ag.GroupTools = []string{"SendFile", "Skill"}
+	store.Update(ag)
+	e.a.mu.Unlock()
+	setScene(t, e, ext, nil)
+	eq("agent 的群聊工具", names(), "SendFile", "Skill")
+	setScene(t, e, ext, &scene.Rules{Tools: []string{"Skill", "WebSearch"}})
+	eq("场景和 agent 取交集", names(), "Skill")
+}
+
+// 生效顺序：防刷屏。场景里设了阈值就按它暂停。
+func TestSceneGuardOrder(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(st)
+	room, _ := st.Create(rooms.Room{Name: "群", Members: []string{"default"}, Rules: scene.Rules{Guard: scene.Guard{Run: 3}}})
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	e.a.roomGuard(room, "default")
+	e.a.roomGuard(room, "default")
+	if r, _ := st.Get(room.ID); r.Paused {
+		t.Fatal("两条不该暂停")
+	}
+	e.a.roomGuard(room, "default")
+	if r, _ := st.Get(room.ID); !r.Paused {
+		t.Fatal("连续 3 条（场景里设的）该暂停")
+	}
+	room2, _ := st.Create(rooms.Room{Name: "群2", Members: []string{"default"}})
+	for i := 0; i < 7; i++ {
+		e.a.roomGuard(room2, "default")
+	}
+	if r, _ := st.Get(room2.ID); r.Paused {
+		t.Fatal("默认是 8 条，7 条不该暂停")
+	}
+	e.a.roomGuard(room2, "default")
+	if r, _ := st.Get(room2.ID); !r.Paused {
+		t.Fatal("默认 8 条该暂停")
+	}
+}
+
+// 场景说明和角色提示词紧跟群聊守则；场景工具表之外的工具，模型提出也不执行。
+func TestSceneTextAndToolGate(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	ext := extGroup(t, e)
+	setScene(t, e, ext, &scene.Rules{Brief: "这是一场谋杀之夜", Roles: map[string]scene.Role{agents.DefaultID: {Prompt: "你是管家"}}})
+	e.a.mu.Lock()
+	system, _, _, _ := e.a.contextParts(ext)
+	e.a.mu.Unlock()
+	i, j, k := strings.Index(system, "这是群聊，不是私聊"), strings.Index(system, "[场景] 这是一场谋杀之夜"), strings.Index(system, "[你的角色] 你是管家")
+	if i < 0 || j < i || k < j {
+		t.Fatalf("顺序应是群聊守则、场景、角色：%d %d %d\n%s", i, j, k, system)
+	}
+	// 场景工具表里没有的工具（Message），模型提出也不执行
+	e.a.SetLLM(&proposeModel{name: "Message", args: messageArgs})
+	e.sid = "fake:c1"
+	e.say("@bot 去告诉主会话", group(true), from("u1", "张三"))
+	in := e.k.expect(proto.TInput)
+	expectUnoffered(t, e, in, "Message")
+}
