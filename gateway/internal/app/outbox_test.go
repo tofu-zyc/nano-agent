@@ -339,3 +339,35 @@ func TestDisabledChannelKeepsPendingAndResumesInOrder(t *testing.T) {
 		t.Fatal("发完应该清空")
 	}
 }
+
+// 删除机器人的顺序：先停渠道、再忘掉并丢弃待发。之后发给它的消息直接拒绝，出站里没有残留。
+func TestDeleteBotAfterStopRejectsNewMessages(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	e.a.ReconcileChannels(e.a.cfg)
+	v, err := e.a.CreateBot(agents.KindTelegram, BotPatch{Name: strp("临时"), Token: strp("1:x"), Enabled: new(bool)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "tg." + v.ID
+	ch := &platCh{name: name, fail: 1 << 30} // 一直发不出去：消息留在出站里
+	e.a.chMu.Lock()
+	e.a.startChannel(name, ch, nil) // 渠道在跑，DeleteBot 里的 reconcile 会停掉它（停用时记进 chRetired）
+	e.a.chMu.Unlock()
+	if !e.deliverTo(name, "待发") {
+		t.Fatal("渠道在时应该受理")
+	}
+	if err := e.a.DeleteBot(v.ID); err != nil {
+		t.Fatal(err)
+	}
+	st := e.a.outbox.Stats()
+	if st.Dropped24h["channel_removed"] != 1 || e.outboxPending() != 0 {
+		t.Fatalf("待发应按 channel_removed 丢弃: %+v", st)
+	}
+	if e.deliverTo(name, "删除之后") {
+		t.Fatal("删除之后发给它的消息应该直接拒绝")
+	}
+	if e.outboxPending() != 0 {
+		t.Fatal("出站里不该有残留")
+	}
+}

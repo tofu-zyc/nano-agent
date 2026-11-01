@@ -430,10 +430,15 @@ func (a *App) DeleteBot(id string) error {
 	if err != nil {
 		return err
 	}
-	if existed && a.outbox != nil {
-		a.outbox.DropChannel(agents.ChannelName(b)) // 渠道名（tg.<id>），不是 runs 里的键
+	a.reconcileBots() // 先停渠道（停用时它会记进 chRetired）
+	if existed {
+		// 再忘掉这个名字、丢弃待发：之后发给它的消息直接拒绝，不在出站里挂到过期
+		name := agents.ChannelName(b) // 渠道名（tg.<id>），不是 runs 里的键
+		a.ForgetChannel(name)
+		if a.outbox != nil {
+			a.outbox.DropChannel(name)
+		}
 	}
-	a.reconcileBots()
 	if b.Kind == agents.KindWeixin {
 		os.Remove(filepath.Join(a.store.Dir(), "bots", b.ID+".state.json")) // 收消息的游标和 context_token
 	}

@@ -54,8 +54,8 @@ func (a *App) Web() *channel.Web { return a.web }
 
 // ReconcileChannels 让正在运行的渠道和配置一致：该开的开，该关的关，配置变了的重启。
 func (a *App) ReconcileChannels(cfg *config.Config) {
-	// 先取一份机器人列表（要拿 a.mu），再进 chMu：锁的顺序只能是 a.mu → chMu，
-	// 反过来的话会和 Status()（拿着 a.mu 读渠道）互相卡住
+	// 先取一份机器人列表（要拿 a.mu），再进 chMu：持有 a.mu 时不能去拿 chMu
+	// （Status() 拿着 a.mu 读渠道，会互相卡住）；持有 chMu 时可以拿 a.mu（AddChannel、RemoveChannel 就是这样）
 	a.mu.Lock()
 	bots := []agents.Bot{}
 	if a.botStore != nil {
@@ -281,7 +281,7 @@ func (a *App) Channels() []ChannelInfo {
 	return out
 }
 
-// reconcileBotsLocked 按机器人列表启动、停止、重启机器人渠道。调用方持有 chMu，不能再去拿 a.mu。
+// reconcileBotsLocked 按机器人列表启动、停止、重启机器人渠道。调用方持有 chMu；持有 chMu 时可以拿 a.mu，反过来持有 a.mu 时不能拿 chMu。
 func (a *App) reconcileBotsLocked(cfg *config.Config, bots []agents.Bot) {
 	seen := map[string]bool{}
 	for _, b := range bots {

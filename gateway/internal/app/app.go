@@ -568,6 +568,23 @@ func (a *App) RemoveChannel(ch channel.Channel) {
 	a.storeChannelsLocked(name)
 }
 
+// ForgetChannel 把停用渠道的记录去掉（删除机器人用）：之后发给它的消息不再进出站等待。
+func (a *App) ForgetChannel(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if old := a.chRetired.Load(); old != nil {
+		if _, ok := (*old)[name]; ok {
+			retired := make(map[string]channel.Channel, len(*old))
+			for k, v := range *old {
+				if k != name {
+					retired[k] = v
+				}
+			}
+			a.chRetired.Store(&retired)
+		}
+	}
+}
+
 // storeChannelsLocked 重新发布渠道快照；name 回来了就不再算停用。调用方持有 a.mu。
 func (a *App) storeChannelsLocked(name string) {
 	snap := make(map[string]channel.Channel, len(a.chans))
