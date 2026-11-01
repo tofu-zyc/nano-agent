@@ -448,6 +448,7 @@ func (b *Board) Snapshot() []Entry                  // 按名字排序
 | `autonomy` | App | `mindsErr`，读取失败为 error |
 | `schedule` | App | `schedulesErr`，启动失败为 error |
 
+- 渠道自己报的 `error` 持续超过 1 分钟才算 error，在那之前算 degraded：一次网络抖动不该让 `nano-gateway status` 返回 3。中间恢复过又出错的算新的一次，重新计时。构建失败、`Run` 意外退出、启用的渠道停止（`stopped`）不等待，直接是 error。
 - `channel:<名字>` 只在 `channels.go` 里认领和释放：`reconcile` 判定要启用时认领（构建失败也有条目，显示 error），停用、配置变了重启或机器人被删除时释放，别处不写这些条目。停用的渠道不留条目，网页和终端不经过 `reconcile`，没有条目。
 - `storage` 列出问题时跳过 `execution_leases` 和 `runtime_events` 两个 scope，它们由 `dispatch`、`runtime_events` 条目单独报告，同一个故障只在一处出现。其他 scope（`jobs:<节点>`、`hook_event`、会话 ID、`persona`、`interjections` 等）照常算在 `storage` 里。
 - `StorageIssues` 在运行中也会新增，所以 `storage` 在启动后不只设一次：每次取健康状态（`Status`）之前按当前的问题刷新，写入方仍然只有 App。这些问题记上后在进程内不会清除，说明末尾写"修复后重启网关重新检查"。

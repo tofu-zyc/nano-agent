@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
@@ -120,6 +121,50 @@ func (a *App) releaseChannelHealth(name string) {
 	delete(a.chHealth, name)
 }
 
+// channelErrorGrace 是渠道自己报的 error 要持续多久才算 error，之前算 degraded：
+// 一次网络抖动不该让 nano-gateway status 返回 3。
+const channelErrorGrace = time.Minute
+
+// channelWatch 把一个渠道报来的状态写进它的健康条目，并给渠道自己报的 error 一段宽限。
+type channelWatch struct {
+	h     *health.Handle
+	grace time.Duration
+
+	mu       sync.Mutex
+	since    time.Time // 这一次连续出错的开始；零值表示现在没在出错
+	promoted bool      // 宽限已过，条目是 error
+	detail   string
+}
+
+func (w *channelWatch) report(st channel.Status) {
+	state, detail := channelHealth(st)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if st.State != channel.StateError {
+		w.since, w.promoted = time.Time{}, false
+		w.h.Set(state, detail)
+		return
+	}
+	w.detail = detail
+	if w.since.IsZero() {
+		w.since = time.Now()
+		since := w.since
+		time.AfterFunc(w.grace, func() {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			if w.since.Equal(since) { // 中间恢复过又出错的，是另一次，不能被前一次的定时器提前判成 error
+				w.promoted = true
+				w.h.Set(health.Error, w.detail)
+			}
+		})
+	}
+	if w.promoted {
+		w.h.Set(health.Error, detail)
+	} else {
+		w.h.Set(health.Degraded, detail)
+	}
+}
+
 // channelHealth 把渠道自己报的状态换成健康状态：出错和停止（启用的渠道不该停）是 error，
 // 连接中和等人接入还算正常。
 func channelHealth(st channel.Status) (health.State, string) {
@@ -148,11 +193,12 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 	// 渠道停止之后迟到的回报写不到这里：stopChannel 先释放了 h。
 	h := a.chHealth[name]
 	if sr, ok := ch.(channel.StatusReporter); ok {
+		w := &channelWatch{h: h, grace: a.channelGrace}
 		sr.OnStatus(func(st channel.Status) {
-			h.Set(channelHealth(st))
+			w.report(st)
 			a.publishChannel(name)
 		})
-		h.Set(channelHealth(sr.Status()))
+		w.report(sr.Status())
 	}
 	go func() {
 		defer close(r.done)

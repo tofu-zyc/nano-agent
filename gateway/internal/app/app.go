@@ -178,12 +178,13 @@ type App struct {
 	pendingRestart string
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
-	chMu     sync.Mutex
-	runs     map[string]*chanRun
-	chErr    map[string]string
-	chHealth map[string]*health.Handle // channel:<名字> 的健康条目，受 chMu 保护
-	cli      *channel.CLI
-	web      *channel.Web
+	chMu         sync.Mutex
+	runs         map[string]*chanRun
+	chErr        map[string]string
+	chHealth     map[string]*health.Handle // channel:<名字> 的健康条目，受 chMu 保护
+	channelGrace time.Duration             // 渠道自己报的 error 的宽限，测试里改短
+	cli          *channel.CLI
+	web          *channel.Web
 
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
@@ -445,6 +446,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		desktopGates:   map[string]chan struct{}{},
 		desktopUsed:    map[string]map[string]bool{},
 	}
+	a.channelGrace = channelErrorGrace
 	a.health = health.NewBoard()
 	a.hStorage, _ = a.health.Claim("storage")
 	a.hDispatch, _ = a.health.Claim("dispatch")

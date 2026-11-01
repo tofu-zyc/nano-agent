@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
@@ -137,6 +138,7 @@ func (c *statusCh) report(st channel.Status) {
 
 func TestHealthChannelLifecycle(t *testing.T) {
 	e := setup(t)
+	e.a.channelGrace = time.Hour // 这个测试不关心宽限过后的升级
 	cfg := e.a.cfg
 	e.a.ReconcileChannels(cfg) // 初始化渠道表，网页和终端渠道没有健康条目
 	if _, ok := healthOf(e.a, "channel:web"); ok {
@@ -168,8 +170,8 @@ func TestHealthChannelLifecycle(t *testing.T) {
 		t.Fatalf("在线: %+v", h)
 	}
 	first.report(channel.Status{State: channel.StateError, Error: "掉线了"})
-	if h, _ := healthOf(e.a, "channel:tg.t1"); h.State != health.Error || h.Detail != "掉线了" {
-		t.Fatalf("渠道自己报错: %+v", h)
+	if h, _ := healthOf(e.a, "channel:tg.t1"); h.State != health.Degraded || h.Detail != "掉线了" {
+		t.Fatalf("渠道自己报错先算 degraded: %+v", h)
 	}
 
 	// 停用：条目消失
@@ -213,5 +215,52 @@ func TestHealthChannelLifecycle(t *testing.T) {
 	e.a.chMu.Unlock()
 	if stale {
 		t.Fatal("删除的机器人不该留下 chErr")
+	}
+}
+
+// 渠道自己报的 error 持续超过宽限才算 error；一次抖动不算，前一次的定时器也不能提前判后一次。
+func TestHealthChannelErrorGrace(t *testing.T) {
+	e := setup(t)
+	e.a.channelGrace = 600 * time.Millisecond
+	e.a.ReconcileChannels(e.a.cfg)
+	ch := &statusCh{fakeCh: fakeCh{name: "tg.g1", sent: make(chan string, 10)}, st: channel.Status{State: channel.StateOnline}}
+	e.a.chMu.Lock()
+	e.a.reconcile("tg.g1", true, "c", func() (channel.Channel, error) { return ch, nil })
+	e.a.chMu.Unlock()
+	state := func() health.State { h, _ := healthOf(e.a, "channel:tg.g1"); return h.State }
+
+	ch.report(channel.Status{State: channel.StateError, Error: "断了"}) // 第一次：0ms，定时器在 600ms
+	if state() != health.Degraded {
+		t.Fatalf("宽限内是 degraded: %v", state())
+	}
+	time.Sleep(50 * time.Millisecond)
+	ch.report(channel.Status{State: channel.StateOnline}) // 抖动：恢复
+	if state() != health.OK {
+		t.Fatalf("恢复: %v", state())
+	}
+	time.Sleep(150 * time.Millisecond)
+	ch.report(channel.Status{State: channel.StateError, Error: "又断了"}) // 第二次：200ms，定时器在 800ms
+	time.Sleep(450 * time.Millisecond)                                 // 650ms：第一次的定时器已经过期，但不能算数
+	if state() != health.Degraded {
+		t.Fatalf("前一次的定时器不能提前判后一次: %v", state())
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for state() != health.Error {
+		if time.Now().After(deadline) {
+			t.Fatal("持续出错超过宽限应升级为 error")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if h, _ := healthOf(e.a, "channel:tg.g1"); h.Detail != "又断了" {
+		t.Fatalf("说明是这一次的: %+v", h)
+	}
+	ch.report(channel.Status{State: channel.StateOnline}) // 升级以后恢复
+	if state() != health.OK {
+		t.Fatalf("恢复后回到 ok: %v", state())
+	}
+	// 渠道停了（启用的渠道不该停）不等宽限，直接 error
+	ch.report(channel.Status{State: channel.StateStopped})
+	if state() != health.Error {
+		t.Fatalf("停止直接 error: %v", state())
 	}
 }
