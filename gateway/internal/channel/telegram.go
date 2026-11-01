@@ -189,7 +189,7 @@ func (t *Telegram) callRetry(ctx context.Context, method string, params, out any
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(max(te.RetryAfter, 1)) * time.Second):
+		case <-time.After(te.RetryDelay()):
 		}
 	}
 }
@@ -471,7 +471,7 @@ func isNameByte(c byte) bool {
 }
 
 func (t *Telegram) Send(ctx context.Context, chatID, text, replyTo string) error {
-	for i, part := range Split(text, 4000) {
+	for i, part := range Split(text, tgTextLimit) {
 		p := map[string]any{"chat_id": chatID, "text": part}
 		if i == 0 && replyTo != "" {
 			if id, err := strconv.ParseInt(replyTo, 10, 64); err == nil {

@@ -101,6 +101,9 @@ func mockFeishu(t *testing.T, deny bool) (*Feishu, *cardServer) {
 			data["card_id"] = fmt.Sprint(len(m.texts))
 		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/"):
 			m.patched = append(m.patched, p.Content)
+		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/") && strings.HasSuffix(r.URL.Path, "/reply"):
+			m.sent = append(m.sent, "reply "+strings.Split(r.URL.Path, "/")[5]+" "+p.MsgType+":"+p.Content)
+			data["message_id"] = "msg-test"
 		case r.Method == "POST" && r.URL.Path == "/open-apis/im/v1/messages":
 			m.sent = append(m.sent, p.MsgType+":"+p.Content)
 			data["message_id"] = "msg-test"

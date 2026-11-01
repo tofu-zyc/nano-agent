@@ -315,8 +315,9 @@ package outbox
 type Item struct {
 	Channel  string            // 渠道名，发送时按名字取当前的渠道对象
 	Chat     string
-	Parts    []string          // 已按渠道上限切好的段；媒体消息为空
-	Markdown bool
+	Parts    []string          // 已按渠道实际的发法切好的段；媒体消息为空
+	Markdown bool              // 入队时的请求：按 Markdown 发
+	Plain    bool              // Parts 的结果：逐段用 Send 发；否则用 SendMarkdown 发
 	ReplyTo  string            // 只用于第一段
 	Delay    time.Duration     // 第一段之前的停顿，保留群聊和私聊分条的节奏
 	Media    *media.Attachment // 只存引用，发送时从媒体库读
@@ -345,13 +346,21 @@ func (o *Outbox) Close()                                 // 停止受理，等�
 **切段**：渠道包新增一个可选接口：
 
 ~~~go
-// TextLimiter 报告一段文字消息最多多少字（按 rune 计），出站据此切段并逐段记进度。
-type TextLimiter interface{ TextLimit(markdown bool) int }
+// Parter 按渠道实际的发法，把一条消息切成要逐段发送的段：plain 为 true 时每段用 Send 发，
+// 否则用 SendMarkdown 发。
+// 实现必须保证：逐段发送和整条调用 Send/SendMarkdown，平台收到的内容和顺序完全一样。
+type Parter interface {
+	Parts(text string, markdown bool) (parts []string, plain bool)
+}
 ~~~
 
-- Telegram、飞书、QQ、微信实现它，返回值必须和各自 `Send`、`SendMarkdown` 内部用的上限一致（现在分别是 4000；文字 8000、富文本 6000；4000；2000，实现时逐一核对）。
-- `App.enqueue` 用 `channel.Split` 切段。每段不超过上限，渠道内部再切时只得到这一段本身。
+- Telegram：没有 `SendMarkdown`，都按 4000 字切，`plain` 为 true。
+- 飞书：Markdown 按 6000 字切，`plain` 为 false（富文本消息）；纯文字按 8000 字切，`plain` 为 true。
+- QQ：都按 4000 字切，`plain` 为 `!markdown`。
+- 微信：只能显示纯文字，Markdown 先转成纯文字再按 2000 字切，纯文字直接按 2000 字切，`plain` 都是 true。先切原文再转换会让分条结果和代码围栏处理变化，所以切段必须在渠道里按它实际的顺序做。
+- `App.enqueue` 用 `Parts` 切段，把结果和 `plain` 一起记进 `Item`。每段重试时按 `plain` 选 `Send` 或 `SendMarkdown`，回复引用只用于第一段。
 - 没实现这个接口的渠道不切段，整条重试。
+- 每个实现有一个测试：拿一段超过上限的长文本（Markdown 的那组让代码围栏跨过切点），用渠道现有的假服务器比较"整条发"和"按 `Parts` 逐段发"，平台收到的请求序列必须完全相同。
 
 **顺序与并发**：
 
@@ -362,8 +371,9 @@ type TextLimiter interface{ TextLimit(markdown bool) int }
 
 **重试与结局**：
 
-- **临时失败**：退避重试，从 5 秒起翻倍，最长 5 分钟。渠道给出了等待时间时按它等（如 Telegram 429 的 `retry_after`）。
-- **永久失败**：渠道把"永远发不到"的错误用 `fmt.Errorf("%w", channel.ErrGone)` 包起来，出站立即丢弃，原因记为 `gone`。已知的有 Telegram 的 403（机器人被拉黑或踢出）和 400 `chat not found`；其他平台由实现者对照平台文档补充，拿不准的一律按临时失败处理。
+- **临时失败**：退避重试，从 5 秒起翻倍，最长 5 分钟。
+- **限流**：渠道的错误带等待时间时（`channel.RetryAfter(err)`，错误实现 `RetryDelay() time.Duration`；Telegram 429 的 `retry_after`），下次发送推迟到等待时间之后。限流不计入连续失败次数，否则限流会让健康状态变 degraded，还会让后面的消息先发；24 小时过期照常计算。
+- **永久失败**：错误满足 `errors.Is(err, channel.ErrGone)`（直接是 `ErrGone`，或用 `fmt.Errorf("%w", channel.ErrGone)` 包起来，或实现 `Is`），出站立即丢弃，原因记为 `gone`。已知的有 Telegram 的 403（机器人被拉黑或踢出）和 400 `chat not found`；其他平台由实现者对照平台文档补充，拿不准的一律按临时失败处理。目前只有 Telegram 实现。
 - **过期**：入队 24 小时仍未发出，丢弃，原因 `expired`。
 - **渠道暂时不在**（重启中、未上线、被关闭）：等待，不计入失败次数，直到过期。机器人被删除（`App.DeleteBot`）时，App 调 `DropChannel`。
 - **附件读不到**：丢弃，原因 `media_missing`。
@@ -386,7 +396,7 @@ type TextLimiter interface{ TextLimit(markdown bool) int }
 
 **App 的改动**：
 
-- `enqueue`：job 闭包照旧进每个渠道的内存协程，这个协程只服务卡片；命令行和网页照旧；外部平台的文字和媒体切段后交给出站。
+- `enqueue`：job 闭包照旧进每个渠道的内存协程，这个协程只服务卡片；命令行和网页照旧；外部平台的文字和媒体切段（`Parts`）后交给出站。
 - `AddChannel` 不再给文字消息建协程；`DeleteBot` 删除机器人后调用 `DropChannel`。
 - 网关停止时调用 `Outbox.Close`。
 - `Status` 增加出站统计；网页的网关节点和 `nano-gateway status` 显示它。
@@ -478,7 +488,7 @@ func (b *Board) Snapshot() []Entry                  // 按名字排序
 1. R1 和 R12。
 2. `internal/journal` 及其测试。
 3. `internal/health`，接入已有的错误，加上 status 输出和退出码。
-4. 渠道的 `TextLimiter` 和 `ErrGone`。
+4. 渠道的 `Parter`、`ErrGone` 和 `RetryAfter`。
 5. `internal/outbox`，接入 App。
 6. 模型面快照测试。
 
