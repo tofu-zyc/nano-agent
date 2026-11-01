@@ -46,7 +46,7 @@ const (
 
 // Rules 是一个场景的规则。零值表示全部沿用默认。
 type Rules struct {
-	Mode        string          `json:"mode,omitempty"`    // mention | free；2c 再加 turns | director
+	Mode        string          `json:"mode,omitempty"`    // mention | free | turns | director
 	Observe     bool            `json:"observe,omitempty"` // 主动插话只记录，不发出
 	Brief       string          `json:"brief,omitempty"`   // 场景说明，每个成员都看得到
 	Roles       map[string]Role `json:"roles,omitempty"`   // agent ID → 它在这里的角色

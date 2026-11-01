@@ -2038,10 +2038,13 @@ func (a *App) finish(s *sess, status, detail string) {
 		}
 		a.deliver(o.ep, text, "")
 	}
-	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
-	// agent 在房间里的回复：记进群记录，转给听得到的成员；说出口的也算进每小时的额度；回合制接着叫下一位
+	// agent 在房间里的回复：先记进群记录、转给听得到的成员，再算用量（可能因此暂停），最后回合制接着叫下一位
 	if inRoom {
-		a.roomRunDone(roomOf, s, r, status, body)
+		a.roomRunSay(roomOf, s, r, body)
+	}
+	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
+	if inRoom {
+		a.roomRunDone(roomOf, s, status, body)
 	}
 	s.lastActivity = a.now()
 	a.pumpRuns()

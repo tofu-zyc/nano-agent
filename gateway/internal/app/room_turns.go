@@ -12,19 +12,23 @@ import (
 // 轮数（Round）和这一轮下一个轮到谁（Next）存在 scenes.json 的场景条目里；
 // 这一串是不是正在转（TurnActive）只在内存里：重启或取消暂停后不自动接着跑，等下一句人话或旁白。
 
-// roomRunDone 在群里的成员一轮结束时调用：把它说的话记进群，再按回合制决定下一步。调用方持有锁。
-func (a *App) roomRunDone(room rooms.Room, s *sess, r *run, status, body string) {
+// roomRunSay 在群里的成员一轮结束时调用：把它说的话记进群、转给听得到的成员。调用方持有锁。
+func (a *App) roomRunSay(room rooms.Room, s *sess, r *run, body string) {
+	if roomLogSID(room.ID) == s.sid || isSilence(body) {
+		return
+	}
+	s.groupSpokeAt = a.now()
+	s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
+	a.roomAgentSay(room, roomSender(s.sid), body, r.roomChan)
+}
+
+// roomRunDone 在用量算完之后：用最新的群状态（可能刚被用量暂停）做轮流的判断。调用方持有锁。
+func (a *App) roomRunDone(room rooms.Room, s *sess, status, body string) {
 	if roomLogSID(room.ID) == s.sid {
 		return
 	}
 	member := roomSender(s.sid)
 	spoke := !isSilence(body)
-	if spoke {
-		s.groupSpokeAt = a.now()
-		s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
-		a.roomAgentSay(room, member, body, r.roomChan)
-	}
-	// 用量已经算进场景（可能刚把群暂停了）：用最新的群记录接着判断
 	if fresh, ok := a.roomStore.Get(room.ID); ok {
 		a.roomTurnDone(fresh, member, status, spoke)
 	}
@@ -50,7 +54,7 @@ func (a *App) roomTurnStart(room rooms.Room) {
 	if st.TurnActive || room.Paused || room.Mode != scene.ModeTurns {
 		return
 	}
-	st.TurnActive, st.RoundTurns, st.RoundSilent, st.ErrRun = true, 0, 0, 0
+	st.TurnActive, st.RoundTurns, st.RoundSilent, st.RoundCalled, st.ErrRun = true, 0, 0, 0, 0
 	a.roomTurnNext(room)
 }
 
@@ -76,9 +80,11 @@ func (a *App) roomTurnNext(room rooms.Room) {
 	for range len(order) + 1 {
 		if u.Next >= len(order) { // 一整轮结束
 			u.Next = 0
-			u.Round++
+			if st.RoundCalled > 0 { // 一个人都没叫起来的一轮不计数
+				u.Round++
+			}
 			allSilent := st.RoundTurns > 0 && st.RoundSilent == st.RoundTurns
-			st.RoundTurns, st.RoundSilent, st.ErrRun = 0, 0, 0 // 连续出错只数同一轮里的
+			st.RoundTurns, st.RoundSilent, st.RoundCalled = 0, 0, 0
 			a.saveSceneUses()
 			if room.Rounds > 0 && u.Round >= room.Rounds {
 				a.roomTurnStop(room.ID)
@@ -102,6 +108,7 @@ func (a *App) roomTurnNext(room rooms.Room) {
 			continue
 		}
 		st.Current = member
+		st.RoundCalled++
 		hint := fmt.Sprintf("[系统] 第 %d 轮，轮到你。不想说就只回 [不回复]。", u.Round+1)
 		a.roomStart(s, member, room, hint, "")
 		return
@@ -127,11 +134,11 @@ func (a *App) roomTurnDone(room rooms.Room, member, status string, spoke bool) {
 		a.roomTurnStop(room.ID) // 人停下了这一轮：不再往下叫
 		return
 	default:
-		// 出错算跳过；同一轮里连续两位出错就暂停
+		// 出错算跳过；连续两次出错（跨轮也算）就暂停
 		st.ErrRun++
 		if st.ErrRun >= 2 {
 			a.roomTurnStop(room.ID)
-			a.pauseRoom(room, "轮流时连续两位成员出错，先暂停")
+			a.pauseRoom(room, "轮流时连续两次出错，先暂停")
 			return
 		}
 	}

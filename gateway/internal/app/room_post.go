@@ -141,9 +141,11 @@ func (a *App) roomPost(room rooms.Room, l roomLine, o postOpt) {
 			continue
 		}
 		s := a.sessOf(sid)
-		s.groupFresh = true
-		s.groupPending++
-		s.groupLast = a.now()
+		if l.Channel == "" && l.Kind != lineCue { // 频道里的话和 cue 不算新消息：不能让私下的内容引出公开的插话
+			s.groupFresh = true
+			s.groupPending++
+			s.groupLast = a.now()
+		}
 		s.groupEp = endpoint{ch: "room", chat: room.ID}
 		// 暂停了：消息照样进成员的会话（它们还能听到），只是不叫人回
 		if room.Paused || room.MutedAgent(member) || wake == nil || l.Kind == lineCue {
@@ -209,6 +211,12 @@ func (a *App) roomTrigger(s *sess, member string, room rooms.Room, channelID str
 		s.groupTimer = nil
 		s.groupFresh = false
 		s.groupProactive, s.groupObserve = false, nil
+		// 这两秒里群可能暂停了、成员可能被禁言或退群：以现在的为准
+		cur, ok := a.roomStore.Get(room.ID)
+		if !ok || cur.Paused || cur.MutedAgent(member) || !slicesContains(cur.Members, member) {
+			return
+		}
+		room = cur
 		a.roomStart(s, member, room, a.roomChannelHint(room, channelID), channelID)
 	})
 }

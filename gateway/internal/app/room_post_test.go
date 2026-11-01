@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/rooms"
@@ -139,5 +140,49 @@ func TestRoomChannelsFollowMembers(t *testing.T) {
 	got, _ := st.Get(room.ID)
 	if len(got.Channels) != 1 || len(got.Channels[0].Members) != 1 || got.Channels[0].Members[0] != "bob" {
 		t.Fatalf("小猫退群后频道里只剩小鲍：%+v", got.Channels)
+	}
+}
+
+// 频道里的话不算新消息：自由模式下不会因此有人在公开场合插话；同样的话公开说就会。
+func TestRoomChannelLineDoesNotWakeFreeMode(t *testing.T) {
+	for _, private := range []bool{true, false} {
+		e := setup(t)
+		e.a.SetLLM(&scriptModel{reply: func(who string, n int) (string, error) { return "插一句", nil }})
+		room, _ := threeRoom(t, e, scene.Rules{Mode: scene.ModeFree})
+		for _, id := range []string{"default", "bob", "cat"} { // 工具型不会主动插话
+			ag, _ := e.a.agentStore.Get(id)
+			ag.Style = agents.StyleLife
+			if err := e.a.agentStore.Update(ag); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ch := ""
+		if private {
+			ch = "s"
+		}
+		if err := e.a.RoomSay(room.ID, "今晚的事别告诉别人", "张三", ch, "我"); err != nil {
+			t.Fatal(err)
+		}
+		e.a.mu.Lock()
+		e.a.rnd = func() float64 { return 0 }
+		base := e.a.now()
+		e.a.now = func() time.Time { return base.Add(25 * time.Second) }
+		e.a.mu.Unlock()
+		e.a.groupTick()
+		time.Sleep(300 * time.Millisecond)
+		e.a.mu.Lock()
+		running := false
+		for _, s := range e.a.sessions {
+			if s != nil && s.run != nil {
+				running = true
+			}
+		}
+		e.a.mu.Unlock()
+		if private && running {
+			t.Fatal("频道里的话不该让任何人在公开场合插话")
+		}
+		if !private && !running {
+			t.Fatal("对照：公开说的话应该有人被叫起来")
+		}
 	}
 }

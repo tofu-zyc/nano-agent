@@ -86,7 +86,11 @@
   <summary>更多规则</summary>
   <div class="p-card">
     <label class="p-label">说话方式
-      <select class="p-select" value={rules.mode ?? ''} onchange={(e) => onsave({ mode: str(e) })}>
+      <select class="p-select" value={rules.mode ?? ''} onchange={(e) => {
+        const mode = str(e);
+        // 轮流必须设轮数或这一场的预算：两者都没设就一起发 5 轮（之后可以改）
+        onsave(mode === 'turns' && !rules.rounds && !rules.budget_total ? { mode, rounds: 5 } : { mode });
+      }}>
         <option value="">默认（{external ? '自由' : '点名'}）</option>
         <option value="mention">点名：只有被 @ 或者叫到名字才说</option>
         <option value="free">自由：安静下来按积极度自己插话</option>

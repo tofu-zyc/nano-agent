@@ -511,10 +511,83 @@ def run(page, url, nano):
     open_node(page, "rm:" + room["id"])
     page.screenshot(path=os.path.join(SHOTS, "room.png"))
     text = page.locator(".insp").inner_text()
-    if "成员" in text and "怎么说话" in text and "每天最多用多少 token" in text:
-        ok("群面板能改成员、说话方式和预算")
+    if "成员" in text and "场景说明" in text and "角色提示词" in text and "旁白和发言" in text:
+        ok("群面板有成员、场景说明、角色提示词和旁白输入")
     else:
         fail("群面板缺东西：" + text[:200])
+    insp = page.locator(".insp")
+    insp.locator("summary:has-text('更多规则')").click()
+    if "每天最多用多少 token" in insp.inner_text() and "这一场最多用多少 token" in insp.inner_text():
+        ok("群面板的更多规则里有说话方式和预算")
+    else:
+        fail("群面板的更多规则里缺说话方式或预算：" + insp.inner_text()[:300])
+
+    def room_now():
+        return [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == room["id"]][0]
+
+    def log_text():
+        return json.dumps(api(page, "GET", "/api/sessions/" + urllib.request.quote(room["sid"], safe="") + "/full-history")[1], ensure_ascii=False)
+
+    # 旁白：作为旁白说一句，出现在群记录里（点名模式，不会叫醒谁）
+    insp.locator("textarea[placeholder^='例如：夜深了']").fill("夜深了，灯一盏盏熄灭")
+    insp.locator("button:has-text('发出')").click()
+    page.wait_for_timeout(800)
+    if "夜深了，灯一盏盏熄灭" in log_text():
+        ok("以旁白身份说一句，出现在群记录里")
+    else:
+        fail("旁白没有进群记录")
+    # 轮流：只选模式，轮数和预算都没设，网页要一起发 rounds
+    mode_sel = insp.locator("select.p-select:has(option[value=turns])")
+    mode_sel.select_option("turns")
+    page.wait_for_timeout(800)
+    cur = room_now()
+    if cur.get("mode") == "turns" and cur.get("rounds") == 5:
+        ok("切到轮流：没设轮数时一起发 rounds=5，后端接受")
+    else:
+        fail("切到轮流没生效：" + json.dumps(cur, ensure_ascii=False)[:300])
+    box = insp.locator("label:has-text('这一场最多几轮') input")
+    box.fill("3")
+    box.press("Tab")
+    page.wait_for_timeout(600)
+    if room_now().get("rounds") == 3:
+        ok("轮流的轮数能改")
+    else:
+        fail("改轮数没生效：" + json.dumps(room_now(), ensure_ascii=False)[:300])
+    # 私下频道：加一个，再勾上第三位成员
+    insp.locator("summary:has-text('私下频道')").click()
+    insp.locator("input[placeholder='新频道的名字']").fill("密谈")
+    insp.locator("button:has-text('添加')").click()
+    page.wait_for_timeout(700)
+    chans = room_now().get("channels") or []
+    if len(chans) == 1 and len(chans[0]["members"]) == 2:
+        third = [m for m in room["members"] if m not in chans[0]["members"]][0]
+        # 没勾上的那一位：频道卡片里第三个复选框
+        unchecked = insp.locator(".p-label:has(b:has-text('密谈')) input[type=checkbox]:not(:checked)")
+        unchecked.first.check()
+        page.wait_for_timeout(700)
+        chans = room_now().get("channels") or []
+        if len(chans) == 1 and third in chans[0]["members"] and len(chans[0]["members"]) == 3:
+            ok("能加一个频道并勾选成员")
+        else:
+            fail("勾选频道成员没生效：" + json.dumps(chans, ensure_ascii=False))
+    else:
+        fail("加频道没生效：" + json.dumps(chans, ensure_ascii=False))
+    # 导演：能看到“让 TA 说”，点一次
+    mode_sel.select_option("director")
+    page.wait_for_timeout(800)
+    cue_btns = insp.locator("button:has-text('让 TA 说')")
+    if room_now().get("mode") == "director" and cue_btns.count() == 3:
+        before = log_text()
+        cue_btns.first.click()
+        page.wait_for_timeout(1200)
+        if not page.locator(".toast.err, .toast.error").count():
+            ok("导演模式有“让 TA 说”，点一次没有报错")
+        else:
+            fail("点“让 TA 说”报错：" + page.locator(".toast").first.inner_text())
+        del before
+    else:
+        fail("切到导演后没有“让 TA 说”：" + json.dumps(room_now(), ensure_ascii=False)[:300])
+    api(page, "PATCH", "/api/rooms/" + room["id"], {"mode": "mention"})
     sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
     if sessions.get(room["sid"], {}).get("title") == "产品组":
         ok("群的会话在列表里显示群名")
@@ -555,7 +628,7 @@ def run(page, url, nano):
     page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=15000)
     if '/room:' in page.locator('aside.list').inner_text():
         fail("群成员的内部会话从实时事件漏进了列表")
-    if page.locator(".room-chat .msg.user .bubble").count() == 1:
+    if page.locator(".room-chat .msg.user .bubble:has-text(\"这是群聊界面验证\")").count() == 1:
         ok("群发言实时显示头像和说话人，用户消息没有重复")
     else:
         fail("群消息重复或没有显示")

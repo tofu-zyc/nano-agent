@@ -123,6 +123,7 @@ type roomRun struct {
 	TurnActive              bool
 	Current                 string
 	RoundTurns, RoundSilent int
+	RoundCalled             int
 	ErrRun                  int
 }
 

@@ -197,7 +197,7 @@ func TestRoomTurnsAllSilentStopsWithoutPause(t *testing.T) {
 	}
 }
 
-// 出错算跳过；同一轮里连续两位出错就暂停并写明原因。
+// 出错算跳过；连续两次出错（跨轮也算）就暂停并写明原因。
 func TestRoomTurnsErrorsSkipThenPause(t *testing.T) {
 	e := setup(t)
 	failing := map[string]bool{"default": true, "bob": true}
@@ -215,11 +215,9 @@ func TestRoomTurnsErrorsSkipThenPause(t *testing.T) {
 	if p, _ := paused(e, id); p {
 		t.Fatal("不连续的出错不该暂停")
 	}
-	failing["cat"] = true
-	step(t, e, e.a.roomMemberSID("default", id)) // 第二轮：出错
-	step(t, e, e.a.roomMemberSID("cat", id))     // 同一轮里连续第二位出错
+	step(t, e, e.a.roomMemberSID("default", id)) // 第二轮开头又出错：和上一位的出错连起来（跨轮也算）
 	waitFor(t, func() bool { p, _ := paused(e, id); return p })
-	if !strings.Contains(roomLog(e, log), "连续两位成员出错") {
+	if !strings.Contains(roomLog(e, log), "连续两次出错") {
 		t.Fatalf("要写明原因：\n%s", roomLog(e, log))
 	}
 }
@@ -386,5 +384,63 @@ func TestRoomTurnsThenDirectorEndToEnd(t *testing.T) {
 	want := "[旁白] 天黑了\n[小纳] default说第1句\n[bob] bob说第1句\n[小纳] default说第2句\n[bob] bob说第2句\n[小纳] default说第3句\n[bob] bob说第3句\n[系统] 这一场到了 3 轮，先暂停，清零累计后再恢复\n[导演→bob] 该你揭晓了\n[bob] bob说第4句"
 	if got != want {
 		t.Fatalf("群记录：\n%s\n应为：\n%s", got, want)
+	}
+}
+
+// 只剩一位能说话、模型一直出错：连续出错跨轮累计，叫两次就暂停，不会无限转下去。
+func TestRoomTurnsErrorsAcrossRoundsPause(t *testing.T) {
+	e := setup(t)
+	m := &scriptModel{reply: func(who string, n int) (string, error) { return "", errors.New("模型挂了") }}
+	id, log := turnRoom(t, e, scene.Rules{Mode: scene.ModeTurns, BudgetTotal: 100000, Order: []string{"default", "cat", "bob"}}, m)
+	muted := []string{"cat", "bob"}
+	if _, err := e.a.UpdateRoom(id, RoomPatch{Muted: &muted}); err != nil {
+		t.Fatal(err)
+	}
+	e.a.RoomSay(id, "开始", "张三", "", "我")
+	// 同一位成员连着被叫：第一次出错的一轮结束时下一轮已经开始，不能等它“空闲”
+	for i := 0; i < 2; i++ {
+		in := e.k.expect(proto.TInput)
+		e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+		e.k.expect(proto.TTurn)
+		e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusError})
+	}
+	waitFor(t, func() bool { p, _ := paused(e, id); return p })
+	e.k.none()
+	if !strings.Contains(roomLog(e, log), "连续两次出错") {
+		t.Fatalf("要写明原因：\n%s", roomLog(e, log))
+	}
+}
+
+// 群在回复期间被用量暂停：先记 agent 的话，再写暂停；它 @ 的成员不该被叫起来。
+func TestRoomPausedByUsageDoesNotWakeMentioned(t *testing.T) {
+	e := setup(t)
+	m := &scriptModel{reply: func(who string, n int) (string, error) {
+		if who == "bob" {
+			return "@小猫 你怎么看", nil
+		}
+		return "我来说", nil
+	}}
+	e.a.SetLLM(m)
+	room, _ := threeRoom(t, e, scene.Rules{Mode: scene.ModeMention, Budget: 5})
+	log := roomLogSID(room.ID)
+	if err := e.a.RoomSay(room.ID, "@小鲍 说说", "张三", "", "我"); err != nil {
+		t.Fatal(err)
+	}
+	step(t, e, e.a.roomMemberSID("bob", room.ID))
+	waitFor(t, func() bool { p, _ := paused(e, room.ID); return p })
+	time.Sleep(2500 * time.Millisecond) // 过了叫人的等待时间
+	e.k.none()
+	ls := lines(e, log)
+	say, pause := -1, -1
+	for i, l := range ls {
+		if strings.HasPrefix(l, "[小鲍]") {
+			say = i
+		}
+		if strings.HasPrefix(l, "[系统]") && strings.Contains(l, "先暂停") {
+			pause = i
+		}
+	}
+	if say < 0 || pause < 0 || say > pause {
+		t.Fatalf("小鲍的话要在暂停提示前面：%q", ls)
 	}
 }
