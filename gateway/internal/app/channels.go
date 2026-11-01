@@ -12,6 +12,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/health"
 )
 
 // 渠道管理：按配置启动、停止、重启各个聊天渠道。网页里改了渠道设置时调用 ReconcileChannels，
@@ -64,6 +65,7 @@ func (a *App) ReconcileChannels(cfg *config.Config) {
 	defer a.chMu.Unlock()
 	if a.runs == nil {
 		a.runs, a.chErr = map[string]*chanRun{}, map[string]string{}
+		a.chHealth = map[string]*health.Handle{}
 	}
 	if a.web == nil {
 		a.web = channel.NewWeb()
@@ -85,10 +87,12 @@ func (a *App) reconcile(name string, want bool, conf any, build func() (channel.
 		cur = nil
 	}
 	if want && cur == nil {
+		h := a.claimChannelHealth(name)
 		ch, err := build()
 		if err != nil {
 			a.log.Error("启动渠道失败", "channel", name, "err", err)
 			a.chErr[name] = err.Error()
+			h.Set(health.Error, err.Error())
 			a.publishChannel(name)
 			return
 		}
@@ -97,8 +101,42 @@ func (a *App) reconcile(name string, want bool, conf any, build func() (channel.
 	}
 	if !want {
 		delete(a.chErr, name)
+		a.releaseChannelHealth(name)
 		a.publishChannel(name)
 	}
+}
+
+// channel:<名字> 健康条目只在这里认领和释放：启用的渠道有条目（构建失败也有，显示 error），
+// 停用或被删除的没有。调用方持有 chMu。
+func (a *App) claimChannelHealth(name string) *health.Handle {
+	a.releaseChannelHealth(name)
+	h, _ := a.health.Claim("channel:" + name)
+	a.chHealth[name] = h
+	return h
+}
+
+func (a *App) releaseChannelHealth(name string) {
+	a.chHealth[name].Release()
+	delete(a.chHealth, name)
+}
+
+// channelHealth 把渠道自己报的状态换成健康状态：出错和停止（启用的渠道不该停）是 error，
+// 连接中和等人接入还算正常。
+func channelHealth(st channel.Status) (health.State, string) {
+	switch st.State {
+	case channel.StateError:
+		if st.Error == "" {
+			return health.Error, "出错"
+		}
+		return health.Error, st.Error
+	case channel.StateStopped:
+		return health.Error, "已停止"
+	case channel.StateStarting:
+		return health.OK, "连接中"
+	case channel.StateIdle:
+		return health.OK, "等待接入"
+	}
+	return health.OK, ""
 }
 
 func (a *App) startChannel(name string, ch channel.Channel, conf any) {
@@ -106,13 +144,28 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 	r := &chanRun{ch: ch, conf: conf, cancel: cancel, done: make(chan struct{})}
 	a.runs[name] = r
 	a.AddChannel(ch)
+	// 网页和终端不经过 reconcile，没有健康条目（h 为 nil，什么也不做）。
+	// 渠道停止之后迟到的回报写不到这里：stopChannel 先释放了 h。
+	h := a.chHealth[name]
 	if sr, ok := ch.(channel.StatusReporter); ok {
-		sr.OnStatus(func(channel.Status) { a.publishChannel(name) })
+		sr.OnStatus(func(st channel.Status) {
+			h.Set(channelHealth(st))
+			a.publishChannel(name)
+		})
+		h.Set(channelHealth(sr.Status()))
 	}
 	go func() {
 		defer close(r.done)
-		if err := ch.Run(ctx, a.OnMessage); err != nil {
+		err := ch.Run(ctx, a.OnMessage)
+		if err != nil {
 			a.log.Error("聊天渠道退出", "channel", name, "err", err)
+		}
+		if ctx.Err() == nil {
+			detail := "渠道已退出"
+			if err != nil {
+				detail += "：" + err.Error()
+			}
+			h.Set(health.Error, detail)
 		}
 		a.publishChannel(name)
 	}()
@@ -121,6 +174,7 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 }
 
 func (a *App) stopChannel(name string) {
+	a.releaseChannelHealth(name)
 	r := a.runs[name]
 	if r == nil {
 		return
@@ -187,6 +241,13 @@ func (a *App) reconcileBotsLocked(cfg *config.Config, bots []agents.Bot) {
 			continue
 		}
 		a.stopChannel(name)
+	}
+	// 机器人被删除时，没在跑（比如构建失败）的也要撤掉条目
+	for name := range a.chHealth {
+		if isBotChannel(name) && !seen[name] {
+			a.releaseChannelHealth(name)
+			delete(a.chErr, name)
+		}
 	}
 }
 

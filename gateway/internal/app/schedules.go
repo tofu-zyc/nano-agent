@@ -7,6 +7,7 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/schedule"
 	"path/filepath"
@@ -99,6 +100,7 @@ func (a *App) loadSchedules() {
 	a.schedules, a.schedulesErr = schedule.Open(filepath.Join(a.store.Dir(), "schedules.json"), a.now())
 	if a.schedulesErr != nil {
 		a.log.Warn("定时任务不可用", "err", a.schedulesErr)
+		a.hSchedule.Set(health.Error, a.schedulesErr.Error())
 	}
 }
 func (a *App) Schedules() ScheduleView {

@@ -133,6 +133,13 @@ export type UpdateInfo = {
   updating?: string;
 };
 
+export type HealthEntry = {
+  name: string;
+  state: 'ok' | 'degraded' | 'error';
+  detail?: string;
+  since: string;
+};
+
 export type RuntimeStatus = {
   running: boolean;
   pid: number;
@@ -144,6 +151,7 @@ export type RuntimeStatus = {
   kernel_listen: string;
   pending_restart: number;
   recent_errors?: string[];
+  health?: HealthEntry[];
   update?: UpdateInfo;
 };
 

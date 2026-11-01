@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
@@ -121,6 +122,12 @@ type App struct {
 	jobCompletions  map[string]jobCompletionWait
 	jobEvents       *eventlog.Store
 	jobEventsErr    error
+	health          *health.Board
+	hStorage        *health.Handle // 以下各条目只由 App 写（channel:<名字> 由 channels.go 认领）
+	hDispatch       *health.Handle
+	hEvents         *health.Handle
+	hAutonomy       *health.Handle
+	hSchedule       *health.Handle
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
 	runWaitSerial   uint64
@@ -171,11 +178,12 @@ type App struct {
 	pendingRestart string
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
-	chMu  sync.Mutex
-	runs  map[string]*chanRun
-	chErr map[string]string
-	cli   *channel.CLI
-	web   *channel.Web
+	chMu     sync.Mutex
+	runs     map[string]*chanRun
+	chErr    map[string]string
+	chHealth map[string]*health.Handle // channel:<名字> 的健康条目，受 chMu 保护
+	cli      *channel.CLI
+	web      *channel.Web
 
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
@@ -437,6 +445,12 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		desktopGates:   map[string]chan struct{}{},
 		desktopUsed:    map[string]map[string]bool{},
 	}
+	a.health = health.NewBoard()
+	a.hStorage, _ = a.health.Claim("storage")
+	a.hDispatch, _ = a.health.Claim("dispatch")
+	a.hEvents, _ = a.health.Claim("runtime_events")
+	a.hAutonomy, _ = a.health.Claim("autonomy")
+	a.hSchedule, _ = a.health.Claim("schedule")
 	for _, recovery := range []struct {
 		name string
 		run  func() error
@@ -454,7 +468,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.dispatchWait = map[string]func(dispatch.Change){}
 	a.dispatcher, a.dispatchErr = dispatch.Open(ctx, filepath.Join(store.Dir(), "runtime", "leases.json"), a.runtimeLimits.Dispatch(), a.leaseChanged)
 	if a.dispatchErr != nil {
-		store.RecordStorageIssue("execution_leases", a.dispatchErr)
+		store.RecordStorageIssue(issueExecutionLeases, a.dispatchErr)
+		a.hDispatch.Set(health.Error, a.dispatchErr.Error())
 		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
 	}
 	a.jobHints = map[string]*jobHint{}
@@ -466,7 +481,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.jobCompletions = map[string]jobCompletionWait{}
 	a.jobEvents, a.jobEventsErr = eventlog.Open(ctx, filepath.Join(store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
 	if a.jobEventsErr != nil {
-		store.RecordStorageIssue("runtime_events", a.jobEventsErr)
+		store.RecordStorageIssue(issueRuntimeEvents, a.jobEventsErr)
+		a.hEvents.Set(health.Error, a.jobEventsErr.Error())
 		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
 	if a.persona != nil {

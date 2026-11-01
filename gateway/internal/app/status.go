@@ -8,27 +8,29 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/config"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/redact"
 )
 
 // Status 是 `nano-gateway status`、聊天 /status 和网页用的运行概况。
 type Status struct {
-	Search         SearchUsage   `json:"search"`
-	Running        bool          `json:"running"`
-	PID            int           `json:"pid"`
-	Version        string        `json:"version"`
-	Started        int64         `json:"started"` // 毫秒
-	UptimeMS       int64         `json:"uptime_ms"`
-	Mode           string        `json:"mode"` // systemd | background | foreground
-	WebURL         string        `json:"web_url,omitempty"`
-	KernelListen   string        `json:"kernel_listen"`
-	Kernels        []KernelInfo  `json:"kernels"`
-	Machines       []MachineInfo `json:"machines"`
-	Channels       []ChannelInfo `json:"channels"`
-	DefaultModel   string        `json:"default_model,omitempty"`
-	PendingRestart int           `json:"pending_restart"`
-	Update         *UpdateInfo   `json:"update,omitempty"`
-	RecentErrors   []string      `json:"recent_errors,omitempty"`
+	Search         SearchUsage    `json:"search"`
+	Running        bool           `json:"running"`
+	PID            int            `json:"pid"`
+	Version        string         `json:"version"`
+	Started        int64          `json:"started"` // 毫秒
+	UptimeMS       int64          `json:"uptime_ms"`
+	Mode           string         `json:"mode"` // systemd | background | foreground
+	WebURL         string         `json:"web_url,omitempty"`
+	KernelListen   string         `json:"kernel_listen"`
+	Kernels        []KernelInfo   `json:"kernels"`
+	Machines       []MachineInfo  `json:"machines"`
+	Channels       []ChannelInfo  `json:"channels"`
+	DefaultModel   string         `json:"default_model,omitempty"`
+	PendingRestart int            `json:"pending_restart"`
+	Update         *UpdateInfo    `json:"update,omitempty"`
+	RecentErrors   []string       `json:"recent_errors,omitempty"`
+	Health         []health.Entry `json:"health"`
 }
 
 // RestartRequest 是一次网关自重启的发起信息。SID/Channel/Chat 用于重启完成后回话。
@@ -96,6 +98,8 @@ func (a *App) statusLocked() Status {
 		Machines:     a.machineList(),
 		KernelListen: a.cfg.Kernel.Listen,
 	}
+	a.refreshStorageHealthLocked()
+	st.Health = a.health.Snapshot()
 	if a.updater != nil {
 		u := a.update
 		u.Current = a.version
@@ -105,6 +109,39 @@ func (a *App) statusLocked() Status {
 		st.DefaultModel = a.models.Default()
 	}
 	return st
+}
+
+// 这两个 scope 的故障由 dispatch、runtime_events 条目单独报告，storage 里不重复列。
+const (
+	issueExecutionLeases = "execution_leases"
+	issueRuntimeEvents   = "runtime_events"
+)
+
+// refreshStorageHealthLocked 按当前的存储恢复问题刷新 storage 条目。问题会在运行中新增
+// （Hook 事件、节点的任务记录、会话恢复未完成），记上之后在进程内不会清除。调用方持有 a.mu。
+func (a *App) refreshStorageHealthLocked() {
+	if a.store == nil {
+		return
+	}
+	var scopes []string
+	for _, is := range a.store.StorageIssues() {
+		if is.Scope != issueExecutionLeases && is.Scope != issueRuntimeEvents {
+			scopes = append(scopes, is.Scope)
+		}
+	}
+	if len(scopes) == 0 {
+		a.hStorage.Set(health.OK, "")
+		return
+	}
+	head := scopes
+	if len(head) > 3 {
+		head = head[:3]
+	}
+	detail := fmt.Sprintf("%d 处：%s", len(scopes), strings.Join(head, "、"))
+	if len(scopes) > len(head) {
+		detail += " 等"
+	}
+	a.hStorage.Set(health.Degraded, detail+"；修复后重启网关重新检查")
 }
 
 // statusBriefLocked 是聊天命令用的版本（OnMessage 已经持有 a.mu），不查渠道和日志。
@@ -157,10 +194,20 @@ func formatStatusBrief(st Status) string {
 	if st.PendingRestart > 0 {
 		fmt.Fprintf(&b, "\n有 %d 项设置改了还没重启", st.PendingRestart)
 	}
+	for _, e := range health.Problems(st.Health) {
+		fmt.Fprintf(&b, "\n健康：%s（%s）%s", e.Name, e.State, healthDetail(e))
+	}
 	if len(st.RecentErrors) > 0 {
 		fmt.Fprintf(&b, "\n最近的错误：\n- %s", strings.Join(st.RecentErrors, "\n- "))
 	}
 	return b.String()
+}
+
+func healthDetail(e health.Entry) string {
+	if e.Detail == "" {
+		return ""
+	}
+	return "：" + e.Detail
 }
 
 // RequestRestart 由网页和 GatewayAdmin 调用。调用方不持有 a.mu。

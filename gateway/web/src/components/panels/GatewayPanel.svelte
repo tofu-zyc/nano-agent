@@ -49,6 +49,20 @@
     <p class="p-note p-small">更新会备份旧版本，新版本起不来自动退回；接入的电脑上的内核会自动换成同一个版本。检查更新和下载走下面的「默认代理」。</p>
   </div>
 
+  {#if rt?.health?.length}
+    <h5 class="p-h">部件健康 <span class="muted p-small">各部件自己报告；正常的也列出来</span></h5>
+    <div class="p-card">
+      {#each rt.health as h (h.name)}
+        <div class="p-row">
+          <span class="tag" class:ok={h.state === 'ok'} class:warn={h.state === 'degraded'} class:err={h.state === 'error'}>{h.state}</span>
+          <code class="p-nowrap">{h.name}</code>
+          <span class="p-grow muted p-small">{h.detail ?? ''}</span>
+          {#if h.state !== 'ok'}<span class="muted p-small">{since(Date.parse(h.since))}</span>{/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if ov.storage_issues?.length}
     <div class="p-err"><b>存储恢复需要处理</b>
       {#each ov.storage_issues as issue}<p>{issue.scope}：{issue.error}</p>{/each}

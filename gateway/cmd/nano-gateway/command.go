@@ -15,6 +15,7 @@ import (
 	"nano-agent/gateway/internal/app"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/control"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/paths"
 	"nano-agent/gateway/internal/secret"
 	"nano-agent/gateway/internal/version"
@@ -80,6 +81,16 @@ func runStatus(args []string) int {
 		return 1
 	}
 	printStatus(st)
+	return statusExit(st)
+}
+
+// exitHealthError：网关在运行，但有部件报告 error。其余退出码：0 运行正常，1 没在运行，2 用法错误。
+const exitHealthError = 3
+
+func statusExit(st app.Status) int {
+	if health.HasError(st.Health) {
+		return exitHealthError
+	}
 	return 0
 }
 
@@ -125,6 +136,13 @@ func printStatus(st app.Status) {
 	}
 	if st.PendingRestart > 0 {
 		fmt.Printf("待重启设置：%d 项\n", st.PendingRestart)
+	}
+	for _, e := range health.Problems(st.Health) {
+		line := fmt.Sprintf("健康：%s（%s）", e.Name, e.State)
+		if e.Detail != "" {
+			line += "：" + e.Detail
+		}
+		fmt.Println(line)
 	}
 	if len(st.RecentErrors) > 0 {
 		fmt.Println("最近的错误：")

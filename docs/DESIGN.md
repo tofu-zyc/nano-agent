@@ -416,22 +416,32 @@ type Entry struct {
 func NewBoard() *Board
 func (b *Board) Claim(name string) (*Handle, error) // 同名第二次认领返回错误
 func (h *Handle) Set(state State, detail string)    // 只有认领者能写
+func (h *Handle) Release()                          // 撤销认领，可以重复调用
 func (b *Board) Snapshot() []Entry                  // 按名字排序
 ~~~
+
+- `Release` 之后条目从 `Snapshot` 里消失，同名可以重新 `Claim`。
+- 释放后，旧 `Handle` 上的 `Set` 一律无效：不报错，也不改条目。渠道协程和 `OnStatus` 回调可能在渠道停止之后才回报，不能写到新认领的同名条目上。
+- `Entry`、`Board`、`Handle` 的方法都可并发调用；`nil` 的 `Handle` 什么也不做。
 
 三种状态的定义：`ok` 正常；`degraded` 能用，但有事要人看；`error` 这一部分现在不能工作。
 
 第一批条目只收拢已有的错误，不新增检查。原来的字段保留，在给它们赋值的地方同时写健康条目：
 
-| 条目 | 认领者 | 来源 |
+| 条目 | 认领者 | 来源与档位 |
 | --- | --- | --- |
 | `outbox` | 出站 | 存储失败为 error；有条目连续失败 3 次以上、24 小时内有丢弃或容量满为 degraded |
-| `channel:<名字>` | 渠道管理（`channels.go`） | `chErr` 和渠道的状态 |
-| `storage` | App 启动 | `session.Store.StorageIssues()`：会话、插话、人格等的恢复问题 |
-| `dispatch` | App | `dispatchErr` |
-| `runtime_events` | App | `jobEventsErr` |
-| `autonomy` | App | `mindsErr` |
-| `schedule` | App | `schedulesErr` |
+| `channel:<名字>` | 渠道管理（`channels.go`） | `chErr` 和渠道的状态：构建失败、渠道报 `error`、启用的渠道停止（`stopped`）或 `Run` 意外退出为 error；连接中、等人接入、在线为 ok |
+| `storage` | App | `session.Store.StorageIssues()`，有问题为 degraded，不影响退出码 |
+| `dispatch` | App | `dispatchErr`，启动失败为 error |
+| `runtime_events` | App | `jobEventsErr`，启动失败为 error |
+| `autonomy` | App | `mindsErr`，读取失败为 error |
+| `schedule` | App | `schedulesErr`，启动失败为 error |
+
+- `channel:<名字>` 只在 `channels.go` 里认领和释放：`reconcile` 判定要启用时认领（构建失败也有条目，显示 error），停用、配置变了重启或机器人被删除时释放，别处不写这些条目。停用的渠道不留条目，网页和终端不经过 `reconcile`，没有条目。
+- `storage` 列出问题时跳过 `execution_leases` 和 `runtime_events` 两个 scope，它们由 `dispatch`、`runtime_events` 条目单独报告，同一个故障只在一处出现。其他 scope（`jobs:<节点>`、`hook_event`、会话 ID、`persona`、`interjections` 等）照常算在 `storage` 里。
+- `StorageIssues` 在运行中也会新增，所以 `storage` 在启动后不只设一次：每次取健康状态（`Status`）之前按当前的问题刷新，写入方仍然只有 App。这些问题记上后在进程内不会清除，说明末尾写"修复后重启网关重新检查"。
+- 说明写成概括：`N 处：前三个 scope 等；…`，完整列表在网页概览的存储恢复提示里，不重复。
 
 对外暴露：
 

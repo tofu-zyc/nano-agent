@@ -25,6 +25,7 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
@@ -47,6 +48,12 @@ type autonomyDoc struct {
 
 func (a *App) autonomyFile() string { return filepath.Join(a.store.Dir(), "autonomy.json") }
 
+// setMindsErr 记下自主状态不可用的原因，同时报到健康清单。调用方持有锁。
+func (a *App) setMindsErr(err error) {
+	a.mindsErr = err
+	a.hAutonomy.Set(health.Error, err.Error())
+}
+
 // loadMinds 从 data/autonomy.json 读入所有 agent 的心智状态（只读一次）。调用方持有锁。
 func (a *App) loadMinds() {
 	if a.mindsLoaded {
@@ -63,20 +70,20 @@ func (a *App) loadMinds() {
 	var doc autonomyDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
 		// 读不动就当成"不知道现在是什么"，绝不拿空状态覆盖原文件
-		a.mindsErr = fmt.Errorf("自主状态解析失败（%v），先不覆盖：%s", err, a.autonomyFile())
+		a.setMindsErr(fmt.Errorf("自主状态解析失败（%v），先不覆盖：%s", err, a.autonomyFile()))
 		a.log.Error(a.mindsErr.Error())
 		return
 	}
 	needsMigration := doc.Version < autonomy.SchemaVersion
 	if doc.Version > autonomy.SchemaVersion {
-		a.mindsErr = fmt.Errorf("自主状态版本过新，拒绝降级覆盖")
+		a.setMindsErr(fmt.Errorf("自主状态版本过新，拒绝降级覆盖"))
 		a.log.Error(a.mindsErr.Error())
 		return
 	}
 	for _, st := range doc.Agents {
 		if st != nil {
 			if st.SchemaVersion > autonomy.SchemaVersion || doc.Version > autonomy.SchemaVersion {
-				a.mindsErr = fmt.Errorf("自主状态版本过新，拒绝降级覆盖")
+				a.setMindsErr(fmt.Errorf("自主状态版本过新，拒绝降级覆盖"))
 				a.log.Error(a.mindsErr.Error())
 				return
 			}
@@ -87,7 +94,7 @@ func (a *App) loadMinds() {
 		backup := a.autonomyFile() + ".schema1.bak"
 		if saved, readErr := os.ReadFile(backup); readErr == nil {
 			if !json.Valid(saved) {
-				a.mindsErr = fmt.Errorf("旧自主状态备份损坏，保留现场")
+				a.setMindsErr(fmt.Errorf("旧自主状态备份损坏，保留现场"))
 				return
 			}
 		} else if errors.Is(readErr, os.ErrNotExist) {
@@ -107,12 +114,12 @@ func (a *App) loadMinds() {
 				err = os.Rename(tmp, backup)
 			}
 			if err != nil {
-				a.mindsErr = fmt.Errorf("自主状态迁移备份失败：%w", err)
+				a.setMindsErr(fmt.Errorf("自主状态迁移备份失败：%w", err))
 				a.log.Error(a.mindsErr.Error())
 				return
 			}
 		} else {
-			a.mindsErr = readErr
+			a.setMindsErr(readErr)
 			return
 		}
 

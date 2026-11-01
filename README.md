@@ -118,7 +118,7 @@ bot> 结果是 1、4、9、16、25。
 `nano-gateway` 自己带一套管理命令，终端、网页和聊天里都能用：
 
 ```sh
-nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置和最近错误
+nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置、不正常的部件和最近错误
 nano-gateway start               # 启动（有 systemd 用服务，没有用后台进程并看护）
 nano-gateway stop                # 停止
 nano-gateway restart             # 先检查配置，再停止/启动；配置坏了会拒绝，网关保持运行
@@ -128,6 +128,8 @@ nano-gateway doctor              # 检查配置、密钥和目录权限、端口
 nano-gateway version             # 编译时写进去的版本号
 nano-gateway help                # 全部命令；nano-gateway 命令 --help 看单个命令
 ```
+
+各个部件（存储、执行租约、可靠事件、自主活动、定时任务和每个启用的渠道）自己报告健康状态：`ok` 正常，`degraded` 能用但有事要人看，`error` 这一部分现在不能工作。`nano-gateway status` 和聊天 `/status` 只列出不是 `ok` 的部件，网页的网关节点列出全部。`nano-gateway status` 的退出码：0 运行正常，1 没在运行，2 用法错误，3 在运行但有部件是 `error`（脚本里判断“网关没在运行”要用 1，不要用非 0）。
 
 聊天里管理员可以用 `/status` 和 `/restart`；网关节点上有「重启网关」按钮，改动了需要重启的配置时节点上会有标记、面板里列出是哪几项，重启期间页面显示“重启中”并自动重连；AI 可以在管理员会话里用 `Gateway {"what":"logs"}` 看脱敏日志，用 `GatewayAdmin {"action":"restart"}` 重启（要审批）。重启会先重新加载 `gateway.toml` 和 `data/config.json`，加载失败不会停掉正在运行的网关；成功后会给发起的会话回一句“网关已重启”。
 
