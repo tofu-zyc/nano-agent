@@ -603,19 +603,8 @@ func (a *App) toolNames() []string {
 			add(t)
 		}
 	}
-	for _, spec := range a.gatewayTools() {
-		add(spec.Name)
-	}
-	add("Skill")
-	add("Schedule")
-	add(knowledgeLabel)
-	add("FollowUp")
-	add("Agenda")
-	add("Idea")
-	add("Mind")
-	add("SendFile")
-	for _, spec := range a.searchTools() {
-		add(spec.Name)
+	for _, name := range gatewayToolNames() {
+		add(name)
 	}
 	sort.Strings(out)
 	return out

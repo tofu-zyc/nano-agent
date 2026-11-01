@@ -172,6 +172,12 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 `internal/app/model_surface_test.go` 为 11 种角色（挂了工作目录的管理员、访客 none / readonly、外部群聊、拟人型私聊、life、dream、定时任务、Hook 临时会话、分支、内部群成员）各建一个会话，调用 `contextParts`，把 `prefixVer`、系统提示全文、工具定义 JSON 和字节数存进 `testdata/model-surface/<角色>.golden`。内容变了就失败，用 `go test ./internal/app -run TestModelSurface -update` 更新并检查 `prefixVer`；工具定义变了而 `prefixVer` 没变，失败，带 `-update` 也拒绝写入。每个角色"系统提示加工具定义"的总字节有上限（当时的值上浮 10%，写在测试里）；同一输入两次得到的字节必须相同。
 
+## 网关工具登记和本轮工具
+
+网关自己提供的工具（Skill、Session、Job、Schedule、Hook、Message、Gateway、GatewayAdmin、SendFile、Knowledge、FollowUp、Agenda、Idea、Mind、Diary、WebSearch、WebFetch）登记在 `internal/app/tooldefs.go` 的一张表里：名字、生成定义的函数、执行入口、是否走 `gateway:tools` 状态租约、受理后直接报“开始”还是先报“排队”、是否只给管理员、能不能出现在群聊和场景的工具表。exec 分发、网页上的工具列表（`toolNames`）、群聊白名单的默认范围都从这张表推出；哪类会话提供哪些工具仍在 `contextParts` 和 `toolsFor` 里，但定义只通过表取。内核工具（Read、Shell 等）和 MCP 工具不在表里，C 侧的执行策略不变。
+
+模型回复里的每个工具调用，名字必须在这次请求的工具表里。有一个不在，整批不接受、不执行，按 `unaccepted_tool_proposal` 写进历史，原因是“这一轮没有提供工具 X”；处理器里原有的权限检查保留。
+
 ## 验收范围与已知边界
 
 v0.9.0 Linux + Windows 范围已验收。2026-10-29 在 c55229b 复验：
@@ -185,3 +191,5 @@ v0.9.0 Linux + Windows 范围已验收。2026-10-29 在 c55229b 复验：
 | 前端类型检查、语义测试、构建 | 通过，语义测试 7 项 |
 
 macOS 后端已实现、两个架构编译通过；用户暂缓原生运行验收。真实飞书/Telegram 租户联调及长期自主行为仍需后续观察，模拟接口测试不等于真实平台实测。远程 CI 和正式发布状态以对应提交的实际结果为准，发布步骤见 [发布流程](RELEASE.md)。
+
+出站已知边界：Job 卡片和命令行、网页走内存协程，文字走可靠出站；同一个窗口里两者不共用先后顺序（例如一条文字和一张 Job 卡片的到达先后不保证）。目前没有发现看得见的问题。渠道停用时从渠道表里去掉，它的待发消息留在出站里等，重新启用后按顺序接着发；删除机器人才丢弃。

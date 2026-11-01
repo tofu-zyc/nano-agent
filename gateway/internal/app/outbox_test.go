@@ -288,3 +288,54 @@ func TestStatusReportsOutbox(t *testing.T) {
 		t.Fatalf("没事不打印: %q", s)
 	}
 }
+
+// 渠道停用：从渠道表和快照里去掉，待发消息留在出站里等；重新启用后一条不丢、按顺序发出。
+func TestDisabledChannelKeepsPendingAndResumesInOrder(t *testing.T) {
+	e := setup(t)
+	e.a.ReconcileChannels(e.a.cfg) // 初始化 runs
+	ch1 := &platCh{name: "tg"}
+	e.a.chMu.Lock()
+	e.a.startChannel("telegram", ch1, nil)
+	e.a.chMu.Unlock()
+	if !e.deliverTo("tg", "第0条") {
+		t.Fatal("渠道在时应该受理")
+	}
+	waitUntil(t, "第0条发出", func() bool { return len(ch1.texts()) == 1 })
+
+	e.a.chMu.Lock()
+	e.a.stopChannel("telegram")
+	e.a.chMu.Unlock()
+	e.a.mu.Lock()
+	_, inChans := e.a.chans["tg"]
+	e.a.mu.Unlock()
+	if snap := e.a.chSnap.Load(); inChans || (snap != nil && (*snap)["tg"] != nil) {
+		t.Fatal("停用的渠道应该从渠道表和快照里去掉")
+	}
+	for i := 1; i <= 3; i++ {
+		if !e.deliverTo("tg", "第"+string(rune('0'+i))+"条") {
+			t.Fatalf("渠道停用期间第 %d 条也应该受理（等渠道回来）", i)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := e.outboxPending(); n != 3 {
+		t.Fatalf("停用期间待发应该留着：%d", n)
+	}
+	if got := ch1.texts(); len(got) != 1 {
+		t.Fatalf("停用的渠道对象不该再发：%v", got)
+	}
+	if e.a.outbox.Stats().Dropped24h["channel_removed"] != 0 {
+		t.Fatal("停用不是删除，不该丢弃")
+	}
+
+	ch2 := &platCh{name: "tg"}
+	e.a.chMu.Lock()
+	e.a.startChannel("telegram", ch2, nil)
+	e.a.chMu.Unlock()
+	waitUntil(t, "停用期间的消息发出", func() bool { return len(ch2.texts()) == 3 })
+	if got := strings.Join(ch2.texts(), ","); got != "第1条,第2条,第3条" {
+		t.Fatalf("顺序不对：%s", got)
+	}
+	if e.outboxPending() != 0 {
+		t.Fatal("发完应该清空")
+	}
+}

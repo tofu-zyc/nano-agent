@@ -244,6 +244,7 @@ func (a *App) stopChannel(name string) {
 		a.log.Warn("渠道停止超时", "channel", name)
 	}
 	delete(a.runs, name)
+	a.RemoveChannel(r.ch) // 待发消息留在出站里，渠道回来再发
 	a.log.Info("渠道已停止", "channel", name)
 }
 

@@ -208,6 +208,7 @@ type App struct {
 	jobStopGroups  map[string]bool
 	outboxes       map[string]chan outItem                    // 每个渠道一个内存协程：Job 卡片、cli、web，以及出站不可用时的内存直发
 	outbox         *outbox.Outbox                             // 外部平台渠道的可靠出站
+	chRetired      atomic.Pointer[map[string]channel.Channel] // 停用渠道最后的对象：只用来给排队中的消息按它的发法切段
 	chSnap         atomic.Pointer[map[string]channel.Channel] // 渠道快照：AddChannel 时复制一份换上，出站不去拿 a.mu
 	mediaRef       atomic.Pointer[media.Store]
 	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
@@ -546,17 +547,54 @@ func (a *App) Bus() *events.Bus { return a.bus }
 
 func (a *App) publish(e events.Event) { a.bus.Publish(e) }
 
+// RemoveChannel 在渠道停用时把它从渠道表和快照里去掉（已经被同名的新对象替换的不动）。
+// 出站里它的待发消息按“渠道暂时不在”等待，重新启用后接着发；删除机器人另走 DropChannel。
+func (a *App) RemoveChannel(ch channel.Channel) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name := ch.Name()
+	if a.chans[name] != ch {
+		return
+	}
+	delete(a.chans, name)
+	retired := map[string]channel.Channel{name: ch}
+	if old := a.chRetired.Load(); old != nil {
+		for k, v := range *old {
+			retired[k] = v
+		}
+		retired[name] = ch
+	}
+	a.chRetired.Store(&retired)
+	a.storeChannelsLocked(name)
+}
+
+// storeChannelsLocked 重新发布渠道快照；name 回来了就不再算停用。调用方持有 a.mu。
+func (a *App) storeChannelsLocked(name string) {
+	snap := make(map[string]channel.Channel, len(a.chans))
+	for k, v := range a.chans {
+		snap[k] = v
+	}
+	a.chSnap.Store(&snap)
+	if old := a.chRetired.Load(); old != nil {
+		if _, ok := (*old)[name]; ok && snap[name] != nil {
+			retired := make(map[string]channel.Channel, len(*old))
+			for k, v := range *old {
+				if k != name {
+					retired[k] = v
+				}
+			}
+			a.chRetired.Store(&retired)
+		}
+	}
+}
+
 // AddChannel 登记一个聊天通道（同名的旧通道被替换），并保证有一个按顺序发送消息的协程。
 func (a *App) AddChannel(ch channel.Channel) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	name := ch.Name()
 	a.chans[name] = ch
-	snap := make(map[string]channel.Channel, len(a.chans))
-	for k, v := range a.chans {
-		snap[k] = v
-	}
-	a.chSnap.Store(&snap)
+	a.storeChannelsLocked(name)
 	if _, ok := a.outboxes[name]; ok {
 		return
 	}
@@ -964,24 +1002,33 @@ func (a *App) enqueue(ep endpoint, it outItem) bool {
 	if snap := a.chSnap.Load(); snap != nil {
 		ch = (*snap)[ep.ch]
 	}
+	// Job 卡片、命令行和网页走内存协程；其余渠道（以后新加的平台自动算）进可靠出站。
+	if it.job == nil && ep.ch != "cli" && ep.ch != "web" && a.outbox != nil {
+		// 渠道停用了（不在快照里）：照样入队，等它回来；切段按它停用前的样子
+		sizing := ch
+		if sizing == nil {
+			if r := a.chRetired.Load(); r != nil {
+				sizing = (*r)[ep.ch]
+			}
+		}
+		if sizing != nil {
+			_, err := a.outbox.Enqueue(a.outboxItem(sizing, ep, it))
+			switch {
+			case err == nil:
+				return true
+			case errors.Is(err, outbox.ErrFull):
+				a.log.Warn("出站队列已满，消息没发出去", "chat", ep.key())
+				return false
+			case errors.Is(err, outbox.ErrTooLarge):
+				a.log.Warn("消息超过出站日志的单条上限，改为内存直发", "chat", ep.key())
+			default:
+				a.log.Debug("出站不可用，改为内存直发", "chat", ep.key(), "err", err)
+			}
+		}
+	}
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return false
-	}
-	// Job 卡片、命令行和网页走内存协程；其余渠道（以后新加的平台自动算）进可靠出站。
-	if it.job == nil && ep.ch != "cli" && ep.ch != "web" && a.outbox != nil {
-		_, err := a.outbox.Enqueue(a.outboxItem(ch, ep, it))
-		switch {
-		case err == nil:
-			return true
-		case errors.Is(err, outbox.ErrFull):
-			a.log.Warn("出站队列已满，消息没发出去", "chat", ep.key())
-			return false
-		case errors.Is(err, outbox.ErrTooLarge):
-			a.log.Warn("消息超过出站日志的单条上限，改为内存直发", "chat", ep.key())
-		default:
-			a.log.Debug("出站不可用，改为内存直发", "chat", ep.key(), "err", err)
-		}
 	}
 	it.ch, it.chatID = ch, ep.chat
 	select {
@@ -2150,7 +2197,11 @@ func (a *App) generateModel(s *sess) {
 			if n := a.nodes[r.node]; n != nil && n.info.Features["max_calls_per_turn"] > 0 {
 				limit = min(limit, n.info.Features["max_calls_per_turn"])
 			}
-			if why := validateProposedCalls(res.Calls, limit); why != "" {
+			why := validateProposedCalls(res.Calls, limit)
+			if name := unofferedCall(res.Calls, req.Tools); why == "" && name != "" {
+				why = fmt.Sprintf("这一轮没有提供工具 %s；整批未接受、未执行", name)
+			}
+			if why != "" {
 				proposals := res.Calls
 				if len(proposals) > 256 {
 					proposals = proposals[:256]

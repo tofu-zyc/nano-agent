@@ -148,6 +148,7 @@ func readFileTail(path string) string {
 // 真实 C 内核 → 真实 Go 网关：一轮 Skill 工具调用（走 exec 帧，R1 的类型冲突就在这条路上）。
 func TestRealKernelRoundTripWithGatewayTool(t *testing.T) {
 	e, _ := setupRealKernel(t)
+	addSkill(t, e, "other") // 有技能 Skill 才会被提供；下面调用的 demo 不存在
 	e.say(`!call Skill {"name":"demo"}`, msgID("m1"))
 	// 最终回复里带着工具结果（没有这个技能 → 错误文本回到模型）
 	msg := e.ch.wait(t, "技能")

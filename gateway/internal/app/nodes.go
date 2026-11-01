@@ -118,30 +118,24 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 // 调用方持有锁。
 func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
-	for _, spec := range a.searchTools() {
-		tools = append(tools, toolOf(spec))
-	}
+	tools = append(tools, a.toolsNamed(sid, "WebSearch", "WebFetch")...)
 	if readOnly {
 		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
 			return t.Function.Name != "Read" && t.Function.Name != "Grep" && t.Function.Name != "WebSearch" && t.Function.Name != "WebFetch"
 		})
 	}
-	if spec, ok := a.skillSpec(sid); ok {
-		tools = append(tools, toolOf(spec))
-	}
+	tools = append(tools, a.toolsNamed(sid, "Skill")...)
 	// 会话分叉：任何会话都能用（分支就是从它分出来的）
-	tools = append(tools, toolOf(sessionTool()))
+	tools = append(tools, a.toolsNamed(sid, "Session")...)
 	if a.jobEvents != nil && n.info.Features["job_control_tool"] >= 1 {
-		tools = append(tools, toolOf(jobTool()))
+		tools = append(tools, a.toolsNamed(sid, "Job")...)
 	}
 	if admin {
-		tools = append(tools, toolOf(scheduleTool()))
+		tools = append(tools, a.toolsNamed(sid, "Schedule")...)
 		if a.jobEvents != nil && n.info.Features["hook_tool"] >= 1 {
-			tools = append(tools, toolOf(hookTool()))
+			tools = append(tools, a.toolsNamed(sid, "Hook")...)
 		}
-		for _, spec := range a.gatewayTools() {
-			tools = append(tools, toolOf(spec))
-		}
+		tools = append(tools, a.toolsNamed(sid, "Gateway", "Message", "GatewayAdmin")...)
 	}
 	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	return tools

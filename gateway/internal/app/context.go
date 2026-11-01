@@ -60,49 +60,40 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		}
 	}
 	if isDreamSID(sid) {
-		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
+		tools = a.toolsNamed(sid, "Diary", knowledgeLabel)
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
-		var all []llm.Tool
-		for _, spec := range a.searchTools() {
-			all = append(all, toolOf(spec))
-		}
-		if spec, ok := a.skillSpec(sid); ok {
-			all = append(all, toolOf(spec))
-		}
+		names := []string{"WebSearch", "WebFetch", "Skill"}
 		if a.memoryOn(a.agentOf(sid)) {
-			all = append(all, toolOf(knowledgeTool()))
+			names = append(names, knowledgeLabel)
 		}
 		if ag.Life() {
-			all = append(all, toolOf(followUpTool()))
+			names = append(names, "FollowUp")
 		}
-		all = append(all, toolOf(sendFileTool()))
-		tools = a.groupTools(sid, all)
+		names = append(names, "SendFile")
+		tools = a.groupTools(sid, a.toolsNamed(sid, names...))
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
 			tools = a.toolsFor(sid, n, false, admin)
 		}
 		if noTools {
-			tools = nil
-			for _, spec := range a.searchTools() {
-				tools = append(tools, toolOf(spec))
-			}
+			tools = a.toolsNamed(sid, "WebSearch", "WebFetch")
 		} else {
 			// MCP 服务带的工具（<服务>__<工具>）：访客、只读和不用工具的模式都没有
 			tools = append(tools, a.mcpOffered(sid, admin)...)
 		}
 		if a.memoryOn(a.agentOf(sid)) {
-			tools = append(tools, toolOf(knowledgeTool()))
+			tools = append(tools, a.toolsNamed(sid, knowledgeLabel)...)
 		}
 		if ag.Life() {
 			if !isLifeSID(sid) {
-				tools = append(tools, toolOf(followUpTool()))
+				tools = append(tools, a.toolsNamed(sid, "FollowUp")...)
 			}
 			if admin {
-				tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
+				tools = append(tools, a.toolsNamed(sid, "Agenda", "Idea", "Mind")...)
 			}
 		}
-		tools = append(tools, toolOf(sendFileTool()))
+		tools = append(tools, a.toolsNamed(sid, "SendFile")...)
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)

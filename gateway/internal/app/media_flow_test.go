@@ -63,6 +63,7 @@ func withMedia(t *testing.T, e *env) *media.Store {
 func TestReadImageShownToModel(t *testing.T) {
 	e := setup(t)
 	withMedia(t, e)
+	offerNodeTools(e, "Read")
 	client := useVision(t, e)
 	local := e.hosts.set(host.LocalName, "local", true, 7, "")
 	local.mu.Lock()

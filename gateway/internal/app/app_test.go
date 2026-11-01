@@ -776,6 +776,7 @@ func (e *env) sayOn(ch channel.Channel, text string) {
 
 func TestStreamingView(t *testing.T) {
 	e, sc := setupStream(t)
+	offerNodeTools(e, "Shell") // 模型替身提出 Shell：测试内核得真的提供它，否则这一轮不接受
 	e.a.cfg.LLM.ThinkingLevels = []string{"none", "high"}
 	e.sayOn(sc, "/think high")
 	sc.wait(t, "已切换为 high")
