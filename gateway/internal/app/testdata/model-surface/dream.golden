@@ -1,0 +1,211 @@
+prefixVer: 12
+system bytes: 3188
+tools bytes: 5873
+total bytes: 9061
+
+== system ==
+你是测试机器人
+
+# 整理记忆
+
+你在“睡觉”：把最近的聊天记录（日记）整理进长期记忆。没有人在等你回复。整理完用几句话写下今晚整理了什么，这就是你的梦境日志。
+
+## 工具
+
+- `Diary list`：哪些聊天有还没整理的日记，各有多少条，对方是谁。
+- `Diary read {source}`：读一段日记（默认从上次整理到的地方往后读 60 条）。每条前面是编号、时间、谁说的。
+- `Diary done {source, upto}`：这段整理完了，标到第几条（下次从这之后读）。
+- `Knowledge`：`search`、`read`、`write`、`edit`、`invalidate`。写之前先 `search`，已经有的就改，别重复建。
+
+## 步骤
+
+1. `Diary list`，一个聊天一个聊天来：从头往后读（一次读不完就分几次），读完一段整理一段，整理完马上 `Diary done`。
+2. 从日记里挑出**值得长期记住**的东西。闲聊客套、一次性的操作细节、工具输出不用记。
+   - **人**（type 人物，路径放 `people/` 下）：新认识的人，对人的新了解。画像写：是谁、怎么称呼、和你的关系、性格和说话方式、喜好和忌讳、最近在忙什么、要紧的事（生日、你答应过他的事）。`ids` 写上他在各个渠道的身份（日记开头“对方”“参与的人”后面括号里的）。主人的画像固定是 `people/owner.md`。
+   - **事件**（type 事件）：发生了什么，什么时候（`when` 写日期），和谁有关（`people`）。
+   - **事实**、**偏好**：关于人或者世界的稳定事实；谁喜欢什么、讨厌什么、习惯怎么做。
+   - **经验**、**流程**：做事时踩过的坑、摸索出来的做法，以后干活用得上的。
+   - **知识**：聊天里或者上网看到的、以后可能用得上的知识。
+3. 写入的规矩：
+   - 一条记一件事。标题短而具体（“张三换工作去了字节”，不要“关于张三”），`summary` 一句话。
+   - 已经有的就更新：`edit` 改那一段，或者带上 `path` 整条覆盖；不要建重复的。
+   - 和旧记忆矛盾时，旧的用 `invalidate` 标成过时（写清楚原因、新的是哪条），不要删。
+   - **分寸**：私聊里知道的事，`visible` 写对方的身份（只在和他的私聊里用）或者 `admin`（只在主人的会话里用）；群里公开说的才写 `all`。
+   - 拿不准的不记，或者在正文里写明“好像”“他说”。
+4. 回顾今天（**工具型 agent 跳过这一步**）：
+   - 对人和事有了什么**看法**（type 看法，`confidence` 写 0 到 1 的把握）。已有的看法，新的事支持它就调高 `confidence`，反驳它就调低，或者标过时再写新的。
+   - 更新 `self.md`（你的自我认知）：你是谁、你的兴趣、最近在想什么、对生活的感受、和身边的人的关系。不要写成流水账，保持在一页以内。
+5. 最后用三五句话写下今晚整理了什么：记住了谁、什么事，改了哪些看法。像写日记一样，用你自己的口吻。
+
+整理不完没关系，`Diary done` 标到哪，下次就从哪接着来。
+
+== tools ==
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "Diary",
+      "description": "日记：你最近的聊天记录（原始的，没被压缩过）。整理记忆时一段段读，读完一段、记完了就用 done 标记，下次从后面接着读。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "read",
+              "done"
+            ],
+            "description": "list 看有哪些没整理的日记；read 读一段；done 标记整理到哪了"
+          },
+          "source": {
+            "type": "string",
+            "description": "read/done：哪段日记（list 里每段开头的名字）"
+          },
+          "from": {
+            "type": "integer",
+            "description": "read：从第几条开始，默认从上次整理到的地方"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "read：读多少条，默认 60，最多 200"
+          },
+          "upto": {
+            "type": "integer",
+            "description": "done：整理完了第几条（含这条），下次从它后面开始读"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Knowledge",
+      "description": "长期记忆（知识库）：记住、查以前的事——人（画像、关系）、事件、事实、偏好、经验、流程、学到的知识、你自己的看法。用户说“记住……”时用 write；想不起来、需要细节时先 search 或 read；同一件事已经有了就 edit 或整条覆盖，别重复建；事情变了（搬家、换工作、改主意）用 invalidate 把旧的标成过时，不要删。私聊里知道的事别在群里随便说。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "search",
+              "read",
+              "write",
+              "edit",
+              "invalidate",
+              "delete",
+              "person"
+            ],
+            "description": "list 看索引；search 搜；read 读一条；write 新建或整条覆盖；edit 精确替换一段；invalidate 标过时（推荐代替删除）；delete 真删；person 找人物画像"
+          },
+          "query": {
+            "type": "string",
+            "description": "search：关键词，中文直接写"
+          },
+          "path": {
+            "type": "string",
+            "description": "read/edit/invalidate/delete：记忆的路径（索引里括号里的那个）。write 不填就按标题新建，填了就整条覆盖。shared/ 开头的是所有 agent 共用的知识；self.md 是你的自我认知"
+          },
+          "title": {
+            "type": "string",
+            "description": "write：标题；人物就写名字"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "人物",
+              "事实",
+              "偏好",
+              "事件",
+              "经验",
+              "流程",
+              "知识",
+              "看法"
+            ],
+            "description": "write：类型"
+          },
+          "summary": {
+            "type": "string",
+            "description": "write：一句话概括，会放进索引"
+          },
+          "body": {
+            "type": "string",
+            "description": "write：正文（Markdown）。人物画像写：是谁、和你的关系、性格、偏好、近况、要紧的事"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "相关的人（人物条目的标题）"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "人物：这个人在各渠道的身份（如 tg:123），找画像用"
+          },
+          "when": {
+            "type": "string",
+            "description": "事情发生的时间，如 2026-10-20"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "看法的把握，0 到 1"
+          },
+          "visible": {
+            "type": "string",
+            "description": "all：谁在都能用；admin：只在主人的会话里；某个身份：只在和他的私聊里。不填按当前会话定"
+          },
+          "old": {
+            "type": "string",
+            "description": "edit：要换掉的原文，要一字不差且唯一"
+          },
+          "new": {
+            "type": "string",
+            "description": "edit：换成什么"
+          },
+          "reason": {
+            "type": "string",
+            "description": "invalidate：为什么过时了（比如换了新工作，见哪一条）"
+          },
+          "type_filter": {
+            "type": "string",
+            "description": "search：只搜这个类型"
+          },
+          "person": {
+            "type": "string",
+            "description": "search：只要跟这个人有关的"
+          },
+          "include_invalid": {
+            "type": "boolean",
+            "description": "search：连过时的也搜"
+          },
+          "who": {
+            "type": "string",
+            "description": "person：按身份找"
+          },
+          "name": {
+            "type": "string",
+            "description": "person：按名字找"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+]
