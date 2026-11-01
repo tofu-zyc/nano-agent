@@ -999,12 +999,16 @@ func (a *App) dropAgentFromRooms(id string) {
 		if r.IsDM() && len(r.Members) < 2 {
 			if err := a.roomStore.Delete(r.ID); err != nil {
 				a.log.Warn("两个人的私聊少了一个人，没删掉", "room", r.ID, "err", err)
+			} else {
+				a.sceneForget(roomLogSID(r.ID))
 			}
 			continue
 		}
 		if len(r.Members) == 0 {
 			if err := a.roomStore.Delete(r.ID); err != nil {
 				a.log.Warn("清空成员的群没删掉", "room", r.ID, "err", err)
+			} else {
+				a.sceneForget(roomLogSID(r.ID))
 			}
 			continue
 		}

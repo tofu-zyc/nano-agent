@@ -156,6 +156,11 @@ func (a *App) groupReply(s *sess, ep endpoint, who string) {
 	if s.groupTimer != nil {
 		return // 已经排上了，后面的消息都进了历史，等这一次一起看
 	}
+	// 外部群额度用完了：不调用模型，每天最多回一次固定说明
+	if sc, ok := a.sceneOf(s.sid); ok && a.sceneOver(sc) {
+		a.sceneBudgetNotice(s, ep, sc)
+		return
+	}
 	sid, key := s.sid, ep.key()
 	s.groupTimer = time.AfterFunc(2*time.Second, func() {
 		a.mu.Lock()
@@ -222,7 +227,7 @@ func (a *App) groupTick() {
 			continue
 		}
 		// 点名模式下永远不主动开口，只有自由模式交给这里按额度插话（内部群默认点名，外部群默认自由）
-		if !sc.free() {
+		if !sc.free() || a.sceneOver(sc) {
 			continue
 		}
 		if room := sc.Room; room != nil && (s.sid == roomLogSID(room.ID) || room.Paused || room.MutedAgent(roomSender(s.sid))) {

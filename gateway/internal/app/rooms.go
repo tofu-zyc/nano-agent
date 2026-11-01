@@ -189,22 +189,6 @@ func (a *App) roomAgentSay(room rooms.Room, member, text string) {
 	a.roomGuard(room, member)
 }
 
-// roomUsage 累加一个群今天的 token 用量，超过预算就暂停。调用方持有锁。
-func (a *App) roomUsage(room rooms.Room, prompt, completion int) {
-	if room.Budget <= 0 {
-		return
-	}
-	st := a.roomState(room.ID)
-	day := a.now().In(a.loc).Format("2006-01-02")
-	if st.TokenDay != day {
-		st.TokenDay, st.Tokens = day, 0
-	}
-	st.Tokens += prompt + completion
-	if st.Tokens > room.Budget {
-		a.pauseRoom(room, fmt.Sprintf("今天的 token 用量到了预算（%d），先暂停，明天或者你恢复", room.Budget))
-	}
-}
-
 // roomGuard 防止几个 agent 在群里聊个不停。调用方持有锁。
 func (a *App) roomGuard(room rooms.Room, speaker string) {
 	st := a.roomState(room.ID)
@@ -242,8 +226,6 @@ func (a *App) roomGuard(room rooms.Room, speaker string) {
 type roomRun struct {
 	Tail     []string // 最近的发言者（"human" 或者 agent ID）
 	Pending  map[string][]chan string
-	Tokens   int
-	TokenDay string
 }
 
 // roomState 是房间的运行状态（只在内存里）。调用方持有锁。
@@ -457,6 +439,9 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if err := r.Rules.Validate(kind, sceneToolNames()); err != nil {
 		return RoomInfo{}, err
 	}
+	if p.Reset {
+		a.sceneResetTotal(roomLogSID(r.ID))
+	}
 	if err := a.roomStore.Update(r); err != nil {
 		return RoomInfo{}, err
 	}
@@ -488,6 +473,7 @@ func (a *App) DeleteRoom(id string) error {
 	if err := a.roomStore.Delete(id); err != nil {
 		return err
 	}
+	a.sceneForget(roomLogSID(id))
 	a.publish(events.Event{T: "rooms"})
 	return nil
 }

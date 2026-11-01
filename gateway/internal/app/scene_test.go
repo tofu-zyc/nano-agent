@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/scene"
@@ -256,4 +257,114 @@ func TestSceneTextAndToolGate(t *testing.T) {
 	e.say("@bot 去告诉主会话", group(true), from("u1", "张三"))
 	in := e.k.expect(proto.TInput)
 	expectUnoffered(t, e, in, "Message")
+}
+
+func mkRoom(t *testing.T, e *env, r scene.Rules) (*rooms.Store, rooms.Room) {
+	t.Helper()
+	withAgents(t, e)
+	st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(st)
+	room, err := st.Create(rooms.Room{Name: "群", Members: []string{"default"}, Rules: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, room
+}
+
+// 预算池：内部群超过当天或这一场的预算就暂停并写明原因；清零累计；重启前后一致；删群删条目。
+func TestSceneBudgetRoom(t *testing.T) {
+	e := setup(t)
+	st, room := mkRoom(t, e, scene.Rules{Budget: 100, BudgetTotal: 1000})
+	sid := e.a.roomMemberSID("default", room.ID)
+	e.a.mu.Lock()
+	e.a.sceneUsage(sid, 60)
+	if r, _ := st.Get(room.ID); r.Paused {
+		t.Fatal("60/100 不该暂停")
+	}
+	e.a.sceneUsage(e.a.roomMemberSID("default", room.ID), 50) // 同一个场景的别的会话也记进来
+	r, _ := st.Get(room.ID)
+	e.a.mu.Unlock()
+	if !r.Paused {
+		t.Fatal("110 > 100 该暂停")
+	}
+	var why string
+	for _, m := range e.a.store.History(roomLogSID(room.ID)) {
+		if strings.Contains(m.Content, "今天的 token 用量到了预算（100）") {
+			why = m.Content
+		}
+	}
+	if why == "" {
+		t.Fatal("群记录里要写明原因")
+	}
+
+	// 重启前后累计一致
+	e.a.mu.Lock()
+	before := *e.a.sceneUses[roomLogSID(room.ID)]
+	e.a.mu.Unlock()
+	if before.DayTokens != 110 || before.Total != 110 || before.Since == 0 {
+		t.Fatalf("用量：%+v", before)
+	}
+	a2 := newAppAt(t, e.dir, nil)
+	a2.mu.Lock()
+	after := *a2.sceneUses[roomLogSID(room.ID)]
+	a2.mu.Unlock()
+	if after != before {
+		t.Fatalf("重启后：%+v，应为 %+v", after, before)
+	}
+
+	// 清零累计
+	e.a.mu.Lock()
+	e.a.sceneResetTotal(roomLogSID(room.ID))
+	got := *e.a.sceneUses[roomLogSID(room.ID)]
+	e.a.mu.Unlock()
+	if got.Total != 0 || got.DayTokens != 110 {
+		t.Fatalf("清零只清累计：%+v", got)
+	}
+
+	// 删群删条目
+	if err := e.a.DeleteRoom(room.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	_, left := e.a.sceneUses[roomLogSID(room.ID)]
+	e.a.mu.Unlock()
+	if left {
+		t.Fatal("删群应删掉用量条目")
+	}
+}
+
+func TestSceneBudgetTotalPausesRoom(t *testing.T) {
+	e := setup(t)
+	st, room := mkRoom(t, e, scene.Rules{BudgetTotal: 100})
+	e.a.mu.Lock()
+	e.a.sceneUsage(e.a.roomMemberSID("default", room.ID), 101)
+	e.a.mu.Unlock()
+	if r, _ := st.Get(room.ID); !r.Paused {
+		t.Fatal("累计超了该暂停")
+	}
+}
+
+// 外部群超额：当天不再调用模型，被点名时一天最多回一次固定说明；第二天恢复。
+func TestSceneBudgetExternalGroup(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	ext := extGroup(t, e)
+	setScene(t, e, ext, &scene.Rules{Budget: 100})
+	e.a.mu.Lock()
+	e.a.sceneUsage(ext, 100)
+	e.a.mu.Unlock()
+	e.sid = "fake:c1"
+	e.say("@bot 在吗", group(true), from("u2", "李四"), func(m *channel.Message) { m.MsgID = "m2" })
+	e.ch.wait(t, "今天的额度用完了")
+	e.k.none() // 没有调用模型
+	e.say("@bot 还在吗", group(true), from("u2", "李四"), func(m *channel.Message) { m.MsgID = "m3" })
+	e.k.none()
+	select {
+	case got := <-e.ch.sent:
+		t.Fatalf("一天只回一次说明：%q", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	setNow(e, e.a.now().Add(24*time.Hour))
+	e.say("@bot 早", group(true), from("u2", "李四"), func(m *channel.Message) { m.MsgID = "m4" })
+	e.k.expect(proto.TInput)
 }

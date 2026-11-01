@@ -160,6 +160,8 @@ type App struct {
 	agentRoot         string          // agents 目录
 	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
 	roomRuns          map[string]*roomRun
+	sceneUses         map[string]*sceneUse // 场景的用量（data/runtime/scenes.json）
+	sceneUsePath      string
 	hub               *kernel.Hub
 	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
 	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
@@ -495,6 +497,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
 	a.openOutbox(ctx, store.Dir())
+	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
 		if err := store.MigrateAuxiliary("persona", a.persona.Dir(), ".md"); err != nil {
@@ -2029,8 +2032,8 @@ func (a *App) finish(s *sess, status, detail string) {
 			s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
 			a.roomAgentSay(roomOf, roomSender(s.sid), body)
 		}
-		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
 	}
+	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
 	s.lastActivity = a.now()
 	a.pumpRuns()
 	if s.run == nil && isHookSID(s.sid) {
