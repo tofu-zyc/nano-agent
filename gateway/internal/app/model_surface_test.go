@@ -23,6 +23,8 @@ import (
 //	go test ./internal/app -run TestModelSurface -update
 var updateSurface = flag.Bool("update", false, "更新 testdata/model-surface 下的金样（工具定义变了而 prefixVer 没变时拒绝更新）")
 
+// 说明：定时任务（cron）和 Hook 没有真实的 run，快照是 contextParts 在该会话刚建好时算出的内容，
+// 不是线上某一轮的内容。其余角色的状态都走真实入口布置。
 // surfaceCap 是每个角色“系统提示加工具定义”的总字节上限：当时的值上浮 10%。
 // 超了说明模型面膨胀了，先想想值不值，再来改这里。
 var surfaceCap = map[string]int{
@@ -36,7 +38,7 @@ var surfaceCap = map[string]int{
 	"cron":            9057,
 	"hook":            8846,
 	"branch":          3601,
-	"room-member":     8618,
+	"room-member":     6586,
 }
 
 type surfaceRole struct {
@@ -107,11 +109,22 @@ func surfaceRoles() []surfaceRole {
 			}
 			return res.BranchSID
 		}},
+		// 走真实入口：CreateRoom 建群，再由人说一句话（roomHumanSay 把成员会话标成 Group）。
+		// 群 ID 是随机的，快照里换成 r1。
 		{"room-member", func(t *testing.T, e *env) string {
 			withAgents(t, e)
 			st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
 			e.a.SetRooms(st)
-			return "@" + agents.DefaultID + "/room:r1"
+			name, members := "测试群", []string{agents.DefaultID}
+			info, err := e.a.CreateRoom(RoomPatch{Name: &name, Members: &members})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.a.mu.Lock()
+			room, _ := st.Get(info.ID)
+			e.a.roomHumanSay(room, "李四", "大家好") // 没点名，不会触发模型
+			e.a.mu.Unlock()
+			return e.a.roomMemberSID(agents.DefaultID, info.ID)
 		}},
 	}
 }
@@ -154,6 +167,10 @@ func TestModelSurface(t *testing.T) {
 			text, toolsJSON, total := renderSurface(system, tools)
 			text = strings.ReplaceAll(text, e.dir, "<tmp>")
 			toolsJSON = strings.ReplaceAll(toolsJSON, e.dir, "<tmp>")
+			if i := strings.Index(sid, "room:"); i >= 0 { // 群 ID 随机，金样里统一叫 r1
+				text = strings.ReplaceAll(text, sid[i+5:], "r1")
+				toolsJSON = strings.ReplaceAll(toolsJSON, sid[i+5:], "r1")
+			}
 
 			// 同样的输入必须得到同样的字节（遍历 map 的顺序不固定之类要按缓存回归修复）
 			e.a.mu.Lock()

@@ -1,10 +1,17 @@
 prefixVer: 12
-system bytes: 21
-tools bytes: 7814
-total bytes: 7835
+system bytes: 425
+tools bytes: 5563
+total bytes: 5988
 
 == system ==
 你是测试机器人
+
+这是群聊，不是私聊：
+- 像群里的一个人那样说话：口语、简短，一般一到两句。
+- 不用标题、列表、代码块；不说客套话，不说“作为一个 AI”。
+- 不提工具、执行过程、上下文和用量。
+- 不知道、不相关、或者别人在聊别的事，就别说话，只回 [不回复]。
+- 一次只说一件事，别把群里的话都接一遍。
 
 == tools ==
 [
@@ -158,74 +165,6 @@ total bytes: 7835
         "required": [
           "files"
         ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "Session",
-      "description": "在会话之间分叉（Fork）：把一个会话在某个安全边界上的上下文保存成不可变快照，分支带着这份上下文独立继续，源会话照常用；分支默认安静运行，结果不发回原来的聊天。action 取 fork / list_branches / inspect / continue / pause / archive。在工具批次里调用 fork 会先返回 pending_boundary，等这批调用结束才真正建好；用同一个 request_id 重试返回同一个分支。",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "action": {
-            "type": "string",
-            "enum": [
-              "fork",
-              "list_branches",
-              "inspect",
-              "continue",
-              "pause",
-              "archive"
-            ],
-            "description": "要做的事，默认 fork"
-          },
-          "source_sid": {
-            "type": "string",
-            "description": "从哪个会话分叉，默认当前会话"
-          },
-          "branch_sid": {
-            "type": "string",
-            "description": "inspect / continue / pause / archive 要操作的分支"
-          },
-          "title": {
-            "type": "string",
-            "description": "分支标题"
-          },
-          "prompt": {
-            "type": "string",
-            "description": "start=true 或 continue 时，这一轮要在分支里做什么"
-          },
-          "start": {
-            "type": "boolean",
-            "description": "建完就在分支里开始跑"
-          },
-          "delivery": {
-            "type": "string",
-            "enum": [
-              "silent"
-            ],
-            "description": "结果留在分支里；只有用户显式操作可以开启报告"
-          },
-          "request_id": {
-            "type": "string",
-            "description": "幂等键：同一个 request_id 重试返回同一个分支"
-          }
-        },
-        "required": [
-          "action"
-        ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "echo",
-      "description": "回显",
-      "parameters": {
-        "type": "object"
       }
     }
   }
