@@ -170,7 +170,7 @@ func (a *App) groupReply(s *sess, ep endpoint, who string) {
 		}
 		s.groupTimer = nil
 		s.groupFresh = false
-		s.groupProactive = false
+		s.groupProactive, s.groupObserve = false, nil
 		ep2 := parseEndpoint(key)
 		s.queue = append(s.queue, queued{ep: ep2, who: who, trigger: true, m: channel.Message{ChatID: ep2.chat, Group: true}})
 		a.startRun(s)
@@ -251,9 +251,13 @@ func (a *App) groupTick() {
 			continue
 		}
 		// 不调模型的门槛：按这几条新消息估计“该不该接话”，乘上积极度抽一次；没抽中就等下一批新消息
-		if a.random() >= a.groupGate(s, now)*talkValue(rule.Eagerness) {
+		gate := a.groupGate(s, now) * talkValue(rule.Eagerness)
+		if a.random() >= gate {
 			s.groupFresh = false
 			continue
+		}
+		if sc.Rules.Observe {
+			s.groupObserve = &observeWhy{QuietSec: int(now.Sub(s.groupLast).Seconds()), Pending: s.groupPending, Gate: gate}
 		}
 		s.groupThoughtAt = now
 		s.groupThoughts = append(s.groupThoughts, now)

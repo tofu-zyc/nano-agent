@@ -139,7 +139,7 @@ func (a *App) roomTrigger(s *sess, member string, room rooms.Room) {
 		}
 		s.groupTimer = nil
 		s.groupFresh = false
-		s.groupProactive = false
+		s.groupProactive, s.groupObserve = false, nil
 		ep := endpoint{ch: "room", chat: room.ID}
 		s.queue = append(s.queue, queued{ep: ep, who: "room:" + member, trigger: true,
 			m: channel.Message{ChatID: room.ID, Group: true}})

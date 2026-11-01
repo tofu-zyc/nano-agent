@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +12,7 @@ import (
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/llm"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/scene"
@@ -367,4 +370,149 @@ func TestSceneBudgetExternalGroup(t *testing.T) {
 	setNow(e, e.a.now().Add(24*time.Hour))
 	e.say("@bot 早", group(true), from("u2", "李四"), func(m *channel.Message) { m.MsgID = "m4" })
 	e.k.expect(proto.TInput)
+}
+
+// observeModel：被“群里安静了”提醒触发的那一轮提出调用并带话；其余（被点名）照常回复。
+type observeModel struct{}
+
+func (observeModel) Chat(_ context.Context, req llm.Request, _ func(llm.Delta)) (*llm.Result, error) {
+	last := req.Messages[len(req.Messages)-1].Content
+	if strings.Contains(last, "群里安静了一会儿") {
+		return &llm.Result{Reason: llm.ReasonToolUse, Content: "本来想插的一句话",
+			Calls: []llm.ToolCall{{ID: "o1", Type: "function", Function: llm.FunctionCall{Name: "SendFile", Arguments: `{"path":"a.txt"}`}}},
+			Usage: llm.Usage{PromptTokens: 30, CompletionTokens: 7}}, nil
+	}
+	return &llm.Result{Reason: llm.ReasonFinal, Content: "被点名的回复", Usage: llm.Usage{PromptTokens: 20, CompletionTokens: 5}}, nil
+}
+
+func observeLines(t *testing.T, e *env) []ObserveRecord {
+	t.Helper()
+	return e.a.Observe("", 100, true)
+}
+
+func historyHas(e *env, sid, text string) bool {
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	for _, m := range e.a.store.History(sid) {
+		if strings.Contains(m.Content, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// observe 档，外部群：主动插话那一轮照常请求模型，没有发出、历史里没有、工具没执行，observe.jsonl 里有记录；被点名照常回复。
+func TestObserveExternalGroup(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	e.a.SetLLM(observeModel{})
+	sid := extGroup(t, e)
+	makeLife(t, e, store, nil)
+	e.a.mu.Lock()
+	e.a.rnd = func() float64 { return 0 }
+	base := e.a.now()
+	e.a.now = func() time.Time { return base.Add(25 * time.Second) }
+	e.a.mu.Unlock()
+	setScene(t, e, sid, &scene.Rules{Observe: true})
+	e.a.groupTick()
+	in := e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	turn := e.k.expect(proto.TTurn)
+	if turn.Reason != proto.ReasonFinal || len(turn.Calls) != 0 {
+		t.Fatalf("observe 的那一轮不能把工具调用交给内核：%+v", turn)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitIdle(t, e, sid)
+	select {
+	case got := <-e.ch.sent:
+		t.Fatalf("observe 不该发出：%q", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if historyHas(e, sid, "本来想插的一句话") {
+		t.Fatal("回复不该写进会话历史")
+	}
+	for _, m := range e.a.store.History(sid) {
+		if m.Role == "assistant" {
+			t.Fatalf("历史里不该有助手消息：%+v", m)
+		}
+	}
+	recs := observeLines(t, e)
+	if len(recs) != 1 || recs[0].Say != "本来想插的一句话" || len(recs[0].Tools) != 1 || recs[0].Tools[0].Name != "SendFile" ||
+		recs[0].Why.QuietSec < 25 || recs[0].Why.Pending != 1 || recs[0].PromptTokens != 30 || recs[0].Scene != sid {
+		t.Fatalf("observe 记录：%+v", recs)
+	}
+	// 用量记进预算池
+	e.a.mu.Lock()
+	use := e.a.sceneUses[sid].Total
+	e.a.mu.Unlock()
+	if use != 37 {
+		t.Fatalf("observe 的用量也要计入：%d", use)
+	}
+	// 被点名照常回复
+	e.say("@bot 在吗", group(true), from("u2", "李四"), func(m *channel.Message) { m.MsgID = "m9" })
+	in = e.k.expect(proto.TInput)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	e.ch.wait(t, "被点名的回复")
+}
+
+// observe 档，内部群自由模式：不进群记录和成员历史。
+func TestObserveRoomFree(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	e.a.SetLLM(observeModel{})
+	makeLife(t, e, store, nil)
+	st, room := mkRoom(t, e, scene.Rules{Mode: scene.ModeFree, Observe: true})
+	_ = st
+	member := e.a.roomMemberSID("default", room.ID)
+	e.a.mu.Lock()
+	r, _ := e.a.roomStore.Get(room.ID)
+	e.a.roomHumanSay(r, "李四", "大家好")
+	e.a.rnd = func() float64 { return 0 }
+	base := e.a.now()
+	e.a.now = func() time.Time { return base.Add(25 * time.Second) }
+	e.a.mu.Unlock()
+	e.a.groupTick()
+	in := e.k.expect(proto.TInput)
+	if in.SID != member {
+		t.Fatalf("应该由成员会话跑：%q", in.SID)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: member})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: member, Status: proto.StatusOK})
+	waitIdle(t, e, member)
+	for _, sid := range []string{member, roomLogSID(room.ID)} {
+		if historyHas(e, sid, "本来想插的一句话") {
+			t.Fatalf("%s 的历史里不该有 observe 的回复", sid)
+		}
+	}
+	recs := e.a.Observe("room:"+room.ID, 10, true)
+	if len(recs) != 1 || recs[0].Say != "本来想插的一句话" {
+		t.Fatalf("observe 记录：%+v", recs)
+	}
+}
+
+// 只留最新的一半；默认不含“本来也不会说话”的判断。
+func TestObserveTrimAndSilentFilter(t *testing.T) {
+	e := setup(t)
+	old := observeKeep
+	observeKeep = 10
+	defer func() { observeKeep = old }()
+	e.a.mu.Lock()
+	for i := 0; i < 11; i++ {
+		e.a.observeAppend(ObserveRecord{At: int64(i), Scene: "s", Say: fmt.Sprint(i), Silent: i%2 == 0})
+	}
+	e.a.mu.Unlock()
+	all := e.a.Observe("s", 100, true)
+	if len(all) != 5 || all[0].Say != "10" || all[4].Say != "6" {
+		t.Fatalf("超了只留最新的一半：%d %+v", len(all), all)
+	}
+	if loud := e.a.Observe("s", 100, false); len(loud) != 2 {
+		t.Fatalf("默认不含 [不回复]：%+v", loud)
+	}
+	a2 := newAppAt(t, e.dir, nil)
+	if got := a2.Observe("s", 100, true); len(got) != 5 {
+		t.Fatalf("重启后读回：%d", len(got))
+	}
 }

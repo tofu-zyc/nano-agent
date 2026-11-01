@@ -201,7 +201,7 @@ func (a *App) clearAgentBoundState(sid, oldAgentID string) {
 			s.groupTimer.Stop()
 			s.groupTimer = nil
 		}
-		s.groupFresh, s.groupProactive = false, false
+		s.groupFresh, s.groupProactive, s.groupObserve = false, false, nil
 	}
 	// 旧 agent 的自主日程里和这个聊天有关的约定 / 复查也作废
 	a.mindDropSession(sid, oldAgentID)

@@ -162,6 +162,8 @@ type App struct {
 	roomRuns          map[string]*roomRun
 	sceneUses         map[string]*sceneUse // 场景的用量（data/runtime/scenes.json）
 	sceneUsePath      string
+	observe           *observeLog // observe 记录（第一次用到时打开）
+	observeDir        string      // data 目录
 	hub               *kernel.Hub
 	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
 	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
@@ -277,6 +279,7 @@ type sess struct {
 	groupSpeaks    []time.Time
 	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
 	groupThoughts  []time.Time // 最近一小时判断了几次
+	groupObserve   *observeWhy // groupTick 触发的下一轮是 observe（开始时交给 run）
 	groupSilent    int         // 自己凑上来、又决定不说话的连续次数（退避用）
 	groupPending   int         // 上一轮之后进来的新消息条数
 
@@ -339,6 +342,7 @@ type run struct {
 	readOnly        bool                             // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate         bool                             // 这个身份可以提权写工作目录外（管理员）
 	proactive       bool                             // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	observe         *observeWhy                      // 场景是 observe 档的主动插话：回复只记录，不写历史、不发出、不执行工具
 	inner           bool                             // agent 自己的一轮（整理记忆、内心活动）
 	withImages      bool                             // 这一轮的模型能接收图片
 	usedTools       bool                             // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
@@ -497,6 +501,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
 	a.openOutbox(ctx, store.Dir())
+	a.observeDir = store.Dir()
 	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -1458,6 +1463,7 @@ func (a *App) startRun(s *sess) {
 	}
 	r.proactive = s.groupProactive
 	s.groupProactive = false
+	r.observe, s.groupObserve = s.groupObserve, nil
 	// 放行：内核按自动模式跑（沙箱和审批规则都不变），要审批的调用由网关当场批准（approvals.go）
 	if mode == proto.ModeFull {
 		r.full, mode = true, proto.ModeAuto
@@ -1915,6 +1921,9 @@ func (a *App) finish(s *sess, status, detail string) {
 	default:
 		note = "（出错了：" + detail + "）"
 	}
+	if r.observe != nil {
+		body, note = "", "" // observe 的那一轮：本来会说的话已经记在 observe.jsonl，什么都不发（出错也只留日志）
+	}
 	if text, ok := a.afterRun(s); ok {
 		body, note = "", text
 	}
@@ -1978,7 +1987,7 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	group := a.isGroupSession(s.sid)
 	roomOf, inRoom := a.roomOfSession(s.sid)
-	if group && r.proactive {
+	if group && r.proactive && r.observe == nil {
 		// 自己凑上来又不想说：记着，连着几次就越等越久
 		if isSilence(body) {
 			s.groupSilent++
@@ -2152,6 +2161,9 @@ func (a *App) generateModel(s *sess) {
 	views, bus, sid := r.views(), a.bus, s.sid
 	contentEmitted := false
 	onDelta := func(d llm.Delta) {
+		if r.observe != nil {
+			return // observe 的那一轮不显示
+		}
 		if d.Reasoning != "" {
 			bus.Publish(events.Event{T: "delta", SID: sid, RunID: r.runID, TurnID: r.turnID, Kind: "reasoning", Text: d.Reasoning})
 			for _, v := range views {
@@ -2210,6 +2222,11 @@ func (a *App) generateModel(s *sess) {
 		// 边界二：生成完整结束（用量已经结算），但还没把结果交给内核。这期间收到的插话要
 		// 在这里处理：不派发这批尚未接受的工具，先写补充再重新规划。
 		if a.yieldToInterjection(s, r, res, u) {
+			return
+		}
+		if r.observe != nil {
+			a.observeTurn(s, r, res)
+			a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID, Reason: proto.ReasonFinal})
 			return
 		}
 		if res.Reason == llm.ReasonToolUse {
