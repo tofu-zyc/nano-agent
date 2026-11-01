@@ -274,3 +274,48 @@ func (a *App) RoomSay(id, text, as, channelID, defaultName string) error {
 		wake: func(m string) bool { return a.roomShouldSpeak(room, m, text) }})
 	return nil
 }
+
+// RoomCue 是导演让某个成员说一句（POST /api/rooms/{id}/cue）：有 note 时先作为 cue 只发给它，
+// 再叫它在指定频道（channelID 空表示公开）说一句。它正在说话时拒绝。
+func (a *App) RoomCue(id, agentID, note, channelID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.roomStore == nil {
+		return errors.New("房间列表还没准备好")
+	}
+	room, ok := a.roomStore.Get(id)
+	if !ok {
+		return errors.New("没有这个群")
+	}
+	if !slicesContains(room.Members, agentID) {
+		return fmt.Errorf("%s 不在这个群里", agentID)
+	}
+	if room.Paused {
+		return errors.New("这个群现在暂停了，先恢复")
+	}
+	if room.MutedAgent(agentID) {
+		return fmt.Errorf("%s 被禁言了", a.agentDisplay(agentID))
+	}
+	if channelID != "" {
+		c, ok := room.ChannelByID(channelID)
+		if !ok {
+			return fmt.Errorf("没有这个频道：%s", channelID)
+		}
+		if !slicesContains(c.Members, agentID) {
+			return fmt.Errorf("%s 不在频道「%s」里", a.agentDisplay(agentID), c.Name)
+		}
+	}
+	s := a.sessOf(a.roomMemberSID(agentID, room.ID))
+	if s.run != nil || len(s.queue) > 0 || s.groupTimer != nil {
+		return fmt.Errorf("%s 正在说话，等它说完", a.agentDisplay(agentID))
+	}
+	if note = strings.TrimSpace(note); note != "" {
+		a.roomPost(room, roomLine{Kind: lineCue, To: agentID, Text: note}, postOpt{})
+	}
+	hint := "[系统] 导演让你说一句。"
+	if h := a.roomChannelHint(room, channelID); h != "" {
+		hint += "\n" + h
+	}
+	a.roomStart(s, agentID, room, hint, channelID)
+	return nil
+}

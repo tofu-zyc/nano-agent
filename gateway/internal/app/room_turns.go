@@ -78,7 +78,7 @@ func (a *App) roomTurnNext(room rooms.Room) {
 			u.Next = 0
 			u.Round++
 			allSilent := st.RoundTurns > 0 && st.RoundSilent == st.RoundTurns
-			st.RoundTurns, st.RoundSilent = 0, 0
+			st.RoundTurns, st.RoundSilent, st.ErrRun = 0, 0, 0 // 连续出错只数同一轮里的
 			a.saveSceneUses()
 			if room.Rounds > 0 && u.Round >= room.Rounds {
 				a.roomTurnStop(room.ID)

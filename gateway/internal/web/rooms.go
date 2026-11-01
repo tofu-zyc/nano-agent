@@ -74,3 +74,20 @@ func (s *Server) roomSay(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
+
+// roomCue 导演让某个成员说一句：POST /api/rooms/{id}/cue，{agent, note, channel}。
+func (s *Server) roomCue(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Agent   string `json:"agent"`
+		Note    string `json:"note"`
+		Channel string `json:"channel"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.RoomCue(r.PathValue("id"), req.Agent, req.Note, req.Channel); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}

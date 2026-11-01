@@ -39,6 +39,10 @@ type Room struct {
 	scene.Rules
 }
 
+func validMode(m string) bool {
+	return m == ModeMention || m == ModeFree || m == scene.ModeTurns || m == scene.ModeDirector
+}
+
 // IsDM 是不是两个 agent 之间的私聊。
 func (r Room) IsDM() bool { return len(r.DM) == 2 }
 
@@ -102,8 +106,8 @@ func (s *Store) Create(r Room) (Room, error) {
 	if r.Mode == "" {
 		r.Mode = ModeMention
 	}
-	if r.Mode != ModeMention && r.Mode != ModeFree {
-		return Room{}, errors.New("说话方式只能是 mention（点名）或 free（自由）")
+	if !validMode(r.Mode) {
+		return Room{}, errors.New("说话方式只能是 mention（点名）、free（自由）、turns（轮流）或 director（导演）")
 	}
 	if r.ID == "" {
 		r.ID = newID()
@@ -137,7 +141,7 @@ func (s *Store) Update(r Room) error {
 		if r.Name == "" {
 			r.Name = s.rooms[i].Name
 		}
-		if r.Mode != ModeMention && r.Mode != ModeFree {
+		if !validMode(r.Mode) {
 			r.Mode = s.rooms[i].Mode
 		}
 		r.Members = normalizeMembers(r.Members)
