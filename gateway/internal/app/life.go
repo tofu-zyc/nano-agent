@@ -74,10 +74,7 @@ const defaultLifeGuide = `你不是一个等着被使用的工具，而是一个
 
 const (
 	lifeBored    = 3 * time.Hour // 这么久没人找它：下次醒得更早
-	lifeRecent   = 10            // 留几条近况
 	lifeShown    = 3             // 带进聊天的近况条数
-	lifeHighCtx  = 40000         // 内心会话的上下文超过这么多就整理（保持连续又不贵）
-	lifeLowCtx   = 15000
 	lifeRecentOp = "[近况]"
 	lifeRecentEd = "[/近况]"
 )
@@ -419,58 +416,6 @@ func agoText(now time.Time, ts int64) string {
 		return fmt.Sprintf("%d 小时前", int(d.Hours()))
 	}
 	return fmt.Sprintf("%d 天前", int(d.Hours()/24))
-}
-
-// wakeNote 是醒来时看到的情况：几点了、多久没人找、今天还能找几次人、最近的聊天、谁还没回。
-func (a *App) wakeNote(ag agents.Agent, ls *lifeState, now time.Time, manual bool) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "[系统] 现在是 %s %s %s。", now.Format("01-02"), weekdayCN(now), now.Format("15:04"))
-	if manual {
-		b.WriteString("主人把你叫醒了，看看有什么想做的。")
-	} else {
-		b.WriteString("你醒着，手头没事。")
-	}
-	if last := a.agentLastActivity(ag.ID); !last.IsZero() && !last.Equal(a.bootAt) {
-		fmt.Fprintf(&b, "上次有人找你是 %s。", agoText(now, last.Unix()))
-	} else {
-		b.WriteString("这段时间还没人找过你。")
-	}
-	p := effectiveLifePolicy(ag)
-	fmt.Fprintf(&b, "今天第 %d 次醒来", ls.Wakes+1)
-	if pickString(ag.LifeReach, "owner") == "off" {
-		b.WriteString("；你设成了不主动找人。")
-	} else if p.ReachesUnlimited() {
-		b.WriteString("；主动找人的次数不限。")
-	} else {
-		fmt.Fprintf(&b, "，今天还能主动找人 %d 次。", max(0, p.MaxReaches-ls.Reaches))
-	}
-	if targets := a.lifeTargets(ag); len(targets) > 0 {
-		b.WriteString("\n最近的聊天（Message 的 to 写括号里的）：")
-		for _, t := range targets {
-			fmt.Fprintf(&b, "\n- %s（%s）", t.Name, t.To)
-			if t.Last != "" {
-				b.WriteString("：" + t.Last)
-			}
-			if t.At > 0 {
-				b.WriteString("，" + agoText(now, t.At))
-			}
-			if at, waiting := ls.Awaiting[strings.TrimPrefix(t.To, "chat:")]; waiting {
-				fmt.Fprintf(&b, "。你 %s 主动找过他，他还没回，先别再找他", agoText(now, at))
-			}
-		}
-	}
-	if !a.awakeOf(ag).contains(now) {
-		b.WriteString("\n现在是你睡觉的时间，别去打扰别人。")
-	}
-	// 能做什么要说实话：没开搜索就上不了网，记忆关着就记不了东西，别编
-	if len(a.searchTools()) == 0 {
-		b.WriteString("\n（网络搜索没开，这次上不了网。）")
-	}
-	if !a.memoryOn(ag) {
-		b.WriteString("\n（长期记忆关着，这次记不了东西。）")
-	}
-	b.WriteString("\n想做点什么就做，不想做就歇着。最后用一两句话写下这会儿你做了什么、心情怎样。")
-	return b.String()
 }
 
 // innerLimits 是 agent 自己的一轮的上限：整理记忆要读很多日记、写很多条，内心活动只是醒一会儿。

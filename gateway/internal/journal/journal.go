@@ -23,6 +23,7 @@ var (
 	ErrRecordTooLarge = errors.New("日志记录超过单条上限")
 	ErrFileFull       = errors.New("日志文件超过上限")
 	ErrFrozen         = errors.New("日志写入失败后已冻结")
+	ErrClosed         = errors.New("日志已关闭")
 )
 
 // Limits 是单条记录（data 的字节数）和整个文件的字节上限。
@@ -156,11 +157,21 @@ func (j *Journal) encode(seq uint64, data any) ([]byte, error) {
 	return append(line, '\n'), nil
 }
 
+func (j *Journal) usable() error {
+	if j.frozen != nil {
+		return fmt.Errorf("%w: %v", ErrFrozen, j.frozen)
+	}
+	if j.file == nil {
+		return ErrClosed
+	}
+	return nil
+}
+
 // Append 写入一条记录并 fsync，返回时这条已经提交。超过上限只返回错误；
 // 写入或同步失败会冻结日志。
 func (j *Journal) Append(data any) error {
-	if j.frozen != nil {
-		return fmt.Errorf("%w: %v", ErrFrozen, j.frozen)
+	if err := j.usable(); err != nil {
+		return err
 	}
 	line, err := j.encode(j.seq+1, data)
 	if err != nil {
@@ -185,8 +196,8 @@ func (j *Journal) Append(data any) error {
 // Rewrite 用 records 替换整个日志（序号从 1 重排）。先写 <path>.next 并 fsync，再原子替换；
 // 替换之前出错，原文件不变、日志仍可用；替换开始之后出错则冻结，重启读到旧文件或新文件，不会读到半个。
 func (j *Journal) Rewrite(records []any) error {
-	if j.frozen != nil {
-		return fmt.Errorf("%w: %v", ErrFrozen, j.frozen)
+	if err := j.usable(); err != nil {
+		return err
 	}
 	next := j.path + ".next"
 	lines := make([][]byte, len(records))
@@ -206,7 +217,9 @@ func (j *Journal) Rewrite(records []any) error {
 		return err
 	}
 	// Windows 替换前要先关掉旧句柄。从这里开始任何失败都冻结。
-	if err := j.file.Close(); err != nil {
+	err := j.file.Close()
+	j.file = nil
+	if err != nil {
 		j.frozen = err
 		return err
 	}

@@ -352,6 +352,29 @@ func TestVersionAndArguments(t *testing.T) {
 	}
 }
 
+func TestUseAfterCloseReturnsError(t *testing.T) {
+	j, _ := mustOpen(t, filepath.Join(t.TempDir(), "j.jsonl"))
+	j.Append(rec{N: 1})
+	j.Close()
+	if err := j.Append(rec{N: 2}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("关闭后追加: %v", err)
+	}
+	if err := j.Rewrite([]any{rec{N: 2}}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("关闭后改写: %v", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatalf("重复关闭: %v", err)
+	}
+	// 冻结之后关闭再用，仍然是冻结的错误而不是崩溃
+	k, _ := mustOpen(t, filepath.Join(t.TempDir(), "k.jsonl"))
+	k.file.Close()
+	k.Append(rec{N: 1})
+	k.Close()
+	if err := k.Append(rec{N: 2}); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("冻结后关闭再追加: %v", err)
+	}
+}
+
 func TestUnserializableRecordIsRejectedWithoutFreezing(t *testing.T) {
 	j, _ := mustOpen(t, filepath.Join(t.TempDir(), "j.jsonl"))
 	if err := j.Append(make(chan int)); err == nil {

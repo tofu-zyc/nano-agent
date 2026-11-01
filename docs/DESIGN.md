@@ -236,7 +236,7 @@
 | R10 | 前端拆出拓扑布局计算、SSE 状态归并和共享的资源操作 | 局部 |
 | R11 | `kernel/src/main.c` 按宿主子系统拆分 | 局部 |
 | R12 | 修正失真的代码注释（`mcp/store.go`、`app/nodes.go`、`session/settings.go` 中的旧说法）；按主题整理用阶段编号命名的测试文件 | 低风险，先做 |
-| R13 | 可靠事件日志（`internal/eventlog`）改用第 1 步新建的 `internal/journal`，去掉两份相同的写盘逻辑；磁盘格式不变 | 第 1 步之后单独做 |
+| R13 | 可靠事件日志（`internal/eventlog`）改用第 1 步新建的 `internal/journal`，去掉两份相同的写盘逻辑；磁盘格式不变。eventlog 现在有版本 1 和 2 两种记录，迁移前日志包要支持在一份日志里接受多个版本号 | 第 1 步之后单独做 |
 
 ## 10 文档规则
 

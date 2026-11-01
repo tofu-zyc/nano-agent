@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
@@ -307,7 +308,7 @@ func TestLifeCreateAndLabels(t *testing.T) {
 	e.a.mu.Lock()
 	si := e.a.sessionInfo(lifeSID(info.ID))
 	ag, _ := e.a.agentByID(info.ID)
-	note := e.a.wakeNote(ag, e.a.lifeOf(info.ID), e.a.now(), false)
+	note := e.a.mindNote(ag, e.a.mindOf(info.ID), autonomy.Trigger{}, e.a.now(), true)
 	e.a.mu.Unlock()
 	if si.Title != "小鲍的内心" || si.Channel != "life" {
 		t.Fatalf("内心会话的名字和图标：%q %q", si.Title, si.Channel)

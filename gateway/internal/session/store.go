@@ -9,7 +9,6 @@ package session
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -205,11 +204,6 @@ type renameTombstone struct {
 	From        string `json:"from,omitempty"`
 	FromGen     int64  `json:"from_gen,omitempty"`
 	At          int64  `json:"at,omitempty"`
-}
-
-func sumOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) renameOpFile(from, to string) string {
