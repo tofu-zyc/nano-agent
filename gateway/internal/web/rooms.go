@@ -6,6 +6,7 @@ package web
 
 import (
 	"net/http"
+	"strconv"
 
 	"nano-agent/gateway/internal/app"
 )
@@ -46,4 +47,12 @@ func (s *Server) deleteRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// listObserve 是场景最近的 observe 记录：GET /api/observe?scene=<键>&n=50[&all=1]。
+// all=1 时包含“本来也不会说话”的判断。
+func (s *Server) listObserve(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+	all := r.URL.Query().Get("all") == "1"
+	writeJSON(w, map[string]any{"items": s.app.Observe(r.URL.Query().Get("scene"), n, all)})
 }

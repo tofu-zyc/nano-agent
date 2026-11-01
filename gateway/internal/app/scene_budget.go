@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"nano-agent/gateway/internal/scene"
 )
 
 // 场景的预算池：一个场景所有成员会话的用量（输入加输出 token）记在一起，包括 observe 的那几轮。
@@ -70,6 +72,18 @@ func (a *App) sceneUseOf(key string) *sceneUse {
 	return u
 }
 
+// sceneUseView 是场景当前用量的副本，不会为没用过的场景建条目。调用方持有锁。
+func (a *App) sceneUseView(key string) sceneUse {
+	var u sceneUse
+	if p := a.sceneUses[key]; p != nil {
+		u = *p
+	}
+	if day := a.now().In(a.loc).Format("2006-01-02"); u.Day != day {
+		u.Day, u.DayTokens = day, 0
+	}
+	return u
+}
+
 // sceneUsage 把一轮的用量记进场景。内部群超过任一预算就暂停，写明原因；外部群在下次用的时候查。
 // 调用方持有锁。
 func (a *App) sceneUsage(sid string, tokens int) {
@@ -97,7 +111,7 @@ func (a *App) sceneUsage(sid string, tokens int) {
 
 // sceneOver 是场景现在超没超预算（用完了）。调用方持有锁。
 func (a *App) sceneOver(sc sceneInfo) bool {
-	u := a.sceneUseOf(sc.Key)
+	u := a.sceneUseView(sc.Key)
 	return sc.Rules.Budget > 0 && u.DayTokens >= sc.Rules.Budget ||
 		sc.Rules.BudgetTotal > 0 && u.Total >= sc.Rules.BudgetTotal
 }
@@ -126,4 +140,19 @@ func (a *App) sceneForget(key string) {
 		delete(a.sceneUses, key)
 		a.saveSceneUses()
 	}
+}
+
+// SceneUsage 是网页上看到的场景用量。
+type SceneUsage struct {
+	DayTokens int   `json:"day_tokens"`
+	Total     int   `json:"total"`
+	Since     int64 `json:"since,omitempty"`
+	Over      bool  `json:"over"` // 现在超了预算（外部群当天不再调用模型）
+}
+
+// sceneUsageOf 是场景现在的用量。调用方持有锁。
+func (a *App) sceneUsageOf(key string, rules scene.Rules) SceneUsage {
+	u := a.sceneUseView(key)
+	over := rules.Budget > 0 && u.DayTokens >= rules.Budget || rules.BudgetTotal > 0 && u.Total >= rules.BudgetTotal
+	return SceneUsage{DayTokens: u.DayTokens, Total: u.Total, Since: u.Since, Over: over}
 }

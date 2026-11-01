@@ -7,6 +7,7 @@
   import WorkspacePicker from '../WorkspacePicker.svelte';
   import Icon from '../Icon.svelte';
   import AgentSwitcher from '../AgentSwitcher.svelte';
+  import SceneRules from '../SceneRules.svelte';
 
   let { sid }: { sid: string } = $props();
   // agent 自己的会话（拟人型的内心活动、整理记忆）：只能看，工作目录、权限这些对它没意义
@@ -212,6 +213,11 @@
     {/if}
     {#if sess.group}
       <div class="p-warn">这是在群聊里的会话：每条群消息都记进历史，被 @ 或叫到名字才回；群里安静够了、额度也够时可以插一句。默认不挂工作目录，工具只有群聊白名单里的。</div>
+      {#if sess.scene && !room && !sid.startsWith('@')}
+        <h4 class="p-h">群规则</h4>
+        <SceneRules rules={sess.scene} use={sess.scene_use} sceneKey={sid} external members={[sess.agent]}
+          onsave={(p) => patch({ scene: { ...sess.scene, ...p } })} onreset={() => patch({ scene_reset: true })} />
+      {/if}
     {/if}
 
     <h5 class="p-h">对话 agent <span class="muted p-small">保留聊天记录，下一条消息由新 agent 回复</span></h5>

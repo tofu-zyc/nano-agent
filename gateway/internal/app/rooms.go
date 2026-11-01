@@ -288,18 +288,22 @@ type RoomInfo struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
-	Mode    string   `json:"mode"`
 	Paused  bool     `json:"paused"`
 	Muted   []string `json:"muted"`
 	DM      bool     `json:"dm"`
-	Budget  int      `json:"budget"` // 每天最多的 token（0 不限）
-	SID     string   `json:"sid"`    // 记录会话（网页里打开它就能看聊天）
+	SID     string   `json:"sid"` // 记录会话（网页里打开它就能看聊天）
 	Count   int      `json:"count"`
+	// 场景规则（mode、observe、brief、roles、tools、style、guard、budget、budget_total）平铺在这里
+	scene.Rules
+	Use SceneUsage `json:"use"` // 用量
 }
 
 func (a *App) roomInfo(r rooms.Room) RoomInfo {
-	out := RoomInfo{ID: r.ID, Name: r.Name, Members: r.Members, Mode: r.Mode, Paused: r.Paused, Muted: r.Muted,
-		DM: r.IsDM(), Budget: r.Budget, SID: roomLogSID(r.ID)}
+	out := RoomInfo{ID: r.ID, Name: r.Name, Members: r.Members, Paused: r.Paused, Muted: r.Muted,
+		DM: r.IsDM(), SID: roomLogSID(r.ID), Rules: r.Rules.Clone(), Use: a.sceneUsageOf(roomLogSID(r.ID), r.Rules)}
+	if out.Mode == "" {
+		out.Mode = scene.ModeMention
+	}
 	if out.Members == nil {
 		out.Members = []string{}
 	}

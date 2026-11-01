@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -514,5 +515,86 @@ func TestObserveTrimAndSilentFilter(t *testing.T) {
 	a2 := newAppAt(t, e.dir, nil)
 	if got := a2.Observe("s", 100, true); len(got) != 5 {
 		t.Fatalf("重启后读回：%d", len(got))
+	}
+}
+
+// 接口：外部群的 scene 整块；内部群的规则字段（tools 区分不给、null、[]）。
+func TestSceneAPIs(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	ext := extGroup(t, e)
+	set := func(sid, body string) error {
+		var p SessionPatch
+		if err := json.Unmarshal([]byte(body), &p); err != nil {
+			t.Fatal(err)
+		}
+		return e.a.UpdateSession(sid, p)
+	}
+	if err := set(ext, `{"scene":{"brief":"读书会","tools":[],"style":{"quiet":"30s"}}}`); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := e.a.Session(ext)
+	if info.Scene == nil || info.Scene.Brief != "读书会" || info.Scene.Tools == nil || len(info.Scene.Tools) != 0 || info.SceneUse == nil {
+		t.Fatalf("会话信息：%+v", info.Scene)
+	}
+	for _, bad := range []string{`{"scene":{"mode":"turns"}}`, `{"scene":{"tools":["Shell"]}}`, `{"scene":{"guard":{"run":5}}}`, `{"scene":{"nope":1}}`} {
+		if err := set(ext, bad); err == nil {
+			t.Errorf("%s 应该被拒绝", bad)
+		}
+	}
+	if info, _ := e.a.Session(ext); info.Scene.Brief != "读书会" {
+		t.Fatal("被拒绝的修改不能留下半套")
+	}
+	if err := set(mainSID, `{"scene":{"brief":"x"}}`); err == nil {
+		t.Fatal("私聊不能设群规则")
+	}
+	e.a.mu.Lock()
+	e.a.sceneUsage(ext, 50)
+	e.a.mu.Unlock()
+	if err := set(ext, `{"scene_reset":true}`); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := e.a.Session(ext); info.SceneUse.Total != 0 || info.SceneUse.DayTokens != 50 {
+		t.Fatalf("清零只清累计：%+v", info.SceneUse)
+	}
+	if err := set(ext, `{"scene":null}`); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := e.a.Session(ext); info.Scene == nil || !info.Scene.IsZero() {
+		t.Fatalf("null 清掉规则：%+v", info.Scene)
+	}
+
+	// 内部群：tools 不给 / null / []
+	rs, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+	e.a.SetRooms(rs)
+	var create RoomPatch
+	json.Unmarshal([]byte(`{"name":"群","members":["default"],"tools":["Skill"],"brief":"说明","budget":10}`), &create)
+	ri, err := e.a.CreateRoom(create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ri.Mode != "mention" || !slices.Equal(ri.Tools, []string{"Skill"}) || ri.Brief != "说明" || ri.Budget != 10 {
+		t.Fatalf("建群：%+v", ri)
+	}
+	patch := func(body string) RoomInfo {
+		var p RoomPatch
+		json.Unmarshal([]byte(body), &p)
+		got, err := e.a.UpdateRoom(ri.ID, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := patch(`{"paused":false}`); !slices.Equal(got.Tools, []string{"Skill"}) {
+		t.Fatalf("没给 tools 不动：%v", got.Tools)
+	}
+	if got := patch(`{"tools":[]}`); got.Tools == nil || len(got.Tools) != 0 {
+		t.Fatalf("[] 不给工具：%v", got.Tools)
+	}
+	if got := patch(`{"tools":null}`); got.Tools != nil {
+		t.Fatalf("null 沿用默认：%v", got.Tools)
+	}
+	if _, err := e.a.UpdateRoom(ri.ID, RoomPatch{ScenePatch: ScenePatch{Guard: &scene.Guard{Run: 1}}}); err == nil {
+		t.Fatal("防刷屏阈值越界应该拒绝")
 	}
 }

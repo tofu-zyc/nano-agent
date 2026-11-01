@@ -38,6 +38,12 @@ export const toolLabels: Record<string, string> = {
   FollowUp: '过会儿再看',
   Diary: '读日记',
   SendFile: '发图片 / 文件到聊天',
+  Session: '分支会话',
+  Job: '后台任务',
+  Hook: '事件规则',
+  Agenda: '日程',
+  Idea: '想法',
+  Mind: '心智状态',
 };
 
 export const toolLabel = (n: string) => toolLabels[n] ?? n;

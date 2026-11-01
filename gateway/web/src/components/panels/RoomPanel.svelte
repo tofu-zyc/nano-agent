@@ -3,6 +3,7 @@
   import { store } from '../../lib/state.svelte';
   import { api } from '../../lib/api';
   import Icon from '../Icon.svelte';
+  import SceneRules from '../SceneRules.svelte';
 
   let { id }: { id: string } = $props();
   const r = $derived(store.room(id));
@@ -53,7 +54,7 @@
         <button class="btn sm primary" onclick={() => { location.hash = '#/sessions/' + encodeURIComponent(r!.sid); store.inspector = null; }}><Icon name="chat" size={13} />打开聊天</button>
         <button class="btn sm" onclick={() => patch({ paused: !r!.paused })}>{r.paused ? '恢复' : '暂停'}</button>
       </div>
-      <p class="p-note p-small">在聊天里说话就是在这个群里说话：成员 agent 都看得到，被叫到的会回。连续 8 条 agent 发言或者两个 agent 来回 6 轮，会自动暂停，等你说话。</p>
+      <p class="p-note p-small">在聊天里说话就是在这个群里说话：成员 agent 都看得到，被叫到的会回。连续多条 agent 发言（默认 8）或者两个 agent 来回多轮（默认 6），会自动暂停，等你说话；阈值在“更多规则”里改。</p>
     </div>
 
     <h5 class="p-h">成员 <span class="muted p-small">点一下加减；被禁言的只看不说</span></h5>
@@ -72,20 +73,13 @@
       {/each}
     </div>
 
-    <h5 class="p-h">怎么说话</h5>
+    <h5 class="p-h">名字</h5>
     <div class="p-card">
-      <select class="p-select" value={r.mode} onchange={(e) => patch({ mode: (e.target as HTMLSelectElement).value })}>
-        <option value="mention">点名：只有被 @ 或者叫到名字才说</option>
-        <option value="free">自由：拟人型的成员安静下来按积极度自己插话（工具型只回被叫到的）</option>
-      </select>
-      <label class="p-label">名字
-        <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
-      </label>
-      <label class="p-label">每天最多用多少 token（AI 的用量单位；0 表示不限，超了自动暂停）
-        <input class="p-input" value={r.budget ?? 0} inputmode="numeric"
-          onchange={(e) => patch({ budget: Number((e.target as HTMLInputElement).value) || 0 })} />
-      </label>
+      <input class="p-input" value={r.name} onchange={(e) => patch({ name: (e.target as HTMLInputElement).value })} />
     </div>
+
+    <SceneRules rules={r} use={r.use} sceneKey={'room:' + r.id} members={r.members} onsave={patch}
+      onreset={() => patch({ reset: true })} />
 
     <div class="p-danger-zone">
       <button class="btn sm danger" onclick={remove}><Icon name="trash" size={13} />删掉这个群</button>

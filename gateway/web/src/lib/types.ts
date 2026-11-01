@@ -83,6 +83,8 @@ export type SessionInfo = {
   can_switch_agent: boolean; // 现在能不能切换（后端最终校验）
   switch_blocked?: string; // 不能切换的原因
   group?: boolean; // 群聊里的会话
+  scene?: SceneRules; // 外部群的群规则
+  scene_use?: SceneUse;
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
@@ -458,17 +460,42 @@ export type MemoryView = { agent: string; on: boolean; self: string; entries: Me
 
 // 一个机器人：绑一个 agent，凭据只回传有没有（不返回明文）
 // 网关内部的群聊（房间）：成员是 agent，聊天记录是一个会话（sid）
-export type RoomInfo = {
+/** 场景规则：内部群存在群里，外部群存在会话设置里（两边字段一样）。tools 为 null 表示沿用默认，[] 表示不给工具 */
+export type SceneRules = {
+  mode?: 'mention' | 'free';
+  observe?: boolean;
+  brief?: string;
+  roles?: Record<string, { prompt?: string; eagerness?: string }>;
+  tools: string[] | null;
+  style?: { quiet?: string; min_gap?: string; max_len?: number; parts?: number };
+  guard?: { run?: number; ping_pong?: number };
+  budget?: number;
+  budget_total?: number;
+};
+export type SceneUse = { day_tokens: number; total: number; since?: number; over: boolean };
+export type ObserveRecord = {
+  at: number;
+  scene: string;
+  sid: string;
+  agent: string;
+  say?: string;
+  silent: boolean;
+  tools?: { name: string; args?: string }[];
+  why: { quiet_sec: number; pending: number; gate: number };
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+export type RoomInfo = SceneRules & {
   id: string;
   name: string;
   members: string[];
-  mode: 'mention' | 'free';
   paused: boolean;
   muted: string[];
   dm: boolean;
-  budget?: number;
   sid: string;
   count: number;
+  use: SceneUse;
 };
 
 export type BotInfo = {
