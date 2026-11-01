@@ -598,3 +598,51 @@ func TestSceneAPIs(t *testing.T) {
 		t.Fatal("防刷屏阈值越界应该拒绝")
 	}
 }
+
+// 外部群额度用完：拟人型约好的 FollowUp 到点也不调用模型，约定留着，第二天恢复后触发。
+func TestFollowUpWaitsForSceneBudget(t *testing.T) {
+	e := setup(t)
+	store, _ := withAgents(t, e)
+	ext := extGroup(t, e)
+	makeLife(t, e, store, nil)
+	setScene(t, e, ext, &scene.Rules{Budget: 100})
+	ag, _ := store.Get(agents.DefaultID)
+	e.a.mu.Lock()
+	e.a.sceneUsage(ext, 100)
+	ls := e.a.lifeOf("default")
+	ls.FollowUps[ext] = followUp{At: e.a.now().Add(-time.Minute).Unix(), Note: "问问他"}
+	e.a.followUpTick(ag, ls, e.a.now())
+	_, kept := ls.FollowUps[ext]
+	e.a.mu.Unlock()
+	e.k.none()
+	if !kept {
+		t.Fatal("额度用完：约定要留着")
+	}
+	setNow(e, e.a.now().Add(24*time.Hour))
+	e.a.mu.Lock()
+	e.a.followUpTick(ag, ls, e.a.now())
+	e.a.mu.Unlock()
+	if in := e.k.expect(proto.TInput); in.SID != ext {
+		t.Fatalf("第二天应该触发：%+v", in)
+	}
+}
+
+// 删外部群会话时删掉它的用量条目。
+func TestDeleteSessionForgetsSceneUse(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	ext := extGroup(t, e)
+	e.a.mu.Lock()
+	e.a.sceneUsage(ext, 10)
+	e.a.mu.Unlock()
+	e.k.none()
+	if err := e.a.DeleteSession(ext); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	_, left := e.a.sceneUses[ext]
+	e.a.mu.Unlock()
+	if left {
+		t.Fatal("用量条目应该删掉")
+	}
+}

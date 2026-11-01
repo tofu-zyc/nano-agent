@@ -186,7 +186,7 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 预算池：一个场景所有成员会话的用量记在一起（含 observe 的轮），存 `data/runtime/scenes.json`，每轮结束后整份写临时文件再替换，重启接着算；崩溃时可能丢最后一轮的累加。内部群超过当天或这一场的预算就暂停并在群记录里写明原因，网页可把累计清零。外部群超过当天预算后不再调用模型、不主动插话，被点名时每天最多回一次“今天的额度用完了”。
 
-`observe` 档只作用于主动插话（`groupTick` 触发的那一轮）：照常请求模型，回复不写任何历史和群记录、不发出，工具调用不执行；本来会说的话、触发原因和用量记在 `data/runtime/observe.jsonl`（journal，最多 2000 条，超了只留最新一半）。被点名、两个 agent 的私聊、Message、FollowUp 不受影响。写入失败时这一轮的结果丢掉，健康状态 `observe` 为 degraded。
+`observe` 档只作用于主动插话（`groupTick` 触发的那一轮）：照常请求模型，回复不写任何历史和群记录、不发出，工具调用不执行；本来会说的话、触发原因和用量记在 `data/runtime/observe.jsonl`（journal，最多 2000 条，超了只留最新一半）。被点名、两个 agent 的私聊、Message、FollowUp 不受影响。observe 的判断不占每小时的发言额度，所以记下的“本来会说”可能比真正开启后实际说出口的多；成本仍由每小时判断次数的上限管着。写入失败时这一轮的结果丢掉，健康状态 `observe` 为 degraded。
 
 接口：`PATCH /api/rooms/{id}` 接受规则字段（`tools` 不给不改、`null` 沿用默认、`[]` 不给工具；`reset: true` 清零累计）；`PATCH /api/sessions/{sid}` 的 `scene` 整块替换外部群的规则（`null` 清掉，`scene_reset: true` 清零累计）；`GET /api/observe?scene=<键>&n=50[&all=1]`。
 

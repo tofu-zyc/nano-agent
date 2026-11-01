@@ -224,8 +224,8 @@ func (a *App) roomGuard(room rooms.Room, speaker string) {
 }
 
 type roomRun struct {
-	Tail     []string // 最近的发言者（"human" 或者 agent ID）
-	Pending  map[string][]chan string
+	Tail    []string // 最近的发言者（"human" 或者 agent ID）
+	Pending map[string][]chan string
 }
 
 // roomState 是房间的运行状态（只在内存里）。调用方持有锁。

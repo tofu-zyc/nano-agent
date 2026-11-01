@@ -24,6 +24,7 @@ func TestValidate(t *testing.T) {
 		"duration":  {Rules{Style: Style{Quiet: "abc"}}, Room},
 		"guard low": {Rules{Guard: Guard{Run: 1}}, Room},
 		"guard hi":  {Rules{Guard: Guard{PingPong: 51}}, Room},
+		"parts":     {Rules{Style: Style{Parts: 6}}, Room},
 		"ext guard": {Rules{Guard: Guard{Run: 5}}, External},
 		"ext total": {Rules{BudgetTotal: 5}, External},
 	}

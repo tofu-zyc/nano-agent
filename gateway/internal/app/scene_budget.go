@@ -105,7 +105,7 @@ func (a *App) sceneUsage(sid string, tokens int) {
 	case sc.Rules.Budget > 0 && u.DayTokens > sc.Rules.Budget:
 		a.pauseRoom(*sc.Room, fmt.Sprintf("今天的 token 用量到了预算（%d），先暂停，明天或者你恢复", sc.Rules.Budget))
 	case sc.Rules.BudgetTotal > 0 && u.Total > sc.Rules.BudgetTotal:
-		a.pauseRoom(*sc.Room, fmt.Sprintf("这一场的 token 累计到了预算（%d），先暂停，清零累计或者你恢复", sc.Rules.BudgetTotal))
+		a.pauseRoom(*sc.Room, fmt.Sprintf("这一场的 token 累计到了预算（%d），先暂停，清零累计后再恢复", sc.Rules.BudgetTotal))
 	}
 }
 

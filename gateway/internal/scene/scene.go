@@ -128,6 +128,9 @@ func (r Rules) Validate(kind Kind, sceneTools []string) error {
 			return fmt.Errorf("场景里不能用工具 %s（可选：%s）", t, strings.Join(sceneTools, "、"))
 		}
 	}
+	if r.Style.Parts > 5 {
+		return errors.New("最多拆成 5 条")
+	}
 	if r.Style.MaxLen < 0 || r.Style.Parts < 0 || r.Budget < 0 || r.BudgetTotal < 0 || r.Guard.Run < 0 || r.Guard.PingPong < 0 {
 		return errors.New("数值不能是负数")
 	}

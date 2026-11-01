@@ -671,6 +671,10 @@ func (a *App) followUpTick(ag agents.Agent, ls *lifeState, now time.Time) {
 			a.saveLife()
 			continue
 		}
+		// 场景的额度用完了：不调用模型，约定留着，额度恢复（第二天）后再触发
+		if sc, ok := a.sceneOf(sid); ok && a.sceneOver(sc) {
+			continue
+		}
 		s := a.sessOf(sid)
 		if s.run != nil || len(s.queue) > 0 || s.compacting {
 			continue // 正在聊：过一会儿再看

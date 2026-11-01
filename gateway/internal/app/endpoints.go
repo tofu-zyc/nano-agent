@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nano-agent/gateway/internal/scene"
 	"os"
 	"path/filepath"
 	"slices"
@@ -381,8 +382,12 @@ func (a *App) DeleteSession(sid string) error {
 		return errors.New("这个会话有任务在跑，先停止再删除")
 	}
 	agent := a.execAgentID(sid)
+	sc, inScene := a.sceneOf(sid)
 	if err := a.store.Delete(sid); err != nil {
 		return err
+	}
+	if inScene && sc.Kind == scene.External {
+		a.sceneForget(sc.Key) // 外部群会话没了，它的用量条目也删掉
 	}
 	a.lifecycleExperienceFor(agent, sid, "删除了这个会话")
 	a.dropJournal(sid) // 会话没了，它的插话日志也不能留着复活
