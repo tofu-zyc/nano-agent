@@ -140,7 +140,19 @@ func (w *channelWatch) report(st channel.Status) {
 	state, detail := channelHealth(st)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if st.State != channel.StateError {
+	switch st.State {
+	case channel.StateOnline, channel.StateIdle:
+		w.since, w.promoted = time.Time{}, false // 只有这两种算恢复
+		w.h.Set(state, detail)
+		return
+	case channel.StateStarting:
+		if !w.since.IsZero() {
+			return // 出错期间重试前报的“连接中”不算恢复：保持当前状态，计时照走
+		}
+		w.h.Set(state, detail)
+		return
+	case channel.StateError:
+	default: // stopped 等：直接按状态写，不再有“正在出错”的计时
 		w.since, w.promoted = time.Time{}, false
 		w.h.Set(state, detail)
 		return

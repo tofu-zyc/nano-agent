@@ -328,13 +328,14 @@ type Item struct {
 type Deps struct {
 	Channel func(name string) channel.Channel // 当前的渠道对象；nil 表示暂时没有
 	Media   func(id string) ([]byte, error)
+	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选；默认用渠道的 MediaSender
 	Now     func() time.Time
 	Log     *slog.Logger
 	Health  *health.Handle
 }
 
-func Open(ctx context.Context, path string, deps Deps) (*Outbox, error)
-func (o *Outbox) Enqueue(it Item) (id string, err error) // 不等磁盘、不阻塞；满了返回 ErrFull，存储不可用返回 ErrStorage
+func Open(ctx context.Context, path string, deps Deps) (*Outbox, error) // 存储损坏时仍返回一个拒绝受理的 *Outbox 和错误
+func (o *Outbox) Enqueue(it Item) (id string, err error) // 不等磁盘、不阻塞；满了返回 ErrFull，单条超过上限返回 ErrTooLarge，存储不可用返回 ErrStorage，已关闭返回 ErrClosed
 func (o *Outbox) DropChannel(name string)                // 机器人被删除：它的待发消息以 channel_removed 结局
 func (o *Outbox) Stats() Stats                           // 各渠道待发数、最老一条的时间、失败中的条数、24 小时内的丢弃数及原因
 func (o *Outbox) Recent(n int) []Record                  // 最近的失败和丢弃，供网页和 /status
@@ -390,9 +391,11 @@ type Parter interface {
 - **先记录后动作**：`Enqueue` 把 `enqueue` 记录交给写协程，持久化成功之后这条才能被发送。`Enqueue` 返回到落盘之间的毫秒级窗口里崩溃，这条会丢，和现在一样；落盘之后的都会发出。
 - 重启时重放，恢复待发集合和最近的结局记录。
 - **压缩**：已结局的条目只保留最近 500 条或 7 天，供展示。文件超过 4 MiB、或已结局记录占多数时改写。
-- **存储失败**（打开时损坏，或运行中写盘失败）：出站停止受理，健康条目报 `error`，保留原文件；`App.enqueue` 退回现在的内存直发。
+- **单条上限**：日志的单条记录上限 1 MiB，文件硬上限 32 MiB。超过单条上限的消息不能丢：`Enqueue` 返回 `ErrTooLarge`，App 走内存直发，同时记警告，健康条目报 `degraded`。
+- **重启后的状态**：待发集合、已发段数、失败次数和下次发送时间都从日志恢复（退避和限流的等待重启后仍然有效）；`Delay` 不再等。
+- **存储失败**（打开时损坏，或运行中写盘失败）：出站停止受理，健康条目报 `error`，保留原文件；`App.enqueue` 退回现在的内存直发，并保持现在"每个渠道按顺序发"的行为。运行中写盘失败时，已经受理但还没落盘的消息，和已落盘的一起在内存里照常发送，不再有落盘保证；打开时损坏则 `Open` 仍返回一个拒绝受理的 `*Outbox` 和错误。
 
-**容量**：待发最多 2048 条、正文合计 8 MiB；单个目标最多 256 条（和现在每渠道 256 相当）。满了 `Enqueue` 返回 `ErrFull`，App 记一条警告、健康条目报 `degraded`，`enqueue` 返回 false。不静默丢弃。
+**容量**：待发最多 2048 条、正文合计 8 MiB；单个目标最多 256 条（和现在每渠道 256 相当）。满了 `Enqueue` 返回 `ErrFull`，App 记一条警告、健康条目报 `degraded`，`enqueue` 返回 false。不静默丢弃。已结局的记录只留最近 500 条或 7 天，文件超过 4 MiB 且大部分可回收、或已结局记录多过待发时改写。
 
 **App 的改动**：
 
@@ -448,7 +451,7 @@ func (b *Board) Snapshot() []Entry                  // 按名字排序
 | `autonomy` | App | `mindsErr`，读取失败为 error |
 | `schedule` | App | `schedulesErr`，启动失败为 error |
 
-- 渠道自己报的 `error` 持续超过 1 分钟才算 error，在那之前算 degraded：一次网络抖动不该让 `nano-gateway status` 返回 3。中间恢复过又出错的算新的一次，重新计时。构建失败、`Run` 意外退出、启用的渠道停止（`stopped`）不等待，直接是 error。
+- 渠道自己报的 `error` 持续超过 1 分钟才算 error，在那之前算 degraded：一次网络抖动不该让 `nano-gateway status` 返回 3。只有 online 和 idle 算恢复；出错期间渠道在重试前报的 starting 不算恢复，条目保持 degraded 或 error，计时照走。恢复过又出错的算新的一次，重新计时。构建失败、`Run` 意外退出、启用的渠道停止（`stopped`）不等待，直接是 error。
 - `channel:<名字>` 只在 `channels.go` 里认领和释放：`reconcile` 判定要启用时认领（构建失败也有条目，显示 error），停用、配置变了重启或机器人被删除时释放，别处不写这些条目。停用的渠道不留条目，网页和终端不经过 `reconcile`，没有条目。
 - `storage` 列出问题时跳过 `execution_leases` 和 `runtime_events` 两个 scope，它们由 `dispatch`、`runtime_events` 条目单独报告，同一个故障只在一处出现。其他 scope（`jobs:<节点>`、`hook_event`、会话 ID、`persona`、`interjections` 等）照常算在 `storage` 里。
 - `StorageIssues` 在运行中也会新增，所以 `storage` 在启动后不只设一次：每次取健康状态（`Status`）之前按当前的问题刷新，写入方仍然只有 App。这些问题记上后在进程内不会清除，说明末尾写"修复后重启网关重新检查"。

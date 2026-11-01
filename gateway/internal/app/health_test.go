@@ -264,3 +264,33 @@ func TestHealthChannelErrorGrace(t *testing.T) {
 		t.Fatalf("停止直接 error: %v", state())
 	}
 }
+
+// 出错期间报来的“连接中”不算恢复：error → starting → error 超过宽限仍要变成 error。
+func TestHealthChannelStartingDoesNotResetGrace(t *testing.T) {
+	e := setup(t)
+	e.a.channelGrace = 300 * time.Millisecond
+	e.a.ReconcileChannels(e.a.cfg)
+	ch := &statusCh{fakeCh: fakeCh{name: "tg.g2", sent: make(chan string, 10)}, st: channel.Status{State: channel.StateOnline}}
+	e.a.chMu.Lock()
+	e.a.reconcile("tg.g2", true, "c", func() (channel.Channel, error) { return ch, nil })
+	e.a.chMu.Unlock()
+	state := func() health.State { h, _ := healthOf(e.a, "channel:tg.g2"); return h.State }
+	// 每 50ms 在 error 和 starting 之间来回报，始终连不上
+	deadline := time.Now().Add(3 * time.Second)
+	for state() != health.Error {
+		if time.Now().After(deadline) {
+			t.Fatal("始终连不上的渠道应在宽限后变成 error")
+		}
+		ch.report(channel.Status{State: channel.StateError, Error: "连不上"})
+		time.Sleep(25 * time.Millisecond)
+		ch.report(channel.Status{State: channel.StateStarting})
+		if s := state(); s == health.OK {
+			t.Fatalf("starting 不能把出错中的条目改回 ok: %v", s)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	ch.report(channel.Status{State: channel.StateOnline})
+	if state() != health.OK {
+		t.Fatal("online 才算恢复")
+	}
+}
