@@ -60,7 +60,8 @@ type Item struct {
 type Deps struct {
 	Channel   func(name string) channel.Channel // 当前的渠道对象；nil 表示暂时没有。不能去拿 App 的总锁
 	Media     func(id string) ([]byte, error)
-	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选
+	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选：只发附件本身；默认用渠道的 MediaSender
+	MediaNote func(att media.Attachment, err error) string                                                        // 说明的文字；err 为 nil 表示渠道不能发文件
 	Now       func() time.Time
 	Log       *slog.Logger
 	Health    *health.Handle
@@ -221,8 +222,9 @@ func itemSize(it Item) int {
 }
 
 // Enqueue 把消息交给出站。只做内存操作：不等磁盘、不阻塞，可以在 App 的总锁下调用。
-// 满了返回 ErrFull，单条超过上限返回 ErrTooLarge，存储不可用返回 ErrStorage；
-// 这些情况下消息没有被接受，调用方负责退回内存直发。
+// 没有被接受时返回错误：
+//   - ErrFull 是明确拒绝，不是退回：调用方记一条警告，这条消息就不发了；
+//   - ErrTooLarge、ErrStorage（和 ErrClosed）：调用方退回内存直发。
 func (o *Outbox) Enqueue(it Item) (string, error) {
 	size := itemSize(it)
 	// 记录的 JSON 比正文略大（转义、字段名）；按最坏情况留余量，真正的上限由日志再把关

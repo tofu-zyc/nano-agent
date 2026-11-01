@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"nano-agent/gateway/internal/channel"
@@ -66,12 +67,16 @@ func (o *Outbox) scan() time.Duration {
 		}
 	}
 	for _, t := range o.targets {
+		if inflight(t) {
+			continue // 同一个窗口一次只发一条：队列里任何一条在发，整个窗口都等它发完
+		}
 		for _, e := range t.q {
-			if e.inflight {
-				break
-			}
 			if e.fails >= passAfter {
-				if e.durable && !now.Before(e.next) && o.launchLocked(e) {
+				if e.durable && !now.Before(e.next) {
+					if !o.canLaunchLocked(e) {
+						break // 渠道的发送位满了：不排期，等某次发送结束时叫醒
+					}
+					o.launchLocked(e)
 					break
 				}
 				soon(e.next.Sub(now))
@@ -94,22 +99,31 @@ func (o *Outbox) scan() time.Duration {
 				}
 				e.delayDone = true
 			}
-			o.launchLocked(e)
+			if o.canLaunchLocked(e) {
+				o.launchLocked(e)
+			}
 			break
 		}
 	}
 	return next
 }
 
-func (o *Outbox) launchLocked(e *entry) bool {
-	if o.busy[e.item.Channel] >= sendsPerChan {
-		return false
+func inflight(t *target) bool {
+	for _, e := range t.q {
+		if e.inflight {
+			return true
+		}
 	}
+	return false
+}
+
+func (o *Outbox) canLaunchLocked(e *entry) bool { return o.busy[e.item.Channel] < sendsPerChan }
+
+func (o *Outbox) launchLocked(e *entry) {
 	e.inflight = true
 	o.busy[e.item.Channel]++
 	o.wg.Add(1)
 	go o.send(e)
-	return true
 }
 
 type outcome struct {
@@ -184,26 +198,7 @@ func (o *Outbox) deliver(e *entry) outcome {
 	}
 	it := e.item
 	if it.Media != nil {
-		var data []byte
-		var err error
-		if o.deps.Media != nil {
-			data, err = o.deps.Media(it.Media.ID)
-		} else {
-			err = errors.New("没有媒体库")
-		}
-		if err != nil {
-			return outcome{kind: "media_missing", err: err}
-		}
-		ctx, cancel := context.WithTimeout(o.ctx, o.tn.sendTimeout)
-		defer cancel()
-		send := o.deps.SendMedia
-		if send == nil {
-			send = defaultSendMedia
-		}
-		if err := send(ctx, ch, it.Chat, *it.Media, data); err != nil {
-			return o.afterError(err)
-		}
-		return outcome{kind: "sent"}
+		return o.deliverMedia(e, ch)
 	}
 	o.mu.Lock()
 	from := e.sent
@@ -240,9 +235,68 @@ func (o *Outbox) afterError(err error) outcome {
 	return classify(err)
 }
 
-func defaultSendMedia(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error {
-	if ms, ok := ch.(channel.MediaSender); ok {
-		return ms.SendMedia(ctx, chat, att, data)
+// deliverMedia 发一个附件，用户看到的和以前一样，不会反复收到说明：
+//   - 渠道不能发文件：只发说明；
+//   - 附件发送失败，属于 ErrGone：丢弃，不发说明；限流：按 RetryAfter 等待后重试附件，不发说明；
+//   - 其他错误：发一条说明，说明发出去就算这条已发，并在 Recent 里记一次附件失败；
+//     说明也发不出去，就按说明的错误分类重试，下次仍然先试附件。
+func (o *Outbox) deliverMedia(e *entry, ch channel.Channel) outcome {
+	it := e.item
+	att := *it.Media
+	send := o.deps.SendMedia
+	if send == nil {
+		if ms, ok := ch.(channel.MediaSender); ok {
+			send = func(ctx context.Context, _ channel.Channel, chat string, a media.Attachment, data []byte) error {
+				return ms.SendMedia(ctx, chat, a, data)
+			}
+		}
 	}
-	return ch.Send(ctx, chat, "［"+att.MIME+"："+att.Name+"］", "")
+	sendNote := func(cause error) outcome {
+		ctx, cancel := context.WithTimeout(o.ctx, o.tn.sendTimeout)
+		defer cancel()
+		if err := ch.Send(ctx, it.Chat, o.mediaNote(att, cause), ""); err != nil {
+			return o.afterError(err)
+		}
+		return outcome{kind: "sent"}
+	}
+	if send == nil {
+		return sendNote(nil)
+	}
+	var data []byte
+	var err error
+	if o.deps.Media != nil {
+		data, err = o.deps.Media(att.ID)
+	} else {
+		err = errors.New("没有媒体库")
+	}
+	if err != nil {
+		return outcome{kind: "media_missing", err: err}
+	}
+	ctx, cancel := context.WithTimeout(o.ctx, o.tn.sendTimeout)
+	err = send(ctx, ch, it.Chat, att, data)
+	cancel()
+	if err == nil {
+		return outcome{kind: "sent"}
+	}
+	if res := o.afterError(err); res.kind != "failed" {
+		return res // canceled、gone、限流
+	}
+	res := sendNote(err)
+	if res.kind == "sent" {
+		now := o.deps.Now()
+		o.mu.Lock()
+		o.recentLocked(Record{ID: e.id, Channel: it.Channel, Chat: it.Chat, Kind: it.Kind, State: "failed", Error: "附件没发出去：" + err.Error(), Fails: e.fails + 1, At: now})
+		o.mu.Unlock()
+	}
+	return res
+}
+
+func (o *Outbox) mediaNote(att media.Attachment, err error) string {
+	if o.deps.MediaNote != nil {
+		return o.deps.MediaNote(att, err)
+	}
+	if err == nil {
+		return fmt.Sprintf("［%s：%s］", att.MIME, att.Name)
+	}
+	return fmt.Sprintf("［%s：%s，没发出去：%s］", att.MIME, att.Name, err)
 }

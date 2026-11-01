@@ -328,14 +328,15 @@ type Item struct {
 type Deps struct {
 	Channel func(name string) channel.Channel // 当前的渠道对象；nil 表示暂时没有
 	Media   func(id string) ([]byte, error)
-	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选；默认用渠道的 MediaSender
+	SendMedia func(ctx context.Context, ch channel.Channel, chat string, att media.Attachment, data []byte) error // 可选：只发附件本身；默认用渠道的 MediaSender
+	MediaNote func(att media.Attachment, err error) string // 说明的文字；err 为 nil 表示渠道不能发文件。App 传入和现在 sendMedia 一样的两种写法
 	Now     func() time.Time
 	Log     *slog.Logger
 	Health  *health.Handle
 }
 
 func Open(ctx context.Context, path string, deps Deps) (*Outbox, error) // 存储损坏时仍返回一个拒绝受理的 *Outbox 和错误
-func (o *Outbox) Enqueue(it Item) (id string, err error) // 不等磁盘、不阻塞；满了返回 ErrFull，单条超过上限返回 ErrTooLarge，存储不可用返回 ErrStorage，已关闭返回 ErrClosed
+func (o *Outbox) Enqueue(it Item) (id string, err error) // 不等磁盘、不阻塞；ErrFull 是明确拒绝（App 记警告，`enqueue` 返回 false，不退回内存直发）；ErrTooLarge、ErrStorage、ErrClosed 退回内存直发
 func (o *Outbox) DropChannel(name string)                // 机器人被删除：它的待发消息以 channel_removed 结局
 func (o *Outbox) Stats() Stats                           // 各渠道待发数、最老一条的时间、失败中的条数、24 小时内的丢弃数及原因
 func (o *Outbox) Recent(n int) []Record                  // 最近的失败和丢弃，供网页和 /status
@@ -378,6 +379,7 @@ type Parter interface {
 - **过期**：入队 24 小时仍未发出，丢弃，原因 `expired`。
 - **渠道暂时不在**（重启中、未上线、被关闭）：等待，不计入失败次数，直到过期。机器人被删除（`App.DeleteBot`）时，App 调 `DropChannel`。
 - **附件读不到**：丢弃，原因 `media_missing`。
+- **附件发送失败**：用户看到的和现在一样，不会反复收到说明。渠道没有 `MediaSender`：只发说明。失败属于 `ErrGone`：丢弃，不发说明。限流：按 `RetryAfter` 等待后重试附件，不发说明。其他错误：发一条说明，说明发出去这条就算已发，同时在 `Recent` 里记一次附件失败；说明也发不出去，就按说明的错误分类重试，下次仍然先试附件。
 - **部分已发**：记录已发段数，重试从下一段接着发。
 - **结果不明**（超时）：按失败重试，所以可能重复。这是"至少一次"，文档里写明。
 
@@ -392,8 +394,10 @@ type Parter interface {
 - 重启时重放，恢复待发集合和最近的结局记录。
 - **压缩**：已结局的条目只保留最近 500 条或 7 天，供展示。文件超过 4 MiB、或已结局记录占多数时改写。
 - **单条上限**：日志的单条记录上限 1 MiB，文件硬上限 32 MiB。超过单条上限的消息不能丢：`Enqueue` 返回 `ErrTooLarge`，App 走内存直发，同时记警告，健康条目报 `degraded`。
+- **同一个窗口一次只发一条**：队列里任何一条在发，整个窗口都等它发完（包括被放行后重试的队头）。渠道的 4 个发送位占满时不空转，等某次发送结束再看。
+- **压缩**：改写后的第一条记录只带当前最大的 ID（`{"t":"seq","id":"o<n>"}`），历史全部过期后 ID 也不会从头开始。
 - **重启后的状态**：待发集合、已发段数、失败次数和下次发送时间都从日志恢复（退避和限流的等待重启后仍然有效）；`Delay` 不再等。
-- **存储失败**（打开时损坏，或运行中写盘失败）：出站停止受理，健康条目报 `error`，保留原文件；`App.enqueue` 退回现在的内存直发，并保持现在"每个渠道按顺序发"的行为。运行中写盘失败时，已经受理但还没落盘的消息，和已落盘的一起在内存里照常发送，不再有落盘保证；打开时损坏则 `Open` 仍返回一个拒绝受理的 `*Outbox` 和错误。
+- **存储失败**（打开时损坏，或运行中写盘失败）：出站停止受理，健康条目报 `error`，保留原文件；`App.enqueue` 退回现在的内存直发，并保持现在"每个渠道按顺序发"的行为；退回之后，出站里还没发完的消息和 App 直接发的新消息，在同一个窗口里可能乱序。运行中写盘失败时，已经受理但还没落盘的消息，和已落盘的一起在内存里照常发送，不再有落盘保证；打开时损坏则 `Open` 仍返回一个拒绝受理的 `*Outbox` 和错误。
 
 **容量**：待发最多 2048 条、正文合计 8 MiB；单个目标最多 256 条（和现在每渠道 256 相当）。满了 `Enqueue` 返回 `ErrFull`，App 记一条警告、健康条目报 `degraded`，`enqueue` 返回 false。不静默丢弃。已结局的记录只留最近 500 条或 7 天，文件超过 4 MiB 且大部分可回收、或已结局记录多过待发时改写。
 

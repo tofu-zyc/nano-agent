@@ -829,3 +829,220 @@ func TestCloseDrainsAndRejects(t *testing.T) {
 		t.Fatalf("Close 要把已受理的记录写完: %d", len(r2.all))
 	}
 }
+
+// blockCh：H 立刻失败；A、B 开头的一直阻塞到 release；其余直接成功。统计每个窗口同时在发的最大条数。
+type blockCh struct {
+	name    string
+	release chan struct{}
+	mu      sync.Mutex
+	cur     map[string]int
+	peak    map[string]int
+	got     []call
+}
+
+func newBlockCh(name string) *blockCh {
+	return &blockCh{name: name, release: make(chan struct{}), cur: map[string]int{}, peak: map[string]int{}}
+}
+func (b *blockCh) Name() string                                     { return b.name }
+func (b *blockCh) Run(ctx context.Context, _ channel.Handler) error { <-ctx.Done(); return nil }
+func (b *blockCh) Send(ctx context.Context, chat, text, reply string) error {
+	b.mu.Lock()
+	b.cur[chat]++
+	b.peak[chat] = max(b.peak[chat], b.cur[chat])
+	b.mu.Unlock()
+	defer func() { b.mu.Lock(); b.cur[chat]--; b.mu.Unlock() }()
+	switch {
+	case text == "H":
+		return errors.New("H 总是失败")
+	case strings.HasPrefix(text, "A"), strings.HasPrefix(text, "B"):
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	b.mu.Lock()
+	b.got = append(b.got, call{chat: chat, text: text})
+	b.mu.Unlock()
+	return nil
+}
+func (b *blockCh) peakOf(chat string) int { b.mu.Lock(); defer b.mu.Unlock(); return b.peak[chat] }
+
+// 回归：队头失败 3 次被放行后，后面一条在发的时候，队头的重试不能同时启动。
+func TestOneInFlightPerTargetWhileHeadRetries(t *testing.T) {
+	ch := newBlockCh("tg")
+	r := newRig(t, fastTune)
+	r.setCh("tg", ch)
+	r.mustEnqueue(text("tg", "w", "H"))
+	r.mustEnqueue(text("tg", "w", "A"))
+	time.Sleep(400 * time.Millisecond)
+	if p := ch.peakOf("w"); p != 1 {
+		t.Fatalf("同一个窗口同时在发 %d 条", p)
+	}
+	close(ch.release)
+}
+
+// 回归：渠道的发送位占满时，到点的队头不能让扫描空转。
+func TestNoBusyLoopWhenChannelSlotsAreFull(t *testing.T) {
+	ch := newBlockCh("tg")
+	var nows atomic.Int64
+	r := &rig{t: t, path: filepath.Join(t.TempDir(), "outbox.jsonl"), chs: map[string]channel.Channel{"tg": ch}, data: map[string][]byte{}}
+	d := r.deps()
+	d.Now = func() time.Time { nows.Add(1); return time.Now() }
+	tn := fastTune
+	tn.tick = time.Hour
+	o, err := open(context.Background(), r.path, d, tn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.o = o
+	t.Cleanup(o.Close)
+	r.mustEnqueue(text("tg", "w", "H"))
+	waitFor(t, "H 失败满 3 次", func() bool {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		e := o.all["o1"]
+		return e != nil && e.fails >= passAfter
+	})
+	for i := 0; i < sendsPerChan; i++ {
+		r.mustEnqueue(text("tg", fmt.Sprint("b", i), "B"))
+	}
+	waitFor(t, "发送位占满", func() bool { o.mu.Lock(); defer o.mu.Unlock(); return o.busy["tg"] == sendsPerChan })
+	time.Sleep(100 * time.Millisecond) // 让 H 的退避到点
+	before := nows.Load()
+	time.Sleep(300 * time.Millisecond)
+	if n := nows.Load() - before; n > 20 {
+		t.Fatalf("渠道占满期间扫描空转：300ms 里 Now 被调用 %d 次", n)
+	}
+	close(ch.release)
+	waitFor(t, "位置空出后 H 仍会重试", func() bool {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		return o.all["o1"] != nil && o.all["o1"].fails > passAfter
+	})
+}
+
+type mediaCh struct {
+	fakeCh
+	sendMedia func() error
+	files     int
+}
+
+func (m *mediaCh) SendMedia(ctx context.Context, chat string, att media.Attachment, data []byte) error {
+	m.mu.Lock()
+	m.files++
+	m.mu.Unlock()
+	return m.sendMedia()
+}
+
+func TestMediaFailureRules(t *testing.T) {
+	att := &media.Attachment{ID: "img", MIME: "image/png", Name: "a.png"}
+	newM := func(f func() error) (*mediaCh, *rig) {
+		m := &mediaCh{fakeCh: fakeCh{name: "tg"}, sendMedia: f}
+		r := newRig(t, fastTune, m)
+		r.data["img"] = []byte("PNG")
+		r.o.deps.MediaNote = func(a media.Attachment, err error) string {
+			if err == nil {
+				return "NOTE-NOFILE"
+			}
+			return "NOTE-FAIL:" + err.Error()
+		}
+		return m, r
+	}
+	t.Run("渠道不能发文件：只发说明", func(t *testing.T) {
+		ch := &fakeCh{name: "tg"}
+		r := newRig(t, fastTune, ch)
+		r.data["img"] = []byte("PNG")
+		r.o.deps.MediaNote = func(a media.Attachment, err error) string { return fmt.Sprint("NOTE:", err) }
+		r.mustEnqueue(Item{Channel: "tg", Chat: "c", Media: att})
+		waitFor(t, "说明", func() bool { return len(ch.calls()) == 1 })
+		if ch.calls()[0].text != "NOTE:<nil>" {
+			t.Fatalf("%v", ch.calls())
+		}
+	})
+	t.Run("ErrGone：丢弃，不发说明", func(t *testing.T) {
+		m, r := newM(func() error { return fmt.Errorf("x: %w", channel.ErrGone) })
+		r.mustEnqueue(Item{Channel: "tg", Chat: "c", Media: att})
+		waitFor(t, "丢弃", func() bool { return r.o.Stats().Dropped24h["gone"] == 1 })
+		if len(m.calls()) != 0 {
+			t.Fatalf("不该发说明: %v", m.calls())
+		}
+	})
+	t.Run("限流：等待后重试附件，不发说明", func(t *testing.T) {
+		var n atomic.Int32
+		m, r := newM(func() error {
+			if n.Add(1) <= 2 {
+				return &limitErr{20 * time.Millisecond}
+			}
+			return nil
+		})
+		r.mustEnqueue(Item{Channel: "tg", Chat: "c", Media: att})
+		waitFor(t, "附件发出", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.files == 3 && r.pending() == 0 })
+		if len(m.calls()) != 0 || len(r.o.Recent(5)) != 0 {
+			t.Fatalf("限流不发说明、不记失败: %v %v", m.calls(), r.o.Recent(5))
+		}
+	})
+	t.Run("其他错误：发一条说明就算已发，Recent 记一次", func(t *testing.T) {
+		m, r := newM(func() error { return errors.New("上传失败") })
+		r.mustEnqueue(Item{Channel: "tg", Chat: "c", Media: att})
+		waitFor(t, "说明发出", func() bool { return len(m.calls()) == 1 && r.pending() == 0 })
+		time.Sleep(60 * time.Millisecond)
+		if got := m.calls(); len(got) != 1 || got[0].text != "NOTE-FAIL:上传失败" {
+			t.Fatalf("只发一条说明，不重复: %v", got)
+		}
+		if rec := r.o.Recent(5); len(rec) != 1 || !strings.Contains(rec[0].Error, "附件没发出去") {
+			t.Fatalf("Recent: %+v", rec)
+		}
+	})
+	t.Run("说明也发不出去：重试，下次仍先试附件", func(t *testing.T) {
+		var notes atomic.Int32
+		m, r := newM(func() error { return errors.New("上传失败") })
+		m.fail = func(n int, c call) error {
+			if notes.Add(1) == 1 {
+				return errors.New("说明也失败")
+			}
+			return nil
+		}
+		r.mustEnqueue(Item{Channel: "tg", Chat: "c", Media: att})
+		waitFor(t, "说明最终发出", func() bool { return len(m.calls()) == 1 && r.pending() == 0 })
+		m.mu.Lock()
+		files := m.files
+		m.mu.Unlock()
+		if files != 2 {
+			t.Fatalf("每次重试都先试附件: %d", files)
+		}
+	})
+}
+
+// 压缩后的第一条记录带最大 ID：历史全部过期也不会让 ID 从头开始。
+func TestCompactionKeepsSequence(t *testing.T) {
+	r := newRig(t, fastTune)
+	r.o.mu.Lock()
+	r.o.seq = 777
+	recs := r.o.compactRecordsLocked()
+	r.o.mu.Unlock()
+	first, ok := recs[0].(rec)
+	if !ok || first.T != recSeq || first.ID != "o777" {
+		t.Fatalf("第一条: %+v", recs[0])
+	}
+	r.o.Close()
+	path := filepath.Join(t.TempDir(), "o.jsonl")
+	j, err := journalOpen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Rewrite(recs); err != nil {
+		t.Fatal(err)
+	}
+	j.Close()
+	rr := &rig{chs: map[string]channel.Channel{}, data: map[string][]byte{}}
+	o, err := open(context.Background(), path, rr.deps(), fastTune)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	id, err := o.Enqueue(text("tg", "c", "x"))
+	if err != nil || id != "o778" {
+		t.Fatalf("重启后 ID 接着往后: %q %v", id, err)
+	}
+}

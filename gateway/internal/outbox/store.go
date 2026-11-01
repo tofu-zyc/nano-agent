@@ -16,6 +16,7 @@ const (
 	recProgress = "progress"
 	recAttempt  = "attempt"
 	recSettle   = "settle"
+	recSeq      = "seq" // 压缩时写在第一条，只带当前最大的 ID
 )
 
 // rec 是日志里的一条记录。四种：enqueue（整条 Item）、progress（已发段数）、
@@ -189,7 +190,18 @@ func (o *Outbox) maybeCompact(j *journal.Journal) {
 		return
 	}
 	o.trimHistoryLocked(now)
-	var recs []any
+	recs := o.compactRecordsLocked()
+	o.settledN = 0
+	o.mu.Unlock()
+	if err := j.Rewrite(recs); err != nil {
+		o.log.Warn("出站日志压缩失败", "err", err)
+	}
+}
+
+// compactRecordsLocked 是改写后的日志内容。第一条只带当前最大的 ID：历史全部过期之后
+// 再压缩，重启时 ID 也不会从头开始、和用过的重复。
+func (o *Outbox) compactRecordsLocked() []any {
+	recs := []any{rec{T: recSeq, ID: fmt.Sprintf("o%d", o.seq)}}
 	for _, h := range o.history {
 		it := h.item
 		recs = append(recs, rec{T: recEnqueue, ID: h.id, At: h.at.UnixMilli(), Item: &it},
@@ -212,9 +224,5 @@ func (o *Outbox) maybeCompact(j *journal.Journal) {
 			recs = append(recs, rec{T: recAttempt, ID: e.id, Fails: e.fails, Err: e.lastErr, Next: e.next.UnixMilli()})
 		}
 	}
-	o.settledN = 0
-	o.mu.Unlock()
-	if err := j.Rewrite(recs); err != nil {
-		o.log.Warn("出站日志压缩失败", "err", err)
-	}
+	return recs
 }
