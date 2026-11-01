@@ -279,6 +279,8 @@ type sess struct {
 	groupSpeaks    []time.Time
 	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
 	groupThoughts  []time.Time // 最近一小时判断了几次
+	roomHint       string      // 房间里叫成员说话时，只放进下一次请求的提示（轮到谁、在哪个频道）
+	roomChan       string      // 这一次说话要回到哪个私下频道（空为公开）
 	groupObserve   *observeWhy // groupTick 触发的下一轮是 observe（开始时交给 run）
 	groupSilent    int         // 自己凑上来、又决定不说话的连续次数（退避用）
 	groupPending   int         // 上一轮之后进来的新消息条数
@@ -342,6 +344,8 @@ type run struct {
 	readOnly        bool                             // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate         bool                             // 这个身份可以提权写工作目录外（管理员）
 	proactive       bool                             // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	hint            string                           // 只放进每次请求末尾、不写进历史的提示
+	roomChan        string                           // 房间里这一轮的回复去哪个频道（空为公开）
 	observe         *observeWhy                      // 场景是 observe 档的主动插话：回复只记录，不写历史、不发出、不执行工具
 	inner           bool                             // agent 自己的一轮（整理记忆、内心活动）
 	withImages      bool                             // 这一轮的模型能接收图片
@@ -779,7 +783,6 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			name = "有人"
 		}
 		if text := strings.TrimSpace(m.Text); text != "" {
-			_ = a.store.Append(c.s.sid, session.Msg{Role: "user", Content: "[" + name + "] " + text})
 			a.publish(events.Event{T: "message", SID: c.s.sid, Name: m.SenderName, Text: text})
 		}
 		a.roomHumanLine(room.ID)
@@ -1464,6 +1467,7 @@ func (a *App) startRun(s *sess) {
 	r.proactive = s.groupProactive
 	s.groupProactive = false
 	r.observe, s.groupObserve = s.groupObserve, nil
+	r.hint, r.roomChan, s.roomHint, s.roomChan = s.roomHint, s.roomChan, "", ""
 	// 放行：内核按自动模式跑（沙箱和审批规则都不变），要审批的调用由网关当场批准（approvals.go）
 	if mode == proto.ModeFull {
 		r.full, mode = true, proto.ModeAuto
@@ -2034,15 +2038,11 @@ func (a *App) finish(s *sess, status, detail string) {
 		}
 		a.deliver(o.ep, text, "")
 	}
-	// agent 在房间里的回复：记进群记录，转给其他成员；说出口的也算进每小时的额度；顺手记用量
-	if inRoom {
-		if roomLogSID(roomOf.ID) != s.sid && !isSilence(body) {
-			s.groupSpokeAt = a.now()
-			s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
-			a.roomAgentSay(roomOf, roomSender(s.sid), body)
-		}
-	}
 	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
+	// agent 在房间里的回复：记进群记录，转给听得到的成员；说出口的也算进每小时的额度；回合制接着叫下一位
+	if inRoom {
+		a.roomRunDone(roomOf, s, r, status, body)
+	}
 	s.lastActivity = a.now()
 	a.pumpRuns()
 	if s.run == nil && isHookSID(s.sid) {
@@ -2130,6 +2130,9 @@ func (a *App) generateModel(s *sess) {
 		// 自己凑上来的那一轮：只在这次请求里加一句提醒，不改历史（前缀缓存基本不受影响）
 		req.Messages = append(req.Messages, llm.Message{Role: "user",
 			Content: "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。"})
+	}
+	if r.hint != "" {
+		req.Messages = append(req.Messages, llm.Message{Role: "user", Content: r.hint})
 	}
 	if a.cfg.Security.Redact != "off" {
 		_, e, ok := a.modelOf(s.sid)

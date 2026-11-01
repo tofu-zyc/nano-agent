@@ -3,6 +3,7 @@ package web
 // 网关内部群聊（房间）的网页接口：
 //   GET/POST     /api/rooms
 //   PATCH/DELETE /api/rooms/{id}
+//   POST         /api/rooms/{id}/say、/cue
 
 import (
 	"net/http"
@@ -55,4 +56,21 @@ func (s *Server) listObserve(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
 	all := r.URL.Query().Get("all") == "1"
 	writeJSON(w, map[string]any{"items": s.app.Observe(r.URL.Query().Get("scene"), n, all)})
+}
+
+// roomSay 往群里说一句：POST /api/rooms/{id}/say，{text, as, channel}。
+func (s *Server) roomSay(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text    string `json:"text"`
+		As      string `json:"as"`
+		Channel string `json:"channel"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.RoomSay(r.PathValue("id"), req.Text, req.As, req.Channel, "我"); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }

@@ -992,6 +992,9 @@ func (a *App) dropAgentFromRooms(id string) {
 			r.Muted = muted
 			changed = true
 		}
+		if changed {
+			r.Rules = r.Rules.WithoutMember(id)
+		}
 		if !changed {
 			continue
 		}

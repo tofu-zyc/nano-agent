@@ -45,8 +45,8 @@ func (s sceneInfo) free() bool {
 	switch s.Rules.Mode {
 	case scene.ModeFree:
 		return true
-	case scene.ModeMention:
-		return false
+	case scene.ModeMention, scene.ModeTurns, scene.ModeDirector:
+		return false // 回合制的时钟按回合走，不按真实时间：groupTick 和 observe 都不作用在它们上
 	}
 	return s.Kind == scene.External
 }
@@ -135,7 +135,10 @@ type ScenePatch struct {
 	Guard       *scene.Guard           `json:"guard"`
 	Budget      *int                   `json:"budget"`
 	BudgetTotal *int                   `json:"budget_total"`
-	Reset       bool                   `json:"reset"` // 把这一场累计的用量清零
+	Order       *[]string              `json:"order"`
+	Rounds      *int                   `json:"rounds"`
+	Channels    *[]scene.Channel       `json:"channels"`
+	Reset       bool                   `json:"reset"` // 把这一场累计的用量清零（含轮数）
 }
 
 // apply 返回改过的规则（不改传入的）。校验由调用方按场景种类做。
@@ -181,6 +184,21 @@ func (p ScenePatch) apply(r scene.Rules) (scene.Rules, error) {
 	}
 	if p.BudgetTotal != nil {
 		r.BudgetTotal = *p.BudgetTotal
+	}
+	if p.Order != nil {
+		r.Order = *p.Order
+		if len(r.Order) == 0 {
+			r.Order = nil
+		}
+	}
+	if p.Rounds != nil {
+		r.Rounds = *p.Rounds
+	}
+	if p.Channels != nil {
+		r.Channels = *p.Channels
+		if len(r.Channels) == 0 {
+			r.Channels = nil
+		}
 	}
 	return r, nil
 }

@@ -20,6 +20,9 @@ type sceneUse struct {
 	Total     int    `json:"total"`                // 这一场的累计
 	Since     int64  `json:"since,omitempty"`      // 开始计数的时间（秒）
 	NoticeDay string `json:"notice_day,omitempty"` // 外部群超额后最近一次回说明的日期
+	// 轮流：已经转了几轮，这一轮下一个轮到顺序里的第几位（重启后接着算）
+	Round int `json:"round,omitempty"`
+	Next  int `json:"next,omitempty"`
 }
 
 // loadSceneUses 读用量文件；不存在或损坏都从空开始（损坏时留日志，下次保存会覆盖）。
@@ -130,7 +133,7 @@ func (a *App) sceneBudgetNotice(s *sess, ep endpoint, sc sceneInfo) {
 // sceneResetTotal 把这一场累计的用量清零，重新开始计。调用方持有锁。
 func (a *App) sceneResetTotal(key string) {
 	u := a.sceneUseOf(key)
-	u.Total, u.Since = 0, a.now().Unix()
+	u.Total, u.Round, u.Next, u.Since = 0, 0, 0, a.now().Unix()
 	a.saveSceneUses()
 }
 

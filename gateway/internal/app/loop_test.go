@@ -217,7 +217,7 @@ func TestRoomAgentMention(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.a.mu.Lock()
-	e.a.roomAgentSay(room, "default", "@小波 你怎么看")
+	e.a.roomAgentSay(room, "default", "@小波 你怎么看", "")
 	e.a.mu.Unlock()
 	in := e.k.expect(proto.TInput)
 	if in.SID != e.a.roomMemberSID("bob", room.ID) {
@@ -235,7 +235,7 @@ func TestRoomAgentMention(t *testing.T) {
 	}
 	// 没叫到别人：不叫醒
 	e.a.mu.Lock()
-	e.a.roomAgentSay(room, "default", "今天天气不错")
+	e.a.roomAgentSay(room, "default", "今天天气不错", "")
 	e.a.mu.Unlock()
 	e.k.none()
 }

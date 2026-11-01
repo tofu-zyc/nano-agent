@@ -5,6 +5,7 @@ package scene
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -15,6 +16,15 @@ import (
 const (
 	ModeMention = "mention"
 	ModeFree    = "free"
+	// 回合制的两种：时钟按回合走，不按真实时间；只用于内部群
+	ModeTurns    = "turns"    // 轮流：人或旁白说一句之后，按顺序每人说一句为一轮
+	ModeDirector = "director" // 导演：只有导演点到的那一个会说话
+)
+
+// 频道和轮数的上限。
+const (
+	MaxChannels = 8
+	MaxRounds   = 1000
 )
 
 // 场景的种类。私聊（普通会话）这一步没有规则，不在这里。
@@ -45,6 +55,50 @@ type Rules struct {
 	Guard       Guard           `json:"guard,omitempty"`
 	Budget      int             `json:"budget,omitempty"`       // 每天最多多少 token，0 不限
 	BudgetTotal int             `json:"budget_total,omitempty"` // 这一场最多多少 token，0 不限
+
+	// 以下只用于内部群
+	Order    []string  `json:"order,omitempty"`    // 轮流的发言顺序；空表示按成员顺序
+	Rounds   int       `json:"rounds,omitempty"`   // 轮流时这一场最多几轮
+	Channels []Channel `json:"channels,omitempty"` // 私下频道，最多 8 个
+}
+
+// Channel 是内部群里的私下频道：里面的话只有频道成员听得到。
+type Channel struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Members []string `json:"members"` // 必须是群成员；成员退群时一并去掉
+}
+
+// ChannelByID 按 ID 找频道。
+func (r Rules) ChannelByID(id string) (Channel, bool) {
+	for _, c := range r.Channels {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return Channel{}, false
+}
+
+// Turn 回合制：轮流或导演。
+func (r Rules) Turn() bool { return r.Mode == ModeTurns || r.Mode == ModeDirector }
+
+// WithoutMember 去掉退群成员：从顺序和各频道里拿掉；频道没人了就不留空频道。
+func (r Rules) WithoutMember(id string) Rules {
+	r = r.Clone()
+	r.Order = slices.DeleteFunc(r.Order, func(m string) bool { return m == id })
+	if len(r.Order) == 0 {
+		r.Order = nil
+	}
+	var chans []Channel
+	for _, c := range r.Channels {
+		c.Members = slices.DeleteFunc(c.Members, func(m string) bool { return m == id })
+		if len(c.Members) > 0 {
+			chans = append(chans, c)
+		}
+	}
+	r.Channels = chans
+	delete(r.Roles, id)
+	return r
 }
 
 // Role 是 agent 在场景里的角色。
@@ -82,7 +136,8 @@ func (g Guard) EffectiveGuard() (run, pingPong int) {
 // IsZero 是没设任何规则。
 func (r Rules) IsZero() bool {
 	return r.Mode == "" && !r.Observe && r.Brief == "" && len(r.Roles) == 0 && r.Tools == nil &&
-		r.Style == (Style{}) && r.Guard == (Guard{}) && r.Budget == 0 && r.BudgetTotal == 0
+		r.Style == (Style{}) && r.Guard == (Guard{}) && r.Budget == 0 && r.BudgetTotal == 0 &&
+		len(r.Order) == 0 && r.Rounds == 0 && len(r.Channels) == 0
 }
 
 // Clone 复制一份（映射和切片不共用）。
@@ -97,7 +152,45 @@ func (r Rules) Clone() Rules {
 	if r.Tools != nil {
 		r.Tools = slices.Clone(r.Tools)
 	}
+	r.Order = slices.Clone(r.Order)
+	if r.Channels != nil {
+		chans := make([]Channel, len(r.Channels))
+		for i, c := range r.Channels {
+			c.Members = slices.Clone(c.Members)
+			chans[i] = c
+		}
+		r.Channels = chans
+	}
 	return r
+}
+
+var channelID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,15}$`)
+
+// ValidateMembers 检查和群成员有关的部分：顺序、频道成员、角色都得是群成员，不能重复。
+func (r Rules) ValidateMembers(members []string) error {
+	seen := map[string]bool{}
+	for _, m := range r.Order {
+		if !slices.Contains(members, m) {
+			return fmt.Errorf("发言顺序里的 %s 不在群里", m)
+		}
+		if seen[m] {
+			return fmt.Errorf("发言顺序里 %s 重复了", m)
+		}
+		seen[m] = true
+	}
+	for _, c := range r.Channels {
+		in := map[string]bool{}
+		for _, m := range c.Members {
+			if !slices.Contains(members, m) {
+				return fmt.Errorf("频道「%s」里的 %s 不在群里", c.Name, m)
+			}
+			if in[m] {
+				return fmt.Errorf("频道「%s」里 %s 重复了", c.Name, m)
+			}
+			in[m] = true
+		}
+	}
+	return nil
 }
 
 var eagernessOK = []string{"", "off", "low", "normal", "high"}
@@ -106,11 +199,43 @@ var eagernessOK = []string{"", "off", "low", "normal", "high"}
 func (r Rules) Validate(kind Kind, sceneTools []string) error {
 	switch r.Mode {
 	case "", ModeMention, ModeFree:
+	case ModeTurns, ModeDirector:
+		if kind != Room {
+			return errors.New("轮流和导演只能用在内部群")
+		}
 	default:
-		return errors.New("说话方式只能是 mention（点名）或 free（自由）")
+		return errors.New("说话方式只能是 mention（点名）、free（自由）、turns（轮流）或 director（导演）")
 	}
-	if kind == DMRoom && r.Mode == ModeFree {
+	if kind == DMRoom && r.Mode != "" && r.Mode != ModeMention {
 		return errors.New("两个 agent 的私聊只能点名")
+	}
+	if r.Mode == ModeTurns && r.Rounds <= 0 && r.BudgetTotal <= 0 {
+		return errors.New("轮流必须设轮数或这一场的预算，保证有界")
+	}
+	if r.Rounds < 0 || r.Rounds > MaxRounds {
+		return fmt.Errorf("轮数要在 0 到 %d 之间", MaxRounds)
+	}
+	if kind == External && (r.Rounds != 0 || len(r.Order) != 0 || len(r.Channels) != 0) {
+		return errors.New("外部群没有轮流顺序和私下频道")
+	}
+	if len(r.Channels) > MaxChannels {
+		return fmt.Errorf("私下频道最多 %d 个", MaxChannels)
+	}
+	seen := map[string]bool{}
+	for _, c := range r.Channels {
+		if !channelID.MatchString(c.ID) {
+			return fmt.Errorf("频道 ID %q 只能用小写字母、数字和短横线，最长 16 位", c.ID)
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("频道 ID 重复：%s", c.ID)
+		}
+		seen[c.ID] = true
+		if n := utf8.RuneCountInString(strings.TrimSpace(c.Name)); n == 0 || n > 30 {
+			return errors.New("频道名字要有，最多 30 字")
+		}
+		if len(c.Members) == 0 {
+			return fmt.Errorf("频道「%s」至少要有一个成员", c.Name)
+		}
 	}
 	if n := utf8.RuneCountInString(r.Brief); n > MaxText {
 		return fmt.Errorf("场景说明最多 %d 字（现在 %d）", MaxText, n)
