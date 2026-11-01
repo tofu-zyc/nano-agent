@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
+	"nano-agent/gateway/internal/outbox"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
@@ -204,7 +206,10 @@ type App struct {
 	jobCards       map[string]*jobPresentation
 	jobButtons     map[string]jobButtonAction
 	jobStopGroups  map[string]bool
-	outboxes       map[string]chan outItem
+	outboxes       map[string]chan outItem                    // 每个渠道一个内存协程：Job 卡片、cli、web，以及出站不可用时的内存直发
+	outbox         *outbox.Outbox                             // 外部平台渠道的可靠出站
+	chSnap         atomic.Pointer[map[string]channel.Channel] // 渠道快照：AddChannel 时复制一份换上，出站不去拿 a.mu
+	mediaRef       atomic.Pointer[media.Store]
 	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
 	wss            []Workspace       // 工作目录列表（workspaces.go）
 	hosts          Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
@@ -409,6 +414,7 @@ func (r *run) addOut(ep endpoint) {
 }
 
 type outItem struct {
+	kind    string                // reply | notice，出站只用来统计；空按 notice
 	job     func(context.Context) // bounded task-card I/O on the existing channel sender
 	ch      channel.Channel
 	chatID  string
@@ -487,6 +493,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		a.hEvents.Set(health.Error, a.jobEventsErr.Error())
 		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
+	a.openOutbox(ctx, store.Dir())
 	if a.persona != nil {
 		a.persona.BindSessions(store)
 		if err := store.MigrateAuxiliary("persona", a.persona.Dir(), ".md"); err != nil {
@@ -545,6 +552,11 @@ func (a *App) AddChannel(ch channel.Channel) {
 	defer a.mu.Unlock()
 	name := ch.Name()
 	a.chans[name] = ch
+	snap := make(map[string]channel.Channel, len(a.chans))
+	for k, v := range a.chans {
+		snap[k] = v
+	}
+	a.chSnap.Store(&snap)
 	if _, ok := a.outboxes[name]; ok {
 		return
 	}
@@ -943,13 +955,33 @@ func (a *App) deliver(ep endpoint, text, replyTo string) {
 }
 
 // deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
-func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
+func (a *App) deliverReply(ep endpoint, text string) {
+	a.enqueue(ep, outItem{text: text, md: true, kind: "reply"})
+}
 
 func (a *App) enqueue(ep endpoint, it outItem) bool {
-	ch := a.chans[ep.ch]
+	var ch channel.Channel
+	if snap := a.chSnap.Load(); snap != nil {
+		ch = (*snap)[ep.ch]
+	}
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return false
+	}
+	// Job 卡片、命令行和网页走内存协程；其余渠道（以后新加的平台自动算）进可靠出站。
+	if it.job == nil && ep.ch != "cli" && ep.ch != "web" && a.outbox != nil {
+		_, err := a.outbox.Enqueue(a.outboxItem(ch, ep, it))
+		switch {
+		case err == nil:
+			return true
+		case errors.Is(err, outbox.ErrFull):
+			a.log.Warn("出站队列已满，消息没发出去", "chat", ep.key())
+			return false
+		case errors.Is(err, outbox.ErrTooLarge):
+			a.log.Warn("消息超过出站日志的单条上限，改为内存直发", "chat", ep.key())
+		default:
+			a.log.Debug("出站不可用，改为内存直发", "chat", ep.key(), "err", err)
+		}
 	}
 	it.ch, it.chatID = ch, ep.chat
 	select {
@@ -959,6 +991,34 @@ func (a *App) enqueue(ep endpoint, it outItem) bool {
 		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
 		return false
 	}
+}
+
+// outboxItem 把一条要发的消息换成出站的条目：渠道实现了 Parter 就先按它实际的发法切段。
+func (a *App) outboxItem(ch channel.Channel, ep endpoint, it outItem) outbox.Item {
+	o := outbox.Item{Channel: ep.ch, Chat: ep.chat, ReplyTo: it.replyTo, Delay: it.delay, Kind: it.kind}
+	if o.Kind == "" {
+		o.Kind = "notice"
+	}
+	if it.att != nil {
+		att := *it.att
+		o.Media = &att
+		return o
+	}
+	o.Markdown = it.md
+	if p, ok := ch.(channel.Parter); ok {
+		o.Parts, o.Plain = p.Parts(it.text, it.md)
+	} else {
+		o.Parts = []string{it.text} // 不切段，整条重试
+	}
+	return o
+}
+
+// mediaNote 是附件发不出去时的说明，和 sendMedia 的两种写法一样；err 为 nil 表示渠道不能发文件。
+func mediaNote(att media.Attachment, err error) string {
+	if err == nil {
+		return fmt.Sprintf("［%s：%s］", kindLabel(att.MIME), att.Name)
+	}
+	return fmt.Sprintf("［%s：%s，没发出去：%s］", kindLabel(att.MIME), att.Name, err)
 }
 
 // sendMedia 发一个文件：渠道有 MediaSender 就按它的方式发（发不出去时退回一行说明），没有就发一行说明。
@@ -2215,6 +2275,9 @@ func wireMs(d time.Duration) int {
 // Wait joins durable workers after the App context has been cancelled. Call it
 // before re-exec or releasing the data directory; an in-progress sync may finish.
 func (a *App) Wait() {
+	if a.outbox != nil {
+		a.outbox.Close()
+	}
 	if a.hookEngine != nil {
 		a.hookEngine.Close()
 	}

@@ -403,10 +403,11 @@ type Parter interface {
 
 **App 的改动**：
 
-- `enqueue`：job 闭包照旧进每个渠道的内存协程，这个协程只服务卡片；命令行和网页照旧；外部平台的文字和媒体切段（`Parts`）后交给出站。
-- `AddChannel` 不再给文字消息建协程；`DeleteBot` 删除机器人后调用 `DropChannel`。
-- 网关停止时调用 `Outbox.Close`。
-- `Status` 增加出站统计；网页的网关节点和 `nano-gateway status` 显示它。
+- `enqueue`：Job 卡片闭包、命令行和网页走每个渠道的内存协程（`AddChannel` 照旧建它，出站不可用时的内存直发也走它）；其余渠道一律进出站（判断是"排除 cli、web"，不列平台名，以后新加的平台自动纳入）。渠道实现了 `Parter` 就先切段，Markdown、`ReplyTo`、`Delay`、附件照搬；`Kind` 只区分 `deliverReply`（reply）和其他（notice）。出站返回 `ErrFull` 记警告、`enqueue` 返回 false；`ErrTooLarge`、`ErrStorage`、`ErrClosed` 走内存直发。
+- `Deps.Channel` 取 App 维护的渠道快照：`AddChannel` 时复制一份再原子换上，不拿 `a.mu`，渠道重启换了新对象也能取到。
+- 文件在 `store.Dir()/runtime/outbox.jsonl`。打开失败时用返回的拒绝受理的对象并记日志，不往存储问题里记（出站有自己的健康条目）。
+- 网关停止时（`App.Wait`）调用 `Outbox.Close`。`DeleteBot` 删除成功后用渠道名（`tg.<id>`，不是 runs 里的键）调 `DropChannel`。
+- `Status` 增加出站统计和最近几条失败、丢弃；`nano-gateway status` 只在有待发或有问题时打印一行概括，网页的网关节点显示同样的信息。
 
 **测试**：
 

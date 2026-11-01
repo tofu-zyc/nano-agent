@@ -31,6 +31,7 @@ type Status struct {
 	Update         *UpdateInfo    `json:"update,omitempty"`
 	RecentErrors   []string       `json:"recent_errors,omitempty"`
 	Health         []health.Entry `json:"health"`
+	Outbox         OutboxInfo     `json:"outbox"`
 }
 
 // RestartRequest 是一次网关自重启的发起信息。SID/Channel/Chat 用于重启完成后回话。
@@ -70,6 +71,7 @@ func (a *App) Status() Status {
 	cfg, confStore := a.cfg, a.confStore
 	a.mu.Unlock()
 	st.Channels = a.Channels()
+	st.Outbox = a.outboxInfo()
 	if confStore != nil {
 		for _, f := range confStore.Describe() {
 			if f.Pending {

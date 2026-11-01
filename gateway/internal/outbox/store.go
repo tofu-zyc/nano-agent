@@ -201,7 +201,10 @@ func (o *Outbox) maybeCompact(j *journal.Journal) {
 // compactRecordsLocked 是改写后的日志内容。第一条只带当前最大的 ID：历史全部过期之后
 // 再压缩，重启时 ID 也不会从头开始、和用过的重复。
 func (o *Outbox) compactRecordsLocked() []any {
-	recs := []any{rec{T: recSeq, ID: fmt.Sprintf("o%d", o.seq)}}
+	var recs []any
+	if o.seq > 0 { // o0 不是合法 ID
+		recs = append(recs, rec{T: recSeq, ID: fmt.Sprintf("o%d", o.seq)})
+	}
 	for _, h := range o.history {
 		it := h.item
 		recs = append(recs, rec{T: recEnqueue, ID: h.id, At: h.at.UnixMilli(), Item: &it},

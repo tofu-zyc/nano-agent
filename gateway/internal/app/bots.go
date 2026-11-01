@@ -424,11 +424,14 @@ func (a *App) DeleteBot(id string) error {
 		a.mu.Unlock()
 		return errors.New("机器人列表还没准备好")
 	}
-	b, _ := a.botStore.Get(id)
+	b, existed := a.botStore.Get(id)
 	err := a.botStore.Delete(id)
 	a.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if existed && a.outbox != nil {
+		a.outbox.DropChannel(agents.ChannelName(b)) // 渠道名（tg.<id>），不是 runs 里的键
 	}
 	a.reconcileBots()
 	if b.Kind == agents.KindWeixin {

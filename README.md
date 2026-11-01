@@ -118,7 +118,7 @@ bot> 结果是 1、4、9、16、25。
 `nano-gateway` 自己带一套管理命令，终端、网页和聊天里都能用：
 
 ```sh
-nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置、不正常的部件和最近错误
+nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置、不正常的部件、出站待发和最近错误
 nano-gateway start               # 启动（有 systemd 用服务，没有用后台进程并看护）
 nano-gateway stop                # 停止
 nano-gateway restart             # 先检查配置，再停止/启动；配置坏了会拒绝，网关保持运行

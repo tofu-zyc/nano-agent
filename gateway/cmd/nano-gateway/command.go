@@ -144,6 +144,9 @@ func printStatus(st app.Status) {
 		}
 		fmt.Println(line)
 	}
+	if s := st.Outbox.Summary(time.Now()); s != "" {
+		fmt.Println("出站：" + s)
+	}
 	if len(st.RecentErrors) > 0 {
 		fmt.Println("最近的错误：")
 		for _, e := range st.RecentErrors {

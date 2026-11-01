@@ -69,29 +69,29 @@ type Deps struct {
 
 // Record 是一次失败或丢弃，供网页和 /status 展示。
 type Record struct {
-	ID      string
-	Channel string
-	Chat    string
-	Kind    string
-	State   string // failed | dropped
-	Reason  string // 丢弃的原因：gone | expired | media_missing | channel_removed
-	Error   string
-	Fails   int
-	At      time.Time
+	ID      string    `json:"id"`
+	Channel string    `json:"channel"`
+	Chat    string    `json:"chat"`
+	Kind    string    `json:"kind,omitempty"`
+	State   string    `json:"state"`            // failed | dropped
+	Reason  string    `json:"reason,omitempty"` // 丢弃的原因：gone | expired | media_missing | channel_removed
+	Error   string    `json:"error,omitempty"`
+	Fails   int       `json:"fails,omitempty"`
+	At      time.Time `json:"at"`
 }
 
 type ChannelStats struct {
-	Pending int
-	Oldest  time.Time // 最老一条待发的入队时间
-	Failing int       // 连续失败中的条数
+	Pending int       `json:"pending"`
+	Oldest  time.Time `json:"oldest"`  // 最老一条待发的入队时间
+	Failing int       `json:"failing"` // 连续失败中的条数
 }
 
 type Stats struct {
-	Channels    map[string]ChannelStats
-	Dropped24h  map[string]int // 原因 → 条数
-	Full24h     int            // 队列满而拒绝的次数
-	TooLarge24h int            // 超过单条上限而拒绝的次数
-	Storage     string         // 存储失败的原因；空表示正常
+	Channels    map[string]ChannelStats `json:"channels"`
+	Dropped24h  map[string]int          `json:"dropped_24h"`       // 原因 → 条数
+	Full24h     int                     `json:"full_24h"`          // 队列满而拒绝的次数
+	TooLarge24h int                     `json:"too_large_24h"`     // 超过单条上限而拒绝的次数
+	Storage     string                  `json:"storage,omitempty"` // 存储失败的原因；空表示正常
 }
 
 type tune struct {

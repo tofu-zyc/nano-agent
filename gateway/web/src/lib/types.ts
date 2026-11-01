@@ -140,6 +140,27 @@ export type HealthEntry = {
   since: string;
 };
 
+export type OutboxRecord = {
+  id: string;
+  channel: string;
+  chat: string;
+  kind?: string;
+  state: 'failed' | 'dropped';
+  reason?: string;
+  error?: string;
+  fails?: number;
+  at: string;
+};
+
+export type OutboxInfo = {
+  channels?: Record<string, { pending: number; oldest: string; failing: number }>;
+  dropped_24h?: Record<string, number>;
+  full_24h: number;
+  too_large_24h: number;
+  storage?: string;
+  recent?: OutboxRecord[];
+};
+
 export type RuntimeStatus = {
   running: boolean;
   pid: number;
@@ -152,6 +173,7 @@ export type RuntimeStatus = {
   pending_restart: number;
   recent_errors?: string[];
   health?: HealthEntry[];
+  outbox?: OutboxInfo;
   update?: UpdateInfo;
 };
 
