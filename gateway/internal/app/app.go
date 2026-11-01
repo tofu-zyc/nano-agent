@@ -855,8 +855,6 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	if heard == "" {
 		heard = fmt.Sprintf("（发来 %d 张图片）", len(m.Images))
 	}
-	// 心跳状态：拟人型的每次聊天都记一条事件（同一个会话合并），不每条都唤醒模型
-	a.mindHeard(c.s.sid, who, m.SenderName, heard)
 	s := c.s
 	if br, ok := a.store.Branch(s.sid); ok && (br.Status == session.BranchPreparing || br.Status == session.BranchPendingBoundary || br.SnapshotID == "") {
 		a.answer(c, "分支还没有就绪，请先查看分支状态")

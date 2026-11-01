@@ -205,12 +205,6 @@ func (a *App) autonomyView(ag agents.Agent) *autonomy.View {
 	return &v
 }
 
-// mindHeard 保留旧调用兼容；聊天只在真实轮次结束后写经历，不产生待办或唤醒。
-func (a *App) mindHeard(sid, who, name, text string) {}
-
-// FollowUp 由原聊天自己触发，不再复制成内心的认识或事件。
-func (a *App) mindFollowUp(sid, agentID, note string, at time.Time) {}
-
 // mindDream 是整理完记忆之后的反思：经验写进心智状态，下一次规划能看到。
 func (a *App) mindDream(agentID, note string) {
 	if a.agentRoot == "" {

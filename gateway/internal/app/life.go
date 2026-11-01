@@ -564,9 +564,6 @@ func (a *App) lifeAnswered(sid string) {
 	}
 }
 
-// lifeRecentNote 是拟人型 agent 的近况说明（最近几次内心活动），放在聊天的消息前面。调用方持有锁。
-func (a *App) lifeRecentNote(sid string) string { return a.experienceNote(sid, "") }
-
 // lifeGuide 是拟人守则：agents/<id>/life.md，没有就用内置的。
 func (a *App) lifeGuide(agentID string) string {
 	if a.personaAgent != nil {
@@ -708,7 +705,6 @@ func (a *App) followUpCall(sid string, raw []byte) (string, error) {
 	note := cutRunes(strings.TrimSpace(x.Note), 200)
 	ls.FollowUps[sid] = followUp{At: at.Unix(), Note: note}
 	a.saveLife()
-	a.mindFollowUp(sid, ag.ID, note, at)
 	return "好，" + at.In(a.loc).Format("01-02 15:04") + " 再来看看。", nil
 }
 

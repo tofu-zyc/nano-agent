@@ -478,8 +478,6 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 
 // ---- 人格 ----
 
-func (s *Server) personaPath(name string) (string, error) { return s.persona.ResolveName(name, false) }
-
 func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"dir": s.persona.Dir(), "items": s.app.PersonaFiles()})
 }

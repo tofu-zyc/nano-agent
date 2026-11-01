@@ -555,10 +555,6 @@ func (s *Store) HasLegacyKeys() bool {
 	return false
 }
 
-func jsonCheck(b []byte) error {
-	return jsonCheckReader(strings.NewReader(string(b)))
-}
-
 func jsonCheckReader(r io.Reader) error {
 	dec := json.NewDecoder(bufio.NewReader(r))
 	var v any
@@ -577,10 +573,6 @@ func jsonCheckReader(r io.Reader) error {
 		return err
 	}
 	return nil
-}
-
-func jsonlCheck(b []byte) error {
-	return jsonlCheckReader(strings.NewReader(string(b)))
 }
 
 func jsonlCheckReader(r io.Reader) error {
