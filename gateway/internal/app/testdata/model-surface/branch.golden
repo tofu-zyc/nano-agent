@@ -1,13 +1,55 @@
-prefixVer: 12
+prefixVer: 13
 system bytes: 21
-tools bytes: 3253
-total bytes: 3274
+tools bytes: 5238
+total bytes: 5259
 
 == system ==
 你是测试机器人
 
 == tools ==
 [
+  {
+    "type": "function",
+    "function": {
+      "name": "Report",
+      "description": "向主人汇报这件事现在的情况。有结果可以用了用 ready（要带 evidence）；卡住了、要人处理用 blocked（可以问一个具体问题）；做不下去了用 failed；不用做了用 not_needed。progress 和 waiting 只记一笔，不会发给任何人。汇报的是哪件事由系统从这一轮推出；自己安排的检查不对应任何承诺，不能汇报。汇报只告诉主人情况，不会改变这件事本身的状态：做完日程用 Agenda done。一轮最多汇报 4 次。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "progress",
+              "waiting",
+              "ready",
+              "blocked",
+              "failed",
+              "not_needed"
+            ],
+            "description": "progress 进展、waiting 在等什么：只记一笔，不会发给任何人；ready 有结果可用（要带 evidence）；blocked 卡住了、要人处理（可以带一个 question）；failed 做不下去了；not_needed 不用做了"
+          },
+          "text": {
+            "type": "string",
+            "description": "说明，最多 500 字；blocked、failed、not_needed 必须写"
+          },
+          "question": {
+            "type": "string",
+            "description": "要主人回答的一个具体问题，最多 200 字，只能和 blocked 一起用；定时任务和 Hook 这一轮结束后没有人接着问，不能带"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "ready 必填：从工具结果开头 [本轮验收凭据] 复制 id 字符串，必须是本轮真实成功的工具结果"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    }
+  },
   {
     "type": "function",
     "function": {

@@ -361,3 +361,19 @@ func TestSchedulesAPI(t *testing.T) {
 		t.Fatal(code, res)
 	}
 }
+
+func TestCommitmentsAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/commitments", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("未登录应该 401：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	code, out := c.do("GET", "/api/commitments?agent=default&phase=blocked", nil, false)
+	items, ok := out["items"].([]any)
+	if code != 200 || !ok || len(items) != 0 {
+		t.Fatalf("没有承诺时是空列表：%d %v", code, out)
+	}
+}

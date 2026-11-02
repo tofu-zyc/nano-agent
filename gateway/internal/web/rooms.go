@@ -156,3 +156,9 @@ func (s *Server) roomExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(name))
 	w.Write(data)
 }
+
+// listCommitments 是承诺列表：GET /api/commitments?agent=&phase=。只读；网页登录就是管理员。
+func (s *Server) listCommitments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	writeJSON(w, map[string]any{"items": s.app.Commitments(q.Get("agent"), q.Get("phase"))})
+}

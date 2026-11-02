@@ -55,6 +55,7 @@ const defaultLifeSkill = `# 一个人的时候
 - 有新的念头用 Idea add 记下来，写清来源（从哪件事、哪段记忆、哪次聊天想到的）；可以 Idea schedule 排时间去探索，也可以 defer 或者 drop，允许一个都不做。
 - 对人、对事有了新的认识，想调整长期兴趣，或者做完事想反思，用 Mind（先 view，再 interest_add / belief / reflect）；必须写来源，它会一直留着。
 - 和人有明确约定（几点提醒、答应了什么）一定要用 Agenda 记成 commitment：到点你会自己醒来，即使刚聊过天也不会被推迟。
+- 有结果想让主人知道时用 Report：ready（结果可以用了，要带 evidence）；blocked（卡住了、要人处理，可以问一个具体问题）；failed（做不下去了）；not_needed（不用做了）。progress、waiting 只记一笔，不会发给任何人。汇报的是这一轮「要处理的」那件事；自己安排的检查不对应任何承诺，不用汇报。汇报不改变事情本身的状态：做完日程仍然用 Agenda done，要取消日程用 Agenda cancel 并在 note 里写不做的理由。
 
 别的：
 

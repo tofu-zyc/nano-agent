@@ -166,6 +166,21 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 | Hook 的 life 会话 | 只认忙 | 返回“内心片段正在运行”，让 Hook 稍后重试 |
 | 分支继续 | 只认忙 | 返回“这个分支正在跑，等它结束” |
 
+### 承诺、阶段和 Report
+
+约定（议程项）、意图、回访、定时任务、Hook 规则、分支这六种承诺各是自己的对象，保留自己的到期、补跑、取消和验收规则；`internal/commit` 只管它们共用的两样东西：
+
+- **契约**（`commit.Contract`：目标、授权（谁让做的、在哪个会话、能动到哪里）、完成标准、汇报去处、停止条件）：从各自的字段推出来，不另存一份。推法见 `app/commit_adapters.go` 里六个适配函数（`agendaCommit`、`intentionCommit`、`followUpCommit`、`scheduleCommit`、`hookCommit`、`branchCommit`），都是纯函数。
+- **阶段**（九个：等待、进行中、受阻、就绪、暂停、完成、无需处理、失败、叫停）：由纯函数 `commit.Phase` 从事实（`commit.Facts`）推出，从上往下十二行，第一行命中就是结果。结束阶段一定带着证据或理由——没有证据的“完成”、没有理由的“无需处理”（也包括失败、叫停）算受阻。
+
+只列还存在的承诺，删掉的和结束超过 30 天的不列；意图只列没有未完成议程项的。为了分清日程是谁取消的，`AgendaItem` 加了 `ended_by`（`owner` 或 `agent`）：模型调用 `Agenda cancel` 要写 `note`（不做的理由），网页上的取消记 `owner`；主人取消的是“叫停”，自己取消的是“无需处理”。`BranchMeta.reported_at` 记主人最近一次引入结论的时间：主人建的分支做完一轮、之后没引入过结论，才算“就绪”；自主活动分出的分支不算，只看它的汇报。
+
+**Report 工具**：干活的会话向主人汇报，只有 life 会话、分支、定时任务、Hook 的 agent 处理器有（普通聊天和群聊没有：在原对话里直接回复就是汇报；戏里也没有）。汇报的是哪件事由宿主从这一轮推出：life 的这一轮看 `mindRun.Trigger`（议程项优先，其次意图；自己安排的检查不对应任何承诺，拒绝），分支汇报分支自己，定时任务汇报这个任务，Hook 汇报这条规则（这一轮跑在分支或 life 会话里也算 Hook）。`status` 是 `progress`、`waiting`（只记一笔）、`ready`、`blocked`、`failed`、`not_needed`；拒绝的情况：`ready` 没有本轮真实成功的工具结果当 `evidence`（`Report` 自己不算），`blocked`、`failed`、`not_needed` 没有 `text`，`question` 和 `blocked` 以外的状态一起用，定时任务和 Hook 带 `question`（这一轮结束后没有人接着问），一轮超过 4 次，另有长度上限（`text` 500 字、`question` 200 字）。汇报只记录“主人需要知道什么”，不改承诺自己的状态：做完日程仍用 Agenda done。工具说明和 life 技能里写了什么时候该汇报。这几类会话的工具表因此多了 Report，`prefixVer` 加一，快照只有这四类更新。
+
+**承诺记录** `data/runtime/commitments.jsonl`（`internal/journal`，单条 8KB，整份 16MB）：`report`（汇报）、`seen`（主人点了“知道了”）、`answer`（主人回答了问题）三种；先记再说——Report 写成功才返回成功，写不进去（太大、满了、磁盘出错）就把错误返回给模型，健康条目 `commitments`（网关启动时认领）变 degraded。启动时重放，每件事只留最近一条汇报和最近 16 个看过或回答过的 `Mark`；文件超过 8MB 时整份重写，已经不在的承诺的记录在这时丢掉。汇报的 `Mark` 是 `r:<序号>`，宿主自己记下的受阻和就绪也带 `Mark`（上一次失败 `last:<时间>`、投递 `d:<投递 ID>`、分支做完一轮 `p:<ProgressAt>`），点过“知道了”的 Mark 不再算。
+
+**接口**：`GET /api/commitments?agent=&phase=`（只读，要登录），每件事给出种类、ID、agent、标题、契约、阶段和原因、最近一条汇报、`Mark` 和打开它的链接；每写一条承诺记录发一个网页事件 `commitments`。“知道了”和回答的入口、汇总页是 4c 的事。
+
 ## 经历、内心片段与长期记忆
 
 真实聊天、工具行动、自主活动与分支结果形成可追溯经历。经历是有界派生索引，最多 500 条、30 天；写入失败不撤销真实结果，也不宣称与历史构成跨文件事务。可见范围按 agent、会话与权限过滤，安静分支经历不对访客开放。

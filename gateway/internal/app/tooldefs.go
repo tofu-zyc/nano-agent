@@ -128,6 +128,11 @@ func init() {
 				out, err := a.agendaCall(s.sid, m.Args)
 				callOut(reply, out, err)
 			}},
+		{name: "Report", spec: func(a *App, sid string) (proto.ToolSpec, bool) { return a.reportSpec(sid) }, state: true, started: true,
+			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) {
+				out, err := a.reportCall(s, m.Args)
+				callOut(reply, out, err)
+			}},
 		{name: "Idea", spec: fixedSpec(ideaTool), state: true, started: true, admin: adminOnlyMind,
 			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) {
 				out, err := a.ideaCall(s.sid, m.Args)

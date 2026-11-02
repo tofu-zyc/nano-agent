@@ -36,9 +36,9 @@ var surfaceCap = map[string]int{
 	"companion-dm":         36228,
 	"life":                 38779,
 	"dream":                9967,
-	"cron":                 9057,
-	"hook":                 8846,
-	"branch":               3601,
+	"cron":                 11240,
+	"hook":                 11030,
+	"branch":               5785,
 	"room-member":          6586,
 	"room-member-scene":    5666,
 	"room-member-stage":    905,
@@ -200,6 +200,16 @@ func renderSurface(system string, tools []llm.Tool) (text string, toolsJSON stri
 	return
 }
 
+// withoutVer 去掉金样第一行的 prefixVer。
+func withoutVer(golden string) string {
+	if strings.HasPrefix(golden, "prefixVer: ") {
+		if _, rest, ok := strings.Cut(golden, "\n"); ok {
+			return rest
+		}
+	}
+	return golden
+}
+
 // 金样里的 prefixVer 和工具定义那一段。
 func parseSurface(golden string) (ver int, tools string) {
 	if rest, ok := strings.CutPrefix(golden, "prefixVer: "); ok {
@@ -246,7 +256,8 @@ func TestModelSurface(t *testing.T) {
 			if err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			if string(old) == text {
+			// 金样第一行是写它时的 prefixVer：内容没变就不要求重写（prefixVer 加一不让所有金样都跟着变）
+			if string(old) == text || (len(old) > 0 && withoutVer(string(old)) == withoutVer(text)) {
 				return
 			}
 			oldVer, oldTools := parseSurface(string(old))

@@ -292,6 +292,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/autonomy", s.auth(s.autonomyAction))
 	mux.HandleFunc("GET /api/agents/{id}/dreams", s.auth(s.getDreams))
 	mux.HandleFunc("GET /api/rooms", s.auth(s.listRooms))
+	mux.HandleFunc("GET /api/commitments", s.auth(s.listCommitments))
 	mux.HandleFunc("POST /api/rooms", s.auth(s.createRoom))
 	mux.HandleFunc("PATCH /api/rooms/{id}", s.auth(s.patchRoom))
 	mux.HandleFunc("DELETE /api/rooms/{id}", s.auth(s.deleteRoom))

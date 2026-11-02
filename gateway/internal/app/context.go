@@ -21,9 +21,9 @@ const cronGuide = "[定时任务] 这一轮是定时任务的一次执行。这�
 	"不要因为记得以前的做法就少做、不做或者提前收工。"
 
 // prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）、
-// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind）就加一，
+// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind；v0.10 的 Report，只在 life、分支、定时任务、Hook 的会话里）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 12
+const prefixVer = 13
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -85,6 +85,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		} else {
 			// MCP 服务带的工具（<服务>__<工具>）：访客、只读和不用工具的模式都没有
 			tools = append(tools, a.mcpOffered(sid, admin)...)
+			tools = append(tools, a.toolsNamed(sid, "Report")...) // 只有 life、分支、定时任务、Hook 的会话有
 		}
 		if a.memoryOn(a.agentOf(sid)) {
 			tools = append(tools, a.toolsNamed(sid, knowledgeLabel)...)
@@ -106,7 +107,10 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		system = strings.TrimSpace(system + "\n\n[工具调度] 相互独立的工具调用可以在同一次响应中一起提出；运行时会按执行槽和资源锁有界调度。结果按调用身份关联，全部结果返回后才继续模型请求。有数据依赖的步骤分到下一次响应，不能假定同批调用按顺序完成。")
 	}
 	if inv := a.sessionHook(sid); inv != nil && inv.work.Spec.Scope.Tools != nil {
-		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool { return !slices.Contains(inv.work.Spec.Scope.Tools, t.Function.Name) })
+		// Report 只汇报情况，不扩大权限：登记 Hook 时的工具表里没有它也照给
+		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
+			return t.Function.Name != "Report" && !slices.Contains(inv.work.Spec.Scope.Tools, t.Function.Name)
+		})
 	}
 	// 工具定义用快照保持请求前缀稳定；技能目录/MCP 工具或权限变化会刷新，不必清空聊天。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新

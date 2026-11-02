@@ -131,9 +131,9 @@ type App struct {
 	hEvents         *health.Handle
 	hAutonomy       *health.Handle
 	hSchedule       *health.Handle
-	hStage          *health.Handle    // 场景记录：有一场写不进去就是 degraded
-	hCommit         *health.Handle    // 承诺记录：写不进去就是 degraded
-	commits         *commit.Store     // 承诺记录（Report、知道了、回答）
+	hStage          *health.Handle // 场景记录：有一场写不进去就是 degraded
+	hCommit         *health.Handle // 承诺记录：写不进去就是 degraded
+	commits         *commit.Store  // 承诺记录（Report、知道了、回答）
 	commitsErr      error
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
@@ -345,6 +345,7 @@ type run struct {
 	calls           int                              // 这一轮请求了几次模型
 	usage           llm.Usage                        // 这一轮的累计用量
 	thought         string                           // 这一轮的心里话（场景开了 inner 才有）
+	reports         int                              // 这一轮已经 Report 了几次
 	noTools         bool                             // 访客没有工作目录：不给模型工具，只聊天
 	mode            string                           // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
 	mcpOK           map[string]bool                  // 这一轮已经批准过的 MCP 服务（approval=per_turn）

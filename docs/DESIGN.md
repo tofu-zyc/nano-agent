@@ -708,6 +708,8 @@ func (a *App) admitRun(sid string) (ok bool, why string, retry time.Duration)
 
 ### 15.2 4b：契约、阶段和 Report
 
+现状：**已有**（4b，2026-11-02）。实现细节见 [运行时](RUNTIME.md#承诺阶段和-report)。
+
 **种类**：
 
 | 种类 | 是什么 |

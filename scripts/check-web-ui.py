@@ -683,6 +683,13 @@ def run(page, url, nano):
         api(page, "DELETE", "/api/rooms/" + stage["id"])
     else:
         fail("建不了戏：" + json.dumps(stage, ensure_ascii=False)[:300])
+    # 承诺列表：只读接口，按 agent 和阶段筛选
+    code, cm = api(page, "GET", "/api/commitments")
+    code2, cm2 = api(page, "GET", "/api/commitments?phase=blocked")
+    if code == 200 and isinstance(cm.get("items"), list) and code2 == 200 and isinstance(cm2.get("items"), list):
+        ok("承诺列表接口能用（" + str(len(cm["items"])) + " 件）")
+    else:
+        fail("承诺列表接口不对：" + str(code) + json.dumps(cm, ensure_ascii=False)[:200])
     # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
     code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
     if code != 200:
