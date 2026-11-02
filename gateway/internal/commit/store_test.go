@@ -162,3 +162,45 @@ func TestStoreAutoCompactAndCorruptFile(t *testing.T) {
 		t.Fatalf("文件不能动：%q", b)
 	}
 }
+
+// progress、waiting 顶不掉没处理的汇报：每件事留两条，最近一条汇报和最近一条要主人知道的汇报。
+func TestStoreProgressDoesNotReplaceNotice(t *testing.T) {
+	s, path := open(t)
+	s.Append(report(KindAgenda, "ag-1", StatusBlocked, "有两份重复的"))
+	s.Append(CommitRec{Type: TypeReport, Kind: KindAgenda, ID: "ag-1", Status: StatusBlocked, Text: "要决定", Question: "留哪一份？"})
+	s.Append(report(KindAgenda, "ag-1", StatusProgress, "又看了一遍"))
+	s.Append(report(KindAgenda, "ag-1", StatusWaiting, "在等回答"))
+	latest, _ := s.Latest(KindAgenda, "ag-1")
+	notice, ok := s.Notice(KindAgenda, "ag-1")
+	if latest.Status != StatusWaiting || !ok || notice.Question != "留哪一份？" || notice.Seq != 2 {
+		t.Fatalf("最近一条 %+v，要主人知道的 %+v", latest, notice)
+	}
+	if _, ok := s.Notice(KindAgenda, "none"); ok {
+		t.Fatal("没有的不该有")
+	}
+	// 只有 progress 的：没有要主人知道的
+	s.Append(report(KindBranch, "b1", StatusProgress, "在跑"))
+	if _, ok := s.Notice(KindBranch, "b1"); ok {
+		t.Fatal("progress 不算要主人知道的")
+	}
+	// 压缩时两条都留，重放后状态一样
+	for i := 0; i < 5; i++ {
+		s.Append(report(KindAgenda, "ag-1", StatusProgress, "再来一条"))
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	check := func(s *Store, when string) {
+		t.Helper()
+		l, _ := s.Latest(KindAgenda, "ag-1")
+		n, ok := s.Notice(KindAgenda, "ag-1")
+		if l.Seq != 10 || !ok || n.Seq != 2 || n.Question != "留哪一份？" {
+			t.Fatalf("%s：latest=%+v notice=%+v", when, l, n)
+		}
+	}
+	check(s, "压缩后")
+	s.Close()
+	s2, _ := Open(path)
+	defer s2.Close()
+	check(s2, "重放后")
+}

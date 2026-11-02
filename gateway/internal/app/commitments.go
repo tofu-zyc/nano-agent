@@ -82,7 +82,7 @@ func (a *App) commitItems(agent string, now time.Time) []commitItem {
 				}
 			}
 			for sid, f := range st.FollowUps {
-				add(followUpCommit(sid, f, ag.ID, st.Paused, n))
+				add(followUpCommit(sid, f, ag.ID, n))
 			}
 		}
 	}
@@ -98,7 +98,7 @@ func (a *App) commitItems(agent string, now time.Time) []commitItem {
 			if err != nil {
 				continue
 			}
-			add(hookCommit(r, spec, last[r.ID], running[r.ID], n))
+			add(hookCommit(r, spec, last[r.ID], running[r.ID], n, a.loc))
 		}
 	}
 	if a.store != nil {
@@ -150,8 +150,11 @@ func (a *App) hookDeliveries() (last map[string]*eventlog.Delivery, running map[
 
 // overlayReport 把主人看过的标记和 Report 的汇报叠到事实上：
 //   - 宿主自己记下的 Blocked、Ready 带着 Mark，主人点过“知道了”的不再算；
-//   - 最近一条没看过也没回答过的汇报：blocked、failed 进 Blocked（带问题的进 Question），ready、not_needed 进 Ready；
-//     progress、waiting 只记一笔，不影响阶段。
+//   - 汇报只看最近一条要主人知道的（ready、blocked、failed、not_needed）、还没看过也没回答过的；
+//     progress、waiting 只记一笔，顶不掉它；blocked、failed 进 Blocked（带问题的进 Question），ready、not_needed 进 Ready；
+//   - 汇报和宿主自己的事实同时有，按阶段表的先后取一个：问题先于受阻，受阻先于就绪，
+//     所以汇报的受阻、问题压过宿主的就绪，宿主的受阻压过汇报的就绪；Mark 跟着决定阶段的那条事实，
+//     主人点过“知道了”，下一条才显出来。
 func (a *App) overlayReport(c *commitItem) {
 	f := &c.Facts
 	if a.commits == nil {
@@ -160,7 +163,7 @@ func (a *App) overlayReport(c *commitItem) {
 	if f.Mark != "" && a.commits.Seen(c.Kind, c.ID, f.Mark) {
 		f.Blocked, f.Ready, f.Question, f.Mark = "", "", "", ""
 	}
-	r, ok := a.commits.Latest(c.Kind, c.ID)
+	r, ok := a.commits.Notice(c.Kind, c.ID)
 	if !ok {
 		return
 	}
@@ -168,22 +171,25 @@ func (a *App) overlayReport(c *commitItem) {
 	if a.commits.Seen(c.Kind, c.ID, mark) {
 		return
 	}
-	switch r.Status {
-	case commit.StatusBlocked, commit.StatusFailed:
-		f.Ready = ""
-		if r.Question != "" {
-			f.Question, f.Blocked = r.Question, ""
-		} else {
-			f.Blocked, f.Question = r.Text, ""
-		}
-		f.Mark = mark
-	case commit.StatusReady, commit.StatusNotNeeded:
-		f.Blocked, f.Question = "", ""
+	hostBlocked, hostMark := f.Blocked, f.Mark
+	*f = withoutNotice(*f)
+	switch {
+	case (r.Status == commit.StatusBlocked || r.Status == commit.StatusFailed) && r.Question != "":
+		f.Question, f.Mark = r.Question, mark
+	case r.Status == commit.StatusBlocked || r.Status == commit.StatusFailed:
+		f.Blocked, f.Mark = r.Text, mark
+	case hostBlocked != "":
+		f.Blocked, f.Mark = hostBlocked, hostMark
+	case r.Status == commit.StatusNotNeeded:
+		f.Ready, f.Mark = "不用做了："+r.Text, mark
+	default: // ready
 		f.Ready, f.Mark = r.Text, mark
-		if r.Status == commit.StatusNotNeeded {
-			f.Ready = "不用做了：" + r.Text
-		}
 	}
+}
+
+func withoutNotice(f commit.Facts) commit.Facts {
+	f.Blocked, f.Ready, f.Question, f.Mark = "", "", "", ""
+	return f
 }
 
 // CommitView 是 GET /api/commitments 给网页的一件承诺。

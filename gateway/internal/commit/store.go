@@ -10,7 +10,7 @@ import (
 
 // 承诺记录 data/runtime/commitments.jsonl（internal/journal，单条 8KB，整份 16MB）：
 // 干活的会话用 Report 汇报“主人需要知道什么”，主人点“知道了”或回答问题，都记在这里。
-// 先记再说：写成功才算数；内存里只留每件事最近一条汇报，和最近 16 个看过或回答过的 Mark。
+// 先记再说：写成功才算数；内存里每件事留最近一条汇报、最近一条要主人知道的汇报，和最近 16 个看过或回答过的 Mark。
 
 const (
 	RecordLimit  = 8 << 10  // 单条
@@ -63,7 +63,8 @@ type key struct{ kind, id string }
 type Store struct {
 	j      *journal.Journal
 	seq    uint64
-	report map[key]CommitRec   // 每件事最近一条汇报
+	report map[key]CommitRec   // 每件事最近一条汇报（列表里显示）
+	notice map[key]CommitRec   // 每件事最近一条要主人知道的汇报（ready、blocked、failed、not_needed）：叠加只看它，progress 和 waiting 顶不掉它
 	marks  map[key][]CommitRec // 每件事最近的看过 / 回答（最多 MaxMarks 条，旧的在前）
 	// Alive 在压缩时调用一次，返回“这件承诺还在不在”的判断；不在的记录在这时丢掉。没设就都留着。
 	Alive func() func(kind, id string) bool
@@ -73,7 +74,7 @@ type Store struct {
 
 // Open 打开（不存在就创建）并重放记录。文件损坏、版本不支持时返回错误，文件保持原样。
 func Open(path string) (*Store, error) {
-	s := &Store{report: map[key]CommitRec{}, marks: map[key][]CommitRec{}}
+	s := &Store{report: map[key]CommitRec{}, notice: map[key]CommitRec{}, marks: map[key][]CommitRec{}}
 	j, err := journal.Open(path, recordFormat, journal.Limits{Record: RecordLimit, File: FileLimit}, func(_ uint64, data json.RawMessage) error {
 		var r CommitRec
 		if err := json.Unmarshal(data, &r); err != nil {
@@ -97,6 +98,9 @@ func (s *Store) apply(r CommitRec) {
 	switch r.Type {
 	case TypeReport:
 		s.report[k] = r
+		if NeedsAttention(r.Status) {
+			s.notice[k] = r
+		}
 	case TypeSeen, TypeAnswer:
 		m := append(s.marks[k], r)
 		if len(m) > MaxMarks {
@@ -146,6 +150,21 @@ func (s *Store) Latest(kind, id string) (CommitRec, bool) {
 	return r, ok
 }
 
+// NeedsAttention 是要主人知道的汇报状态：ready、blocked、failed、not_needed。progress 和 waiting 只记一笔。
+func NeedsAttention(status string) bool {
+	switch status {
+	case StatusReady, StatusBlocked, StatusFailed, StatusNotNeeded:
+		return true
+	}
+	return false
+}
+
+// Notice 是这件事最近一条要主人知道的汇报（可能比 Latest 早）。
+func (s *Store) Notice(kind, id string) (CommitRec, bool) {
+	r, ok := s.notice[key{kind, id}]
+	return r, ok
+}
+
 // Seen 是这个 Mark 已经被主人看过或回答过。
 func (s *Store) Seen(kind, id, mark string) bool {
 	if mark == "" {
@@ -184,6 +203,9 @@ func (s *Store) Compact() error {
 	for k, r := range s.report {
 		if alive(k) {
 			keep = append(keep, r)
+			if n, ok := s.notice[k]; ok && n.Seq != r.Seq {
+				keep = append(keep, n) // 最近一条汇报和最近一条要主人知道的汇报，两条都留
+			}
 		}
 	}
 	for k, rs := range s.marks {
@@ -207,6 +229,7 @@ func (s *Store) Compact() error {
 	for k := range s.report {
 		if !alive(k) {
 			delete(s.report, k)
+			delete(s.notice, k)
 		}
 	}
 	for k := range s.marks {

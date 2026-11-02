@@ -2133,7 +2133,7 @@ func (a *App) generateModel(s *sess) {
 	// 桌面任务会连续截很多图：模型请求里只保留最近两张，旧的换成一句说明（历史原样留着）
 	hist := trimToolImages(a.store.EffectiveHistory(s.sid), 2)
 	for _, tool := range snapshotTools {
-		if tool.Function.Name == "Agenda" {
+		if tool.Function.Name == "Agenda" || tool.Function.Name == "Report" { // Report 的 ready 也要凭据
 			hist = evidenceHistory(r, hist)
 			break
 		}

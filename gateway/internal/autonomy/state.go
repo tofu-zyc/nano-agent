@@ -760,8 +760,13 @@ func (s *State) CancelAgenda(id, why, by string, now time.Time) error {
 		return errors.New("没有这个议程项")
 	}
 	a.Status, a.Updated, a.EndedBy = StatusCancelled, now.Unix(), by
-	if why != "" {
+	switch {
+	case why != "":
 		a.Result = clip(why, 200)
+	case by == EndedByOwner:
+		a.Result = "主人取消了" // 网页上取消不写理由：不能留着 Retry 留下的旧原因，也不能让它变成“没写理由”
+	default:
+		a.Result = ""
 	}
 	if in := s.intention(a.IntentionID); in != nil && !hasOpenAgenda(s.Agenda, in.ID) {
 		in.State, in.Updated = IntentionCancelled, now.Unix()

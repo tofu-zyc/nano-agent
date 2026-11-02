@@ -76,9 +76,9 @@ func agendaCommit(it autonomy.AgendaItem, in *autonomy.Intention, paused bool, a
 	case autonomy.StatusDone:
 		f.Ended, f.Evidence = commit.Done, it.Result
 	case autonomy.StatusCancelled:
-		f.Ended, f.Reason = commit.Dropped, it.Result
+		f.Ended, f.Reason = commit.Dropped, firstNonEmpty(it.Result, "取消了") // 升级前的记录没有 EndedBy：算无需处理
 		if it.EndedBy == autonomy.EndedByOwner {
-			f.Ended = commit.Stopped
+			f.Ended, f.Reason = commit.Stopped, firstNonEmpty(it.Result, "主人取消了")
 		}
 	case autonomy.StatusSkipped:
 		f.Ended, f.Reason = commit.Dropped, it.Result
@@ -144,9 +144,9 @@ func intentionCommit(in autonomy.Intention, ags []autonomy.AgendaItem, paused bo
 		// 同议程项：主人取消的是叫停，自己取消的是无需处理；取消的理由和是谁取消的，看它最后一个议程项
 		f.Ended, f.Reason = commit.Dropped, "取消了"
 		if last != nil {
-			f.Reason = last.Result
+			f.Reason = firstNonEmpty(last.Result, "取消了")
 			if last.EndedBy == autonomy.EndedByOwner {
-				f.Ended = commit.Stopped
+				f.Ended, f.Reason = commit.Stopped, firstNonEmpty(last.Result, "主人取消了")
 			}
 		}
 	case autonomy.IntentionRunning:
@@ -175,14 +175,14 @@ func firstNonEmpty(xs ...string) string {
 	return ""
 }
 
-// followUpCommit 是一个约好过会儿再看的回访：sid 是那个聊天。
-func followUpCommit(sid string, f autonomy.FollowUp, agent string, paused bool, now int64) commitItem {
+// followUpCommit 是一个约好过会儿再看的回访：sid 是那个聊天。回访不随自主活动暂停（autonomyAgent 在判断暂停之前就发了）。
+func followUpCommit(sid string, f autonomy.FollowUp, agent string, now int64) commitItem {
 	return commitItem{Kind: commit.KindFollowUp, ID: sid, Agent: agent, Title: f.Note, Link: "#/sessions/" + sid,
 		Contract: commit.Contract{
 			Goal: f.Note, By: agent, Scene: sid, Scope: "在那个聊天里说一句或不说", Done: "到点说一句或不说",
 			ReportTo: []string{sid}, Stop: "一次",
 		},
-		Facts: commit.Facts{Now: now, Paused: paused, Due: f.At}}
+		Facts: commit.Facts{Now: now, Due: f.At}} // 暂停自主活动时回访照常发，所以不设 Paused
 }
 
 // oneShot 是只跑一次的定时任务（at 开头）。
@@ -231,7 +231,7 @@ func scheduleCommit(t schedule.Task, now int64) commitItem {
 }
 
 // hookCommit 是一条 Hook 规则（不是单次投递）。last 是最近一次投递（没有就是 nil），running 是有投递在跑。
-func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery, running bool, now int64) commitItem {
+func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery, running bool, now int64, loc *time.Location) commitItem {
 	var report []string
 	if spec.Deliver != "" && spec.Deliver != "none" && !r.Silent {
 		report = []string{spec.Deliver}
@@ -244,7 +244,7 @@ func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery,
 		stop = append(stop, fmt.Sprintf("失败最多重试 %d 次", spec.Retries))
 	}
 	if spec.DeadlineAt > 0 {
-		stop = append(stop, "到 "+time.Unix(spec.DeadlineAt, 0).Format("01-02 15:04")+" 为止")
+		stop = append(stop, "到 "+time.UnixMilli(spec.DeadlineAt).In(loc).Format("01-02 15:04")+" 为止") // DeadlineAt 是毫秒
 	}
 	if r.Once {
 		stop = append(stop, "只触发一次")
@@ -254,12 +254,26 @@ func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery,
 			Goal: spec.Name, By: r.Creator, Scene: spec.Scope.SID, Scope: scopeText(spec.Scope.Mode, spec.Scope.Workspaces, spec.Scope.Tools),
 			Done: "每次投递成功", ReportTo: report, Stop: stopText(stop...),
 		}}
-	f := commit.Facts{Now: now, Running: running, Due: spec.DeadlineAt}
-	if r.Once && !r.Enabled && last != nil && last.Status == "succeeded" {
+	f := commit.Facts{Now: now, Running: running}
+	// DeadlineAt 是毫秒；这个时间的事件已经触发过（之后有投递）就不再是“要到期的事”
+	if spec.DeadlineAt > 0 && (last == nil || last.UpdatedMS < spec.DeadlineAt) {
+		f.Due = spec.DeadlineAt / 1000
+	}
+	switch {
+	case r.Once && !r.Enabled && last != nil && last.Status == "succeeded":
 		f.Ended, f.Evidence = commit.Done, firstNonEmpty(last.Result, "投递成功")
 		c.EndedAt = last.UpdatedMS / 1000
-	} else {
-		f.Paused = !r.Enabled
+	case r.Once && r.ClaimedBy != "" && last != nil && (last.Status == "failed" || last.Status == "cancelled"):
+		// Once 规则已经被事件占用、那次投递最终失败或取消：它不会再触发了
+		why := "投递失败"
+		if last.Status == "cancelled" {
+			why = "投递被取消"
+		}
+		f.Ended, f.Reason = commit.Failed, firstNonEmpty(last.Error, why)
+		c.EndedAt = last.UpdatedMS / 1000
+	default:
+		// Once 规则被事件占用后会自己停用，那不是人停的
+		f.Paused = !r.Enabled && !(r.Once && r.ClaimedBy != "")
 		if last != nil && (last.Status == "failed" || last.Status == "uncertain") {
 			why := "最近一次投递失败：" + last.Error
 			if last.Status == "uncertain" {
@@ -300,7 +314,7 @@ func branchCommit(m session.BranchMeta, running, autonomous bool, now int64) com
 		f.Blocked, f.Mark = firstNonEmpty(m.Note, m.Progress, "需要处理"), fmt.Sprintf("p:%d", m.ProgressAt)
 	case session.BranchCompleted:
 		// 主人建的分支做完一轮，之后没引入过结论：等人看。自主活动分出的不算，只看它的汇报
-		if !autonomous && m.ReportedAt < m.ProgressAt {
+		if !autonomous && !branchIntroduced(m) {
 			f.Ready, f.Mark = firstNonEmpty(m.Progress, "做完了一轮"), fmt.Sprintf("p:%d", m.ProgressAt)
 		}
 	case session.BranchPreparing, session.BranchPendingBoundary:
@@ -313,4 +327,13 @@ func branchCommit(m session.BranchMeta, running, autonomous bool, now int64) com
 		c.EndedAt = max(m.LastActive, m.ProgressAt, m.CreatedAt)
 	}
 	return c
+}
+
+// branchIntroduced 是主人在这一轮做完之后已经把结论带回来源会话。
+// 升级前引入过结论的分支没有 ReportedAt：Progress 是引入结论时写的那句话，也算。
+func branchIntroduced(m session.BranchMeta) bool {
+	if m.ReportedAt > 0 {
+		return m.ReportedAt >= m.ProgressAt
+	}
+	return strings.HasPrefix(m.Progress, "已把结论带回来源会话：")
 }

@@ -7,6 +7,8 @@ import (
 
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/commit"
+	"nano-agent/gateway/internal/schedule"
+	"nano-agent/gateway/internal/session"
 )
 
 // 汇总：汇报和“知道了”叠在宿主自己的事实上；只列还存在的、结束没超过 30 天的。
@@ -143,3 +145,70 @@ func TestCommitmentsOnlyListLiveAndRecent(t *testing.T) {
 		t.Fatalf("压缩只留还在的：gone=%v old=%v recent=%v", goneOK, oldOK, recentOK)
 	}
 }
+
+// 汇报叠加的先后：问题先于受阻，受阻先于就绪。
+func TestOverlayPrecedence(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	add := func(kind, id, status, text, question string) commit.CommitRec {
+		t.Helper()
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		r, err := e.a.commits.Append(commit.CommitRec{Type: commit.TypeReport, Kind: kind, ID: id, Status: status, Text: text, Question: question})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	overlay := func(c commitItem) commitItem {
+		e.a.mu.Lock()
+		defer e.a.mu.Unlock()
+		e.a.overlayReport(&c)
+		return c
+	}
+	// 定时任务上一轮汇报 ready 没人看，这一轮 Last.OK 为假：宿主的受阻压过汇报的就绪，Mark 是 last:
+	task := schedule.Task{ID: "t1", Name: "每天看新闻", When: "every 24h", Enabled: true, Next: time.Unix(nowU+3600, 0),
+		Last: &schedule.Result{At: time.Unix(nowU-100, 0), OK: false, Summary: "接口超时"}}
+	add(commit.KindSchedule, "t1", commit.StatusReady, "上一轮的结果", "")
+	c := overlay(scheduleCommit(task, nowU))
+	wantPhase(t, "宿主受阻压过汇报就绪", c, commit.Blocked, "上一次失败：接口超时")
+	if c.Facts.Mark != "last:999900" {
+		t.Fatalf("Mark 跟着决定阶段的那条事实：%q", c.Facts.Mark)
+	}
+	// 主人点了“知道了”（针对上一次失败）：下一条才显出来——汇报的就绪
+	e.a.mu.Lock()
+	e.a.commits.Append(commit.CommitRec{Type: commit.TypeSeen, Kind: commit.KindSchedule, ID: "t1", Mark: "last:999900", By: "web:me"})
+	e.a.mu.Unlock()
+	c = overlay(scheduleCommit(task, nowU))
+	wantPhase(t, "知道了之后显出就绪", c, commit.Ready, "上一轮的结果")
+	if c.Facts.Mark != "r:1" {
+		t.Fatalf("Mark：%q", c.Facts.Mark)
+	}
+	// 汇报的受阻、问题压过宿主的就绪
+	m := session.BranchMeta{SID: "main/b1", ParentSID: "main", OwnerAgent: "default", CreatedBy: "web:me", Intent: "查竞品",
+		Status: session.BranchCompleted, ProgressAt: nowU - 10, Progress: "完成：这一轮做了「查竞品」"}
+	wantPhase(t, "宿主就绪", overlay(branchCommit(m, false, false, nowU)), commit.Ready, "")
+	r := add(commit.KindBranch, "main/b1", commit.StatusBlocked, "有个问题", "")
+	b := overlay(branchCommit(m, false, false, nowU))
+	wantPhase(t, "汇报受阻压过宿主就绪", b, commit.Blocked, "有个问题")
+	if b.Facts.Mark != "r:"+itoaU(r.Seq) {
+		t.Fatalf("Mark：%q", b.Facts.Mark)
+	}
+	r = add(commit.KindBranch, "main/b1", commit.StatusBlocked, "要决定", "用哪个方案？")
+	wantPhase(t, "问题压过受阻和就绪", overlay(branchCommit(m, false, false, nowU)), commit.Blocked, "等你回答：用哪个方案？")
+	// 之后的 progress 不顶掉还没回答的问题
+	add(commit.KindBranch, "main/b1", commit.StatusProgress, "又看了一眼", "")
+	add(commit.KindBranch, "main/b1", commit.StatusWaiting, "在等回答", "")
+	got := overlay(branchCommit(m, false, false, nowU))
+	wantPhase(t, "progress 顶不掉问题", got, commit.Blocked, "等你回答：用哪个方案？")
+	if got.Facts.Mark != "r:"+itoaU(r.Seq) {
+		t.Fatalf("Mark：%q", got.Facts.Mark)
+	}
+	// 回答之后：宿主的就绪重新显出来
+	e.a.mu.Lock()
+	e.a.commits.Append(commit.CommitRec{Type: commit.TypeAnswer, Kind: commit.KindBranch, ID: "main/b1", Mark: got.Facts.Mark, By: "web:me", Answer: "第一个"})
+	e.a.mu.Unlock()
+	wantPhase(t, "回答之后", overlay(branchCommit(m, false, false, nowU)), commit.Ready, "")
+}
+
+func itoaU(n uint64) string { return fmt.Sprintf("%d", n) }

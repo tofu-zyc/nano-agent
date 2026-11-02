@@ -2,7 +2,7 @@ package app
 
 import (
 	"encoding/json"
-	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +15,7 @@ import (
 	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/schedule"
+	"nano-agent/gateway/internal/session"
 )
 
 // Report：谁有它、汇报的是哪件事、四种拒绝、写不进记录、重启后还在。
@@ -264,7 +265,7 @@ func TestReportWriteFailureReturnsErrorAndDegradesHealth(t *testing.T) {
 	finishRun(t, e, s)
 }
 
-// 重启后最近一条汇报还在。
+// 重启后最近一条汇报还在：在同一个数据目录上重新起一个 App，用 Commitments 查到，连 openCommits 的路径和叠加一起测到。
 func TestReportSurvivesRestart(t *testing.T) {
 	e := setup(t)
 	s, agendaID := lifeRunOnAgenda(t, e)
@@ -274,19 +275,21 @@ func TestReportSurvivesRestart(t *testing.T) {
 	if _, err := call(e, s, map[string]any{"status": "blocked", "text": "卡住了", "question": "怎么办？"}); err != nil {
 		t.Fatal(err)
 	}
-	e.a.mu.Lock()
-	e.a.commits.Close()
-	e.a.mu.Unlock()
-	s2, err := commit.Open(filepath.Join(e.dir, "data", "runtime", "commitments.jsonl")) // 重启时 openCommits 做的就是这个
-	if err != nil {
+	if _, err := call(e, s, map[string]any{"status": "progress", "text": "又看了一眼"}); err != nil {
 		t.Fatal(err)
 	}
-	defer s2.Close()
-	r, ok := s2.Latest(commit.KindAgenda, agendaID)
-	if !ok || r.Status != "blocked" || r.Question != "怎么办？" || r.Seq != 2 {
-		t.Fatalf("重启后最近一条汇报还在：%+v %v", r, ok)
-	}
 	finishRun(t, e, s)
+	e.a.mu.Lock()
+	e.a.commits.Close() // 旧的网关停下，记录留在磁盘上
+	e.a.mu.Unlock()
+	a2 := importApp(t, e.dir, "", "") // 同一个数据目录上重新起一个 App
+	v := findCommit(a2.Commitments("default", ""), commit.KindAgenda, agendaID)
+	if v == nil || v.Report == nil || v.Report.Text != "又看了一眼" {
+		t.Fatalf("重启后最近一条汇报还在：%+v", v)
+	}
+	if v.Phase != commit.Blocked || v.Why != "等你回答：怎么办？" || v.Mark != "r:2" {
+		t.Fatalf("重启后没处理的问题还在，progress 没顶掉它：%+v", v)
+	}
 }
 
 // 没用 Report 时消息、投递和存储都不变：不会凭空多出承诺记录文件的内容。
@@ -306,4 +309,50 @@ func TestNoReportLeavesStorageUntouched(t *testing.T) {
 		t.Fatal("聊天照常")
 	}
 	_ = agents.DefaultID
+}
+
+// 分支里调一个真实的工具：模型看得到它的凭据，用这个 id Report ready 成功（不是往 toolEvidence 里塞的）。
+func TestReportReadyWithRealReceiptInBranch(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	e.a.mu.Lock()
+	e.a.eps["fake:c1"] = &epRec{Session: mainSID, Who: "fake:u1"}
+	e.a.mu.Unlock()
+	if err := e.a.store.Append(mainSID, session.Msg{Role: "user", Content: "来源会话的上下文"}); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "查竞品", RequestID: "report-ready", By: "fake:u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.SessionBranchAction("continue", branch.BranchSID, `!call echo {"a":1}`, "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	in := e.k.expect(proto.TInput)
+	if in.SID != branch.BranchSID {
+		t.Fatalf("这一轮在分支里：%s", in.SID)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	turn := e.k.expect(proto.TTurn)
+	id := turn.Calls[0].ID
+	e.k.send(proto.Msg{T: proto.TResult, SID: in.SID, ID: id, OK: proto.Bool(true), Content: "竞品有三家"})
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	// 模型这一次的请求里看得到凭据回执（分支没有 Agenda，靠 Report 才给）
+	msgs := e.llm.lastReq().Messages
+	last := msgs[len(msgs)-1].Content
+	m := regexp.MustCompile(`\[本轮验收凭据\] \{"id":"([^"]+)"`).FindStringSubmatch(last)
+	if m == nil || m[1] != id {
+		t.Fatalf("模型看不到凭据回执：%q", last)
+	}
+	e.a.mu.Lock()
+	s := e.a.sessions[branch.BranchSID]
+	out, err := e.a.reportCall(s, reportArgs(map[string]any{"status": "ready", "text": "竞品有三家", "evidence": []string{m[1]}}))
+	r, ok := e.a.commits.Latest(commit.KindBranch, branch.BranchSID)
+	e.a.mu.Unlock()
+	if err != nil || !strings.Contains(out, "ready") || !ok || r.Status != "ready" || len(r.Evidence) != 1 || r.Evidence[0] != id+":echo" {
+		t.Fatalf("用这个 id 汇报 ready：%q %v %+v", out, err, r)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitIdle(t, e, in.SID)
 }

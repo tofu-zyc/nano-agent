@@ -58,7 +58,7 @@ func TestAgendaCommit(t *testing.T) {
 	cancelled.EndedBy = autonomy.EndedByAgent
 	wantPhase(t, "agent 取消", agendaCommit(cancelled, in, false, "default", nowU), commit.Dropped, "对方说不用了")
 	cancelled.Result = ""
-	wantPhase(t, "agent 取消没有理由", agendaCommit(cancelled, in, false, "default", nowU), commit.Blocked, "说不用做了，但没写理由")
+	wantPhase(t, "agent 取消没有理由", agendaCommit(cancelled, in, false, "default", nowU), commit.Dropped, "取消了")
 	skipped := base
 	skipped.Status, skipped.Result = autonomy.StatusSkipped, "今天不适合"
 	wantPhase(t, "跳过", agendaCommit(skipped, in, false, "default", nowU), commit.Dropped, "今天不适合")
@@ -102,14 +102,17 @@ func TestIntentionCommit(t *testing.T) {
 
 func TestFollowUpCommit(t *testing.T) {
 	f := autonomy.FollowUp{At: nowU + 300, Note: "问问面试怎么样"}
-	c := followUpCommit("tg:42", f, "default", false, nowU)
+	c := followUpCommit("tg:42", f, "default", nowU)
 	if c.ID != "tg:42" || c.Contract.Goal != "问问面试怎么样" || c.Contract.Scene != "tg:42" || c.Contract.ReportTo[0] != "tg:42" || c.Contract.Stop != "一次" {
 		t.Fatalf("契约：%+v", c)
 	}
 	wantPhase(t, "等", c, commit.Waiting, "等到某个时间")
 	f.At = nowU - 5
-	wantPhase(t, "到点", followUpCommit("tg:42", f, "default", false, nowU), commit.Waiting, "到期了，马上开始")
-	wantPhase(t, "自主活动暂停", followUpCommit("tg:42", f, "default", true, nowU), commit.Paused, "")
+	wantPhase(t, "到点", followUpCommit("tg:42", f, "default", nowU), commit.Waiting, "到期了，马上开始")
+	// 回访不随自主活动暂停：暂停时照常发，所以不设 Paused
+	if got := followUpCommit("tg:42", f, "default", nowU); got.Facts.Paused {
+		t.Fatal("回访不该因为自主活动暂停而 Paused")
+	}
 }
 
 func TestScheduleCommit(t *testing.T) {
@@ -156,9 +159,10 @@ func TestScheduleCommit(t *testing.T) {
 
 func TestHookCommit(t *testing.T) {
 	rule := eventlog.RuleRecord{ID: "hook_1", AgentID: "default", Creator: "web:me", Enabled: true}
-	spec := hooks.Spec{Name: "构建失败提醒", Deliver: "tg:1", Retries: 2, DeadlineAt: nowU + 7200,
+	spec := hooks.Spec{Name: "构建失败提醒", Deliver: "tg:1", Retries: 2, DeadlineAt: (nowU + 7200) * 1000, // 毫秒
+
 		Handler: hooks.Handler{Type: "agent", TokenBudget: 3000}, Scope: hooks.Scope{SID: "chat:main", Mode: "ask", Workspaces: []string{"proj"}, Tools: []string{"WebSearch"}}}
-	c := hookCommit(rule, spec, nil, false, nowU)
+	c := hookCommit(rule, spec, nil, false, nowU, time.UTC)
 	if c.Contract.Goal != "构建失败提醒" || c.Contract.By != "web:me" || c.Contract.Scene != "chat:main" || c.Contract.Done != "每次投递成功" ||
 		c.Contract.ReportTo[0] != "tg:1" || c.Contract.Stop == "" || c.Title != "构建失败提醒" {
 		t.Fatalf("契约：%+v", c.Contract)
@@ -166,32 +170,32 @@ func TestHookCommit(t *testing.T) {
 	wantPhase(t, "等到截止时间", c, commit.Waiting, "等到某个时间")
 	spec2 := spec
 	spec2.DeadlineAt = 0
-	wantPhase(t, "等事件", hookCommit(rule, spec2, nil, false, nowU), commit.Waiting, "等事件")
-	wantPhase(t, "有投递在跑", hookCommit(rule, spec2, nil, true, nowU), commit.Running, "")
+	wantPhase(t, "等事件", hookCommit(rule, spec2, nil, false, nowU, time.UTC), commit.Waiting, "等事件")
+	wantPhase(t, "有投递在跑", hookCommit(rule, spec2, nil, true, nowU, time.UTC), commit.Running, "")
 	off := rule
 	off.Enabled = false
-	wantPhase(t, "停用", hookCommit(off, spec2, nil, false, nowU), commit.Paused, "")
+	wantPhase(t, "停用", hookCommit(off, spec2, nil, false, nowU, time.UTC), commit.Paused, "")
 	failed := &eventlog.Delivery{ID: "hd_1", Status: "failed", Error: "目标会话没了", UpdatedMS: 5000}
-	cf := hookCommit(rule, spec2, failed, false, nowU)
+	cf := hookCommit(rule, spec2, failed, false, nowU, time.UTC)
 	wantPhase(t, "最近一次失败", cf, commit.Blocked, "最近一次投递失败：目标会话没了")
 	if cf.Facts.Mark != "d:hd_1" {
 		t.Fatalf("Mark：%q", cf.Facts.Mark)
 	}
 	unsure := &eventlog.Delivery{ID: "hd_2", Status: "uncertain", Error: "超时", UpdatedMS: 6000}
-	wantPhase(t, "结果不明", hookCommit(rule, spec2, unsure, false, nowU), commit.Blocked, "最近一次投递的结果不明：超时")
+	wantPhase(t, "结果不明", hookCommit(rule, spec2, unsure, false, nowU, time.UTC), commit.Blocked, "最近一次投递的结果不明：超时")
 	ok := &eventlog.Delivery{ID: "hd_3", Status: "succeeded", Result: "已提醒", UpdatedMS: 7000}
-	wantPhase(t, "成功了还在等下一次", hookCommit(rule, spec2, ok, false, nowU), commit.Waiting, "等事件")
+	wantPhase(t, "成功了还在等下一次", hookCommit(rule, spec2, ok, false, nowU, time.UTC), commit.Waiting, "等事件")
 	once := off
 	once.Once = true
-	co := hookCommit(once, spec2, ok, false, nowU)
+	co := hookCommit(once, spec2, ok, false, nowU, time.UTC)
 	wantPhase(t, "Once 成功后停用", co, commit.Done, "已提醒")
 	if co.EndedAt != 7 {
 		t.Fatalf("结束时间：%d", co.EndedAt)
 	}
-	wantPhase(t, "Once 停用但没成功", hookCommit(once, spec2, failed, false, nowU), commit.Paused, "")
+	wantPhase(t, "Once 停用但没成功", hookCommit(once, spec2, failed, false, nowU, time.UTC), commit.Paused, "")
 	silent := rule
 	silent.Silent = true
-	if got := hookCommit(silent, spec, nil, false, nowU).Contract.ReportTo; len(got) != 0 {
+	if got := hookCommit(silent, spec, nil, false, nowU, time.UTC).Contract.ReportTo; len(got) != 0 {
 		t.Fatalf("Silent 时汇报去处为空：%v", got)
 	}
 }
@@ -246,4 +250,97 @@ func TestBranchCommit(t *testing.T) {
 			t.Fatalf("结束时间：%d", c.EndedAt)
 		}
 	}
+}
+
+// 主人取消日程没写理由：不能变成受阻，也不能留着 Retry 留下的旧原因。
+func TestOwnerCancelWithoutReasonIsStoppedNotBlocked(t *testing.T) {
+	now := time.Unix(nowU, 0)
+	st := autonomy.New()
+	item, _ := st.AddAgenda(autonomy.AgendaItem{Title: "发邮件", Kind: autonomy.KindCommitment, At: nowU + 600}, now)
+	st.Retry(autonomy.Trigger{AgendaID: item.ID}, "还没有配置模型", now, 30*time.Minute) // 留下一条旧原因
+	if err := st.CancelAgenda(item.ID, "", autonomy.EndedByOwner, now); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.AgendaByID(item.ID)
+	c := agendaCommit(got, nil, false, "default", nowU)
+	wantPhase(t, "主人取消没写理由", c, commit.Stopped, "主人取消了")
+	// 意图也一样
+	in := autonomy.Intention{ID: "in-1", Title: "整理", State: autonomy.IntentionCancelled}
+	ci, _ := intentionCommit(in, []autonomy.AgendaItem{{IntentionID: "in-1", Status: autonomy.StatusCancelled, EndedBy: autonomy.EndedByOwner}}, false, "default", nowU)
+	wantPhase(t, "意图：主人取消没写理由", ci, commit.Stopped, "主人取消了")
+	// 升级前的记录没有 EndedBy：算无需处理，没有 Result 就写“取消了”，不算受阻
+	legacy := autonomy.AgendaItem{ID: "ag-old", Title: "老的", Status: autonomy.StatusCancelled}
+	wantPhase(t, "升级前取消", agendaCommit(legacy, nil, false, "default", nowU), commit.Dropped, "取消了")
+	ci, _ = intentionCommit(in, []autonomy.AgendaItem{{IntentionID: "in-1", Status: autonomy.StatusCancelled}}, false, "default", nowU)
+	wantPhase(t, "意图：升级前取消", ci, commit.Dropped, "取消了")
+	// agent 取消不写理由（工具会拦，别的路径也可能）：清掉旧原因，算无需处理
+	st2 := autonomy.New()
+	it2, _ := st2.AddAgenda(autonomy.AgendaItem{Title: "x", Kind: autonomy.KindPlan, At: nowU}, now)
+	st2.Retry(autonomy.Trigger{AgendaID: it2.ID}, "没有在线的内核", now, 5*time.Minute)
+	st2.CancelAgenda(it2.ID, "", autonomy.EndedByAgent, now)
+	g2, _ := st2.AgendaByID(it2.ID)
+	if g2.Result != "" {
+		t.Fatalf("旧原因不该留着：%q", g2.Result)
+	}
+}
+
+// Hook 的 DeadlineAt 是毫秒：换成秒才能和 Now 比；触发过之后不再算到期；停止条件按时区写。
+func TestHookDeadlineIsMilliseconds(t *testing.T) {
+	rule := eventlog.RuleRecord{ID: "hook_1", AgentID: "default", Creator: "web:me", Enabled: true}
+	deadlineMS := int64((nowU + 7200) * 1000)
+	spec := hooks.Spec{Name: "到点提醒", Handler: hooks.Handler{Type: "notify"}, DeadlineAt: deadlineMS}
+	c := hookCommit(rule, spec, nil, false, nowU, time.UTC)
+	if c.Facts.Due != nowU+7200 {
+		t.Fatalf("Due 要换成秒：%d", c.Facts.Due)
+	}
+	wantPhase(t, "没到点", c, commit.Waiting, "等到某个时间")
+	if want := "到 " + time.UnixMilli(deadlineMS).UTC().Format("01-02 15:04") + " 为止"; c.Contract.Stop != want {
+		t.Fatalf("停止条件：%q，应为 %q", c.Contract.Stop, want)
+	}
+	loc := time.FixedZone("x", 8*3600)
+	if got := hookCommit(rule, spec, nil, false, nowU, loc).Contract.Stop; got == c.Contract.Stop {
+		t.Fatalf("停止条件要按 loc 写：%q", got)
+	}
+	// 这个时间的事件触发过（规则在 DeadlineAt 之后有投递）：不再是要到期的事
+	fired := &eventlog.Delivery{ID: "hd_1", Status: "succeeded", UpdatedMS: deadlineMS + 5}
+	if got := hookCommit(rule, spec, fired, false, deadlineMS/1000+60, time.UTC); got.Facts.Due != 0 {
+		t.Fatalf("触发过就不设 Due：%d", got.Facts.Due)
+	}
+	// 投递在 DeadlineAt 之前（别的事件）：还在等这个时间
+	early := &eventlog.Delivery{ID: "hd_2", Status: "succeeded", UpdatedMS: deadlineMS - 1000}
+	if got := hookCommit(rule, spec, early, false, nowU, time.UTC); got.Facts.Due != nowU+7200 {
+		t.Fatalf("早先的投递不算：%d", got.Facts.Due)
+	}
+}
+
+// Once 规则已经被事件占用、那次投递最终失败或取消：它不会再触发，算失败；结果不明仍然是受阻。
+func TestHookOnceClaimedAndFailed(t *testing.T) {
+	rule := eventlog.RuleRecord{ID: "hook_1", AgentID: "default", Creator: "web:me", Once: true, Enabled: false, ClaimedBy: "ev_1"}
+	spec := hooks.Spec{Name: "只提醒一次", Handler: hooks.Handler{Type: "notify"}}
+	failed := &eventlog.Delivery{ID: "hd_1", Status: "failed", Error: "目标会话没了", UpdatedMS: 9000}
+	c := hookCommit(rule, spec, failed, false, nowU, time.UTC)
+	wantPhase(t, "Once 失败", c, commit.Failed, "目标会话没了")
+	if c.EndedAt != 9 {
+		t.Fatalf("结束时间：%d", c.EndedAt)
+	}
+	cancelled := &eventlog.Delivery{ID: "hd_2", Status: "cancelled", UpdatedMS: 9000}
+	wantPhase(t, "Once 取消", hookCommit(rule, spec, cancelled, false, nowU, time.UTC), commit.Failed, "投递被取消")
+	unsure := &eventlog.Delivery{ID: "hd_3", Status: "uncertain", Error: "超时", UpdatedMS: 9000}
+	wantPhase(t, "Once 结果不明仍是受阻", hookCommit(rule, spec, unsure, false, nowU, time.UTC), commit.Blocked, "最近一次投递的结果不明：超时")
+	// 还没被事件占用的 Once 规则：照旧在等
+	free := rule
+	free.ClaimedBy, free.Enabled = "", true
+	wantPhase(t, "Once 还在等", hookCommit(free, spec, nil, false, nowU, time.UTC), commit.Waiting, "等事件")
+}
+
+// 升级前引入过结论的分支没有 ReportedAt：Progress 是引入结论时写的那句，也算引入过。
+func TestBranchIntroducedBeforeUpgradeIsNotReady(t *testing.T) {
+	m := session.BranchMeta{SID: "main/b1", ParentSID: "main", OwnerAgent: "default", CreatedBy: "web:me", Intent: "查竞品",
+		Status: session.BranchCompleted, ProgressAt: nowU - 10, Progress: "已把结论带回来源会话：竞品有三家"}
+	wantPhase(t, "升级前引入过", branchCommit(m, false, false, nowU), commit.Waiting, "等事件")
+	m.Progress = "完成：这一轮做了「查竞品」"
+	wantPhase(t, "没引入过", branchCommit(m, false, false, nowU), commit.Ready, "")
+	m.Progress, m.ReportedAt = "已把结论带回来源会话：竞品有三家", nowU-20 // 新记录以 ReportedAt 为准：引入之后又做了一轮
+	m.Progress = "完成：又做了一轮"
+	wantPhase(t, "引入之后又做了一轮", branchCommit(m, false, false, nowU), commit.Ready, "")
 }
