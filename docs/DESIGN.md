@@ -788,7 +788,7 @@ func Phase(f Facts) (phase, why string)
 | # | 条件 | 阶段 | why |
 | --- | --- | --- | --- |
 | 1 | `Ended` 是 done，`Evidence` 空 | blocked | 说做完了，但没有证据 |
-| 2 | `Ended` 是 dropped，`Reason` 空 | blocked | 说不用做了，但没写理由 |
+| 2 | `Ended` 是 dropped、failed 或 stopped，`Reason` 空；或者 `Ended` 不是这四种 | blocked | 说结束了，但没写理由（不认识的就写出这个值） |
 | 3 | `Ended` 不空 | 同 `Ended` | `Evidence` 或 `Reason` |
 | 4 | `Paused` | paused | |
 | 5 | `Running` | running | |
@@ -802,21 +802,26 @@ func Phase(f Facts) (phase, why string)
 
 另有两个不变量测试：任意一组事实都恰好得到九个阶段中的一个；得到结束阶段时，一定带着证据或理由。
 
+第 2 行会把没有理由的结束当成要人处理，所以主人自己做的结束，适配函数一定给出理由：网页上取消日程没写理由，记成"主人取消了"；归档、取消分支没有备注，记成"主人归档了""取消了"。
+
 **事实**：从各自的记录推出。适配函数写在 app 里，一种一个，各有测试。
 
 | 事实 | agenda | intention | followup | schedule | hook | branch |
 | --- | --- | --- | --- | --- | --- | --- |
-| Ended | done → done（`Result`）；cancelled → 主人取消的是 stopped，agent 取消的是 dropped（`Result`）；skipped → dropped | done → done（`Evidence`）；failed → failed；cancelled 同 agenda | — | 一次性任务跑过、已停用：`Last.OK` 为真是 done（`Last.Summary`），否则 failed | `Once` 且成功后停用：done（最后一次投递的 `Result`） | archived、cancelled → stopped |
-| Paused | 自主活动暂停 | 同左，或 paused | 同左 | 停用，且不是已结束的一次性任务 | 停用 | paused |
+| Ended | done → done（`Result`）；cancelled → 主人取消的是 stopped，agent 取消的是 dropped（`Result`），升级前没记谁取消的算 dropped（没有 `Result` 就写"取消了"）；skipped → dropped | done → done（`Evidence`）；failed → failed；cancelled 同 agenda | — | 一次性任务跑过、已停用：`Last.OK` 为真是 done（`Last.Summary`），否则 failed | `Once` 且成功后停用：done（最后一次投递的 `Result`）；`Once` 已被事件占用、那次投递最终失败或取消：failed（投递的 `Error`） | archived、cancelled → stopped |
+| Paused | 自主活动暂停 | 同左，或 paused | —（暂停时回访照常发） | 停用，且不是已结束的一次性任务 | 停用 | paused |
 | Running | in_progress | running | — | `Running` | 有投递在跑 | running、queued |
 | Blocked | 汇报 | 汇报 | — | 上一次失败（`Last.OK` 为假）；汇报 | 最近一次投递 failed 或 uncertain（结果不明）；汇报 | needs_attention（`Note`）；汇报 |
-| Ready | 汇报 | 汇报 | — | 汇报 | 汇报 | 主人建的分支做完一轮（completed），之后没引入过结论；汇报 |
-| Due | `At` | `NextAt` | `At` | `Next` | `DeadlineAt` | — |
+| Ready | 汇报 | 汇报 | — | 汇报 | 汇报 | 主人建的分支做完一轮（completed），之后没引入过结论（`ReportedAt`）；汇报 |
+| Due | `At` | `NextAt` | `At` | `Next` | `DeadlineAt`（毫秒，换成秒），只在这个时间的事件还没触发时 | preparing、pending_boundary、ready：`CreatedAt` |
 | Wait | 意图的 `Blocked` | `Blocked` | — | — | — | preparing、pending_boundary：等源会话的安全边界；ready：等开始 |
 
-- 表里的"汇报"，指这件事最近一条、还没看过也没回答过的 Report：
+- 表里的"汇报"，指这件事最近一条要主人知道的 Report（ready、blocked、failed、not_needed），而且还没看过也没回答过：
   - blocked、failed 进 `Blocked`，带着问题的进 `Question`；
   - ready、not_needed 进 `Ready`。
+  - progress、waiting 只记一笔，不顶掉前面那条还没处理的汇报。
+- 汇报和宿主自己的事实同时有时，按阶段表的先后取一个：问题先于受阻，受阻先于就绪。汇报的受阻、问题压过宿主的就绪；宿主的受阻压过汇报的就绪。`Mark` 跟着决定阶段的那条事实；主人点过"知道了"，下一条才显出来。
+- 升级前已经引入过结论的分支没有 `ReportedAt`：`Progress` 是引入结论时写的那句（"已把结论带回来源会话：……"），就算已经引入过。
 - 宿主自己记下的 `Blocked`、`Ready` 也带 `Mark`：
   - 汇报：`r:<序号>`；
   - 上一次失败：`last:<时间>`；
@@ -838,7 +843,8 @@ func Phase(f Facts) (phase, why string)
 
 - 哪些会话有：life 会话、分支、定时任务、Hook 的 agent 处理器。
   - 普通聊天和群聊没有：在原对话里直接回复就是汇报。戏里也没有。
-  - 这几类会话的工具表因此变化：`prefixVer` 加一，快照更新；其他会话的快照不变。
+  - 这几类会话的工具表因此变化：`prefixVer` 加一，快照更新；其他会话的快照内容不变，只有金样第一行的 `prefixVer` 跟着改。
+  - 工具结果开头的"[本轮验收凭据]"现在只在有 Agenda 的会话里给模型看；有 Report 的会话也要给，不然分支、定时任务、Hook 里的 ready 拿不到凭据。
 - 汇报的是哪件事，由宿主从这一轮推出，不由模型填：
   - life 的这一轮看 `mindRun.Trigger`：议程项优先，其次意图。自己安排的检查不对应任何承诺，Report 拒绝。
   - 分支汇报的是分支自己。
@@ -885,7 +891,7 @@ type CommitRec struct {
 - 先记再说：
   - Report 先写进记录，写成功才返回成功，之后才可能推送（见 4c）。
   - 写不进去时，返回错误给模型，健康条目 `commitments` 为 degraded。这个条目在网关启动时认领。
-- 内存里的状态：启动时重放记录，每件事只留最近一条汇报，和最近 16 个看过的 `Mark`。
+- 内存里的状态：启动时重放记录，每件事只留最近一条汇报、最近一条要主人知道的汇报，和最近 16 个看过的 `Mark`。
 - 压缩：文件超过 8MB 时用 `Rewrite` 整份重写，只保留内存里的这些。删掉的承诺（删分支、删任务、删规则）的记录在这时丢掉。
 
 **接口**：
@@ -901,6 +907,9 @@ type CommitRec struct {
   - 这几种都被拒绝：没有凭据的 ready、没有 text 的 blocked、自己安排的检查里的 Report、Hook 里带问题的 Report。
   - 写不进记录时返回错误，健康状态变化。
   - 重启后最近一条汇报还在。
+  - 在分支或定时任务里调一个真实的工具，模型看得到它的凭据，用它 Report ready 能成功。
+- 汇报叠加：宿主的受阻不被汇报的就绪盖住；之后的 progress 不顶掉还没回答的问题。
+- 主人取消日程、归档分支不会变成受阻；升级前引入过结论的分支不算就绪。
 - 没用 Report 时，现有的消息、投递和存储都不变。
 - 快照：life、分支、定时任务、Hook 四类会话的快照各更新一份，其余快照不变。
 
