@@ -72,7 +72,7 @@ var Commands = []Command{
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
 	{Name: "sleep", Desc: "让 agent 现在去整理记忆（睡觉做梦）", Admin: true},
 	{Name: "wake", Desc: "叫醒拟人型 agent，让它自己待一会儿（冲浪、想事情、找人聊天）", Admin: true},
-	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "session", Args: "[编号 | new 名字 | fork [--attention] [标题]]", Desc: "查看会话；切换到别的会话、新建一个会话、分出一个分支（--attention：分支汇报结果时通知这里）", Admin: true},
 	{Name: "branch", Args: "[report <分支编号>]", Desc: "查看这个会话的安静分支；把某个分支的结论带回这个会话"},
 	{Name: "pending", Desc: "列出等你处理的事：受阻的、做完了等你看的", Admin: true},
 	{Name: "answer", Args: "<编号> <回答>", Desc: "回答一件等你处理的事里的问题", Admin: true},

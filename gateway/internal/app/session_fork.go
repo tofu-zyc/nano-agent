@@ -174,8 +174,11 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 		title = "分支 " + a.now().Format("01-02 15:04")
 	}
 	delivery := session.BranchDeliverySilent
-	if req.Delivery == session.BranchDeliveryReport {
+	switch {
+	case req.Delivery == session.BranchDeliveryReport:
 		delivery = session.BranchDeliveryReport // 只有用户明确要求时才带回结果
+	case req.Delivery == session.BranchDeliveryAttention && !autonomousForker(req.By):
+		delivery = session.BranchDeliveryAttention // 同样只有主人明确要求；自主活动分出的只能是 silent
 	}
 	by := req.By
 	if by == "" {
@@ -880,7 +883,7 @@ func (a *App) branchSilent(sid string) bool {
 	if inv := a.sessionHook(sid); inv != nil {
 		return inv.work.Delivery.Silent || inv.work.Spec.Handler.Conversation == "branch"
 	}
-	if a.branchDelivery(sid) == session.BranchDeliverySilent {
+	if d := a.branchDelivery(sid); d == session.BranchDeliverySilent || d == session.BranchDeliveryAttention {
 		return true
 	}
 	// 从安静分支派生出来的定时任务同样安静：任务自己那一轮不对外发声（评审 §24 R1）
@@ -972,7 +975,7 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 			src = s.sid
 		}
 		res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: src, CallerSID: s.sid, Title: args.Title, Prompt: args.Prompt,
-			Start: args.Start != nil && *args.Start, Delivery: session.BranchDeliverySilent, RequestID: args.RequestID, By: from})
+			Start: args.Start != nil && *args.Start, Delivery: args.Delivery, RequestID: args.RequestID, By: from})
 		if err != nil {
 			return err.Error(), false
 		}
@@ -1042,10 +1045,14 @@ func (a *App) runBy(s *sess) string {
 // cmdSessionFork 是用户入口：/session fork [标题]
 func (a *App) cmdSessionFork(c in, title string) {
 	title = strings.TrimSpace(title)
+	delivery := ""
+	if first, rest, _ := strings.Cut(title, " "); first == "--attention" || first == "attention" {
+		delivery, title = session.BranchDeliveryAttention, strings.TrimSpace(rest)
+	}
 	if title == "" {
 		title = "分支 " + a.now().Format("01-02 15:04")
 	}
-	res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: c.s.sid, CallerSID: c.s.sid, Title: title, By: c.who})
+	res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: c.s.sid, CallerSID: c.s.sid, Title: title, By: c.who, Delivery: delivery})
 	if err != nil {
 		a.answer(c, "创建分支失败："+err.Error())
 		return
@@ -1056,6 +1063,9 @@ func (a *App) cmdSessionFork(c in, title string) {
 		text = "已登记分支 " + res.BranchSID + "，等当前这一轮结束（工具批次和生成都完成）后才会复制上下文并发布 ready。"
 	} else if res.Status == session.BranchPreparing {
 		text = "已创建分支记录 " + res.BranchSID + "，正在保存固定边界上下文（preparing），尚未就绪；原聊天窗口继续使用。"
+	}
+	if delivery == session.BranchDeliveryAttention {
+		text += "它平时安静；汇报就绪、受阻或失败时会通知这个聊天。"
 	}
 	a.answer(c, text)
 }
@@ -1112,7 +1122,7 @@ func sessionTool() proto.ToolSpec {
     "title": {"type": "string", "description": "分支标题"},
     "prompt": {"type": "string", "description": "start=true 或 continue 时，这一轮要在分支里做什么"},
     "start": {"type": "boolean", "description": "建完就在分支里开始跑"},
-    "delivery": {"type": "string", "enum": ["silent"], "description": "结果留在分支里；只有用户显式操作可以开启报告"},
+    "delivery": {"type": "string", "enum": ["silent", "attention"], "description": "silent（默认）：结果留在分支里；attention：只有分支汇报 ready、blocked、failed 时通知主人，仅主人明确要求时用"},
     "request_id": {"type": "string", "description": "幂等键：同一个 request_id 重试返回同一个分支"}
   },
   "required": ["action"]

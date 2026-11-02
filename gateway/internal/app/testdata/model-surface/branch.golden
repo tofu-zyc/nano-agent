@@ -1,7 +1,7 @@
 prefixVer: 13
 system bytes: 21
-tools bytes: 4931
-total bytes: 4952
+tools bytes: 5038
+total bytes: 5059
 
 == system ==
 你是测试机器人
@@ -119,9 +119,10 @@ total bytes: 4952
           "delivery": {
             "type": "string",
             "enum": [
-              "silent"
+              "silent",
+              "attention"
             ],
-            "description": "结果留在分支里；只有用户显式操作可以开启报告"
+            "description": "silent（默认）：结果留在分支里；attention：只有分支汇报 ready、blocked、failed 时通知主人，仅主人明确要求时用"
           },
           "request_id": {
             "type": "string",

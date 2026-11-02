@@ -204,3 +204,36 @@ func TestStoreProgressDoesNotReplaceNotice(t *testing.T) {
 	defer s2.Close()
 	check(s2, "重放后")
 }
+
+// 推送记录：每件事留最近 MaxNotes 条，重放和压缩之后一样；已经不在的承诺在压缩时丢掉。
+func TestStoreNotesReplayAndCompact(t *testing.T) {
+	s, path := open(t)
+	for i := 0; i < MaxNotes+2; i++ {
+		if _, err := s.Append(CommitRec{Type: TypeNotify, Kind: KindBranch, ID: "b1", Status: "ready", Text: fmt.Sprintf("第%d版", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Append(CommitRec{Type: TypeNotify, Kind: KindBranch, ID: "gone", Status: "ready", Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	notes := s.Notes(KindBranch, "b1")
+	if len(notes) != MaxNotes || notes[len(notes)-1].Text != fmt.Sprintf("第%d版", MaxNotes+1) {
+		t.Fatalf("留最近 %d 条：%+v", MaxNotes, notes)
+	}
+	s.Alive = func() func(kind, id string) bool { return func(_, id string) bool { return id == "b1" } }
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := s2.Notes(KindBranch, "b1"); len(got) != MaxNotes || got[0].Text != "第2版" {
+		t.Fatalf("压缩后重放一样：%+v", got)
+	}
+	if got := s2.Notes(KindBranch, "gone"); len(got) != 0 {
+		t.Fatalf("不在的承诺压缩时丢掉：%+v", got)
+	}
+}

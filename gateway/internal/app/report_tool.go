@@ -142,6 +142,12 @@ func (a *App) reportCall(s *sess, raw []byte) (string, error) {
 	a.commitHealth(nil)
 	s.run.reports++
 	a.publishCommitments()
+	if kind == commit.KindBranch && a.branchAttention(id) {
+		switch x.Status {
+		case commit.StatusReady, commit.StatusBlocked, commit.StatusFailed:
+			a.attentionPush(id, x.Status, x.Text, x.Question, fmt.Sprint(rec.Seq))
+		}
+	}
 	switch x.Status {
 	case commit.StatusProgress, commit.StatusWaiting:
 		return fmt.Sprintf("记下了（%s）。这一笔不会发给任何人。", x.Status), nil

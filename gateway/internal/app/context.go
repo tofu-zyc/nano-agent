@@ -33,6 +33,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if isCronSID(sid) {
 		system = strings.TrimSpace(system + "\n\n" + cronGuide)
 	}
+	if a.branchAttention(sid) {
+		system += attentionNote
+	}
 	// 群聊：人格后面加上群聊守则（agents/<id>/group.md 或内置的），内容对这个群保持不变
 	if a.isGroupSession(sid) {
 		if g := a.groupGuide(a.agentOf(sid).ID); g != "" {

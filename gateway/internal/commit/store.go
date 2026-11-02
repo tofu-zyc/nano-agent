@@ -17,6 +17,7 @@ const (
 	FileLimit    = 16 << 20 // 整份
 	compactAt    = 8 << 20  // 超过这么大就整份重写
 	MaxMarks     = 16       // 每件事留最近几个看过的 Mark
+	MaxNotes     = 4        // 每件事留最近几条推送记录（去重和限频用）
 	recordFormat = 1
 )
 
@@ -25,6 +26,7 @@ const (
 	TypeReport = "report" // 干活的会话汇报
 	TypeSeen   = "seen"   // 主人点了“知道了”
 	TypeAnswer = "answer" // 主人回答了问题
+	TypeNotify = "notify" // 给主人推了一条通知（attention 分支）：Status、Text 是推的内容
 )
 
 // 汇报的状态。
@@ -66,6 +68,7 @@ type Store struct {
 	report map[key]CommitRec   // 每件事最近一条汇报（列表里显示）
 	notice map[key]CommitRec   // 每件事最近一条要主人知道的汇报（ready、blocked、failed、not_needed）：叠加只看它，progress 和 waiting 顶不掉它
 	marks  map[key][]CommitRec // 每件事最近的看过 / 回答（最多 MaxMarks 条，旧的在前）
+	notes  map[key][]CommitRec // 每件事最近的推送（最多 MaxNotes 条，旧的在前）
 	// Alive 在压缩时调用一次，返回“这件承诺还在不在”的判断；不在的记录在这时丢掉。没设就都留着。
 	Alive func() func(kind, id string) bool
 	// Now 给记录打时间（毫秒）；没设用真实时间。
@@ -74,7 +77,7 @@ type Store struct {
 
 // Open 打开（不存在就创建）并重放记录。文件损坏、版本不支持时返回错误，文件保持原样。
 func Open(path string) (*Store, error) {
-	s := &Store{report: map[key]CommitRec{}, notice: map[key]CommitRec{}, marks: map[key][]CommitRec{}}
+	s := &Store{report: map[key]CommitRec{}, notice: map[key]CommitRec{}, marks: map[key][]CommitRec{}, notes: map[key][]CommitRec{}}
 	j, err := journal.Open(path, recordFormat, journal.Limits{Record: RecordLimit, File: FileLimit}, func(_ uint64, data json.RawMessage) error {
 		var r CommitRec
 		if err := json.Unmarshal(data, &r); err != nil {
@@ -101,6 +104,12 @@ func (s *Store) apply(r CommitRec) {
 		if NeedsAttention(r.Status) {
 			s.notice[k] = r
 		}
+	case TypeNotify:
+		n := append(s.notes[k], r)
+		if len(n) > MaxNotes {
+			n = n[len(n)-MaxNotes:]
+		}
+		s.notes[k] = n
 	case TypeSeen, TypeAnswer:
 		m := append(s.marks[k], r)
 		if len(m) > MaxMarks {
@@ -125,7 +134,7 @@ func (s *Store) Append(r CommitRec) (CommitRec, error) {
 		return CommitRec{}, fmt.Errorf("承诺记录要有种类和 ID")
 	}
 	switch r.Type {
-	case TypeReport, TypeSeen, TypeAnswer:
+	case TypeReport, TypeSeen, TypeAnswer, TypeNotify:
 	default:
 		return CommitRec{}, fmt.Errorf("不认识的记录种类：%s", r.Type)
 	}
@@ -188,6 +197,9 @@ func (s *Store) Answer(kind, id, mark string) (CommitRec, bool) {
 	return CommitRec{}, false
 }
 
+// Notes 是这件事最近的推送（旧的在前）。
+func (s *Store) Notes(kind, id string) []CommitRec { return s.notes[key{kind, id}] }
+
 // LastSeq 是已经写下的最大序号。
 func (s *Store) LastSeq() uint64 { return s.seq }
 
@@ -216,6 +228,11 @@ func (s *Store) Compact() error {
 			keep = append(keep, rs...)
 		}
 	}
+	for k, rs := range s.notes {
+		if alive(k) {
+			keep = append(keep, rs...)
+		}
+	}
 	// 按原来的序号排，重写后回放得到同样的状态
 	for i := 1; i < len(keep); i++ {
 		for j := i; j > 0 && keep[j-1].Seq > keep[j].Seq; j-- {
@@ -238,6 +255,11 @@ func (s *Store) Compact() error {
 	for k := range s.marks {
 		if !alive(k) {
 			delete(s.marks, k)
+		}
+	}
+	for k := range s.notes {
+		if !alive(k) {
+			delete(s.notes, k)
 		}
 	}
 	return nil
