@@ -287,32 +287,9 @@ func (s *State) RecordReach(id string, now time.Time, loc *time.Location) {
 	s.SettleLedger(LedgerReach, "", id, 0, now, loc)
 }
 
-// SeedLedger 把旧 life.json 里的当日次数和 token 导进账本（只导一次，由调用方判断）。
-func (s *State) SeedLedger(source string, starts, tokens int, now time.Time, loc *time.Location) {
-	if starts <= 0 && tokens <= 0 {
-		return
-	}
-	u := s.ledgerEntry(LedgerDay(now, loc), tzName(loc), source, true)
-	if u == nil || u.Starts > 0 || u.Tokens > 0 {
-		return
-	}
-	u.Starts, u.Tokens = starts, tokens
-	s.refreshBudget()
-	s.Touch()
-}
-
 func tzName(loc *time.Location) string {
 	if loc == nil {
 		return "UTC"
 	}
 	return loc.String()
-}
-
-// dayStart 是一个 YYYY-MM-DD 日期的中午（UTC）：只用来按日期落到账本的某一天。
-func dayStart(day string) time.Time {
-	t, err := time.ParseInLocation("2006-01-02", day, time.UTC)
-	if err != nil {
-		return time.Now()
-	}
-	return t.Add(12 * time.Hour)
 }

@@ -184,7 +184,7 @@ func TestAutonomyBudgetBlocksAndRecovers(t *testing.T) {
 	setNow(e, base)
 	addAgendaCall(t, e, `{"action":"add","title":"用掉今天预算","kind":"commitment","when":"15:10"}`)
 	e.a.mu.Lock()
-	e.a.mindOf("default").Spend(100)
+	e.a.mindOf("default").SpendAt(100, e.a.now().In(e.a.loc), e.a.loc)
 	e.a.mu.Unlock()
 	setNow(e, base.Add(11*time.Minute))
 	e.a.autonomyTick()

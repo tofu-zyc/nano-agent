@@ -166,7 +166,7 @@ make install
 - `agents/`：每个 agent 一个目录，里面是它的人格 `persona.md`（v0.5 起）；v0.6 起还有它的长期记忆 `knowledge/`（一条一个 Markdown 文件，人物画像在 `people/` 下）、自我认知 `self.md`、梦境日志 `dreams/`、整理进度 `dream-state.json`，可选的 `life.md`（拟人守则）、`group.md`（群聊守则）、`skills/`（它自己的技能）
 - `knowledge/`：所有 agent 共用的知识（v0.6 起）
 - `personas/`：给某个会话单独用的人格；`skills/`：所有 agent 共用的技能
-- `data/agents.json`、`data/bots.json`：agent 和机器人的配置（凭据加密）；`data/life.json`、`data/autonomy.json`：拟人型的作息与回访、心智与日程和活动账本
+- `data/agents.json`、`data/bots.json`：agent 和机器人的配置（凭据加密）；`data/autonomy.json`：拟人型的心智与日程、活动账本、作息和回访（旧版的 `life.json` 第一次启动时并进来，改名为 `life.json.imported`）
 - `data/`：会话、模型、SSH 连接、图片、日志
 - `secret.key`：第一次启动时生成的加密密钥（0600）
 - `run/`：unix socket 和 SSH 控制 socket

@@ -405,14 +405,6 @@ func (s *State) SpendAt(tokens int, now time.Time, loc *time.Location) {
 	s.AddLedgerTokens(LedgerOther, tokens, now, loc)
 }
 
-// Spend 同 SpendAt，记在当前的预算日（没有就用今天的 UTC 日期）。
-func (s *State) Spend(tokens int) {
-	if s.Budget.Day == "" {
-		s.Budget.Day = LedgerDay(time.Now(), time.UTC)
-	}
-	s.AddLedgerTokens(LedgerOther, tokens, dayStart(s.Budget.Day), time.UTC)
-}
-
 // AddEvent 把事件放进队列；同一个 Dedupe 在 ttl 内重复到达就合并掉。返回是否真的加进去了。
 func (s *State) AddEvent(e Event, now time.Time, ttl time.Duration) bool {
 	if e.Kind == "" {

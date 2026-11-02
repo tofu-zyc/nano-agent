@@ -5,7 +5,8 @@ package app
 // 拟人型 agent 有作息：醒着的时间里，按活跃度隔一阵自己醒一次（越久没人找它越容易醒），在
 // @<id>/life 会话里想事情、上网冲浪（WebSearch/WebFetch）、记东西（Knowledge）、找人聊天（Message）。
 // 醒来干什么写在 life 技能里（skills/life/SKILL.md）。每次的最终回复是它的“近况”，带进它的其他聊天。
-// 状态（下次醒来、今天醒了几次、主动找了几次人、近况、谁还没回）存在 data/life.json。
+// 状态（下次醒来、今天醒了几次和用了多少 token、主动找了几次人、谁还没回、回访）都在 autonomy.State（data/autonomy.json）里，
+// 近况取自经历；旧的 data/life.json 只在第一次启动时导入一次（life_import.go）。
 
 import (
 	"encoding/json"

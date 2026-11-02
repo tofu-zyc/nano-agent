@@ -8,7 +8,8 @@ package app
 //   - 真实执行结果写回状态，再决定下次什么时候看；
 //   - 内心决策、资源占用、主动联系分开判断：不再要求“最近 20 分钟没人找”。
 //
-// 旧版 life.json 继续保留（近况、主动找了谁、FollowUp），只把“什么时候醒”交给心智状态。
+// 状态都在这一份里（data/autonomy.json）：下次醒来、今天的次数和用量（账本）、主动找了谁、FollowUp；
+// 旧版 data/life.json 只在第一次启动时导入一次（life_import.go）。
 
 import (
 	"encoding/json"
@@ -1105,11 +1106,9 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			}
 		}
 		{
-			var exploration, commitment, hook, manual int
+			var commitment, hook, manual int
 			for _, row := range v.Ledger {
 				switch row.Source {
-				case autonomy.LedgerExploration:
-					exploration = row.Starts
 				case autonomy.LedgerCommitment:
 					commitment = row.Starts
 				case autonomy.LedgerHook:
@@ -1118,7 +1117,6 @@ func (a *App) cmdAutonomy(c in, arg string) {
 					manual = row.Starts
 				}
 			}
-			_ = exploration
 			wakes, limit := a.wakesToday(st, now), effectiveLifePolicy(ag).MaxWakes
 			if limit > 0 {
 				fmt.Fprintf(&b, "今天：探索 %d / %d 次", wakes, limit)
