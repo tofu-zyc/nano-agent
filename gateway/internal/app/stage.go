@@ -359,6 +359,15 @@ func (a *App) sceneIsolated(sid string) bool {
 	return ok && sc.Rules.Stage
 }
 
+// sceneSealed 一场戏的群记录和成员会话只追加：Line 和 Cursors 都假定它们不会被清空、撤回或删除。
+// 在清空、撤回、删历史、删会话的入口、任何副作用之前调用。
+func (a *App) sceneSealed(sid string) error {
+	if a.sceneIsolated(sid) {
+		return errors.New("这是一场戏，群记录和成员的会话只追加，不能清空、撤回或删除；要重来就从某一句分出平行世界")
+	}
+	return nil
+}
+
 // ---- 接口：时间线 ----
 
 // stageFile 是群的场景记录文件；不是一场戏返回错误。

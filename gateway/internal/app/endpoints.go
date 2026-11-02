@@ -378,6 +378,9 @@ func (a *App) DeleteSession(sid string) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
+	if err := a.sceneSealed(sid); err != nil {
+		return err
+	}
 	if s := a.sessions[sid]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return errors.New("这个会话有任务在跑，先停止再删除")
 	}

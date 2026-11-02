@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -87,7 +88,9 @@ func firstLineOf(t *testing.T, recs []StageRec, member string) int {
 
 func TestStageForkTakesPrefixAndLeavesOriginalAlone(t *testing.T) {
 	e := setup(t)
-	m := &scriptModel{reply: say}
+	m := &scriptModel{reply: func(who string, n int) (string, error) {
+		return fmt.Sprintf("<心里>%s想第%d次</心里>%s说第%d句", who, n, who, n), nil
+	}}
 	id, _ := turnRoom(t, e, stageRules(scene.Rules{Order: []string{"default", "bob", "cat"}, Rounds: 3, Inner: true}), m)
 	e.a.RoomSay(id, "夜深了", "旁白", "", "我")
 	runRounds(t, e, id, 3, "default", "bob", "cat")
@@ -133,8 +136,8 @@ func TestStageForkTakesPrefixAndLeavesOriginalAlone(t *testing.T) {
 			cut = i + 1
 		}
 	}
-	if len(fork.stage) != cut+1 {
-		t.Fatalf("场景记录 %d 条，应为 %d+1", len(fork.stage), cut)
+	if len(fork.stage) != cut+2 {
+		t.Fatalf("场景记录 %d 条，应为 %d+run+fork", len(fork.stage), cut)
 	}
 	for i := 0; i < cut; i++ {
 		x, y := orig.stage[i], fork.stage[i]
@@ -145,7 +148,12 @@ func TestStageForkTakesPrefixAndLeavesOriginalAlone(t *testing.T) {
 			t.Fatalf("新文件的序号要连续：%d", y.Seq)
 		}
 	}
-	last := fork.stage[cut]
+	// 说出第 at 句的那一轮的 run 跟在后面：心里话和用量都在
+	run := fork.stage[cut]
+	if run.Kind != "run" || run.Said != at || run.Member != "cat" || run.Inner != "cat想第1次" || run.Usage == nil || run.Usage.PromptTokens == 0 {
+		t.Fatalf("第 %d 句那一轮的 run 要带过来：%+v", at, run)
+	}
+	last := fork.stage[cut+1]
 	if last.Kind != "fork" || !strings.Contains(string(last.Detail), id) || !strings.Contains(string(last.Detail), `"at":`) {
 		t.Fatalf("最后一条是 fork：%+v %s", last, last.Detail)
 	}
@@ -303,5 +311,21 @@ func TestStageForkFailureLeavesNothingBehind(t *testing.T) {
 				t.Errorf("%s：留下了文件 %s", step, en.Name())
 			}
 		}
+	}
+}
+
+// 名字只有空格时按没填处理。
+func TestStageForkBlankNameUsesDefault(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	room, _ := threeRoom(t, e, stageRules(scene.Rules{Mode: scene.ModeMention}))
+	e.a.RoomSay(room.ID, "第一句", "张三", "", "我")
+	info, err := e.a.ForkRoom(room.ID, ForkRequest{At: 1, Name: "   "})
+	if err != nil || info.Name != "群 · 平行 1" {
+		t.Fatalf("%v %q", err, info.Name)
+	}
+	info, err = e.a.ForkRoom(room.ID, ForkRequest{At: 1, Name: "  我的名字 "})
+	if err != nil || info.Name != "我的名字" {
+		t.Fatalf("%v %q", err, info.Name)
 	}
 }

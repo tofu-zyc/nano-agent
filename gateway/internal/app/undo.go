@@ -70,6 +70,9 @@ func (a *App) UndoSession(sid string) (string, error) {
 	if !a.hasSession(sid) {
 		return "", errors.New("没有这个会话")
 	}
+	if err := a.sceneSealed(sid); err != nil {
+		return "", err
+	}
 	text, note, pending, err := a.undoLatest(a.sessOf(sid))
 	if err == nil && !pending {
 		a.publish(events.Event{T: "say", SID: sid, Text: note})

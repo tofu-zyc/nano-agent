@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/journal"
@@ -58,9 +59,13 @@ func (a *App) ForkRoom(id string, req ForkRequest) (RoomInfo, error) {
 	var recs []StageRec
 	cut, lastLine, nearest := -1, 0, 0
 	var cursors map[string]int
+	var runRec *StageRec // 说出第 at 句的那一轮的 run：写在 cursors 后面，心里话和用量在里面
 	if err := readStage(a.stagePath(id), func(r StageRec) bool {
 		recs = append(recs, r)
 		switch {
+		case r.Kind == "run" && r.Said == req.At && runRec == nil:
+			rr := r
+			runRec = &rr
 		case r.Kind == "line":
 			lastLine = max(lastLine, r.Line)
 		case r.Kind == "cursors" && r.Line == req.At:
@@ -82,6 +87,9 @@ func (a *App) ForkRoom(id string, req ForkRequest) (RoomInfo, error) {
 		return RoomInfo{}, fmt.Errorf("第 %d 句不能分出（那一刻有成员正在说话），之前也没有可以分出的句子", req.At)
 	}
 	recs = recs[:cut]
+	if runRec != nil {
+		recs = append(recs, *runRec)
+	}
 
 	// 群记录和成员会话的前缀
 	logMsgs := a.store.Archive(roomLogSID(id))
@@ -165,7 +173,7 @@ func (a *App) ForkRoom(id string, req ForkRequest) (RoomInfo, error) {
 		return fail(err)
 	}
 	// 新群：成员、禁言、规则照抄（含 stage）；用量从零开始，轮流从顺序的第一位开始
-	name := req.Name
+	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = a.forkName(room.Name)
 	}

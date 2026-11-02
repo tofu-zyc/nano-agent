@@ -452,6 +452,9 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 func (a *App) ResetSession(sid string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.sceneSealed(sid); err != nil {
+		return err
+	}
 	if s := a.sessions[sid]; s != nil && s.run != nil {
 		s.queue = nil
 		s.resetAfter = true
