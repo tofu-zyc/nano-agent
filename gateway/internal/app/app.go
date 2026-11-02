@@ -230,7 +230,6 @@ type App struct {
 	agentSkills    map[string]*skills.Registry // 每个 agent 自己的技能目录
 	dreams         map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
 	bootAt         time.Time                   // 网关启动的时间（算“空闲多久”的起点）
-	lifes          map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
 	minds          map[string]*autonomy.State  // 自主活动的心智状态（autonomy.go，data/autonomy.json）
 	mindsLoaded    bool
 	mindMachines   map[string]bool            // 已通知心智状态的设备在线状态

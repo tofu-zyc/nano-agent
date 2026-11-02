@@ -65,6 +65,9 @@ func (a *App) loadMinds() {
 	}
 	b, err := os.ReadFile(a.autonomyFile())
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			a.importLifeOnLoad() // 还没有 autonomy.json：旧的 life.json 照样要并进来
+		}
 		return
 	}
 	var doc autonomyDoc
@@ -91,7 +94,7 @@ func (a *App) loadMinds() {
 		}
 	}
 	if needsMigration {
-		backup := a.autonomyFile() + ".schema1.bak"
+		backup := fmt.Sprintf("%s.schema%d.bak", a.autonomyFile(), doc.Version) // 迁移前的样子留一份
 		if saved, readErr := os.ReadFile(backup); readErr == nil {
 			if !json.Valid(saved) {
 				a.setMindsErr(fmt.Errorf("旧自主状态备份损坏，保留现场"))
@@ -130,6 +133,9 @@ func (a *App) loadMinds() {
 			a.minds[id] = st
 		}
 	}
+	if !a.importLifeOnLoad() {
+		return
+	}
 	if needsMigration {
 		a.saveMinds()
 	}
@@ -140,20 +146,24 @@ func (a *App) saveMinds() {
 	if a.minds == nil || a.mindsErr != nil {
 		return
 	}
-	doc := autonomyDoc{Version: autonomy.SchemaVersion, Agents: a.minds}
+	if err := a.writeMinds(a.minds); err != nil {
+		a.log.Warn("保存自主活动状态失败", "err", err)
+	}
+}
+
+// writeMinds 把给定的状态整份写进 data/autonomy.json（先写临时文件再原子替换）。
+func (a *App) writeMinds(agents map[string]*autonomy.State) error {
+	doc := autonomyDoc{Version: autonomy.SchemaVersion, Agents: agents}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		a.log.Warn("自主活动状态序列化失败", "err", err)
-		return
+		return fmt.Errorf("序列化失败：%w", err)
 	}
 	p := a.autonomyFile()
 	tmp := p + ".tmp"
 	if err = os.WriteFile(tmp, b, 0o600); err == nil {
 		err = os.Rename(tmp, p)
 	}
-	if err != nil {
-		a.log.Warn("保存自主活动状态失败", "err", err)
-	}
+	return err
 }
 
 // mind 是 agent 的心智状态；第一次用时从磁盘读、导入旧近况、处理重启。调用方持有锁。
@@ -254,33 +264,28 @@ func (a *App) lifeBegin(ag agents.Agent) {
 	if !ag.Life() || a.agentRoot == "" {
 		return
 	}
-	ls := a.lifeOf(ag.ID)
 	st := a.mind(ag.ID)
-	if ls.Next == 0 {
-		ls.Next = a.now().Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))).Unix()
-	}
-	// 心智状态的下次检查和旧的 Next 保持同一个时间
 	if st.NextCheck == 0 {
-		st.SetNextCheck(time.Unix(ls.Next, 0))
+		st.SetNextCheck(a.now().Add(5*time.Minute + time.Duration(a.random()*float64(10*time.Minute))))
 	}
-	a.saveLife()
 	a.saveMinds()
 	a.publish(events.Event{T: "life", Name: ag.ID, Kind: "next"})
 }
 
 // lifeBlocked 是旧版（固定间隔醒来）的说明，保留给状态显示；20 分钟空闲门槛已经取消。
 // 新的判断在 autonomy.Trigger.CanStart 里，按约定/探索、作息、次数、预算分别判断。
-func (a *App) lifeBlocked(ag agents.Agent, ls *lifeState, now time.Time) string {
+func (a *App) lifeBlocked(ag agents.Agent, now time.Time) string {
+	st := a.mind(ag.ID)
 	if !a.awakeOf(ag).contains(now) {
 		return "睡着"
 	}
-	if b := pickInt(ag.LifeBudget, 0); b > 0 && ls.Tokens >= b {
+	if b := pickInt(ag.LifeBudget, 0); b > 0 && a.tokensToday(st, now) >= b {
 		return "今天的预算用完了"
 	}
 	if s := a.sessions[lifeSID(ag.ID)]; s != nil && (s.run != nil || len(s.queue) > 0 || s.compacting) {
 		return "正在想事情"
 	}
-	if p := effectiveLifePolicy(ag); !p.WakesUnlimited() && ls.Wakes >= p.MaxWakes {
+	if p := effectiveLifePolicy(ag); !p.WakesUnlimited() && a.wakesToday(st, now) >= p.MaxWakes {
 		return "今天醒够了"
 	}
 	return ""
@@ -318,28 +323,24 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	if a.mindsErr != nil {
 		return
 	}
-	ls := a.lifeOf(ag.ID)
-	// 旧版约好的回访（FollowUp）仍然是自己的执行者，先处理
-	a.followUpTick(ag, ls, now)
 	st := a.mind(ag.ID)
+	// 旧版约好的回访（FollowUp）仍然是自己的执行者，先处理
+	a.followUpTick(ag, st, now)
 	limit := pickInt(ag.LifeBudget, 0)
 	st.SetBudgetLimit(limit)
 	if st.RollDay(now, a.loc) {
-		ls.Tokens = 0
-		a.saveLife()
+		a.saveMinds()
 	}
 	if st.Paused {
-		a.mirrorNextCheck(st, ls)
 		return
 	}
-	if ls.Next == 0 && st.NextCheck == 0 {
+	if st.NextCheck == 0 {
 		a.lifeBegin(ag) // 刚变成拟人型 / 第一次启动：安排第一次自己活动
 	}
 	a.syncDimensions(ag)
 	st.SetRuntime(a.dimensionRuntime(ag))
 	trig := st.Next(now)
 	if trig == nil {
-		a.mirrorNextCheck(st, ls)
 		return
 	}
 	// 资源占用：内心会话正在跑 / 整理上下文，等一会儿再看（不丢意图）
@@ -360,7 +361,7 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 		return
 	}
 	opts := autonomy.StartOptions{Paused: st.Paused, Awake: a.awakeOf(ag).contains(now), BudgetLeft: st.BudgetLeft(limit),
-		Wakes: ls.Wakes, MaxWakes: effectiveLifePolicy(ag).MaxWakes}
+		Wakes: a.wakesToday(st, now), MaxWakes: effectiveLifePolicy(ag).MaxWakes}
 	if ok, why := trig.CanStart(opts); !ok {
 		next := now.Add(15 * time.Minute)
 		switch {
@@ -381,18 +382,6 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	}
 	if err := a.startMindLocked(ag, st, *trig, false); err != nil {
 		a.log.Warn("自主活动没能开始", "agent", ag.ID, "err", err)
-	}
-}
-
-// mirrorNextCheck 把心智状态的下次检查同步到旧版 life.json（网页、状态都用它显示）。
-func (a *App) mirrorNextCheck(st *autonomy.State, ls *lifeState) {
-	next, ok := st.NextDueTime()
-	if st.Paused || !ok {
-		return
-	}
-	if ls.Next != next.Unix() {
-		ls.Next = next.Unix()
-		a.saveLife()
 	}
 }
 
@@ -431,7 +420,7 @@ func (a *App) startLife(agentID string, manual bool) error {
 		return errors.New("没有在线的内核")
 	}
 	opts := autonomy.StartOptions{Paused: st.Paused, Awake: a.awakeOf(ag).contains(now),
-		BudgetLeft: st.BudgetLeft(pickInt(ag.LifeBudget, 0)), Wakes: a.lifeOf(agentID).Wakes,
+		BudgetLeft: st.BudgetLeft(pickInt(ag.LifeBudget, 0)), Wakes: a.wakesToday(st, now),
 		MaxWakes: effectiveLifePolicy(ag).MaxWakes}
 	if manual {
 		opts.Paused, opts.Awake, opts.BudgetLeft = false, true, -1
@@ -634,15 +623,6 @@ func ledgerSource(trig autonomy.Trigger, manual, hook bool) string {
 	}
 }
 
-// migrateLifeLedger 把旧 life.json 的当日次数和 token 导一次进账本：
-// 升级当天不该显示成 0，只导一次（账本这一天已经有记录就不再动）。
-func (a *App) migrateLifeLedger(st *autonomy.State, ls *lifeState, now time.Time) {
-	if ls == nil || (ls.Wakes == 0 && ls.Tokens == 0) {
-		return
-	}
-	st.SeedLedger(autonomy.LedgerExploration, ls.Wakes, ls.Tokens, now, a.loc)
-}
-
 // startMindLocked 开一轮自主活动：内心会话、交接用的说明、状态先标成进行中。调用方持有锁。
 func (a *App) startMindLocked(ag agents.Agent, st *autonomy.State, trig autonomy.Trigger, manual bool) error {
 	return a.startMindWithHookLocked(ag, st, trig, manual, nil)
@@ -662,20 +642,11 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		return errors.New("它正在想事情")
 	}
 	now := a.now().In(a.loc)
-	ls := a.lifeOf(ag.ID)
-	// 旧 life.json 的当日次数先进账本，再记这一次（顺序反了会把这一次数两遍）
-	a.migrateLifeLedger(st, ls, now)
 	a.syncDimensions(ag)
-	// 先记次数，这样这次醒来的说明里能看到“第几次”；开始失败时下面会退回去
-	if !manual && trig.IsExploration() {
-		ls.Wakes++
-	}
 	if err := a.store.BeginEpisode(s.sid); err != nil {
-		if !manual && trig.IsExploration() {
-			ls.Wakes--
-		}
 		return fmt.Errorf("开启内心片段失败：%w", err)
 	}
+	// 先在账本里预留一次（这样这次醒来的说明里能看到“第几次”）；开始失败时下面会退回去
 	source := ledgerSource(trig, manual, hook != nil)
 	resID := fmt.Sprintf("mind-%s-%d", ag.ID, now.UnixNano())
 	st.ReserveLedger(source, resID, now, a.loc)
@@ -686,9 +657,8 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		ids = append(ids, e.ID)
 	}
 	st.MarkStarted(trig, now)
-	ls.Next = now.Add(a.lifeInterval(ag, now)).Unix()
+	st.SetNextCheck(now.Add(a.lifeInterval(ag, now))) // 这一轮结束时会按真实的下一件事重排
 	a.saveMinds()
-	a.saveLife()
 	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source, Ledger: resID}
 	who := "life:" + ag.ID
 	if hook != nil {
@@ -701,12 +671,8 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		s.queue = nil
 		s.mind = nil
 		st.ReleaseLedger(resID)
-		if !manual && trig.IsExploration() {
-			ls.Wakes--
-		}
 		st.Retry(trig, "没能开始（没有可用的模型或在线的内核）", now, 5*time.Minute)
 		a.saveMinds()
-		a.saveLife()
 		return errors.New("没能开始：没有可用的模型或在线的内核")
 	}
 	st.MarkProcessed(ids)
@@ -750,12 +716,11 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 	if !a.awakeOf(ag).contains(now) {
 		b.WriteString("这是你平常睡觉的时间，只有明确的约定才现在做。")
 	}
-	ls := a.lifeOf(ag.ID)
 	p := effectiveLifePolicy(ag)
-	fmt.Fprintf(&b, "%s；%s。\n", p.wakeText(ls.Wakes), p.reachText(ls.Reaches))
+	fmt.Fprintf(&b, "%s；%s。\n", p.wakeText(a.wakesToday(st, now)), p.reachText(a.reachesToday(st, now)))
 	fmt.Fprintf(&b, "【要处理的】%s\n", trig.Reason)
 	b.WriteString(st.BriefForModel(now, a.loc))
-	for sid, f := range a.lifeOf(ag.ID).FollowUps {
+	for sid, f := range st.FollowUps {
 		fmt.Fprintf(&b, "\n【聊天回访】%s %s：%s；到点会在那个聊天里醒来，由那边处理，不是本片段的任务。\n", sid, time.Unix(f.At, 0).In(a.loc).Format("01-02 15:04"), f.Note)
 	}
 	b.WriteString("\n【最近的经历】以下都已经在当时的场合处理结束，只供了解，不是给你的任务；其中的上下文或会话指当时那个聊天。\n")
@@ -768,7 +733,7 @@ func (a *App) mindNote(ag agents.Agent, st *autonomy.State, trig autonomy.Trigge
 			if t.Last != "" {
 				b.WriteString("：" + t.Last)
 			}
-			if at, waiting := ls.Awaiting[strings.TrimPrefix(t.To, "chat:")]; waiting {
+			if at, waiting := st.Awaiting[strings.TrimPrefix(t.To, "chat:")]; waiting {
 				fmt.Fprintf(&b, "。你 %s 主动找过他，他还没回，先别再找他", agoText(now, at))
 			}
 			b.WriteString("\n")
@@ -852,7 +817,6 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 	} else {
 		st.Finish(rec, now, a.mindRetry(mr.Trigger, st))
 	}
-	st.Spend(tokens)
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
 	st.SettleLedger(mr.Source, mr.Ledger, r.runID, tokens, now, a.loc)
 	// 维度按自己的漂移速度回落向基线；越过阈值的发一条可靠事件，Hook 可以订阅
@@ -864,12 +828,7 @@ func (a *App) autonomyDone(s *sess, r *run, status, body string) {
 			"dimension": change.Name, "from": change.From, "to": change.To, "threshold": change.Threshold, "agent": mr.AgentID})
 	}
 	a.scheduleMindNext(st, ag, now)
-	ls := a.lifeOf(ag.ID)
-	if next, ok := st.NextDueTime(); ok {
-		ls.Next = next.Unix()
-	}
 	a.saveMinds()
-	a.saveLife()
 	a.log.Info("自主活动结束", "agent", ag.ID, "kind", mr.Trigger.Kind, "ok", okRun, "used_tools", r.usedTools,
 		"tokens", tokens, "status", status)
 	a.publishAutonomy(ag.ID)
@@ -893,7 +852,7 @@ func (a *App) mindAborted(s *sess, r *run, why string) {
 		IntentionID: mr.Trigger.IntentionID, RunSID: s.sid, Started: mr.Started.Unix(), Ended: now.Unix(),
 		OK: false, UsedTools: r.usedTools, Summary: why, Tokens: r.usage.PromptTokens + r.usage.CompletionTokens},
 		now, a.mindRetry(mr.Trigger, st))
-	st.Spend(r.usage.PromptTokens + r.usage.CompletionTokens)
+	st.AddLedgerTokens(mr.Source, r.usage.PromptTokens+r.usage.CompletionTokens, now, a.loc) // 被打断的活动：只记 token，次数不动
 	a.scheduleMindNext(st, ag, now)
 	a.saveMinds()
 	a.publishAutonomy(ag.ID)
@@ -1028,8 +987,7 @@ func (a *App) AutonomyAction(id string, x AutonomyActionReq) (autonomy.View, err
 			a.cancelRun(s)
 		}
 	case "resume":
-		st.SetPaused(false, "", now)
-		a.lifeOf(id).Next = now.Unix()
+		st.SetPaused(false, "", now) // 恢复时立刻检查一次（NextCheck 设成现在）
 	case "cancel_agenda":
 		if err := st.CancelAgenda(x.ID, x.Note, now); err != nil {
 			return autonomy.View{}, err
@@ -1168,10 +1126,8 @@ func (a *App) cmdAutonomy(c in, arg string) {
 					manual = row.Starts
 				}
 			}
-			wakes, limit := a.lifeOf(ag.ID).Wakes, effectiveLifePolicy(ag).MaxWakes
-			if exploration > wakes {
-				wakes = exploration
-			}
+			_ = exploration
+			wakes, limit := a.wakesToday(st, now), effectiveLifePolicy(ag).MaxWakes
 			if limit > 0 {
 				fmt.Fprintf(&b, "今天：探索 %d / %d 次", wakes, limit)
 			} else {
@@ -1213,8 +1169,6 @@ func (a *App) cmdAutonomy(c in, arg string) {
 			if s := a.sessions[lifeSID(ag.ID)]; s != nil && s.run != nil {
 				a.cancelRun(s)
 			}
-		} else {
-			a.lifeOf(ag.ID).Next = now.Unix()
 		}
 		a.afterMindChange(st, ag, now)
 		if pause {

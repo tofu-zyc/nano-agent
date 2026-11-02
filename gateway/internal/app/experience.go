@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/knowledge"
@@ -23,20 +22,6 @@ func (a *App) experienceOf(agent string) *experience.Store {
 		a.log.Warn("经历记录不可追加，保留现场", "agent", agent, "err", err)
 	}
 	a.experiences[agent] = s
-	// 旧近况保留读兼容，稳定来源键保证重启/部分导入不重复。
-	ls := a.lifeOf(agent)
-	if ls.ExperienceImported {
-		return s
-	}
-	for i, n := range ls.Recent {
-		e := experience.Entry{Kind: "life", Where: "旧版内心活动", Visible: "admin", Said: n.Text, Status: "ok", Sources: []string{fmt.Sprintf("legacy-recent:%d:%d", n.At, i)}}
-		if err := s.Append(e, time.Unix(n.At, 0)); err != nil {
-			a.log.Warn("旧近况导入失败", "agent", agent, "err", err)
-			return s
-		}
-	}
-	ls.ExperienceImported = true
-	a.saveLife()
 	return s
 }
 

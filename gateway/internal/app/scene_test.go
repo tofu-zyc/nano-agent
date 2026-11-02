@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"nano-agent/gateway/internal/autonomy"
 	"os"
 	"path/filepath"
 	"slices"
@@ -609,10 +610,10 @@ func TestFollowUpWaitsForSceneBudget(t *testing.T) {
 	ag, _ := store.Get(agents.DefaultID)
 	e.a.mu.Lock()
 	e.a.sceneUsage(ext, 100)
-	ls := e.a.lifeOf("default")
-	ls.FollowUps[ext] = followUp{At: e.a.now().Add(-time.Minute).Unix(), Note: "问问他"}
-	e.a.followUpTick(ag, ls, e.a.now())
-	_, kept := ls.FollowUps[ext]
+	st := e.a.mind("default")
+	st.FollowUpMap()[ext] = autonomy.FollowUp{At: e.a.now().Add(-time.Minute).Unix(), Note: "问问他"}
+	e.a.followUpTick(ag, st, e.a.now())
+	_, kept := st.FollowUps[ext]
 	e.a.mu.Unlock()
 	e.k.none()
 	if !kept {
@@ -620,7 +621,7 @@ func TestFollowUpWaitsForSceneBudget(t *testing.T) {
 	}
 	setNow(e, e.a.now().Add(24*time.Hour))
 	e.a.mu.Lock()
-	e.a.followUpTick(ag, ls, e.a.now())
+	e.a.followUpTick(ag, st, e.a.now())
 	e.a.mu.Unlock()
 	if in := e.k.expect(proto.TInput); in.SID != ext {
 		t.Fatalf("第二天应该触发：%+v", in)

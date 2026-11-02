@@ -758,20 +758,20 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
 	}
 	fromLife := isLifeSID(fromSID)
-	var ls *lifeState
+	var st *autonomy.State
 	if fromLife {
 		now := a.now().In(a.loc)
-		ls = a.lifeOf(agentID)
+		st = a.mind(agentID)
 		switch reach := pickString(ag.LifeReach, "owner"); {
 		case reach == "off":
 			return "", errors.New("你设成了不主动找人")
 		case reach == "owner" && !a.isOwnerSID(agentID, target):
 			return "", errors.New("你只能主动找主人（找人范围在 agent 设置里改）")
 		}
-		if at, waiting := ls.Awaiting[target]; waiting {
+		if at, waiting := st.Awaiting[target]; waiting {
 			return "", fmt.Errorf("你 %s 主动找过他，他还没回；等他回了再说", agoText(now, at))
 		}
-		if p := effectiveLifePolicy(ag); !p.ReachesUnlimited() && ls.Reaches >= p.MaxReaches {
+		if p := effectiveLifePolicy(ag); !p.ReachesUnlimited() && a.reachesToday(st, now) >= p.MaxReaches {
 			return "", errors.New("今天主动找人的次数用完了")
 		}
 		if !a.awakeOf(ag).contains(now) {
@@ -820,9 +820,10 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		where = chanName(ep.ch) + "里"
 	}
 	if fromLife {
-		ls.Awaiting[target] = a.now().Unix()
-		ls.Reaches++
-		a.saveLife()
+		now := a.now()
+		st.AwaitingMap()[target] = now.Unix()
+		st.RecordReach(st.NewID("reach"), now.In(a.loc), a.loc) // 账本里记一次找人
+		a.saveMinds()
 	}
 	a.log.Info("主动发了私聊消息", "agent", agentID, "to", target, "from", fromSID)
 	return "发出去了（" + where + "）。对方回了会在那个聊天里接着聊。", nil

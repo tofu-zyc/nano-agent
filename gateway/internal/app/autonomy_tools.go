@@ -425,11 +425,6 @@ func (a *App) mindSummary(st *autonomy.State, now time.Time) string {
 func (a *App) afterMindChange(st *autonomy.State, ag agents.Agent, now time.Time) {
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
 	a.scheduleMindNext(st, ag, now)
-	ls := a.lifeOf(ag.ID)
-	if next, ok := st.NextDueTime(); ok {
-		ls.Next = next.Unix()
-	}
 	a.saveMinds()
-	a.saveLife()
 	a.publishAutonomy(ag.ID)
 }

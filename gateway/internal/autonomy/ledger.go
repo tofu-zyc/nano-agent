@@ -17,9 +17,11 @@ const (
 	LedgerCommitment  = "commitment"  // 明确的约定和已排好的目标：不占探索次数
 	LedgerHook        = "hook"        // Hook 派生的模型活动
 	LedgerManual      = "manual"      // 主人手动叫醒
+	LedgerReach       = "reach"       // 主动找人：只记次数（每次找人记一次启动）
+	LedgerOther       = "other"       // 不属于某一次启动的用量：自主分支、被打断的活动、升级时补上的差额；只记 token
 )
 
-// LedgerSources 是固定顺序的四个来源，网页和命令按它显示。
+// LedgerSources 是固定顺序的四个来源，网页和命令按它显示（reach 和 other 不在其中，另外取）。
 var LedgerSources = []string{LedgerExploration, LedgerCommitment, LedgerHook, LedgerManual}
 
 const (
@@ -242,6 +244,7 @@ func (s *State) SettleLedger(source, reservationID, runID string, tokens int, no
 	if tokens > 0 {
 		u.Tokens += tokens
 	}
+	s.refreshBudget()
 	u.Runs = append(u.Runs, LedgerRun{ID: identity, Start: startedAt, Tokens: tokens})
 	if len(u.Runs) > maxLedgerRuns {
 		u.Runs = u.Runs[len(u.Runs)-maxLedgerRuns:]
@@ -255,6 +258,35 @@ func (s *State) SettleLedger(source, reservationID, runID string, tokens int, no
 	s.Touch()
 }
 
+// AddLedgerTokens 往某一天的某个来源上加 token，不记次数（被打断的活动、自主分支等）。
+func (s *State) AddLedgerTokens(source string, tokens int, now time.Time, loc *time.Location) {
+	if tokens <= 0 {
+		return
+	}
+	if u := s.ledgerEntry(LedgerDay(now, loc), tzName(loc), source, true); u != nil {
+		u.Tokens += tokens
+		s.refreshBudget()
+		s.Touch()
+	}
+}
+
+// RaiseLedgerStarts 把今天某个来源的启动次数提到至少 n（导入旧计数时用，只升不降）。
+func (s *State) RaiseLedgerStarts(source string, n int, now time.Time, loc *time.Location) {
+	if n <= 0 {
+		return
+	}
+	u := s.ledgerEntry(LedgerDay(now, loc), tzName(loc), source, true)
+	if u != nil && u.Starts+u.Reserved < n {
+		u.Starts = n - u.Reserved
+		s.Touch()
+	}
+}
+
+// RecordReach 记一次主动找人（今天第几次看账本里 reach 的次数）。
+func (s *State) RecordReach(id string, now time.Time, loc *time.Location) {
+	s.SettleLedger(LedgerReach, "", id, 0, now, loc)
+}
+
 // SeedLedger 把旧 life.json 里的当日次数和 token 导进账本（只导一次，由调用方判断）。
 func (s *State) SeedLedger(source string, starts, tokens int, now time.Time, loc *time.Location) {
 	if starts <= 0 && tokens <= 0 {
@@ -265,6 +297,7 @@ func (s *State) SeedLedger(source string, starts, tokens int, now time.Time, loc
 		return
 	}
 	u.Starts, u.Tokens = starts, tokens
+	s.refreshBudget()
 	s.Touch()
 }
 
@@ -273,4 +306,13 @@ func tzName(loc *time.Location) string {
 		return "UTC"
 	}
 	return loc.String()
+}
+
+// dayStart 是一个 YYYY-MM-DD 日期的中午（UTC）：只用来按日期落到账本的某一天。
+func dayStart(day string) time.Time {
+	t, err := time.ParseInLocation("2006-01-02", day, time.UTC)
+	if err != nil {
+		return time.Now()
+	}
+	return t.Add(12 * time.Hour)
 }

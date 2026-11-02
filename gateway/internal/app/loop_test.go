@@ -1,6 +1,7 @@
 package app
 
 import (
+	"nano-agent/gateway/internal/autonomy"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,7 +134,6 @@ func TestFollowUp(t *testing.T) {
 	e.a.mu.Lock()
 	_, tools, _, _ := e.a.contextParts(mainSID)
 	out, err := e.a.followUpCall(mainSID, []byte(`{"minutes":30,"note":"问问面试怎么样"}`))
-	e.a.lifeOf("default").Next = base.Add(10 * time.Hour).Unix() // 别让内心活动插进来
 	e.a.mind("default").SetNextCheck(base.Add(10 * time.Hour))
 	e.a.mu.Unlock()
 	if err != nil || !strings.Contains(out, "15:30") {
@@ -170,20 +170,20 @@ func TestFollowUp(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
 	e.a.mu.Lock()
-	_, left := e.a.lifeOf("default").FollowUps[mainSID]
+	_, left := e.a.mind("default").FollowUps[mainSID]
 	e.a.mu.Unlock()
 	if left {
 		t.Fatal("对方先说话了，约好的应该取消")
 	}
 	// 睡着时到点：挪到醒来
 	e.a.mu.Lock()
-	e.a.lifeOf("default").FollowUps[mainSID] = followUp{At: time.Date(2026, 10, 21, 23, 40, 0, 0, time.UTC).Unix(), Note: "x"}
+	e.a.mind("default").FollowUpMap()[mainSID] = autonomy.FollowUp{At: time.Date(2026, 10, 21, 23, 40, 0, 0, time.UTC).Unix(), Note: "x"}
 	e.a.mu.Unlock()
 	setNow(e, time.Date(2026, 10, 21, 23, 45, 0, 0, time.UTC))
 	e.a.lifeTick()
 	e.k.none()
 	e.a.mu.Lock()
-	moved := e.a.lifeOf("default").FollowUps[mainSID].At
+	moved := e.a.mind("default").FollowUps[mainSID].At
 	e.a.mu.Unlock()
 	if moved != time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC).Unix() {
 		t.Fatalf("睡着时到点应该挪到 08:00：%v", time.Unix(moved, 0).UTC())

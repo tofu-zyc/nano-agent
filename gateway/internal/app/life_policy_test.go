@@ -1,6 +1,7 @@
 package app
 
 import (
+	"nano-agent/gateway/internal/autonomy"
 	"strings"
 	"testing"
 	"time"
@@ -130,19 +131,23 @@ func TestValidateLifePolicy(t *testing.T) {
 func TestLifeBlockedHonoursUnlimitedWakes(t *testing.T) {
 	e := setup(t)
 	ag := agents.Agent{ID: "default", Style: "life", LifeReach: sp("off"), LifeMaxWakes: ip(0)}
-	ls := e.a.lifeOf(ag.ID)
-	ls.Wakes = 16 // 档位是 8，已经超了
-	if why := e.a.lifeBlocked(ag, ls, e.a.now()); strings.Contains(why, "醒够") {
+	st := e.a.mind(ag.ID)
+	st.RaiseLedgerStarts(autonomy.LedgerExploration, 16, e.a.now(), e.a.loc) // 档位是 8，已经超了
+	if why := e.a.lifeBlocked(ag, e.a.now()); strings.Contains(why, "醒够") {
 		t.Fatalf("不限次数还被挡住：%q", why)
 	}
 	ag.LifeMaxWakes = ip(16)
-	if why := e.a.lifeBlocked(ag, ls, e.a.now()); !strings.Contains(why, "醒够") {
+	if why := e.a.lifeBlocked(ag, e.a.now()); !strings.Contains(why, "醒够") {
 		t.Fatalf("到上限应该挡住：%q（而是 %q）", "醒够了", why)
 	}
 	// 上限减小时不杀已经启动的任务，只影响下一次调度
 	ag.LifeMaxWakes = ip(3)
-	ls.Wakes = 3
-	if why := e.a.lifeBlocked(ag, ls, e.a.now()); !strings.Contains(why, "醒够") {
+	for i := range st.Ledger {
+		if st.Ledger[i].Source == autonomy.LedgerExploration {
+			st.Ledger[i].Starts = 3
+		}
+	}
+	if why := e.a.lifeBlocked(ag, e.a.now()); !strings.Contains(why, "醒够") {
 		t.Fatalf("上限 3、已经 3 次应该挡住：%q", why)
 	}
 }
