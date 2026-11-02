@@ -189,7 +189,10 @@
     if (!playing) return;
     const line = at >= 0 && cues[at] ? cues[at].line : 0;
     cues = buildCues(playItems, { inner: pInner, channels: pChannels });
-    if (ended) return;
+    if (ended) {
+      at = cues.length - 1; // 放完了：停在新字幕的最后一条，不指着旧的下标
+      return;
+    }
     const next = cues.findIndex((c) => c.line >= line);
     if (next < 0) {
       clearTimeout(timer);
