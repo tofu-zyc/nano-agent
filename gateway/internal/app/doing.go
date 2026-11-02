@@ -113,7 +113,7 @@ func (a *App) agentDoing(ag agents.Agent, viewer string) Doing {
 	case idle >= slackFor:
 		d = Doing{State: "idle", Icon: "😶", Text: "在发呆", Brief: "在发呆"}
 	}
-	if at := a.nextWakeAt(a.mind(ag.ID)); at > 0 {
+	if at := a.nextWakeAt(ag.ID, a.mind(ag.ID)); at > 0 {
 		if next := time.Unix(at, 0).In(a.loc); next.After(now) && w.contains(next) {
 			d.Text += "，大约 " + clockDay(now, next) + "起来转转"
 		}

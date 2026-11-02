@@ -256,10 +256,13 @@ func (a *App) latestLifeNote(agentID string) string {
 	return ""
 }
 
-// nextWakeAt 是下次醒来的时间（秒；没有为 0）。
-func (a *App) nextWakeAt(st *autonomy.State) int64 {
+// nextWakeAt 是下次醒来的时间（秒；没有为 0）：最近的日程、意图或自己的检查；这一轮正在跑的时候还没有，显示开始时估的那个。
+func (a *App) nextWakeAt(agentID string, st *autonomy.State) int64 {
 	if t, ok := st.NextDueTime(); ok {
 		return t.Unix()
+	}
+	if s := a.sessions[lifeSID(agentID)]; s != nil && s.mind != nil {
+		return s.mind.NextHint
 	}
 	return 0
 }
@@ -526,7 +529,7 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	now := a.now().In(a.loc)
 	st := a.mind(ag.ID)
 	p := effectiveLifePolicy(ag)
-	b := &LifeBrief{State: "awake", Next: a.nextWakeAt(st) * 1000, Wakes: a.wakesToday(st, now), Reaches: a.reachesToday(st, now), Tokens: a.tokensToday(st, now),
+	b := &LifeBrief{State: "awake", Next: a.nextWakeAt(ag.ID, st) * 1000, Wakes: a.wakesToday(st, now), Reaches: a.reachesToday(st, now), Tokens: a.tokensToday(st, now),
 		MaxWakes: p.MaxWakes, MaxReaches: p.MaxReaches, WakesFree: p.WakesUnlimited(), ReachesFree: p.ReachesUnlimited(),
 		Recent: []lifeNote{}}
 	b.Experience = a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", 12, a.now())
@@ -655,14 +658,12 @@ func (a *App) followUpTick(ag agents.Agent, st *autonomy.State, now time.Time) {
 			a.saveMinds()
 			continue
 		}
-		// 场景的额度用完了：不调用模型，约定留着，额度恢复（第二天）后再触发
-		if sc, ok := a.sceneOf(sid); ok && a.sceneOver(sc) {
+		// 场景的额度用完了：不调用模型，约定留着，额度恢复（第二天）后再触发；正在聊：过一会儿再看。
+		// 没模型、没内核不在这里拦：照旧发出去，由聊天那边告诉对方
+		if ok, why, _ := a.admitRun(sid); !ok && (why == admitOver || why == admitBusy) {
 			continue
 		}
 		s := a.sessOf(sid)
-		if s.run != nil || len(s.queue) > 0 || s.compacting {
-			continue // 正在聊：过一会儿再看
-		}
 		delete(st.FollowUps, sid)
 		st.Touch()
 		a.saveMinds()

@@ -676,7 +676,7 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		if strings.TrimSpace(prompt) == "" {
 			return BranchInfo{}, errors.New("继续分支要给出这一轮做什么")
 		}
-		if a.forkWaitBoundary(sid) {
+		if ok, why, _ := a.admitRun(sid); !ok && why == admitBusy {
 			return BranchInfo{}, errors.New("这个分支正在跑，等它结束")
 		}
 		if err := a.startBranchRunLocked(sid, prompt, by); err != nil {

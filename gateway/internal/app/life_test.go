@@ -86,7 +86,7 @@ func TestLifeWake(t *testing.T) {
 	waitIdle(t, e, sid)
 	e.a.mu.Lock()
 	st := e.a.mind("default")
-	next, wakes, recent := e.a.nextWakeAt(st), e.a.wakesToday(st, e.a.now()), len(e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 3, e.a.now()))
+	next, wakes, recent := e.a.nextWakeAt("default", st), e.a.wakesToday(st, e.a.now()), len(e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 3, e.a.now()))
 	info := e.a.lifeBrief(func() agents.Agent { ag, _ := store.Get("default"); return ag }())
 	e.a.mu.Unlock()
 	// normal：1 小时 + 0.5×1 小时

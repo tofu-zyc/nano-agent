@@ -538,11 +538,11 @@ func (a *App) startDream(agentID string, manual bool) error {
 		return errors.New("这个 agent 关掉了长期记忆")
 	}
 	s := a.sessOf(dreamSID(agentID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
-		return errors.New("正在整理记忆")
-	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return errors.New("还没有配置模型")
+	if ok, why, _ := a.admitRun(s.sid); !ok {
+		if why == admitBusy {
+			return errors.New("正在整理记忆")
+		}
+		return errors.New(why)
 	}
 	if err := a.store.Reset(s.sid); err != nil {
 		return fmt.Errorf("清空上次整理的上下文：%w", err)
@@ -553,9 +553,6 @@ func (a *App) startDream(agentID string, manual bool) error {
 	st.Model = pickString(ag.DreamModel, "")
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		return err
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return errors.New("没有在线的内核")
 	}
 	ds := a.dreamOf(agentID)
 	now := a.now().In(a.loc)

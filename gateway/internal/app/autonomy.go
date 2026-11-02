@@ -39,6 +39,8 @@ type mindRun struct {
 	Manual  bool
 	Source  string // 账本来源：exploration / commitment / hook / manual
 	Ledger  string // 账本预留身份：跨日结算和重复回调靠它对齐
+	// NextHint 是这一轮开始时估的“再隔多久醒”（秒）：这一轮还没结束时，网页上的“下次醒来”显示它
+	NextHint int64
 }
 
 type autonomyDoc struct {
@@ -334,7 +336,7 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	if st.Paused {
 		return
 	}
-	if st.NextCheck == 0 {
+	if _, due := st.NextDueTime(); !due && st.LastWake == 0 {
 		a.lifeBegin(ag) // 刚变成拟人型 / 第一次启动：安排第一次自己活动
 	}
 	a.syncDimensions(ag)
@@ -343,20 +345,13 @@ func (a *App) autonomyAgent(ag agents.Agent, now time.Time) {
 	if trig == nil {
 		return
 	}
-	// 资源占用：内心会话正在跑 / 整理上下文，等一会儿再看（不丢意图）
-	s := a.sessOf(lifeSID(ag.ID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
-		st.SetNextCheck(now.Add(2 * time.Minute))
-		a.saveMinds()
-		return
-	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		st.Retry(*trig, "还没有配置模型", now, 30*time.Minute)
-		a.saveMinds()
-		return
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		st.Retry(*trig, "没有在线的内核", now, 5*time.Minute)
+	// 准入：内心会话正在跑 / 整理上下文，等一会儿再看（不丢意图）；没模型、没内核，记成失败稍后重试
+	if ok, why, retry := a.admitRun(lifeSID(ag.ID)); !ok {
+		if why == admitBusy {
+			st.SetNextCheck(now.Add(retry))
+		} else {
+			st.Retry(*trig, why, now, retry)
+		}
 		a.saveMinds()
 		return
 	}
@@ -399,12 +394,11 @@ func (a *App) startLife(agentID string, manual bool) error {
 	if !ag.Life() {
 		return errors.New("只有拟人型 agent 有内心活动（在 agent 节点里把类型改成拟人型）")
 	}
-	s := a.sessOf(lifeSID(agentID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
-		return errors.New("它正在想事情")
-	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return errors.New("还没有配置模型")
+	if ok, why, _ := a.admitRun(lifeSID(agentID)); !ok {
+		if why == admitBusy {
+			return errors.New("它正在想事情")
+		}
+		return errors.New(why)
 	}
 	st := a.mind(agentID)
 	now := a.now().In(a.loc)
@@ -415,9 +409,6 @@ func (a *App) startLife(agentID string, manual bool) error {
 		} else {
 			trig = autonomy.Trigger{Kind: autonomy.EventSelfCheck, Reason: "自己醒一会儿", Due: now.Unix()}
 		}
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return errors.New("没有在线的内核")
 	}
 	opts := autonomy.StartOptions{Paused: st.Paused, Awake: a.awakeOf(ag).contains(now),
 		BudgetLeft: st.BudgetLeft(pickInt(ag.LifeBudget, 0)), Wakes: a.wakesToday(st, now),
@@ -637,10 +628,11 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 			}
 		}
 	}
-	s := a.sessOf(lifeSID(ag.ID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
+	// 只认“会话忙”：没模型、没内核由下面的 startRun 开不起来时按原来的办法记失败重试
+	if ok, why, _ := a.admitRun(lifeSID(ag.ID)); !ok && why == admitBusy {
 		return errors.New("它正在想事情")
 	}
+	s := a.sessOf(lifeSID(ag.ID))
 	now := a.now().In(a.loc)
 	a.syncDimensions(ag)
 	if err := a.store.BeginEpisode(s.sid); err != nil {
@@ -657,9 +649,9 @@ func (a *App) startMindWithHookLocked(ag agents.Agent, st *autonomy.State, trig 
 		ids = append(ids, e.ID)
 	}
 	st.MarkStarted(trig, now)
-	st.SetNextCheck(now.Add(a.lifeInterval(ag, now))) // 这一轮结束时会按真实的下一件事重排
+	nextHint := now.Add(a.lifeInterval(ag, now)).Unix() // 只用来显示：这一轮结束时按真实的下一件事重排
 	a.saveMinds()
-	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source, Ledger: resID}
+	s.mind = &mindRun{AgentID: ag.ID, Trigger: trig, Started: now, Manual: manual, Source: source, Ledger: resID, NextHint: nextHint}
 	who := "life:" + ag.ID
 	if hook != nil {
 		who = hook.work.Delivery.Creator

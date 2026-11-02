@@ -376,7 +376,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 		return errors.New("任务已在运行")
 	}
 	s := a.sessOf(cronSID(task))
-	if s.run != nil || s.compacting || len(s.queue) > 0 {
+	if ok, why, _ := a.admitRun(s.sid); !ok && why == admitBusy {
 		return errors.New("任务会话正在使用")
 	}
 	if advance {
@@ -425,11 +425,8 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		return fail(err)
 	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return fail(errors.New("还没有配置模型"))
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return fail(errors.New("没有在线的内核"))
+	if ok, why, _ := a.admitRun(s.sid); !ok { // 设置都写好以后再查模型和内核（工作目录在设置里）
+		return fail(errors.New(why))
 	}
 	s.scheduled = &task
 	// 没有投递窗口（只放任务页）时，这一轮挂在任务自己的会话上；结果由 completeSchedule 记进任务。
