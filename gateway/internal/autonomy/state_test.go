@@ -142,7 +142,7 @@ func TestCheckpointRecoveryAndUnverifiedCompletion(t *testing.T) {
 	if !strings.Contains(s.BriefForModel(now, time.UTC), "不要重发邮件") {
 		t.Fatal("重启后没有保留给下一轮的检查点")
 	}
-	if err := s.CancelAgenda(id, "用户取消", now); err != nil {
+	if err := s.CancelAgenda(id, "用户取消", EndedByOwner, now); err != nil {
 		t.Fatal(err)
 	}
 	s.Finish(Execution{AgendaID: id, OK: true, UsedTools: true, Verified: true, Summary: "迟到的完成"}, now, time.Minute)
@@ -196,7 +196,7 @@ func TestIdeasNeedSourceAndBecomeScheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 取消
-	if err := s.CancelAgenda(ag.ID, "今天没空", now); err != nil {
+	if err := s.CancelAgenda(ag.ID, "今天没空", EndedByAgent, now); err != nil {
 		t.Fatal(err)
 	}
 	if s.Intentions[0].State != IntentionCancelled {

@@ -71,6 +71,8 @@ type BranchMeta struct {
 	// Progress 是最近进展的一句话（由宿主从真实执行状态生成，不调模型）；ProgressAt 是它的时间
 	Progress   string `json:"progress,omitempty"`
 	ProgressAt int64  `json:"progress_at,omitempty"`
+	// ReportedAt 是主人最近一次把这个分支的结论带回来源会话（引入结论）的时间；之后没有新的一轮就不算“等人看”
+	ReportedAt int64 `json:"reported_at,omitempty"`
 	Note       string `json:"note,omitempty"`
 }
 

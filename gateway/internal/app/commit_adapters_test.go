@@ -1,0 +1,249 @@
+package app
+
+import (
+	"testing"
+	"time"
+
+	"nano-agent/gateway/internal/autonomy"
+	"nano-agent/gateway/internal/commit"
+	"nano-agent/gateway/internal/eventlog"
+	"nano-agent/gateway/internal/hooks"
+	"nano-agent/gateway/internal/schedule"
+	"nano-agent/gateway/internal/session"
+)
+
+// 六个适配函数：给出各自的记录，推出的事实和阶段都对。
+
+const nowU = 1_000_000
+
+func phaseOf(c commitItem) (string, string) { return commit.Phase(c.Facts) }
+
+func wantPhase(t *testing.T, name string, c commitItem, phase, why string) {
+	t.Helper()
+	if p, w := phaseOf(c); p != phase || (why != "" && w != why) {
+		t.Fatalf("%s：阶段 %s / %q，应为 %s / %q（事实 %+v）", name, p, w, phase, why, c.Facts)
+	}
+}
+
+func TestAgendaCommit(t *testing.T) {
+	in := &autonomy.Intention{ID: "in-1", Why: "怕忘了", Blocked: "等预算恢复"}
+	base := autonomy.AgendaItem{ID: "ag-1", Title: "发邮件", Kind: autonomy.KindCommitment, At: nowU + 600, Source: "chat:main",
+		Status: autonomy.StatusPlanned, Criteria: "邮件发出去", Mode: "ask", Workspaces: []string{"proj"}, Minutes: 10, IntentionID: "in-1"}
+	c := agendaCommit(base, in, false, "default", nowU)
+	if c.Contract.Goal != "发邮件：怕忘了" || c.Contract.By != "default" || c.Contract.Scene != "chat:main" || c.Contract.Done != "邮件发出去" ||
+		len(c.Contract.ReportTo) != 1 || c.Contract.ReportTo[0] != "@default/life" || c.Contract.Scope == "" || c.Contract.Stop == "" {
+		t.Fatalf("契约：%+v", c.Contract)
+	}
+	wantPhase(t, "没到时间", c, commit.Waiting, "等到某个时间")
+	due := base
+	due.At = nowU - 1
+	wantPhase(t, "到期但意图在等预算", agendaCommit(due, in, false, "default", nowU), commit.Waiting, "等预算恢复")
+	wantPhase(t, "到期", agendaCommit(due, nil, false, "default", nowU), commit.Waiting, "到期了，马上开始")
+	wantPhase(t, "自主活动暂停", agendaCommit(base, in, true, "default", nowU), commit.Paused, "")
+	run := base
+	run.Status = autonomy.StatusInProgress
+	wantPhase(t, "在跑", agendaCommit(run, in, false, "default", nowU), commit.Running, "")
+	done := base
+	done.Status, done.Result, done.Updated = autonomy.StatusDone, "邮件已发出，收到回执", nowU
+	wantPhase(t, "完成", agendaCommit(done, in, true, "default", nowU), commit.Done, "邮件已发出，收到回执")
+	if agendaCommit(done, in, false, "default", nowU).EndedAt != nowU {
+		t.Fatal("结束时间")
+	}
+	done.Result = ""
+	wantPhase(t, "完成但没有结果", agendaCommit(done, in, false, "default", nowU), commit.Blocked, "说做完了，但没有证据")
+	cancelled := base
+	cancelled.Status, cancelled.Result = autonomy.StatusCancelled, "对方说不用了"
+	cancelled.EndedBy = autonomy.EndedByOwner
+	wantPhase(t, "主人取消", agendaCommit(cancelled, in, false, "default", nowU), commit.Stopped, "对方说不用了")
+	cancelled.EndedBy = autonomy.EndedByAgent
+	wantPhase(t, "agent 取消", agendaCommit(cancelled, in, false, "default", nowU), commit.Dropped, "对方说不用了")
+	cancelled.Result = ""
+	wantPhase(t, "agent 取消没有理由", agendaCommit(cancelled, in, false, "default", nowU), commit.Blocked, "说不用做了，但没写理由")
+	skipped := base
+	skipped.Status, skipped.Result = autonomy.StatusSkipped, "今天不适合"
+	wantPhase(t, "跳过", agendaCommit(skipped, in, false, "default", nowU), commit.Dropped, "今天不适合")
+}
+
+func TestIntentionCommit(t *testing.T) {
+	in := autonomy.Intention{ID: "in-1", Title: "整理照片", Why: "想留念", SourceEvent: "ev-1", State: autonomy.IntentionAccepted, NextAt: nowU + 60, BudgetTokens: 5000}
+	// 还有没完成的议程项：只列议程项
+	if _, ok := intentionCommit(in, []autonomy.AgendaItem{{ID: "a", IntentionID: "in-1", Status: autonomy.StatusPlanned}}, false, "default", nowU); ok {
+		t.Fatal("有未完成的议程项就不列意图")
+	}
+	if _, ok := intentionCommit(in, []autonomy.AgendaItem{{ID: "a", IntentionID: "other", Status: autonomy.StatusPlanned}}, false, "default", nowU); !ok {
+		t.Fatal("别的意图的议程项不算")
+	}
+	c, _ := intentionCommit(in, nil, false, "default", nowU)
+	if c.Contract.Goal != "整理照片：想留念" || c.Contract.Scene != "ev-1" || c.Contract.Done != "有证据的执行结果" || c.Contract.Stop == "" {
+		t.Fatalf("契约：%+v", c.Contract)
+	}
+	wantPhase(t, "等", c, commit.Waiting, "等到某个时间")
+	for state, want := range map[string]string{autonomy.IntentionRunning: commit.Running, autonomy.IntentionPaused: commit.Paused} {
+		x := in
+		x.State = state
+		c, _ := intentionCommit(x, nil, false, "default", nowU)
+		wantPhase(t, state, c, want, "")
+	}
+	paused, _ := intentionCommit(in, nil, true, "default", nowU)
+	wantPhase(t, "自主活动暂停", paused, commit.Paused, "")
+	x := in
+	x.State, x.Evidence = autonomy.IntentionDone, "文件都归好了"
+	c, _ = intentionCommit(x, []autonomy.AgendaItem{{IntentionID: "in-1", Status: autonomy.StatusDone}}, false, "default", nowU)
+	wantPhase(t, "完成", c, commit.Done, "文件都归好了")
+	x.State, x.Blocked = autonomy.IntentionFailed, "磁盘满了"
+	c, _ = intentionCommit(x, nil, false, "default", nowU)
+	wantPhase(t, "失败", c, commit.Failed, "磁盘满了")
+	x.State = autonomy.IntentionCancelled
+	c, _ = intentionCommit(x, []autonomy.AgendaItem{{IntentionID: "in-1", Status: autonomy.StatusCancelled, Result: "不做了", EndedBy: autonomy.EndedByOwner}}, false, "default", nowU)
+	wantPhase(t, "主人取消", c, commit.Stopped, "不做了")
+	c, _ = intentionCommit(x, []autonomy.AgendaItem{{IntentionID: "in-1", Status: autonomy.StatusCancelled, Result: "没必要", EndedBy: autonomy.EndedByAgent}}, false, "default", nowU)
+	wantPhase(t, "agent 取消", c, commit.Dropped, "没必要")
+}
+
+func TestFollowUpCommit(t *testing.T) {
+	f := autonomy.FollowUp{At: nowU + 300, Note: "问问面试怎么样"}
+	c := followUpCommit("tg:42", f, "default", false, nowU)
+	if c.ID != "tg:42" || c.Contract.Goal != "问问面试怎么样" || c.Contract.Scene != "tg:42" || c.Contract.ReportTo[0] != "tg:42" || c.Contract.Stop != "一次" {
+		t.Fatalf("契约：%+v", c)
+	}
+	wantPhase(t, "等", c, commit.Waiting, "等到某个时间")
+	f.At = nowU - 5
+	wantPhase(t, "到点", followUpCommit("tg:42", f, "default", false, nowU), commit.Waiting, "到期了，马上开始")
+	wantPhase(t, "自主活动暂停", followUpCommit("tg:42", f, "default", true, nowU), commit.Paused, "")
+}
+
+func TestScheduleCommit(t *testing.T) {
+	task := schedule.Task{ID: "t1", Name: "每天看新闻", When: "every 24h", Agent: "default", CreatedBy: "web:me", CreatorMode: "edit", Mode: "ask",
+		Workspaces: []string{"proj"}, Deliver: []string{"tg:1"}, Enabled: true, Next: time.Unix(nowU+3600, 0), Source: "chat:main"}
+	c := scheduleCommit(task, nowU)
+	if c.Contract.Goal != "每天看新闻" || c.Contract.By != "web:me" || c.Contract.Done != "每次跑完的结果" || c.Contract.ReportTo[0] != "tg:1" ||
+		c.Contract.Stop != "超时 30m" {
+		t.Fatalf("契约：%+v", c.Contract)
+	}
+	wantPhase(t, "等", c, commit.Waiting, "等到某个时间")
+	silent := task
+	silent.Silent = true
+	if got := scheduleCommit(silent, nowU).Contract.ReportTo; len(got) != 0 {
+		t.Fatalf("Silent 时汇报去处为空：%v", got)
+	}
+	run := task
+	run.Running = true
+	wantPhase(t, "在跑", scheduleCommit(run, nowU), commit.Running, "")
+	off := task
+	off.Enabled = false
+	wantPhase(t, "停用", scheduleCommit(off, nowU), commit.Paused, "")
+	bad := task
+	bad.Last = &schedule.Result{At: time.Unix(nowU-100, 0), OK: false, Summary: "接口超时"}
+	cb := scheduleCommit(bad, nowU)
+	wantPhase(t, "上一次失败", cb, commit.Blocked, "上一次失败：接口超时")
+	if cb.Facts.Mark != "last:999900" {
+		t.Fatalf("Mark：%q", cb.Facts.Mark)
+	}
+	once := task
+	once.When, once.Enabled, once.Timeout = "at 2026-11-02 09:00", false, "10m"
+	once.Last = &schedule.Result{At: time.Unix(nowU-100, 0), OK: true, Summary: "发了 3 条摘要"}
+	co := scheduleCommit(once, nowU)
+	wantPhase(t, "一次性任务跑完", co, commit.Done, "发了 3 条摘要")
+	if co.Contract.Stop != "超时 10m；一次性的，跑一次" || co.EndedAt != nowU-100 {
+		t.Fatalf("%+v", co)
+	}
+	once.Last.OK, once.Last.Summary = false, "没有在线的内核"
+	wantPhase(t, "一次性任务失败", scheduleCommit(once, nowU), commit.Failed, "没有在线的内核")
+	once.Enabled = true // 还没跑
+	once.Last = nil
+	wantPhase(t, "一次性任务没跑", scheduleCommit(once, nowU), commit.Waiting, "")
+}
+
+func TestHookCommit(t *testing.T) {
+	rule := eventlog.RuleRecord{ID: "hook_1", AgentID: "default", Creator: "web:me", Enabled: true}
+	spec := hooks.Spec{Name: "构建失败提醒", Deliver: "tg:1", Retries: 2, DeadlineAt: nowU + 7200,
+		Handler: hooks.Handler{Type: "agent", TokenBudget: 3000}, Scope: hooks.Scope{SID: "chat:main", Mode: "ask", Workspaces: []string{"proj"}, Tools: []string{"WebSearch"}}}
+	c := hookCommit(rule, spec, nil, false, nowU)
+	if c.Contract.Goal != "构建失败提醒" || c.Contract.By != "web:me" || c.Contract.Scene != "chat:main" || c.Contract.Done != "每次投递成功" ||
+		c.Contract.ReportTo[0] != "tg:1" || c.Contract.Stop == "" || c.Title != "构建失败提醒" {
+		t.Fatalf("契约：%+v", c.Contract)
+	}
+	wantPhase(t, "等到截止时间", c, commit.Waiting, "等到某个时间")
+	spec2 := spec
+	spec2.DeadlineAt = 0
+	wantPhase(t, "等事件", hookCommit(rule, spec2, nil, false, nowU), commit.Waiting, "等事件")
+	wantPhase(t, "有投递在跑", hookCommit(rule, spec2, nil, true, nowU), commit.Running, "")
+	off := rule
+	off.Enabled = false
+	wantPhase(t, "停用", hookCommit(off, spec2, nil, false, nowU), commit.Paused, "")
+	failed := &eventlog.Delivery{ID: "hd_1", Status: "failed", Error: "目标会话没了", UpdatedMS: 5000}
+	cf := hookCommit(rule, spec2, failed, false, nowU)
+	wantPhase(t, "最近一次失败", cf, commit.Blocked, "最近一次投递失败：目标会话没了")
+	if cf.Facts.Mark != "d:hd_1" {
+		t.Fatalf("Mark：%q", cf.Facts.Mark)
+	}
+	unsure := &eventlog.Delivery{ID: "hd_2", Status: "uncertain", Error: "超时", UpdatedMS: 6000}
+	wantPhase(t, "结果不明", hookCommit(rule, spec2, unsure, false, nowU), commit.Blocked, "最近一次投递的结果不明：超时")
+	ok := &eventlog.Delivery{ID: "hd_3", Status: "succeeded", Result: "已提醒", UpdatedMS: 7000}
+	wantPhase(t, "成功了还在等下一次", hookCommit(rule, spec2, ok, false, nowU), commit.Waiting, "等事件")
+	once := off
+	once.Once = true
+	co := hookCommit(once, spec2, ok, false, nowU)
+	wantPhase(t, "Once 成功后停用", co, commit.Done, "已提醒")
+	if co.EndedAt != 7 {
+		t.Fatalf("结束时间：%d", co.EndedAt)
+	}
+	wantPhase(t, "Once 停用但没成功", hookCommit(once, spec2, failed, false, nowU), commit.Paused, "")
+	silent := rule
+	silent.Silent = true
+	if got := hookCommit(silent, spec, nil, false, nowU).Contract.ReportTo; len(got) != 0 {
+		t.Fatalf("Silent 时汇报去处为空：%v", got)
+	}
+}
+
+func TestBranchCommit(t *testing.T) {
+	m := session.BranchMeta{SID: "main/b1", ParentSID: "main", OwnerAgent: "default", CreatedBy: "web:me", Intent: "查一下竞品", Title: "竞品",
+		Status: session.BranchReady, Delivery: session.BranchDeliverySilent, CreatedAt: nowU - 50, ProgressAt: nowU - 10, Progress: "完成：这一轮做了「查竞品」"}
+	c := branchCommit(m, false, false, nowU)
+	if c.Contract.Goal != "查一下竞品" || c.Contract.By != "web:me" || c.Contract.Scene != "main" || c.Contract.Done != "主人引入结论或归档" || len(c.Contract.ReportTo) != 0 {
+		t.Fatalf("契约：%+v", c.Contract)
+	}
+	wantPhase(t, "等开始", c, commit.Waiting, "等开始")
+	m.Title, m.Intent = "竞品", ""
+	if branchCommit(m, false, false, nowU).Contract.Goal != "竞品" {
+		t.Fatal("没有 Intent 就用 Title")
+	}
+	m.Intent = "查一下竞品"
+	m.Status = session.BranchPreparing
+	wantPhase(t, "准备中", branchCommit(m, false, false, nowU), commit.Waiting, "等源会话的安全边界")
+	m.Status = session.BranchPendingBoundary
+	wantPhase(t, "等边界", branchCommit(m, false, false, nowU), commit.Waiting, "等源会话的安全边界")
+	for _, st := range []string{session.BranchRunning, session.BranchQueued} {
+		m.Status = st
+		wantPhase(t, st, branchCommit(m, false, false, nowU), commit.Running, "")
+	}
+	m.Status = session.BranchReady
+	wantPhase(t, "在排队", branchCommit(m, true, false, nowU), commit.Running, "")
+	m.Status = session.BranchPaused
+	wantPhase(t, "暂停", branchCommit(m, false, false, nowU), commit.Paused, "")
+	m.Status, m.Note = session.BranchNeedsAttention, "要选一个方案"
+	cb := branchCommit(m, false, false, nowU)
+	wantPhase(t, "要处理", cb, commit.Blocked, "要选一个方案")
+	if cb.Facts.Mark != "p:999990" {
+		t.Fatalf("Mark：%q", cb.Facts.Mark)
+	}
+	m.Status, m.Note = session.BranchCompleted, ""
+	cr := branchCommit(m, false, false, nowU)
+	wantPhase(t, "做完一轮等人看", cr, commit.Ready, "完成：这一轮做了「查竞品」")
+	if cr.Facts.Mark != "p:999990" {
+		t.Fatalf("Mark：%q", cr.Facts.Mark)
+	}
+	wantPhase(t, "自主活动分出的不算就绪", branchCommit(m, false, true, nowU), commit.Waiting, "等事件")
+	m.ReportedAt = nowU - 5 // 做完之后主人引入过结论
+	wantPhase(t, "引入过结论", branchCommit(m, false, false, nowU), commit.Waiting, "等事件")
+	m.ReportedAt = nowU - 20 // 引入之后又做了一轮
+	wantPhase(t, "引入之后又做了一轮", branchCommit(m, false, false, nowU), commit.Ready, "")
+	for st, why := range map[string]string{session.BranchArchived: "主人归档了", session.BranchCancelled: "取消了"} {
+		m.Status, m.LastActive = st, nowU-3
+		c := branchCommit(m, false, false, nowU)
+		wantPhase(t, st, c, commit.Stopped, why)
+		if c.EndedAt != nowU-3 {
+			t.Fatalf("结束时间：%d", c.EndedAt)
+		}
+	}
+}

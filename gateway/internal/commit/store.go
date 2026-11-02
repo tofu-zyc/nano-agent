@@ -65,8 +65,8 @@ type Store struct {
 	seq    uint64
 	report map[key]CommitRec   // 每件事最近一条汇报
 	marks  map[key][]CommitRec // 每件事最近的看过 / 回答（最多 MaxMarks 条，旧的在前）
-	// Alive 说这件承诺还在不在；压缩时不在的记录丢掉。没设就都留着。
-	Alive func(kind, id string) bool
+	// Alive 在压缩时调用一次，返回“这件承诺还在不在”的判断；不在的记录在这时丢掉。没设就都留着。
+	Alive func() func(kind, id string) bool
 	// Now 给记录打时间（毫秒）；没设用真实时间。
 	Now func() time.Time
 }
@@ -175,7 +175,11 @@ func (s *Store) Size() int64 { return s.j.Size() }
 // Compact 整份重写，只留内存里的这些（每件事最近一条汇报和最近 16 个看过的 Mark）；
 // Alive 说已经不在的承诺，它们的记录在这时丢掉。
 func (s *Store) Compact() error {
-	alive := func(k key) bool { return s.Alive == nil || s.Alive(k.kind, k.id) }
+	alive := func(k key) bool { return true }
+	if s.Alive != nil {
+		in := s.Alive()
+		alive = func(k key) bool { return in(k.kind, k.id) }
+	}
 	var keep []CommitRec
 	for k, r := range s.report {
 		if alive(k) {

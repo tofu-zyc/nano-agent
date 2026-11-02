@@ -804,6 +804,7 @@ func (a *App) introduceBranchReportLocked(branchSID, by string, ep endpoint) (Br
 	_ = a.store.SetBranch(sid, func(m *session.BranchMeta) {
 		m.Progress = clip("已把结论带回来源会话："+report.Conclusion, 200)
 		m.ProgressAt = a.now().Unix()
+		m.ReportedAt = m.ProgressAt
 	})
 	report.Injected = true
 	a.publish(events.Event{T: "branch", SID: sid, Kind: "report"})

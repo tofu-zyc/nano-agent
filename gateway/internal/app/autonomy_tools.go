@@ -179,7 +179,10 @@ func (a *App) agendaCall(sid string, raw []byte) (string, error) {
 		a.afterMindChange(st, ag, now)
 		return "挪到 " + at.In(a.loc).Format("01-02 15:04") + " 了。", nil
 	case "cancel":
-		if err := st.CancelAgenda(x.ID, x.Note, now); err != nil {
+		if strings.TrimSpace(x.Note) == "" {
+			return "", errors.New("取消要在 note 里写不做的理由")
+		}
+		if err := st.CancelAgenda(x.ID, x.Note, autonomy.EndedByAgent, now); err != nil {
 			return "", err
 		}
 		a.afterMindChange(st, ag, now)

@@ -21,6 +21,7 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/eventlog"
@@ -131,6 +132,9 @@ type App struct {
 	hAutonomy       *health.Handle
 	hSchedule       *health.Handle
 	hStage          *health.Handle    // 场景记录：有一场写不进去就是 degraded
+	hCommit         *health.Handle    // 承诺记录：写不进去就是 degraded
+	commits         *commit.Store     // 承诺记录（Report、知道了、回答）
+	commitsErr      error
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
@@ -474,6 +478,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.hAutonomy, _ = a.health.Claim("autonomy")
 	a.hSchedule, _ = a.health.Claim("schedule")
 	a.hStage, _ = a.health.Claim("stage")
+	a.hCommit, _ = a.health.Claim("commitments")
 	for _, recovery := range []struct {
 		name string
 		run  func() error
@@ -510,6 +515,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	}
 	a.openOutbox(ctx, store.Dir())
 	a.observeDir = store.Dir()
+	a.openCommits()
 	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -2385,6 +2391,7 @@ func (a *App) Wait() {
 	if a.outbox != nil {
 		a.outbox.Close()
 	}
+	a.commits.Close()
 	if a.hookEngine != nil {
 		a.hookEngine.Close()
 	}

@@ -124,7 +124,7 @@ func TestStoreCompactDropsDeadCommitments(t *testing.T) {
 	s.Append(CommitRec{Type: TypeSeen, Kind: KindSchedule, ID: "t1", Mark: "r:99"})
 	s.Append(CommitRec{Type: TypeSeen, Kind: KindSchedule, ID: "dead", Mark: "r:1"})
 	before := s.Size()
-	s.Alive = func(kind, id string) bool { return id != "dead" }
+	s.Alive = func() func(kind, id string) bool { return func(kind, id string) bool { return id != "dead" } }
 	if err := s.Compact(); err != nil {
 		t.Fatal(err)
 	}

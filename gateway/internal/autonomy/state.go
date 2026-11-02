@@ -248,9 +248,16 @@ type AgendaItem struct {
 	Workspaces  []string `json:"workspaces,omitempty"`
 	Mode        string   `json:"mode,omitempty"`
 	Result      string   `json:"result,omitempty"`
+	EndedBy     string   `json:"ended_by,omitempty"` // 取消的是谁：owner（主人，网页上取消）| agent（自己，Agenda cancel）；其他结束不填
 	Created     int64    `json:"created"`
 	Updated     int64    `json:"updated"`
 }
+
+// 取消日程的是谁。
+const (
+	EndedByOwner = "owner"
+	EndedByAgent = "agent"
+)
 
 // Event 是进入控制层的一件事。至少一次投递、按 Dedupe 去重。
 type Event struct {
@@ -747,12 +754,12 @@ func (s *State) MoveAgenda(id string, at int64, now time.Time) error {
 }
 
 // CancelAgenda 取消一个议程项；它的意图没有别的议程了就一起取消。
-func (s *State) CancelAgenda(id, why string, now time.Time) error {
+func (s *State) CancelAgenda(id, why, by string, now time.Time) error {
 	a := s.agenda(id)
 	if a == nil {
 		return errors.New("没有这个议程项")
 	}
-	a.Status, a.Updated = StatusCancelled, now.Unix()
+	a.Status, a.Updated, a.EndedBy = StatusCancelled, now.Unix(), by
 	if why != "" {
 		a.Result = clip(why, 200)
 	}

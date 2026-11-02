@@ -251,7 +251,7 @@ func (a *App) mindDropSession(sid, agentID string) {
 			continue
 		}
 		if strings.Contains(ag.Source, sid) || strings.Contains(ag.Note, sid) {
-			if err := st.CancelAgenda(ag.ID, "这个会话已经交给别的 agent 了", now); err == nil {
+			if err := st.CancelAgenda(ag.ID, "这个会话已经交给别的 agent 了", autonomy.EndedByAgent, now); err == nil {
 				changed = true
 			}
 		}
@@ -982,7 +982,7 @@ func (a *App) AutonomyAction(id string, x AutonomyActionReq) (autonomy.View, err
 	case "resume":
 		st.SetPaused(false, "", now) // 恢复时立刻检查一次（NextCheck 设成现在）
 	case "cancel_agenda":
-		if err := st.CancelAgenda(x.ID, x.Note, now); err != nil {
+		if err := st.CancelAgenda(x.ID, x.Note, autonomy.EndedByOwner, now); err != nil {
 			return autonomy.View{}, err
 		}
 	case "move_agenda":
