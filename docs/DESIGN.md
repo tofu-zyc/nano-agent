@@ -316,7 +316,7 @@
 
 **数据结构**：新建叶子包 `internal/scene`，只放类型、默认值和校验，不依赖其他包。
 
-~~~go
+```go
 type Rules struct {
 	Mode        string          `json:"mode,omitempty"`         // mention | free；2c 再加 turns | director
 	Observe     bool            `json:"observe,omitempty"`      // 主动插话只记录，不发出
@@ -345,7 +345,7 @@ type Guard struct { // 只用于内部群的点名和自由模式；0 表示默�
 	Run      int `json:"run,omitempty"`       // 连续几条 agent 发言就暂停：默认 8，范围 2–50
 	PingPong int `json:"ping_pong,omitempty"` // 两个 agent 来回几轮就暂停：默认 6，范围 2–50
 }
-~~~
+```
 
 - `rooms.Room` 嵌入 `scene.Rules`，去掉自己的 `Mode` 和 `Budget`。JSON 键名不变，旧的 `rooms.json` 原样能读，不迁移。
 - 外部群：`session.Settings` 加 `Scene *scene.Rules`（`json:"scene,omitempty"`）。
@@ -399,7 +399,7 @@ agent 上的群聊设置（`group_eagerness`、`group_quiet`、`group_min_gap`�
 
 **一句话的分发**：内部群里的每一句话都走同一个函数 `roomPost(room, line)`，替掉现在 `roomHumanSay`、`roomAgentSay` 和 Message 工具里三段相同的分发循环。
 
-~~~go
+```go
 type roomLine struct {
 	From    string // agent ID；人和旁白为空
 	Name    string // 显示名；旁白为“旁白”
@@ -408,7 +408,7 @@ type roomLine struct {
 	To      string // cue 的对象
 	Text    string
 }
-~~~
+```
 
 - 群记录收下每一句，带上标记：`[名字] …`、`[#频道][名字] …`、`[旁白] …`、`[导演→名字] …`。
 - 成员会话只收它听得到的：公开的话全体都收；频道里的话只有频道成员收；cue 只有对象收，写作 `[导演] …`。说话的 agent 自己不再收一遍。
@@ -416,7 +416,7 @@ type roomLine struct {
 
 **规则新增字段**（`scene.Rules`，只用于内部群）：
 
-~~~go
+```go
 Order    []string  `json:"order,omitempty"`    // 轮流的发言顺序；空表示按成员顺序
 Rounds   int       `json:"rounds,omitempty"`   // 轮流时这一场最多几轮
 Channels []Channel `json:"channels,omitempty"` // 私下频道，最多 8 个
@@ -426,7 +426,7 @@ type Channel struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"` // 必须是群成员；成员退群时一并去掉
 }
-~~~
+```
 
 **四种发言规则**：
 
@@ -490,10 +490,10 @@ type Channel struct {
 
 **规则新增字段**（`scene.Rules`，只用于内部群，不用于两个 agent 的私聊）：
 
-~~~go
+```go
 Stage bool `json:"stage,omitempty"` // 这是一场戏：场内的事不进成员的记忆，场外进不来，全程记录
 Inner bool `json:"inner,omitempty"` // 心里话：成员每次先写一句心里想的，别人听不到，记进时间线；只用于 stage
-~~~
+```
 
 - `stage` 只能在建群时设，之后不能改：关掉以后，下一次整理记忆会把整场戏当成日记读进去。分出的平行世界照抄。
 - `inner` 可以随时开关，改的是系统前缀，下一轮生效。
@@ -511,11 +511,11 @@ Inner bool `json:"inner,omitempty"` // 心里话：成员每次先写一句心�
 - Message 工具不能发进 `stage` 的群，谁发都拒绝（"这是一场戏，只能在导演台说话"）；内心活动的聊天对象里不列它。
 - 人的话、旁白和 cue 只从网页进来（群聊记录里打字、`/say`、`/cue`）。
 
-**场景记录**：每个 `stage` 群一份 `data/runtime/stage/<群 ID>.jsonl`，用 `internal/journal` 写，单条最大 64KB，整份最大 64MB。不开 `stage` 的群没有这份记录。
+**场景记录**：每个 `stage` 群一份 `data/runtime/stage/<群 ID>.jsonl`，用 `internal/journal` 写，单条最大 64KB，整份最大 64MB。不开 `stage` 的群没有这份记录。删群时一并关闭并删除它的场景记录，分出的平行世界有自己的一份。
 
-~~~go
+```go
 type StageRec struct {
-	Kind string `json:"kind"` // line | run | model | prefix | op | fork
+	Kind string `json:"kind"` // line | cursors | run | model | prefix | op | fork
 	TS   int64  `json:"ts"`   // 毫秒
 	// line：群记录里的一句
 	Line    int            `json:"line,omitempty"`    // 群记录里的第几句（从 1 起，和群记录逐条对应）
@@ -545,7 +545,7 @@ type StageRec struct {
 type ModelRec struct {
 	Endpoint string         `json:"endpoint"` // 模型接口的名字
 	Model    string         `json:"model"`
-	Params   map[string]any `json:"params"`   // 实际发出的参数：temperature、reasoning_effort、max_tokens 等
+	Params   map[string]any `json:"params"`   // 实际发出的参数（现在网关只发 thinking 和 max_tokens）
 	Prefix   string         `json:"prefix"`   // 系统提示加工具定义的 SHA-256，全文在 prefix 记录里
 	Input    string         `json:"input"`    // 这次请求全部消息的 SHA-256
 	Msgs     [2]int         `json:"msgs"`     // 用到的成员会话消息：[Base, 长度)
@@ -554,11 +554,13 @@ type ModelRec struct {
 	Calls    []llm.ToolCall `json:"calls,omitempty"`
 	Reason   string         `json:"reason"`   // 结束原因
 }
-~~~
+```
 
 字段名可以按实现调整，但每类记录要能回答这些问题：这一句是谁、在哪、对谁说的；这一轮是谁跑的、想了什么、说没说、花了多少；每次模型调用用的是哪个模型和参数、看到了什么（前缀全文和消息哈希）、回了什么；导演做了什么。
 
-- **先记再做**：群记录的每一句先写进场景记录，再写群记录、送给成员。群记录只有一个写入口（`roomPost` 和 `pauseRoom` 都经过它），保证 `Line` 和群记录的位置一一对应。写不进去（满了或者磁盘出错）就不发这一句，暂停这一场并写明原因，健康状态 `stage` 为 degraded；因为写不进去而暂停时，暂停提示只写群记录。
+`Cursors` 单独成一条 `cursors` 记录：`line` 要在送达之前写下，`Cursors` 要在送达之后才能取（见 14.2）。
+
+- **先记再做**：群记录的每一句先写进场景记录，再写群记录、送给成员。群记录只有一个写入口（`roomPost` 和 `pauseRoom` 都经过它）。`Line` 取这一句在群记录里的实际位置，不单独计数。写不进去（满了或者磁盘出错）就不发这一句，暂停这一场并写明原因；这条暂停提示只写群记录，场景记录里这个位置空着。健康条目 `stage` 由网关认领一次：任何一场写不进去就是 degraded，并写明是哪几场；那一场再写成功后移出。
 - 模型调用和一轮结束的记录走同一个场景钩子：没有场景记录的会话什么都不做。消息入口和 run 的启动、结束路径里不加"是不是剧场"的判断。
 - 导演的操作（暂停、恢复、禁言、改规则、清零）记为 `op`。
 
