@@ -181,6 +181,9 @@ func normalizeMembers(in []string) []string {
 }
 
 // newID 起一个随机 ID（短、不会撞）。
+// NewID 取一个新的群 ID（分出平行世界时要在建群之前就知道它）。
+func NewID() string { return newID() }
+
 func newID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

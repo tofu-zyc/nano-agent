@@ -657,6 +657,24 @@ def run(page, url, nano):
             ok("stage 建群以后不能改")
         else:
             fail("stage 不应该能改：" + str(code))
+        # 平行世界：从第 1 句分出，新群的时间线最后是 fork；超出的句子被拒绝
+        code, fk = api(page, "POST", "/api/rooms/" + stage["id"] + "/fork", {"at": 1, "rewind": True})
+        if code == 200 and fk.get("id") and fk["id"] != stage["id"] and fk.get("stage"):
+            code, tl2 = api(page, "GET", "/api/rooms/" + fk["id"] + "/timeline?after=0&n=50")
+            kinds2 = [x["kind"] for x in tl2.get("items", [])] if code == 200 else []
+            orig = [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == stage["id"]][0]
+            if kinds2 == ["line", "cursors", "fork"] and orig["paused"] is True and not fk.get("paused"):
+                ok("从第 1 句分出平行世界：新群的时间线最后是 fork，倒带暂停了原群")
+            else:
+                fail("分出的结果不对：" + json.dumps({"kinds": kinds2, "orig_paused": orig["paused"]}))
+            api(page, "DELETE", "/api/rooms/" + fk["id"])
+        else:
+            fail("分不出平行世界：" + str(code) + json.dumps(fk, ensure_ascii=False)[:200])
+        code, _ = api(page, "POST", "/api/rooms/" + stage["id"] + "/fork", {"at": 99})
+        if code == 400:
+            ok("超出的句子分不出")
+        else:
+            fail("分出超出的句子应该被拒绝：" + str(code))
         api(page, "DELETE", "/api/rooms/" + stage["id"])
     else:
         fail("建不了戏：" + json.dumps(stage, ensure_ascii=False)[:300])

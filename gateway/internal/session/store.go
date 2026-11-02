@@ -8,6 +8,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -609,6 +610,49 @@ func (s *Store) Append(sid string, m Msg) error {
 		return fmt.Errorf("登记会话激活状态失败：%w", err)
 	}
 	s.hist[sid] = append(append([]Msg(nil), prev...), m)
+	return nil
+}
+
+// Seed 用一份消息建立一个新会话（平行世界的群记录和成员会话）：整份写临时文件再替换，
+// 要么整份在，要么没有。会话已经存在就拒绝；没有消息时什么都不建。
+func (s *Store) Seed(sid string, msgs []Msg) error {
+	if s.Exists(sid) {
+		return fmt.Errorf("会话 %s 已经存在，不能用 Seed 覆盖", sid)
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	if err := s.startNewGeneration(sid); err != nil {
+		return err
+	}
+	path, _, err := s.locate(sid, ".jsonl")
+	if err != nil {
+		return err
+	}
+	if err := s.rememberLongKey(sid); err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	seeded := make([]Msg, len(msgs))
+	for i, m := range msgs {
+		if m.TS == 0 {
+			m.TS = time.Now().Unix()
+		}
+		line, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+		seeded[i] = m
+	}
+	if err := writeFileAtomic(path, buf.Bytes()); err != nil {
+		return fmt.Errorf("保存会话历史：%w", err)
+	}
+	if err := s.ensureActive(sid); err != nil {
+		return fmt.Errorf("登记会话激活状态失败：%w", err)
+	}
+	s.hist[sid] = seeded
 	return nil
 }
 

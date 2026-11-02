@@ -4,6 +4,7 @@ package web
 //   GET/POST     /api/rooms
 //   PATCH/DELETE /api/rooms/{id}
 //   POST         /api/rooms/{id}/say、/cue
+//   POST         /api/rooms/{id}/fork（剧场：从某一句分出平行世界）
 //   GET          /api/rooms/{id}/timeline、/timeline/prefix/{hash}（剧场的场景记录）
 
 import (
@@ -113,4 +114,18 @@ func (s *Server) roomTimelinePrefix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"hash": r.PathValue("hash"), "body": body})
+}
+
+// roomFork 从第 at 句分出平行世界：POST /api/rooms/{id}/fork，{at, name, rewind}。
+func (s *Server) roomFork(w http.ResponseWriter, r *http.Request) {
+	var req app.ForkRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	info, err := s.app.ForkRoom(r.PathValue("id"), req)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, info)
 }
