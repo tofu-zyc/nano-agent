@@ -74,6 +74,9 @@ var Commands = []Command{
 	{Name: "wake", Desc: "叫醒拟人型 agent，让它自己待一会儿（冲浪、想事情、找人聊天）", Admin: true},
 	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
 	{Name: "branch", Args: "[report <分支编号>]", Desc: "查看这个会话的安静分支；把某个分支的结论带回这个会话"},
+	{Name: "pending", Desc: "列出等你处理的事：受阻的、做完了等你看的", Admin: true},
+	{Name: "answer", Args: "<编号> <回答>", Desc: "回答一件等你处理的事里的问题", Admin: true},
+	{Name: "seen", Args: "<编号>", Desc: "把一件等你处理的事记为知道了", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
 	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
@@ -134,6 +137,7 @@ type App struct {
 	hStage          *health.Handle // 场景记录：有一场写不进去就是 degraded
 	hCommit         *health.Handle // 承诺记录：写不进去就是 degraded
 	commits         *commit.Store  // 承诺记录（Report、知道了、回答）
+	schedPrior map[string]uint64 // 定时任务这一轮开始时承诺记录的最大序号：成功后更早的汇报算处理过
 	commitsErr      error
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
@@ -832,6 +836,15 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "branch":
 		a.cmdBranch(c, arg)
+		return
+	case "pending":
+		a.cmdPending(c)
+		return
+	case "answer":
+		a.cmdAnswer(c, arg)
+		return
+	case "seen":
+		a.cmdSeen(c, arg)
 		return
 	case "session":
 		if strings.HasPrefix(strings.TrimSpace(arg), "fork") {

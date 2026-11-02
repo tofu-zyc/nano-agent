@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nano-agent/gateway/internal/commit"
 	"strconv"
 	"strings"
 	"time"
@@ -682,6 +683,9 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		if err := a.startBranchRunLocked(sid, prompt, by); err != nil {
 			return BranchInfo{}, err
 		}
+		if !autonomousForker(by) {
+			a.handledByOwner(commit.KindBranch, sid, 0)
+		}
 	case "pause", "archive":
 		if s := a.sessions[sid]; s != nil && s.run != nil {
 			s.run.dropInbox = true
@@ -700,6 +704,9 @@ func (a *App) sessionBranchActionLocked(action, sid, prompt, by string) (BranchI
 		}
 		if s := a.sessions[sid]; s != nil {
 			s.queue = nil
+		}
+		if action == "archive" {
+			a.handledByOwner(commit.KindBranch, sid, 0)
 		}
 	default:
 		return BranchInfo{}, fmt.Errorf("不认识的分支操作：%s", action)
@@ -807,6 +814,7 @@ func (a *App) introduceBranchReportLocked(branchSID, by string, ep endpoint) (Br
 		m.ReportedAt = m.ProgressAt
 	})
 	report.Injected = true
+	a.handledByOwner(commit.KindBranch, sid, 0)
 	a.publish(events.Event{T: "branch", SID: sid, Kind: "report"})
 	if s.run == nil && !s.compacting {
 		a.startRun(s)

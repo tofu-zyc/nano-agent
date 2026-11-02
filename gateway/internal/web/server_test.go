@@ -377,3 +377,31 @@ func TestCommitmentsAPI(t *testing.T) {
 		t.Fatalf("没有承诺时是空列表：%d %v", code, out)
 	}
 }
+
+func TestPendingAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	for _, p := range []string{"/api/pending", "/api/pending/seen", "/api/pending/answer"} {
+		method := "POST"
+		if p == "/api/pending" {
+			method = "GET"
+		}
+		if code, _ := c.do(method, p, map[string]string{}, method == "POST"); code != http.StatusUnauthorized {
+			t.Fatalf("%s 未登录应该 401：%d", p, code)
+		}
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	code, out := c.do("GET", "/api/pending", nil, false)
+	if items, ok := out["items"].([]any); code != 200 || !ok || len(items) != 0 {
+		t.Fatalf("没有等我处理的事是空列表：%d %v", code, out)
+	}
+	if code, _ := c.do("POST", "/api/pending/seen", map[string]string{"kind": "branch", "id": "x", "mark": "r:1"}, true); code != http.StatusBadRequest {
+		t.Fatalf("不在列表里的事返回 400：%d", code)
+	}
+	long := strings.Repeat("字", 2001)
+	if code, _ := c.do("POST", "/api/pending/answer", map[string]string{"kind": "branch", "id": "x", "mark": "r:1", "text": long}, true); code != http.StatusBadRequest {
+		t.Fatalf("回答超过 2000 字返回 400：%d", code)
+	}
+}

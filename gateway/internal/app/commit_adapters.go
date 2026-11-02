@@ -26,6 +26,8 @@ type commitItem struct {
 	Contract commit.Contract
 	Facts    commit.Facts
 	EndedAt  int64  // 结束的时间（秒）；没结束为 0。结束超过 30 天的不列
+	At       int64  // 决定阶段的那条事实发生的时间（秒）：等我处理按它排，最新的在前
+	Covered  string // 被汇报的就绪盖住的宿主就绪的 Mark：点“知道了”时一起记
 	Link     string // 网页上打开它的链接
 }
 
@@ -221,6 +223,7 @@ func scheduleCommit(t schedule.Task, now int64) commitItem {
 		}
 		if t.Last != nil && !t.Last.OK && !t.Running {
 			f.Blocked, f.Mark = "上一次失败："+t.Last.Summary, fmt.Sprintf("last:%d", t.Last.At.Unix())
+			c.At = t.Last.At.Unix()
 		}
 	}
 	c.Facts = f
@@ -280,6 +283,7 @@ func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery,
 				why = "最近一次投递的结果不明：" + last.Error
 			}
 			f.Blocked, f.Mark = why, "d:"+last.ID
+			c.At = last.UpdatedMS / 1000
 		}
 	}
 	c.Facts = f
@@ -312,10 +316,12 @@ func branchCommit(m session.BranchMeta, running, autonomous bool, now int64) com
 		f.Paused = true
 	case session.BranchNeedsAttention:
 		f.Blocked, f.Mark = firstNonEmpty(m.Note, m.Progress, "需要处理"), fmt.Sprintf("p:%d", m.ProgressAt)
+		c.At = m.ProgressAt
 	case session.BranchCompleted:
 		// 主人建的分支做完一轮，之后没引入过结论：等人看。自主活动分出的不算，只看它的汇报
 		if !autonomous && !branchIntroduced(m) {
 			f.Ready, f.Mark = firstNonEmpty(m.Progress, "做完了一轮"), fmt.Sprintf("p:%d", m.ProgressAt)
+			c.At = m.ProgressAt
 		}
 	case session.BranchPreparing, session.BranchPendingBoundary:
 		f.Due, f.Wait = max(m.CreatedAt, 1), "等源会话的安全边界"

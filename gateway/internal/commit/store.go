@@ -188,6 +188,9 @@ func (s *Store) Answer(kind, id, mark string) (CommitRec, bool) {
 	return CommitRec{}, false
 }
 
+// LastSeq 是已经写下的最大序号。
+func (s *Store) LastSeq() uint64 { return s.seq }
+
 // Size 是文件现在多大。
 func (s *Store) Size() int64 { return s.j.Size() }
 

@@ -162,3 +162,41 @@ func (s *Server) listCommitments(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	writeJSON(w, map[string]any{"items": s.app.Commitments(q.Get("agent"), q.Get("phase"))})
 }
+
+// listPending 是“等我处理”：GET /api/pending。
+func (s *Server) listPending(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"items": s.app.Pending()})
+}
+
+type pendingReq struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Mark string `json:"mark"`
+	Text string `json:"text"`
+}
+
+// pendingSeen 是“知道了”：POST /api/pending/seen {kind,id,mark}。
+func (s *Server) pendingSeen(w http.ResponseWriter, r *http.Request) {
+	var req pendingReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.PendingSeen(req.Kind, req.ID, req.Mark, "web:admin"); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// pendingAnswer 是回答：POST /api/pending/answer {kind,id,mark,text}，回答最多 2000 字。
+func (s *Server) pendingAnswer(w http.ResponseWriter, r *http.Request) {
+	var req pendingReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.PendingAnswer(req.Kind, req.ID, req.Mark, req.Text, "web:admin"); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}

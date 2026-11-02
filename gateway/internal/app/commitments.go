@@ -171,8 +171,9 @@ func (a *App) overlayReport(c *commitItem) {
 	if a.commits.Seen(c.Kind, c.ID, mark) {
 		return
 	}
-	hostBlocked, hostMark := f.Blocked, f.Mark
+	hostBlocked, hostReady, hostMark := f.Blocked, f.Ready, f.Mark
 	*f = withoutNotice(*f)
+	c.At = r.TS / 1000
 	switch {
 	case (r.Status == commit.StatusBlocked || r.Status == commit.StatusFailed) && r.Question != "":
 		f.Question, f.Mark = r.Question, mark
@@ -182,9 +183,20 @@ func (a *App) overlayReport(c *commitItem) {
 		f.Blocked, f.Mark = hostBlocked, hostMark
 	case r.Status == commit.StatusNotNeeded:
 		f.Ready, f.Mark = "不用做了："+r.Text, mark
+		c.Covered = coveredReady(hostReady, hostMark)
 	default: // ready
 		f.Ready, f.Mark = r.Text, mark
+		c.Covered = coveredReady(hostReady, hostMark)
 	}
+}
+
+// coveredReady：汇报的就绪盖住了宿主自己的就绪时，两条说的是同一件事，点“知道了”一起记。
+// 宿主的受阻不在这里：受阻和就绪是两件不同的事（受阻那一支在上面已经取了宿主的）。
+func coveredReady(hostReady, hostMark string) string {
+	if hostReady == "" {
+		return ""
+	}
+	return hostMark
 }
 
 func withoutNotice(f commit.Facts) commit.Facts {
@@ -203,6 +215,9 @@ type CommitView struct {
 	Why      string            `json:"why,omitempty"`
 	Report   *commit.CommitRec `json:"report,omitempty"` // 最近一条汇报
 	Mark     string            `json:"mark,omitempty"`
+	Covered  string            `json:"covered,omitempty"` // 被汇报的就绪盖住的宿主就绪的 Mark；“知道了”一起记
+	Question string            `json:"question,omitempty"`
+	At       int64             `json:"at,omitempty"` // 决定阶段的那条事实发生的时间（秒）
 	Link     string            `json:"link"`
 }
 
@@ -210,6 +225,10 @@ type CommitView struct {
 func (a *App) Commitments(agent, phase string) []CommitView {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.commitViewsLocked(agent, phase)
+}
+
+func (a *App) commitViewsLocked(agent, phase string) []CommitView {
 	now := a.now()
 	items := a.commitItems(agent, now)
 	out := make([]CommitView, 0, len(items))
@@ -218,7 +237,7 @@ func (a *App) Commitments(agent, phase string) []CommitView {
 		if phase != "" && p != phase {
 			continue
 		}
-		v := CommitView{Kind: c.Kind, ID: c.ID, Agent: c.Agent, Title: c.Title, Contract: c.Contract, Phase: p, Why: why, Mark: c.Facts.Mark, Link: c.Link}
+		v := CommitView{Kind: c.Kind, ID: c.ID, Agent: c.Agent, Title: c.Title, Contract: c.Contract, Phase: p, Why: why, Mark: c.Facts.Mark, Covered: c.Covered, Question: c.Facts.Question, At: c.At, Link: c.Link}
 		if a.commits != nil {
 			if r, ok := a.commits.Latest(c.Kind, c.ID); ok {
 				v.Report = &r

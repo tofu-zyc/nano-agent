@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/proto"
@@ -393,6 +394,12 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if err := a.saveTask(task); err != nil {
 		return err
 	}
+	if a.commits != nil {
+		if a.schedPrior == nil {
+			a.schedPrior = map[string]uint64{}
+		}
+		a.schedPrior[task.ID] = a.commits.LastSeq()
+	}
 	fail := func(err error) error { a.completeSchedule(&task, false, err.Error()); return err }
 	if strings.TrimSpace(task.Prompt) == "" {
 		return fail(errors.New("任务的 prompt 是空的"))
@@ -435,7 +442,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if len(task.Deliver) > 0 && !task.Silent {
 		ep = parseEndpoint(task.Deliver[0])
 	}
-	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
+	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.takeScheduleAnswer(task.ID) + a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
 	a.startRun(s)
 	if s.run == nil {
 		if s.scheduled == nil {
@@ -503,6 +510,12 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 			push = false
 		}
 		current.Running = false
+		if prior, had := a.schedPrior[task.ID]; had {
+			delete(a.schedPrior, task.ID)
+			if ok { // 下一次成功了，上一次的汇报（失败、受阻）不用再看
+				a.handledByOwner(commit.KindSchedule, task.ID, prior)
+			}
+		}
 		schedule.Record(&current, schedule.Result{At: a.now(), OK: ok, Summary: clip(summary, 2000)})
 		if err := a.saveTask(current); err != nil {
 			a.log.Error("记录任务结果失败", "err", err)
