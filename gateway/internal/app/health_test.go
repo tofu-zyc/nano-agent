@@ -38,7 +38,7 @@ func TestHealthStartsAllOKAndIsOnStatus(t *testing.T) {
 			t.Fatalf("新网关应全部正常: %+v", h)
 		}
 	}
-	if strings.Join(names, ",") != "autonomy,dispatch,outbox,runtime_events,schedule,storage" {
+	if strings.Join(names, ",") != "autonomy,dispatch,outbox,runtime_events,schedule,stage,storage" {
 		t.Fatalf("第一批条目: %v", names)
 	}
 	if strings.Contains(e.a.StatusBrief(), "健康：") {

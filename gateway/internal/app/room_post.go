@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
@@ -157,12 +158,28 @@ func (a *App) roomPost(room rooms.Room, l roomLine, o postOpt) {
 			a.roomTrigger(s, member, room, l.Channel)
 		}
 	}
-	a.stageCursors(room, line)
+	if !a.othersBusy(room, l.From) {
+		a.stageCursors(room, line)
+	}
 	a.publish(events.Event{T: "rooms"})
 	// 人或旁白在公开频道说了一句：轮流模式从这里开始转
 	if l.From == "" && l.Kind != lineCue && l.Channel == "" && room.Mode == scene.ModeTurns {
 		a.roomTurnStart(room)
 	}
+}
+
+// othersBusy 除了 except，还有没有成员在跑或排队：有的话这一刻成员会话的长度
+// 不是“这一句刚送达”的状态，不能当分出点。说话者自己在 finish 里时 run 可能还没清，要排除在外。
+func (a *App) othersBusy(room rooms.Room, except string) bool {
+	for _, m := range room.Members {
+		if m == except {
+			continue
+		}
+		if s := a.sessions[a.roomMemberSID(m, room.ID)]; s != nil && (s.run != nil || len(s.queue) > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // roomHumanSay 是人在群里说的话（公开）。群记录由 roomPost 记。调用方持有锁。
@@ -262,6 +279,9 @@ func (a *App) RoomSay(id, text, as, channelID, defaultName string) error {
 	if text == "" {
 		return errors.New("话是空的")
 	}
+	if n := utf8.RuneCountInString(text); n > scene.MaxText {
+		return fmt.Errorf("一句话最多 %d 字（现在 %d）", scene.MaxText, n)
+	}
 	if channelID != "" {
 		if _, ok := room.ChannelByID(channelID); !ok {
 			return fmt.Errorf("没有这个频道：%s", channelID)
@@ -319,6 +339,9 @@ func (a *App) RoomCue(id, agentID, note, channelID string) error {
 	s := a.sessOf(a.roomMemberSID(agentID, room.ID))
 	if s.run != nil || len(s.queue) > 0 || s.groupTimer != nil {
 		return fmt.Errorf("%s 正在说话，等它说完", a.agentDisplay(agentID))
+	}
+	if n := utf8.RuneCountInString(strings.TrimSpace(note)); n > scene.MaxText {
+		return fmt.Errorf("提示最多 %d 字（现在 %d）", scene.MaxText, n)
 	}
 	if note = strings.TrimSpace(note); note != "" {
 		a.roomPost(room, roomLine{Kind: lineCue, To: agentID, Text: note}, postOpt{})

@@ -130,6 +130,8 @@ type App struct {
 	hEvents         *health.Handle
 	hAutonomy       *health.Handle
 	hSchedule       *health.Handle
+	hStage          *health.Handle    // 场景记录：有一场写不进去就是 degraded
+	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
 	runWaitSerial   uint64
@@ -472,6 +474,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.hEvents, _ = a.health.Claim("runtime_events")
 	a.hAutonomy, _ = a.health.Claim("autonomy")
 	a.hSchedule, _ = a.health.Claim("schedule")
+	a.hStage, _ = a.health.Claim("stage")
 	for _, recovery := range []struct {
 		name string
 		run  func() error

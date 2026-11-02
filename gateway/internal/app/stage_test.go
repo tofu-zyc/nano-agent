@@ -11,6 +11,7 @@ import (
 
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/knowledge"
+	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/scene"
 	"nano-agent/gateway/internal/session"
@@ -410,7 +411,10 @@ func TestSplitInner(t *testing.T) {
 		{"<心里>想</心里>[不回复]", "想", "[不回复]"},
 		{"<心里>想</心里>", "想", ""},
 		{"没有格式", "", "没有格式"},
-		{"说了<心里>想</心里>", "", "说了<心里>想</心里>"},
+		{"说了<心里>想</心里>", "想", "说了"},
+		{"先说一句。\n<心里>想法在后面</心里>", "想法在后面", "先说一句。"},
+		{"前<心里>甲</心里>中<心里>乙</心里>后", "甲\n乙", "前中后"},
+		{"<心里>只有心里话</心里>\n<心里>两段</心里>", "只有心里话\n两段", ""},
 		{"<心里>没写完", "", "<心里>没写完"},
 	} {
 		inner, said := splitInner(c.in)
@@ -418,7 +422,7 @@ func TestSplitInner(t *testing.T) {
 			t.Errorf("%q → %q / %q，应为 %q / %q", c.in, inner, said, c.inner, c.said)
 		}
 	}
-	if inner, _ := splitInner("<心里>" + long + "</心里>说"); len([]rune(inner)) != 200 {
+	if inner, _ := splitInner("说<心里>" + long + "</心里>"); len([]rune(inner)) != 200 {
 		t.Errorf("心里话最多 200 字：%d", len([]rune(inner)))
 	}
 }
@@ -640,5 +644,194 @@ func TestStageReplayReproducesTheScene(t *testing.T) {
 		if r1[i].Inner != r2[i].Inner || r1[i].Said != r2[i].Said || r1[i].Inner == "" {
 			t.Fatalf("第 %d 轮：%+v / %+v", i+1, r1[i], r2[i])
 		}
+	}
+}
+
+// 句子号取群记录里的实际位置：有一句没写进场景记录、暂停提示只进了群记录时，之后的号不错位。
+func TestStageLineNumbersFollowRoomLog(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	room, _ := threeRoom(t, e, stageRules(scene.Rules{Mode: scene.ModeMention}))
+	log := roomLogSID(room.ID)
+	if err := e.a.RoomSay(room.ID, "第一句", "张三", "", "我"); err != nil {
+		t.Fatal(err)
+	}
+	// 超过单条记录上限的一句：写不进场景记录，群暂停，提示只进群记录
+	e.a.mu.Lock()
+	e.a.roomPost(room, roomLine{Name: narratorName, Kind: lineNarrate, Text: strings.Repeat("字", 30000)}, postOpt{})
+	e.a.mu.Unlock()
+	if p, _ := paused(e, room.ID); !p {
+		t.Fatal("写不进去要暂停")
+	}
+	if _, err := e.a.UpdateRoom(room.ID, RoomPatch{Paused: boolptr(false)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.a.RoomSay(room.ID, "恢复后的一句", "张三", "", "我"); err != nil {
+		t.Fatal(err)
+	}
+	logLines := lines(e, log)
+	var found int
+	for _, r := range kindsOf(timeline(t, e, room.ID), "line") {
+		if r.Text == "恢复后的一句" {
+			found = r.Line
+		}
+	}
+	if found == 0 || found > len(logLines) || !strings.HasSuffix(logLines[found-1], "恢复后的一句") {
+		t.Fatalf("场景记录里这一句是第 %d 句，群记录是：\n%s", found, strings.Join(logLines, "\n"))
+	}
+	if found != 3 {
+		t.Fatalf("群记录里是第 3 条：%d", found)
+	}
+}
+
+// 只在场上没人说话时记 cursors：有别的成员在跑，这一刻会话的长度不是“刚送达”的状态。
+func TestStageCursorsOnlyWhenQuiet(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	room, _ := threeRoom(t, e, stageRules(scene.Rules{Mode: scene.ModeMention}))
+	cursorLines := func() []int {
+		var out []int
+		for _, r := range kindsOf(timeline(t, e, room.ID), "cursors") {
+			out = append(out, r.Line)
+		}
+		return out
+	}
+	eq := func(got []int, want ...int) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("cursors 记在这些句子上：%v，应为 %v", got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("cursors 记在这些句子上：%v，应为 %v", got, want)
+			}
+		}
+	}
+	e.a.RoomSay(room.ID, "@小鲍 在吗", "张三", "", "我") // 第 1 句：没人在跑，记
+	eq(cursorLines(), 1)
+	in := e.k.expect(proto.TInput)                // 小鲍开始跑了
+	e.a.RoomSay(room.ID, "对了还有件事", "张三", "", "我") // 第 2 句：小鲍在跑，不记
+	eq(cursorLines(), 1)
+	e.k.send(proto.Msg{T: proto.TModel, SID: in.SID})
+	e.k.expect(proto.TTurn)
+	e.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+	waitRunDone(t, e.a, in.SID)
+	// 小鲍说的那一句（第 3 句）：别人都空着，说话者自己不算在内，记
+	eq(cursorLines(), 1, 3)
+	e.a.RoomSay(room.ID, "谢谢", "张三", "", "我") // 第 4 句：都空着，记
+	eq(cursorLines(), 1, 3, 4)
+}
+
+func TestStageHealthListsRoomsThatCannotWrite(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	store, _ := withAgents(t, e)
+	_ = store
+	rs := openRooms(t, e)
+	mk := func(name string) rooms.Room {
+		r, err := rs.Create(rooms.Room{Name: name, Members: []string{"default"}, Rules: stageRules(scene.Rules{Mode: scene.ModeMention})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	A, B := mk("甲场"), mk("乙场")
+	health := func() (string, string) {
+		for _, h := range e.a.health.Snapshot() {
+			if h.Name == "stage" {
+				return string(h.State), h.Detail
+			}
+		}
+		t.Fatal("健康条目 stage 要在启动时认领")
+		return "", ""
+	}
+	if st, _ := health(); st != "ok" {
+		t.Fatalf("一开始是 ok：%s", st)
+	}
+	breakRoom := func(r rooms.Room) {
+		e.a.mu.Lock()
+		st, _ := e.a.stageFor(roomLogSID(r.ID))
+		st.j.Close()
+		e.a.mu.Unlock()
+		e.a.RoomSay(r.ID, "一句", "张三", "", "我")
+	}
+	heal := func(r rooms.Room) { // 重启的效果：丢掉坏的，重新打开
+		e.a.mu.Lock()
+		delete(e.a.stages, r.ID)
+		e.a.mu.Unlock()
+		if _, err := e.a.UpdateRoom(r.ID, RoomPatch{Paused: boolptr(false)}); err != nil {
+			t.Fatal(err)
+		}
+		e.a.RoomSay(r.ID, "又一句", "张三", "", "我")
+	}
+	breakRoom(A)
+	if st, d := health(); st != "degraded" || !strings.Contains(d, "甲场") {
+		t.Fatalf("甲场写不进去：%s %s", st, d)
+	}
+	breakRoom(B)
+	if _, d := health(); !strings.Contains(d, "甲场") || !strings.Contains(d, "乙场") {
+		t.Fatalf("两场都要列出来：%s", d)
+	}
+	heal(A)
+	if st, d := health(); st != "degraded" || strings.Contains(d, "甲场") || !strings.Contains(d, "乙场") {
+		t.Fatalf("甲场恢复了，乙场还坏着，状态不能是 ok：%s %s", st, d)
+	}
+	heal(B)
+	if st, _ := health(); st != "ok" {
+		t.Fatalf("都恢复了才是 ok：%s", st)
+	}
+}
+
+// 删群：场景记录关掉、从内存里移掉、文件删掉，健康条目里也不留。
+func TestStageDeleteRoomRemovesRecord(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	room, _ := threeRoom(t, e, stageRules(scene.Rules{Mode: scene.ModeMention}))
+	e.a.RoomSay(room.ID, "一句", "张三", "", "我")
+	path := e.a.stagePath(room.ID)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("场景记录文件应该在：", err)
+	}
+	e.a.mu.Lock()
+	st, _ := e.a.stageFor(roomLogSID(room.ID))
+	j := st.j
+	e.a.mu.Unlock()
+	if err := e.a.DeleteRoom(room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("文件要删掉：%v", err)
+	}
+	e.a.mu.Lock()
+	_, kept := e.a.stages[room.ID]
+	e.a.mu.Unlock()
+	if kept {
+		t.Fatal("要从内存里移掉")
+	}
+	if err := j.Append(StageRec{Kind: "op"}); err == nil {
+		t.Fatal("日志要关掉")
+	}
+	if _, _, err := e.a.StageTimeline(room.ID, 0, 10); err == nil {
+		t.Fatal("群没了，时间线也没了")
+	}
+}
+
+// /say 的话和 /cue 的提示超过 2000 字直接拒绝，不会因为超过单条记录的上限把整场戏暂停。
+func TestRoomSayAndCueRejectOverlongText(t *testing.T) {
+	e := setup(t)
+	e.a.SetLLM(&scriptModel{reply: say})
+	room, _ := threeRoom(t, e, stageRules(scene.Rules{Mode: scene.ModeDirector}))
+	long := strings.Repeat("字", scene.MaxText+1)
+	if err := e.a.RoomSay(room.ID, long, "旁白", "", "我"); err == nil {
+		t.Fatal("太长的话要拒绝")
+	}
+	if err := e.a.RoomCue(room.ID, "bob", long, ""); err == nil {
+		t.Fatal("太长的提示要拒绝")
+	}
+	if p, _ := paused(e, room.ID); p {
+		t.Fatal("被拒绝的话不能把群暂停")
+	}
+	if err := e.a.RoomSay(room.ID, strings.Repeat("字", scene.MaxText), "旁白", "", "我"); err != nil {
+		t.Fatal("正好 2000 字可以：", err)
 	}
 }

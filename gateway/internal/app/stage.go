@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"nano-agent/gateway/internal/events"
@@ -88,11 +89,9 @@ type stageLog struct {
 	j        *journal.Journal
 	path     string
 	seq      uint64
-	lines    int             // 群记录里最后一句的序号
 	prefixes map[string]bool // 已经记过全文的前缀
 	lastSaid map[string]int  // 成员 → 它这一轮说出口的那一句
 	openErr  error
-	h        *health.Handle
 }
 
 func (a *App) stagePath(roomID string) string {
@@ -122,10 +121,7 @@ func (a *App) stageFor(sid string) (*stageLog, rooms.Room) {
 				return err
 			}
 			st.seq = seq
-			switch rec.Kind {
-			case "line":
-				st.lines = max(st.lines, rec.Line)
-			case "prefix":
+			if rec.Kind == "prefix" {
 				st.prefixes[rec.Hash] = true
 			}
 			return nil
@@ -144,20 +140,55 @@ func (a *App) stagePut(st *stageLog, room rooms.Room, rec StageRec) error {
 		err = st.j.Append(rec)
 	}
 	if err != nil {
-		if st.h == nil {
-			st.h, _ = a.health.Claim("stage")
-		}
-		if st.h != nil {
-			st.h.Set(health.Degraded, "场景记录写不进去（群 "+room.Name+"）："+err.Error())
-		}
+		a.stageHealth(room, err)
 		return err
 	}
 	st.seq++
-	if st.h != nil {
-		st.h.Set(health.OK, "")
-	}
+	a.stageHealth(room, nil)
 	a.publish(events.Event{T: "stage", SID: roomLogSID(room.ID), N: int(st.seq), Data: map[string]any{"room": room.ID, "seq": st.seq}})
 	return nil
+}
+
+// stageHealth 更新健康条目 stage：只要还有一场写不进去就是 degraded，详情里列出这几场；
+// 某一场之后写成功了就把它移出去。err 为空表示这一场刚写成功。调用方持有锁。
+func (a *App) stageHealth(room rooms.Room, err error) {
+	if a.stageBad == nil {
+		a.stageBad = map[string]string{}
+	}
+	if err != nil {
+		a.stageBad[room.ID] = room.Name + "：" + err.Error()
+	} else if _, bad := a.stageBad[room.ID]; bad {
+		delete(a.stageBad, room.ID)
+	} else {
+		return
+	}
+	if a.hStage == nil {
+		return
+	}
+	if len(a.stageBad) == 0 {
+		a.hStage.Set(health.OK, "")
+		return
+	}
+	var list []string
+	for _, v := range a.stageBad {
+		list = append(list, v)
+	}
+	sort.Strings(list)
+	a.hStage.Set(health.Degraded, "场景记录写不进去："+strings.Join(list, "；"))
+}
+
+// stageForget 删群时把它的场景记录关掉、从内存里移掉、删掉文件。调用方持有锁。
+func (a *App) stageForget(roomID string) {
+	if st := a.stages[roomID]; st != nil && st.j != nil {
+		st.j.Close()
+	}
+	delete(a.stages, roomID)
+	a.stageHealth(rooms.Room{ID: roomID}, nil)
+	if a.observeDir != "" {
+		if err := os.Remove(a.stagePath(roomID)); err != nil && !os.IsNotExist(err) {
+			a.log.Warn("删除场景记录失败", "room", roomID, "err", err)
+		}
+	}
 }
 
 // stageBroken 是场景记录写不进去：这一场暂停，原因只写群记录（再写场景记录也会失败）。调用方持有锁。
@@ -174,13 +205,13 @@ func (a *App) roomLogWrite(room rooms.Room, msg session.Msg, rec StageRec) (int,
 	st, _ := a.stageFor(log)
 	line := 0
 	if st != nil {
-		rec.Kind, rec.Line = "line", st.lines+1
+		// 句子号取群记录里的实际位置：场景记录里允许有空位（暂停提示只进了群记录的那种）
+		rec.Kind, rec.Line = "line", a.histEnd(log)+1
 		if err := a.stagePut(st, room, rec); err != nil {
 			a.stageBroken(room, err)
 			return 0, false
 		}
-		st.lines++
-		line = st.lines
+		line = rec.Line
 		if rec.From != "" && rec.Say == lineSay {
 			st.lastSaid[rec.From] = line
 		}
@@ -292,15 +323,23 @@ func (a *App) sceneRunEnd(s *sess, r *run, status string) {
 // 加在场景说明后面的固定说明，同一场内不变。
 const innerGuide = "[心里话] 每次回复先用 <心里>一句心里话</心里> 写下你此刻真正的想法（不超过 200 个字，别人听不到），再接着写你说出口的话。不想说话，就在心里话后面只回 [不回复]。"
 
-var innerRe = regexp.MustCompile(`(?s)^\s*<心里>(.*?)</心里>\s*(.*)$`)
+var innerRe = regexp.MustCompile(`(?s)<心里>(.*?)</心里>`)
 
-// splitInner 把回复拆成心里话和说出口的话；没按格式写的整段算说出口。
+// splitInner 把回复拆成心里话和说出口的话：任何位置的 <心里>…</心里> 都拿出来（有几段都要），
+// 说出口的部分去掉这些段落；没有标签的整段算说出口。
 func splitInner(text string) (inner, said string) {
-	m := innerRe.FindStringSubmatch(text)
-	if m == nil {
+	ms := innerRe.FindAllStringSubmatch(text, -1)
+	if ms == nil {
 		return "", text
 	}
-	return cutText(strings.TrimSpace(m[1]), stageInnerMax), strings.TrimSpace(m[2])
+	var parts []string
+	for _, m := range ms {
+		if t := strings.TrimSpace(m[1]); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	said = strings.TrimSpace(innerRe.ReplaceAllString(text, ""))
+	return cutText(strings.Join(parts, "\n"), stageInnerMax), said
 }
 
 // sceneSplit 按场景的规则把成员这一轮的回复拆开：返回说出口的部分，心里话记在这一轮上。

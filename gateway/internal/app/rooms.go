@@ -426,6 +426,7 @@ func (a *App) DeleteRoom(id string) error {
 		return err
 	}
 	a.sceneForget(roomLogSID(id))
+	a.stageForget(id)
 	a.publish(events.Event{T: "rooms"})
 	return nil
 }
