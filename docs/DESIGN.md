@@ -207,7 +207,7 @@
 | 1 事实层（已完成） | 可靠出站（作为从 App 拆出的投递服务）；健康状态（每个部件认领一个条目，只由它写）；模型面快照测试 | 全部 | R1、R12、R3 的投递部分 |
 | 2 场景（已完成） | 内部群升级为场景：角色提示词、可见性、发言规则、时钟、预算池、结束条件、场内工具；外部群可绑定场景规则，群聊规则以场景为准（agent 上的群聊设置作为没单独设置时的默认值）；主动插话的 `observe` 档。分 2a、2b、2c 三段，见第 13 节 | 全部 | R6 |
 | 3 剧场（已完成） | 导演台（插入事件、暂停、禁言、分出平行世界、倒带）；统一时间线；导出时间轴字幕；可重放记录。分 3a、3b、3c 三段，见第 14 节 | 剧场 | — |
-| 4 承诺 | 共用契约和阶段函数；Report 工具；"等我处理"汇总；分支新增 attention 投递档（只发就绪、问题和受阻，现有 silent 不变） | 陪伴、团队 | R2、R7 |
+| 4 承诺 | 共用契约和阶段函数；Report 工具；"等我处理"汇总；分支新增 attention 投递档（只发就绪、问题和受阻，现有 silent 不变）。分 4a、4b、4c 三段，见第 15 节 | 陪伴、团队 | R2、R7 |
 | 5 团队 | 仓库与团队群来源；准入表与授权记录；工单；外部 agent 执行器；工作目录内的 git worktree 隔离；说话纪律 | 团队 | — |
 
 按表中顺序推进，先做剧场、后做团队（2026-10-31 确定）。剧场没有外部副作用，能用模型替身做端到端验收，直接检验"场景"这个核心抽象，又能最早产出内容；团队要动真实仓库和真实的人，需要实机联调，等承诺层稳定后再做。剧场完成时检查场景的实现里没有为内部群写特殊分支，避免抽象被剧场带偏。
@@ -247,8 +247,8 @@
 
 ## 11 待决定
 
-1. 分支是否新增 attention 投递档（第 4 步前定）。
-2. 工单从 Agenda 的明确约定扩展而来，还是作为承诺的新种类单独建对象（第 4 步前定）。
+1. 分支是否新增 attention 投递档：已定，加（见第 15 节）。
+2. 工单从 Agenda 扩展，还是作为承诺的新种类单独建对象：已定，单独建对象，第 5 步做（见第 15 节）。
 3. 外部 agent 执行器如何开启，在沙箱中怎样联网、凭据放在哪里；先做小规模试验再定（第 5 步前定）。
 
 ## 12 第 1 步：事实层
@@ -644,6 +644,330 @@ type ModelRec struct {
 - 导出：同一个脚本场导出的 SRT 和 Markdown 有逐字节的快照测试；长句拆分、时长上下限、开关的组合都有测试。
 - 网页检查脚本覆盖：打开导演台，显示和隐藏心里话，以旁白身份说一句，从某一句分出后跳到新群，三种格式都能导出，放映能开始和停止。
 - 第 3 步收尾：按第 9 节检查场景的实现里没有为内部群写特殊分支，消息入口和 run 的启动、结束路径只按场景规则走。
+
+## 15 第 4 步：承诺
+
+目标：约定、回访、定时任务、Hook、分支这几种承诺共用一份工作契约和一套阶段推导；主人在一个地方看到"等我处理"的事；干活的会话用 Report 汇报，原对话里只出现确认、要人回答的问题和结果。各种承诺仍是各自的对象，保留自己的到期、补跑、取消和验收规则（见 3.4）。分三段做，每段单独验收；后一段等前一段审过再开始：
+
+| 段 | 内容 |
+| --- | --- |
+| 4a | 前置收敛：自主活动只留一份状态（R2）；启动一轮之前的准入检查只写一份（R7）。不改变行为 |
+| 4b | 契约和阶段：`internal/commit` 的阶段函数；六种承诺各自推出契约和事实；Report 工具和承诺记录；只读的承诺列表接口 |
+| 4c | 等我处理：汇总、回答、"知道了"，网页和聊天命令都有；分支的 attention 投递档 |
+
+默认不改变现有行为：没用 Report、没开 attention 时，消息、投递和存储都和现在一样。只有多了 Report 工具的几类会话（life、分支、定时任务、Hook）快照会变。消息入口和 run 的启动路径不加分支，准入统一走 `admitRun`。
+
+第 11 节的前两项在这一步定下来：
+
+1. 分支新增 attention 投递档：加，见 15.3。
+2. 工单作为承诺的新种类单独建对象（第 5 步做），共用这里的契约和阶段函数，不从 Agenda 扩展。Agenda 是一个拟人 agent 自己的日程，存在它的心智状态里；工单属于团队场景，有外部来源（Issue、PR）、执行器、工作区和授权记录，放进 Agenda 会把团队的东西带进陪伴的心智状态。
+
+### 15.1 4a：前置收敛
+
+**R2：自主活动只留一份状态。** `data/autonomy.json` 是唯一的权威状态。`data/life.json` 只导入一次，之后不再读写。
+
+- 两边都有的，统一成一处：
+  - 下次醒来：现在是 `life.Next` 和 `NextCheck` 两份，只留 `NextCheck`。
+  - 今天醒了几次：现在是 `life.Wakes` 和账本里 exploration 的次数，只看账本。
+  - 今天用了多少 token：现在是 `life.Tokens`、`Budget.Tokens` 和账本三份，只看账本。`BudgetLeft` 改从账本算当天的总 token，上限照旧每次从 agent 配置取。
+- 只在 life.json 里的，搬进 autonomy：
+  - `Reaches`（今天主动找了几次人）进账本，来源记 `reach`。
+  - `Awaiting`（主动发了消息、对方还没回）和 `FollowUps`（约好过会儿再看）搬进 `autonomy.State`。
+  - `Recent`（旧近况）不再搬：还没导入经历的（`ExperienceImported` 为假），先按现在的办法导进经历。状态里的"近况"改取最近一条 life 经历。
+- 导入：
+  - `SchemaVersion` 加一。第一次加载时，把 life.json 里还有用的字段导进 autonomy，`Migrated` 加一位。
+  - 成功后把文件改名为 `life.json.imported`，不删。
+  - 导入失败照常报到健康条目 `autonomy`，不导一半。
+- 先写清各类预算的计入口径：把现在每个计入的地方列成一张表写进 RUNTIME，比如 life 会话的每一轮、自主分支、走 life 会话的 Hook、主人叫醒的那一轮。统一到账本时口径不变。这张表也是 4b 里"停止条件"的依据。
+- 网页和状态里的"下次醒来、今天醒了几次、找了几次人"改读 autonomy，显示的数字不变。
+
+**R7：准入检查只写一份。** 有好几处在启动一轮之前，各自检查一遍"会话忙不忙、有没有模型、有没有在线内核、场景额度用完没有"，写法和说法各不相同：FollowUp、自主活动、主人叫醒、定时任务、整理记忆、Hook、分支继续。收成一个：
+
+```go
+// admitRun 是启动一轮之前的共同检查。各种承诺按结果决定自己怎么办（延后多久、记失败还是等下次），
+// 这些规则仍然各自保留。调用方持有锁。
+func (a *App) admitRun(sid string) (ok bool, why string, retry time.Duration)
+```
+
+- 按这个顺序检查：
+  1. 会话在跑、在排队或在整理上下文。
+  2. 没有配置模型。
+  3. 这个会话的工作目录没有在线内核。
+  4. 场景额度用完了。
+- `retry` 是建议的延后时间：会话忙 2 分钟，没模型 30 分钟，没内核 5 分钟，额度用完就等到额度恢复。
+- 各处改成调用它，延后时间和失败的说法保持现在的样子。现在各处不一样的，以调用方现有的为准，`retry` 只是默认值。
+- 作息、每日次数、自主预算、暂停属于自主活动自己的规则，仍在 `autonomy.Trigger.CanStart` 里。
+
+**验收**：
+
+- R2：
+  - 从一份旧的 life.json 加 autonomy.json 启动，导入后网页和状态显示的数字和导入前一样，life.json 改名了。
+  - 再启动一次，不重复导入。
+  - 导入失败时健康条目 `autonomy` 变化，两个文件都没动。
+- R7：`admitRun` 每一项有测试；现有测试不改就全过；快照不变。
+
+### 15.2 4b：契约、阶段和 Report
+
+**种类**：
+
+| 种类 | 是什么 |
+| --- | --- |
+| `agenda` | 议程项 |
+| `intention` | 意图；只列没有未完成议程项的，有的话只列议程项 |
+| `followup` | 约好过会儿再看 |
+| `schedule` | 定时任务 |
+| `hook` | Hook 规则，不是单次投递 |
+| `branch` | 分支 |
+
+只列还存在的：删掉的、已经结束超过 30 天的都不列。
+
+**契约**：第 4 节的五项，从各自的字段推出来，不另存一份。
+
+```go
+package commit
+
+type Contract struct {
+	Goal     string   // 目标
+	By       string   // 授权：谁让做的
+	Scene    string   // 授权：在哪个会话或场景
+	Scope    string   // 授权：能动到哪里（权限模式、工作目录、工具），一句话
+	Done     string   // 完成标准；没写就是空
+	ReportTo []string // 汇报去处；空表示只留在自己的记录里
+	Stop     string   // 停止条件：预算、时限、次数，一句话
+}
+```
+
+| 种类 | 目标 | 授权 | 完成标准 | 汇报去处 | 停止条件 |
+| --- | --- | --- | --- | --- | --- |
+| agenda | `Title`，有意图时加上意图的 `Why` | agent；`Source`；`Workspaces`、`Mode` | `Criteria` | life 会话 | 每日自主预算、作息；`Minutes` |
+| intention | `Title`、`Why` | agent；`SourceEvent` | 有证据的执行结果 | life 会话 | `BudgetTokens`、每日自主预算 |
+| followup | `Note` | 那个聊天 | 到点说一句或不说 | 那个聊天 | 一次 |
+| schedule | `Name` | `CreatedBy`、`CreatorMode`、`Mode`、`Workspaces` | 每次跑完的结果 | `Deliver`；`Silent` 时为空 | `Timeout`；一次性的跑一次 |
+| hook | `Name` | `Creator`、冻结的 `Scope` | 每次投递成功 | `Deliver` | `TokenBudget`、`Retries`、`DeadlineAt`、`Once` |
+| branch | `Intent`，没有就用 `Title` | `CreatedBy`、`OwnerAgent`、快照里的设置 | 主人引入结论或归档 | 投递档；silent 为空 | 自动分支的层数、当日自主预算 |
+
+**阶段**：一共九个。前五个是进行中，后四个是结束，对应第 4 节的四种结束。
+
+| 阶段 | 含义 |
+| --- | --- |
+| `waiting` 等待 | 没到时间、在等事件，或到期了但还不能开始 |
+| `running` 进行中 | 有一轮正在跑 |
+| `blocked` 受阻 | 要人处理：有没回答的问题、汇报受阻或失败、上一次失败、结果不明，或者说结束了却没有证据或理由 |
+| `ready` 就绪 | 有结果等人看，还没看过 |
+| `paused` 暂停 | 人停下的，可以恢复 |
+| `done` 完成 | 有证据 |
+| `dropped` 无需处理 | 有理由 |
+| `failed` 失败 | 不再重试 |
+| `stopped` 叫停 | 人取消或归档的 |
+
+阶段由一个纯函数从事实推出：
+
+```go
+type Facts struct {
+	Now      int64
+	Ended    string // 自己的记录里已经结束：done | dropped | failed | stopped
+	Evidence string // done 的证据
+	Reason   string // dropped、failed、stopped 的理由
+	Paused   bool
+	Running  bool
+	Question string // 还没回答的问题
+	Blocked  string // 受阻的原因
+	Ready    string // 等人看的结果
+	Mark     string // Blocked、Ready、Question 来自哪一条事实；"知道了"和回答都靠它
+	Due      int64  // 下一次到期；0 表示在等事件
+	Wait     string // 到期了还不能开始的原因
+}
+
+func Phase(f Facts) (phase, why string)
+```
+
+从上往下，第一行命中就是结果，每一行一个测试：
+
+| # | 条件 | 阶段 | why |
+| --- | --- | --- | --- |
+| 1 | `Ended` 是 done，`Evidence` 空 | blocked | 说做完了，但没有证据 |
+| 2 | `Ended` 是 dropped，`Reason` 空 | blocked | 说不用做了，但没写理由 |
+| 3 | `Ended` 不空 | 同 `Ended` | `Evidence` 或 `Reason` |
+| 4 | `Paused` | paused | |
+| 5 | `Running` | running | |
+| 6 | `Question` 不空 | blocked | 等你回答：`Question` |
+| 7 | `Blocked` 不空 | blocked | `Blocked` |
+| 8 | `Ready` 不空 | ready | `Ready` |
+| 9 | `Due > Now` | waiting | 等到某个时间 |
+| 10 | `Due > 0`，`Wait` 不空 | waiting | `Wait` |
+| 11 | `Due > 0` | waiting | 到期了，马上开始 |
+| 12 | 其余 | waiting | 等事件 |
+
+另有两个不变量测试：任意一组事实都恰好得到九个阶段中的一个；得到结束阶段时，一定带着证据或理由。
+
+**事实**：从各自的记录推出。适配函数写在 app 里，一种一个，各有测试。
+
+| 事实 | agenda | intention | followup | schedule | hook | branch |
+| --- | --- | --- | --- | --- | --- | --- |
+| Ended | done → done（`Result`）；cancelled → 主人取消的是 stopped，agent 取消的是 dropped（`Result`）；skipped → dropped | done → done（`Evidence`）；failed → failed；cancelled 同 agenda | — | 一次性任务跑过、已停用：`Last.OK` 为真是 done（`Last.Summary`），否则 failed | `Once` 且成功后停用：done（最后一次投递的 `Result`） | archived、cancelled → stopped |
+| Paused | 自主活动暂停 | 同左，或 paused | 同左 | 停用，且不是已结束的一次性任务 | 停用 | paused |
+| Running | in_progress | running | — | `Running` | 有投递在跑 | running、queued |
+| Blocked | 汇报 | 汇报 | — | 上一次失败（`Last.OK` 为假）；汇报 | 最近一次投递 failed 或 uncertain（结果不明）；汇报 | needs_attention（`Note`）；汇报 |
+| Ready | 汇报 | 汇报 | — | 汇报 | 汇报 | 主人建的分支做完一轮（completed），之后没引入过结论；汇报 |
+| Due | `At` | `NextAt` | `At` | `Next` | `DeadlineAt` | — |
+| Wait | 意图的 `Blocked` | `Blocked` | — | — | — | preparing、pending_boundary：等源会话的安全边界；ready：等开始 |
+
+- 表里的"汇报"，指这件事最近一条、还没看过也没回答过的 Report：
+  - blocked、failed 进 `Blocked`，带着问题的进 `Question`；
+  - ready、not_needed 进 `Ready`。
+- 宿主自己记下的 `Blocked`、`Ready` 也带 `Mark`：
+  - 汇报：`r:<序号>`；
+  - 上一次失败：`last:<时间>`；
+  - 投递：`d:<投递 ID>`；
+  - 分支做完一轮：`p:<ProgressAt>`。
+
+  主人点过"知道了"的 `Mark` 不再算。
+- 自主活动分出的分支（`autonomousForker`）做完一轮不算 Ready，只看它的汇报。不然 agent 自己探索的每一轮都会进"等我处理"。
+- 为了分清 agenda 是谁取消的，`AgendaItem` 加一个 `EndedBy` 字段（`owner` 或 `agent`）。模型调用 `Agenda cancel` 时 `note` 必填，写不做的理由；网页上的取消记 `owner`。
+
+**Report 工具**：干活的会话用它向主人汇报。
+
+```json
+{"status": "progress | waiting | ready | blocked | failed | not_needed",
+ "text": "说明（最多 500 字）",
+ "question": "要主人回答的一个具体问题（最多 200 字，只用于 blocked）",
+ "evidence": ["本轮验收凭据的 id"]}
+```
+
+- 哪些会话有：life 会话、分支、定时任务、Hook 的 agent 处理器。
+  - 普通聊天和群聊没有：在原对话里直接回复就是汇报。戏里也没有。
+  - 这几类会话的工具表因此变化：`prefixVer` 加一，快照更新；其他会话的快照不变。
+- 汇报的是哪件事，由宿主从这一轮推出，不由模型填：
+  - life 的这一轮看 `mindRun.Trigger`：议程项优先，其次意图。自己安排的检查不对应任何承诺，Report 拒绝。
+  - 分支汇报的是分支自己。
+  - 定时任务汇报的是这个任务。
+  - Hook 汇报的是这条规则；这一轮跑在分支里也算 Hook。
+- 代码检查：
+  - `ready` 至少要有一个 `evidence`，按 Agenda done 的规则核验，必须是本轮真实成功的工具结果。
+  - `blocked`、`failed`、`not_needed` 要有 `text`。
+  - `question` 只能和 `blocked` 一起用。
+  - Hook 和定时任务的这一轮结束后，没有会话接着问，所以带 `question` 的拒绝，它们只汇报状态。
+  - 一轮最多调用 4 次。
+- 汇报只记录"主人需要知道什么"，不改承诺自己的状态：做完、取消日程仍然用 Agenda，分支的生命周期仍由主人决定。阶段从事实推出，所以汇报会通过上面的表影响阶段。
+- 工具说明和 life 技能里写清楚什么时候该汇报：
+  - 有结果可用（ready）；
+  - 卡住了，要人处理（blocked，可以问一个问题）；
+  - 做不下去了（failed）；
+  - 不用做了（not_needed）。
+
+  progress、waiting 只记一笔，不会发给任何人。
+
+**承诺记录** `data/runtime/commitments.jsonl`（`internal/journal`，单条 8KB，整份 16MB）：
+
+```go
+type CommitRec struct {
+	Seq  uint64 `json:"seq"`
+	Type string `json:"type"` // report | seen | answer
+	TS   int64  `json:"ts"`   // 毫秒
+	Kind string `json:"kind"` // 承诺种类
+	ID   string `json:"id"`   // 在自己种类里的 ID
+	// report
+	Agent    string   `json:"agent,omitempty"`
+	Status   string   `json:"status,omitempty"`
+	Text     string   `json:"text,omitempty"`
+	Question string   `json:"question,omitempty"`
+	Evidence []string `json:"evidence,omitempty"` // 凭据 id 和工具名
+	Run      string   `json:"run,omitempty"`
+	// seen、answer：针对哪一条事实，谁做的
+	Mark   string `json:"mark,omitempty"`
+	By     string `json:"by,omitempty"`
+	Answer string `json:"answer,omitempty"`
+}
+```
+
+- 先记再说：
+  - Report 先写进记录，写成功才返回成功，之后才可能推送（见 4c）。
+  - 写不进去时，返回错误给模型，健康条目 `commitments` 为 degraded。这个条目在网关启动时认领。
+- 内存里的状态：启动时重放记录，每件事只留最近一条汇报，和最近 16 个看过的 `Mark`。
+- 压缩：文件超过 8MB 时用 `Rewrite` 整份重写，只保留内存里的这些。删掉的承诺（删分支、删任务、删规则）的记录在这时丢掉。
+
+**接口**：
+
+- `GET /api/commitments?agent=&phase=`，只给管理员。每件事给出：种类、ID、agent、标题、契约、阶段和 why、最近一条汇报、`Mark`，以及打开它的链接（会话、分支或任务页）。
+- 每写一条记录发一个网页事件 `commitments`。网页收到 `commitments`、`autonomy`、`branch`、`schedules` 事件时重新取列表。
+
+**验收**：
+
+- 阶段表每一行、两个不变量各有测试。
+- 六个适配函数各有测试：给出各自的记录，推出的事实和阶段都对。
+- Report：
+  - 这几种都被拒绝：没有凭据的 ready、没有 text 的 blocked、自己安排的检查里的 Report、Hook 里带问题的 Report。
+  - 写不进记录时返回错误，健康状态变化。
+  - 重启后最近一条汇报还在。
+- 没用 Report 时，现有的消息、投递和存储都不变。
+- 快照：life、分支、定时任务、Hook 四类会话的快照各更新一份，其余快照不变。
+
+### 15.3 4c：等我处理和 attention
+
+**等我处理**：所有阶段为 blocked 或 ready 的承诺，最新的在前。只给管理员看。
+
+- 网页：
+  - 拓扑图上有一个"等我处理 N"的标记，N 为 0 时不显示。
+  - 点开是一个面板，不新增页面，左边仍然只有拓扑和会话两个页面。
+  - 每件事一行：agent、种类和标题、阶段和 why、问题。操作有"回答"（有问题时才有）、"知道了"、"打开"。
+  - 面板底部可以展开"全部承诺"，按阶段分组。
+- 聊天，只在管理员窗口：
+  - `/pending` 列出同样的内容，每件事带一个编号：有汇报的用汇报序号，没有的用 `Mark`。
+  - `/answer <编号> <回答>` 回答问题。
+  - `/seen <编号>` 等于点"知道了"。
+- 接口：
+  - `GET /api/pending`
+  - `POST /api/pending/seen {kind, id, mark}`
+  - `POST /api/pending/answer {kind, id, mark, text}`，回答最多 2000 字。
+
+  "知道了"和回答都先写进承诺记录（`seen`、`answer`）再生效。
+
+**回答送到哪里**：回答写进记录之后，作为"主人的回答"送到这件事干活的地方。
+
+- 分支：放进分支会话的下一个安全边界，像"继续"一样接着跑。分支已归档就拒绝回答。
+- 议程项、意图：在 agent 的心智状态里加一个事件，带上议程项或意图的 ID 和回答。议程项还没开始的，时间改成现在，下一次自主活动就处理它，回答出现在"要处理的"里。
+- 定时任务：下一次运行时，任务说明里带一次"上次你问……，主人回答……"。
+- 回答过的问题不再算 `Question`。
+- 主人在这些地方自己动手也算处理过：
+  - 分支引入结论、继续或归档后，之前的汇报都算看过。
+  - 定时任务下一次成功后，上一次失败不再算。
+
+**attention 投递档**：分支的第三种投递档。`silent` 和 `report` 的行为不变。
+
+- 和 `silent` 一样安静：`branchSilent` 为真，普通回复、工具进度、Message、SendFile 等都不往外发。
+- 唯一的例外：这个分支的 Report 是 ready、blocked 或 failed 时，发一条到父会话最近的窗口（原对话）。宿主自己记下的失败（这一轮出错，needs_attention）也当作受阻发一条。
+- 发出去的只是通知，不写进父会话的历史，父会话的 agent 不会以为是自己说的。格式：
+
+```text
+[分支「<标题>」· 就绪] <text>
+
+[分支「<标题>」· 需要你回答] <text>
+问：<question>
+回复 /answer <编号> <你的回答>，或在网页的"等我处理"里回答。
+```
+
+- 怎么发：
+  - 外部渠道经可靠出站发送，网页发一个 `say` 事件。
+  - 先写记录，再入队。入队前崩溃的那一条只留在"等我处理"里，不补发。
+- 有界：
+  - 状态和正文都跟上一条推送一样的，不发。
+  - 每个分支每小时最多发 3 条，多出来的只留在"等我处理"里。
+  - 父会话本身是安静的（silent 分支、安静来源），不发。
+- 谁能设：和 `report` 一样，只有主人明确要求才行，比如网页上分出时选、`/session fork` 带参数、主人会话里的 Session 工具。自主活动分出的分支（life、Hook、整理记忆）只能是 `silent`。
+- 分支说明（`branchNote`）里，attention 分支多一句：有结果时用 Report ready 汇报，卡住时用 Report blocked 问一个具体问题；其他时候主人看不到你。
+
+**验收**：
+
+- 等我处理：
+  - 受阻、就绪的几种承诺都列出来；点"知道了"之后不再列。
+  - 回答之后：分支接着跑；议程项被叫起来，回答出现在"要处理的"里；定时任务下一次的说明里带着回答。
+- attention：
+  - ready、blocked（带问题）、宿主记下的失败，各发一条到原对话；progress、waiting 和普通回复不发。
+  - 同样的汇报不重复发；超过每小时 3 条的不发；父会话安静时不发。
+  - 自主活动分出的分支设不成 attention。
+  - silent、report 分支的行为和现在一样。
+- 网页检查脚本覆盖：标记的数字、打开面板、回答、知道了、"全部承诺"的分组。`/pending`、`/answer`、`/seen` 有端到端测试。
+- 第 4 步收尾：按第 7 节检查，承诺的实现没有在消息入口和 run 的启动路径里加分支；"每个进行中的承诺恰好处在一个阶段"和"没有证据或理由不能结束"两条不变量有测试。
 
 ## 参考
 
