@@ -808,8 +808,8 @@ func Phase(f Facts) (phase, why string)
 
 | 事实 | agenda | intention | followup | schedule | hook | branch |
 | --- | --- | --- | --- | --- | --- | --- |
-| Ended | done → done（`Result`）；cancelled → 主人取消的是 stopped，agent 取消的是 dropped（`Result`），升级前没记谁取消的算 dropped（没有 `Result` 就写"取消了"）；skipped → dropped | done → done（`Evidence`）；failed → failed；cancelled 同 agenda | — | 一次性任务跑过、已停用：`Last.OK` 为真是 done（`Last.Summary`），否则 failed | `Once` 且成功后停用：done（最后一次投递的 `Result`）；`Once` 已被事件占用、那次投递最终失败或取消：failed（投递的 `Error`） | archived、cancelled → stopped |
-| Paused | 自主活动暂停 | 同左，或 paused | —（暂停时回访照常发） | 停用，且不是已结束的一次性任务 | 停用 | paused |
+| Ended | done → done（`Result`）；cancelled → 主人取消的是 stopped（没有 `Result` 就写"主人取消了"），agent 取消的和升级前没记谁取消的是 dropped（没有 `Result` 就写"取消了"）；skipped → dropped | done → done（`Evidence`）；failed → failed；cancelled 同 agenda | — | 一次性任务跑过、已停用：`Last.OK` 为真是 done（`Last.Summary`），否则 failed | `Once` 且成功后停用：done（最后一次投递的 `Result`）；`Once` 已被事件占用、那次投递最终失败或取消：failed（投递的 `Error`） | archived、cancelled → stopped |
+| Paused | 自主活动暂停 | 同左，或 paused | —（暂停时回访照常发） | 停用，且不是已结束的一次性任务 | 停用（`Once` 规则被事件占用后自己停用的不算） | paused |
 | Running | in_progress | running | — | `Running` | 有投递在跑 | running、queued |
 | Blocked | 汇报 | 汇报 | — | 上一次失败（`Last.OK` 为假）；汇报 | 最近一次投递 failed 或 uncertain（结果不明）；汇报 | needs_attention（`Note`）；汇报 |
 | Ready | 汇报 | 汇报 | — | 汇报 | 汇报 | 主人建的分支做完一轮（completed），之后没引入过结论（`ReportedAt`）；汇报 |
@@ -820,7 +820,7 @@ func Phase(f Facts) (phase, why string)
   - blocked、failed 进 `Blocked`，带着问题的进 `Question`；
   - ready、not_needed 进 `Ready`。
   - progress、waiting 只记一笔，不顶掉前面那条还没处理的汇报。
-- 汇报和宿主自己的事实同时有时，按阶段表的先后取一个：问题先于受阻，受阻先于就绪。汇报的受阻、问题压过宿主的就绪；宿主的受阻压过汇报的就绪。`Mark` 跟着决定阶段的那条事实；主人点过"知道了"，下一条才显出来。
+- 汇报和宿主自己的事实同时有时，按阶段表的先后取一个：问题先于受阻，受阻先于就绪。汇报的受阻、问题压过宿主的就绪；宿主的受阻压过汇报的就绪；两边都是受阻时取汇报的（它更具体）。`Mark` 跟着决定阶段的那条事实；主人点过"知道了"，下一条才显出来。
 - 升级前已经引入过结论的分支没有 `ReportedAt`：`Progress` 是引入结论时写的那句（"已把结论带回来源会话：……"），就算已经引入过。
 - 宿主自己记下的 `Blocked`、`Ready` 也带 `Mark`：
   - 汇报：`r:<序号>`；
@@ -911,7 +911,7 @@ type CommitRec struct {
 - 汇报叠加：宿主的受阻不被汇报的就绪盖住；之后的 progress 不顶掉还没回答的问题。
 - 主人取消日程、归档分支不会变成受阻；升级前引入过结论的分支不算就绪。
 - 没用 Report 时，现有的消息、投递和存储都不变。
-- 快照：life、分支、定时任务、Hook 四类会话的快照各更新一份，其余快照不变。
+- 快照：life、分支、定时任务、Hook 四类会话的快照各更新一份，其余快照内容不变，只改第一行的 `prefixVer`。
 
 ### 15.3 4c：等我处理和 attention
 
@@ -932,6 +932,8 @@ type CommitRec struct {
   - `POST /api/pending/answer {kind, id, mark, text}`，回答最多 2000 字。
 
   "知道了"和回答都先写进承诺记录（`seen`、`answer`）再生效。
+
+  汇报的就绪盖住了宿主自己的就绪时（比如主人建的分支做完一轮，这一轮里也 Report ready 了），两条说的是同一件事：点"知道了"时两个 `Mark` 一起记 `seen`，不要让主人点两次。受阻和就绪互相盖住时不这样，它们是两件不同的事。
 
 **回答送到哪里**：回答写进记录之后，作为"主人的回答"送到这件事干活的地方。
 
