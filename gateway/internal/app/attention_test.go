@@ -249,3 +249,23 @@ func TestSessionForkCommandAttention(t *testing.T) {
 		t.Fatalf("/session fork --attention：%+v", got)
 	}
 }
+
+// 模型通过 Session 工具只能要 silent 或 attention；report 一律当 silent，非管理员要 attention 也只得到 silent。
+func TestAttentionToolDeliveryIsRestricted(t *testing.T) {
+	if toolDelivery("report") != session.BranchDeliverySilent || toolDelivery("") != session.BranchDeliverySilent ||
+		toolDelivery("attention") != session.BranchDeliveryAttention {
+		t.Fatal("toolDelivery 的映射不对")
+	}
+	e := setup(t)
+	withAgents(t, e)
+	br, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "访客", RequestID: "att-guest", By: "fake:guest", Delivery: session.BranchDeliveryAttention})
+	if err != nil {
+		return // 访客根本分不了也算
+	}
+	e.a.mu.Lock()
+	d := e.a.branchDelivery(br.BranchSID)
+	e.a.mu.Unlock()
+	if d != session.BranchDeliverySilent {
+		t.Fatalf("非管理员只能是 silent：%q", d)
+	}
+}

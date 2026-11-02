@@ -177,7 +177,7 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	switch {
 	case req.Delivery == session.BranchDeliveryReport:
 		delivery = session.BranchDeliveryReport // 只有用户明确要求时才带回结果
-	case req.Delivery == session.BranchDeliveryAttention && !autonomousForker(req.By):
+	case req.Delivery == session.BranchDeliveryAttention && !autonomousForker(req.By) && a.isAdmin(req.By):
 		delivery = session.BranchDeliveryAttention // 同样只有主人明确要求；自主活动分出的只能是 silent
 	}
 	by := req.By
@@ -975,7 +975,7 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 			src = s.sid
 		}
 		res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: src, CallerSID: s.sid, Title: args.Title, Prompt: args.Prompt,
-			Start: args.Start != nil && *args.Start, Delivery: args.Delivery, RequestID: args.RequestID, By: from})
+			Start: args.Start != nil && *args.Start, Delivery: toolDelivery(args.Delivery), RequestID: args.RequestID, By: from})
 		if err != nil {
 			return err.Error(), false
 		}
@@ -1141,4 +1141,13 @@ func autonomousOwner(by string) string {
 		}
 	}
 	return ""
+}
+
+// toolDelivery 是模型能要的投递档：silent 或 attention，别的（包括 report）一律当 silent。
+// attention 还要 sessionForkLocked 确认发起人不是自主活动。
+func toolDelivery(d string) string {
+	if d == session.BranchDeliveryAttention {
+		return d
+	}
+	return session.BranchDeliverySilent
 }
