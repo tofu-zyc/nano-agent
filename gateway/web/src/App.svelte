@@ -10,6 +10,7 @@
   import ActivityBar from './components/ActivityBar.svelte';
   import Topology from './views/Topology.svelte';
   import Sessions from './views/Sessions.svelte';
+  import StageDesk from './views/StageDesk.svelte';
   import PersonaEditor from './components/panels/PersonaEditor.svelte';
 
   onMount(() => {
@@ -52,6 +53,8 @@
       <div class="stage">
         {#if store.route.view === 'sessions'}
           <Sessions />
+        {:else if store.route.view === 'stage'}
+          <StageDesk id={store.route.arg ?? ''} />
         {:else}
           <Topology />
         {/if}

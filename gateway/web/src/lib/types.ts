@@ -243,6 +243,7 @@ export type Overview = {
   bots?: BotInfo[]; // 所有机器人
   rooms?: RoomInfo[]; // 网关内部的群聊
   scene_tools?: string[]; // 场景里可选的工具（后端从登记表推出）
+  stage_tools?: string[]; // 戏里可选的工具
   mcp?: MCPInfo[]; // MCP 服务（阶段 11）
 };
 
@@ -475,6 +476,8 @@ export type SceneRules = {
   order?: string[]; // 轮流的发言顺序，空表示按成员顺序
   rounds?: number;
   channels?: { id: string; name: string; members: string[] }[];
+  stage?: boolean; // 这是一场戏（只能在建群时设）
+  inner?: boolean; // 心里话
 };
 export type SceneUse = { day_tokens: number; total: number; since?: number; round?: number; over: boolean };
 export type ObserveRecord = {

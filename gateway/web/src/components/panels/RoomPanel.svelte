@@ -54,6 +54,9 @@
       <div class="p-actions tight">
         <button class="btn sm primary" onclick={() => { location.hash = '#/sessions/' + encodeURIComponent(r!.sid); store.inspector = null; }}><Icon name="chat" size={13} />打开聊天</button>
         <button class="btn sm" onclick={() => patch({ paused: !r!.paused })}>{r.paused ? '恢复' : '暂停'}</button>
+        {#if r.stage}
+          <button class="btn sm primary" onclick={() => { location.hash = '#/stage/' + encodeURIComponent(r!.id); store.inspector = null; }}><Icon name="play" size={13} />打开导演台</button>
+        {/if}
       </div>
       <p class="p-note p-small">在聊天里说话就是在这个群里说话：成员 agent 都看得到，被叫到的会回。连续多条 agent 发言（默认 8）或者两个 agent 来回多轮（默认 6），会自动暂停，等你说话；阈值在“更多规则”里改。</p>
     </div>

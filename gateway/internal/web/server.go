@@ -299,6 +299,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/rooms/{id}/say", s.auth(s.roomSay))
 	mux.HandleFunc("POST /api/rooms/{id}/cue", s.auth(s.roomCue))
 	mux.HandleFunc("POST /api/rooms/{id}/fork", s.auth(s.roomFork))
+	mux.HandleFunc("GET /api/rooms/{id}/export", s.auth(s.roomExport))
 	mux.HandleFunc("GET /api/rooms/{id}/timeline", s.auth(s.roomTimeline))
 	mux.HandleFunc("GET /api/rooms/{id}/timeline/prefix/{hash}", s.auth(s.roomTimelinePrefix))
 	mux.HandleFunc("GET /api/bots", s.auth(s.listBots))

@@ -678,6 +678,83 @@ def run(page, url, nano):
         api(page, "DELETE", "/api/rooms/" + stage["id"])
     else:
         fail("建不了戏：" + json.dumps(stage, ensure_ascii=False)[:300])
+    # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
+    code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
+    if code != 200:
+        fail("建不了第二场戏：" + json.dumps(st2, ensure_ascii=False)[:200])
+    else:
+        page.goto(url + "#/stage/" + st2["id"])
+        page.reload()
+        page.wait_for_selector(".desk header h2")
+        if page.locator(".desk header h2").inner_text() == "戏2":
+            ok("导演台能打开，标题是群名")
+        else:
+            fail("导演台标题不对：" + page.locator(".desk header h2").inner_text())
+        # 旁白
+        page.locator(".ctl textarea[placeholder^='例如：夜深了']").fill("夜深了，灯一盏盏熄灭")
+        page.locator(".ctl button:has-text('发出')").click()
+        page.wait_for_selector(".tl .row.narrate:has-text('夜深了')", timeout=10000)
+        ok("以旁白身份说一句，出现在时间线里（实时更新）")
+        # 人话 @ 阿强：回复里带心里话（mock 会把这句原样回显）
+        page.locator(".ctl label:has-text('作为旁白') input").uncheck()
+        page.locator(".ctl textarea[placeholder^='例如：夜深了']").fill("@阿强 <心里>他在撒谎</心里>我来回答")
+        page.locator(".ctl button:has-text('发出')").click()
+        page.wait_for_selector(".tl .row.inner:has-text('他在撒谎')", timeout=25000)
+        said = page.locator(".tl .row.say:has(.who b:text-is('阿强'))").first.inner_text()
+        if "他在撒谎" in said:
+            fail("说出口的话里不该有心里话：" + said)
+        else:
+            ok("时间线里心里话单独一行，说出口的话里没有它")
+        page.locator(".tl .toggles label:has-text('心里话') input").uncheck()
+        if page.locator(".tl .row.inner").count() == 0:
+            ok("隐藏心里话")
+        else:
+            fail("心里话没有隐藏")
+        page.locator(".tl .toggles label:has-text('心里话') input").check()
+        if page.locator(".tl .row.inner").count() >= 1:
+            ok("再显示心里话")
+        else:
+            fail("心里话没有显示回来")
+        # 点开一轮看用量
+        page.locator(".tl .row.say button:has-text('这一轮')").first.click()
+        if "用量" in page.locator(".tl .detail").first.inner_text():
+            ok("点开一轮能看用量")
+        else:
+            fail("一轮的详情不对")
+        page.screenshot(path=os.path.join(SHOTS, "stage-desk.png"))
+        # 导出：三种格式
+        bad = []
+        for fmt, needle in (("srt", "-->"), ("md", "## 正文"), ("json", "records")):
+            code, body = api(page, "GET", "/api/rooms/" + st2["id"] + "/export?format=" + fmt + "&inner=1&channels=1")
+            text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
+            if code != 200 or needle not in text or "夜深了" not in text:
+                bad.append(fmt)
+        if not bad and "format=srt" in page.locator(".ctl a:has-text('导出')").get_attribute("href"):
+            ok("字幕、剧本、记录三种格式都能导出")
+        else:
+            fail("导出有问题：" + ",".join(bad))
+        # 放映：开始，看到字幕，停止
+        page.locator(".desk header button:has-text('放映')").click()
+        page.wait_for_selector(".screen .sub:has-text('夜深了')", timeout=5000)
+        page.locator(".screen button:has-text('2×')").click()
+        page.locator(".screen button:has-text('停止')").click()
+        page.wait_for_selector(".screen", state="detached", timeout=5000)
+        ok("放映能开始、改速度和停止")
+        # 从第 1 句分出：跳到新群
+        page.locator(".tl .row.narrate button:has-text('从这里分出')").first.click(force=True)
+        page.wait_for_function("() => location.hash.startsWith('#/stage/') && !location.hash.includes('" + st2["id"] + "')", timeout=10000)
+        page.wait_for_selector(".desk header h2:has-text('平行')", timeout=10000)
+        if page.locator(".tl .row").count() == 1:
+            ok("从第 1 句分出后跳到新群，时间线只有前面的一句")
+        else:
+            fail("新群的时间线行数不对：" + str(page.locator(".tl .row").count()))
+        for r0 in api(page, "GET", "/api/rooms")[1]["items"]:
+            if r0["name"].startswith("戏2"):
+                api(page, "DELETE", "/api/rooms/" + r0["id"])
+        page.goto(url + "#/")
+        page.reload()
+        page.wait_for_selector("g.node.gateway")
+
     # 收拾干净，后面的检查不受影响
     for r in (room, room2, dm):
         if r.get("id"):

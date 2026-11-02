@@ -26,7 +26,7 @@
   } = $props();
 
   // 场景里可选的工具：由后端从登记表返回
-  const sceneTools = $derived(store.sceneTools);
+  const sceneTools = $derived(rules.stage ? store.stageTools : store.sceneTools); // 戏里只有联网查资料的两个
   const agentName = (id: string) => store.agents.find((a) => a.id === id)?.name ?? id;
   const eagerLabels: Record<string, string> = { '': '沿用 agent 的设置', off: '不主动插话', low: '低', normal: '中', high: '高' };
 
@@ -100,16 +100,24 @@
         {/if}
       </select>
     </label>
+    {#if rules.stage}
+      <label class="p-row"><input type="checkbox" checked={!!rules.inner} onchange={(e) => onsave({ inner: (e.target as HTMLInputElement).checked })} />
+        <span class="p-grow">心里话：成员每次先写一句心里想的，别人听不到，记进时间线（下一轮生效）</span></label>
+    {/if}
     <label class="p-row"><input type="checkbox" checked={!!rules.observe} onchange={(e) => onsave({ observe: (e.target as HTMLInputElement).checked })} />
       <span class="p-grow">observe：主动插话只记录，不发出（被点名的回复不受影响）</span></label>
 
     <div class="p-label">工具
-      <label class="p-row"><input type="checkbox" checked={!customTools} onchange={(e) => onsave({ tools: (e.target as HTMLInputElement).checked ? null : [] })} /> <span>沿用默认（agent 的群聊工具，没设就是搜索、技能、记忆、发文件）</span></label>
-      {#if customTools}
+      {#if !rules.stage}
+        <label class="p-row"><input type="checkbox" checked={!customTools} onchange={(e) => onsave({ tools: (e.target as HTMLInputElement).checked ? null : [] })} /> <span>沿用默认（agent 的群聊工具，没设就是搜索、技能、记忆、发文件）</span></label>
+      {:else}
+        <p class="p-note p-small">这是一场戏：场内的事不进记忆，所以没设就一个工具都不给，只能选联网查资料的。</p>
+      {/if}
+      {#if customTools || rules.stage}
         {#each sceneTools as t (t)}
           <label class="p-row"><input type="checkbox" checked={(rules.tools ?? []).includes(t)} onchange={(e) => setTool(t, (e.target as HTMLInputElement).checked)} /> <span>{toolLabel(t)} <span class="tiny">{t}</span></span></label>
         {/each}
-        {#if !(rules.tools ?? []).length}<p class="p-note p-small">一个都没选：这个场景不给工具。</p>{/if}
+        {#if !(rules.tools ?? []).length && !rules.stage}<p class="p-note p-small">一个都没选：这个场景不给工具。</p>{/if}
       {/if}
     </div>
 

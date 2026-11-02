@@ -5,7 +5,7 @@
   import Icon from './Icon.svelte';
   import type { RoomInfo } from '../lib/types';
 
-  let { r, onsave }: { r: RoomInfo; onsave: (p: Record<string, unknown>) => Promise<void> | void } = $props();
+  let { r, onsave, desk = false }: { r: RoomInfo; onsave: (p: Record<string, unknown>) => Promise<void> | void; desk?: boolean } = $props();
 
   const name = (id: string) => store.agents.find((a) => a.id === id)?.name ?? id;
   const order = $derived(r.order?.length ? r.order.filter((m) => r.members.includes(m)) : r.members);
@@ -93,7 +93,7 @@
   </div>
 {/if}
 
-{#if r.mode === 'director'}
+{#if r.mode === 'director' && !desk}
   <h5 class="p-h">导演 <span class="muted p-small">@ 和叫名字不会触发；只有你点到的那一个会说话</span></h5>
   <div class="p-card">
     <input class="p-input" bind:value={cueNote} placeholder="给 TA 的提示（只有 TA 看得到，可空）" />

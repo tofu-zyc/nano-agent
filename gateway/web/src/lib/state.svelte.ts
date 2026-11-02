@@ -16,7 +16,7 @@ export type Toast = {
 export type { PairRequest };
 
 // 只有两个页面：拓扑图（所有对象的状态、操作和设置都在节点上）和会话（聊天）
-export type View = 'topology' | 'sessions';
+export type View = 'topology' | 'sessions' | 'stage';
 export type Route = { view: View; arg?: string };
 
 // 以前的页面（设置、设备、定时任务、人格）的链接：跳到拓扑图，打开对应的节点
@@ -31,6 +31,7 @@ function parseHash(): { route: Route; legacy?: Legacy } {
   const topo: Route = { view: 'topology' };
   switch (view) {
     case 'sessions':
+    case 'stage': // 导演台：#/stage/<群 ID>
       return { route: { view, arg } };
     case 'settings':
       return { route: topo, legacy: { target: { type: 'gateway' }, focus: params.get('focus') ?? undefined } };
@@ -379,6 +380,11 @@ class Store {
   /** 场景里可选的工具（后端从登记表推出） */
   get sceneTools(): string[] {
     return this.ov?.scene_tools ?? [];
+  }
+
+  /** 戏里可选的工具 */
+  get stageTools(): string[] {
+    return this.ov?.stage_tools ?? [];
   }
 
   room(id: string | undefined): RoomInfo | undefined {

@@ -5,10 +5,12 @@ package web
 //   PATCH/DELETE /api/rooms/{id}
 //   POST         /api/rooms/{id}/say、/cue
 //   POST         /api/rooms/{id}/fork（剧场：从某一句分出平行世界）
+//   GET          /api/rooms/{id}/export（字幕、剧本、原始记录）
 //   GET          /api/rooms/{id}/timeline、/timeline/prefix/{hash}（剧场的场景记录）
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"nano-agent/gateway/internal/app"
@@ -128,4 +130,20 @@ func (s *Server) roomFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, info)
+}
+
+// roomExport 导出一场戏：GET /api/rooms/{id}/export?format=srt|md|json&inner=1&channels=1&from=&to=。
+func (s *Server) roomExport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	from, _ := strconv.Atoi(q.Get("from"))
+	to, _ := strconv.Atoi(q.Get("to"))
+	data, ctype, name, err := s.app.ExportStage(r.PathValue("id"), app.ExportOpts{
+		Format: q.Get("format"), Inner: q.Get("inner") == "1", Channels: q.Get("channels") == "1", From: from, To: to})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(name))
+	w.Write(data)
 }

@@ -7,6 +7,8 @@
   let name = $state('');
   let mode = $state<'mention' | 'free'>('mention');
   let members = $state<string[]>([]);
+  let stage = $state(false);
+  let inner = $state(false);
   let busy = $state(false);
 
   function toggle(id: string) {
@@ -17,9 +19,10 @@
     if (!members.length) return store.toast({ kind: 'err', text: '至少选一个 agent' }, 2200);
     busy = true;
     try {
-      const info = await api.post<{ id: string }>('/api/rooms', { name: name.trim(), mode, members });
+      const info = await api.post<{ id: string }>('/api/rooms', { name: name.trim(), mode, members, ...(stage ? { stage: true, inner } : {}) });
       name = '';
       members = [];
+      stage = inner = false;
       await store.refresh();
       store.inspector = { type: 'room', id: info.id };
       store.toast({ kind: 'ok', text: '建好了，点「打开聊天」就能在里面说话' }, 3200);
@@ -50,6 +53,12 @@
         <option value="free">自由：拟人型的成员安静下来会自己插话</option>
       </select>
     </label>
+    <label class="p-row"><input type="checkbox" bind:checked={stage} />
+      <span class="p-grow">这是一场戏：场内的事不进成员的记忆，场外的事进不来，全程记录，能分出平行世界、导出字幕（建好后不能改）</span></label>
+    {#if stage}
+      <label class="p-row"><input type="checkbox" bind:checked={inner} />
+        <span class="p-grow">心里话：成员每次先写一句心里想的，别人听不到，记进时间线</span></label>
+    {/if}
     <div class="members">
       {#each store.agents as a (a.id)}
         <button class="chip" class:on={members.includes(a.id)} onclick={() => toggle(a.id)}>{a.emoji} {a.name}</button>
@@ -65,7 +74,7 @@
     {#each store.rooms as r (r.id)}
       <button class="p-srow" onclick={() => store.open({ type: 'room', id: r.id })}>
         <Icon name="chat" size={14} />
-        <span class="p-grow">{r.name}{#if r.paused}<span class="tag">暂停</span>{/if}</span>
+        <span class="p-grow">{r.name}{#if r.stage}<span class="tag">戏</span>{/if}{#if r.paused}<span class="tag">暂停</span>{/if}</span>
         <span class="muted p-small">{r.members.length} 人 · {r.count} 条</span>
         <Icon name="right" size={13} />
       </button>

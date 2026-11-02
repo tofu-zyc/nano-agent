@@ -7,10 +7,11 @@ const assert = require('node:assert/strict');
 
 const compiled = mkdtempSync(path.join(tmpdir(), 'nano-web-test-'));
 after(() => rmSync(compiled, { recursive: true, force: true }));
-const result = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '--ignoreConfig', '--target', 'ES2022', '--module', 'CommonJS', '--skipLibCheck', '--outDir', compiled, 'src/lib/conv.ts', 'src/lib/jobs.ts'], { encoding: 'utf8' });
+const result = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '--ignoreConfig', '--target', 'ES2022', '--module', 'CommonJS', '--skipLibCheck', '--outDir', compiled, 'src/lib/conv.ts', 'src/lib/jobs.ts', 'src/lib/stage.ts'], { encoding: 'utf8' });
 if (result.status !== 0) throw new Error(result.stdout + result.stderr);
 writeFileSync(path.join(compiled, 'package.json'), '{"type":"commonjs"}');
 const { buildBlocks } = require(path.join(compiled, 'conv.js'));
+const stage = require(path.join(compiled, 'stage.js'));
 const call = (id, name) => ({id,type:'function',function:{name,arguments:'{}'}});
 const assistant = (run, turn, calls) => ({role:'assistant',run_id:run,turn_id:turn,tool_calls:calls});
 const tool = (run, turn, id, text) => ({role:'tool',run_id:run,turn_id:turn,tool_call_id:id,content:text});
@@ -114,4 +115,50 @@ test('宿主报告卡片：结构化字段画卡片，普通用户同样正文�
   assert.equal(cards.length, 2);
   assert.equal(cards[0].report.conclusion, '结论一');
   assert.equal(cards[1].report.conclusion, '结论二');
+});
+
+test('stage cues follow the same timing and splitting as the exported subtitles', () => {
+  const long = '第一句话说得比较长比较长比较长比较长。第二句也不短不短不短不短不短？第三句同样很长很长很长很长很长！';
+  const items = [
+    { kind: 'say', who: '小鲍', text: '好', line: 1 },
+    { kind: 'narrate', text: '长'.repeat(39), line: 2 },
+    { kind: 'say', who: '小猫', text: '字'.repeat(41), line: 3 },
+    { kind: 'say', who: '小纳', text: long, line: 4 },
+    { kind: 'narrate', text: 'x\n y  z', line: 5 },
+  ];
+  const cues = stage.buildCues(items, { inner: false, channels: false });
+  assert.deepEqual(cues.slice(0, 3).map((c) => [c.start, c.end]), [[0, 1500], [1800, 9600], [9900, 17900]]);
+  assert.equal(cues.length, 7); // 三条普通 + 长句拆三条 + 最后一条
+  assert.ok(cues[3].text.startsWith('小纳：第一句话') && !cues[4].text.includes('小纳') && !cues[5].text.includes('小纳'));
+  assert.equal(cues[6].text, 'x y z');
+});
+
+test('stage cues obey the inner and channel switches; cues and system lines never show', () => {
+  const items = [
+    { kind: 'inner', who: '小鲍', text: '他在撒谎', line: 2 },
+    { kind: 'say', who: '小鲍', text: '我同意', line: 2 },
+    { kind: 'say', who: '小猫', channel: '密谈', text: '只告诉你', line: 3 },
+    { kind: 'inner', who: '小猫', channel: '密谈', text: '他不信', line: 3 },
+    { kind: 'cue', to: '小鲍', text: '走到窗边', line: 5 },
+    { kind: 'system', text: '先暂停', line: 6 },
+  ];
+  const texts = (o) => stage.buildCues(items, o).map((c) => c.text);
+  assert.deepEqual(texts({ inner: false, channels: false }), ['小鲍：我同意']);
+  assert.deepEqual(texts({ inner: true, channels: false }), ['（小鲍心里）他在撒谎', '小鲍：我同意']);
+  assert.deepEqual(texts({ inner: false, channels: true }), ['小鲍：我同意', '小猫（私下）：只告诉你']);
+  assert.deepEqual(texts({ inner: true, channels: true }), ['（小鲍心里）他在撒谎', '小鲍：我同意', '小猫（私下）：只告诉你', '（小猫心里）他不信']);
+});
+
+test('stage items put the thought before the line, keep silent thoughts in place, and find forkable lines', () => {
+  const recs = [
+    { kind: 'line', line: 1, say: 'narrate', name: '旁白', text: '夜深了' },
+    { kind: 'cursors', line: 1, cursors: {} },
+    { kind: 'line', line: 2, say: 'say', from: 'bob', name: '小鲍', text: '我同意' },
+    { kind: 'run', member: 'bob', said: 2, inner: '他在撒谎' },
+    { kind: 'run', member: 'cat', said: 0, inner: '先观察' },
+    { kind: 'line', line: 3, say: 'system', text: '[系统] 先暂停' },
+  ];
+  const items = stage.buildItems(recs, (c) => c, (id) => ({ bob: '小鲍', cat: '小猫' })[id] ?? id);
+  assert.deepEqual(items.map((i) => i.kind + ':' + i.text), ['narrate:夜深了', 'inner:他在撒谎', 'say:我同意', 'inner:先观察', 'system:先暂停']);
+  assert.deepEqual([...stage.forkable(recs)], [1]);
 });
