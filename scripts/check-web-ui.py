@@ -670,6 +670,11 @@ def run(page, url, nano):
             api(page, "DELETE", "/api/rooms/" + fk["id"])
         else:
             fail("分不出平行世界：" + str(code) + json.dumps(fk, ensure_ascii=False)[:200])
+        code, _ = api(page, "GET", "/api/rooms/" + stage["id"] + "/export?format=srt&from=abc")
+        if code == 400:
+            ok("导出的 from 不是数字时返回 400")
+        else:
+            fail("from=abc 应该返回 400：" + str(code))
         code, _ = api(page, "POST", "/api/rooms/" + stage["id"] + "/fork", {"at": 99})
         if code == 400:
             ok("超出的句子分不出")
@@ -737,6 +742,13 @@ def run(page, url, nano):
         page.locator(".desk header button:has-text('放映')").click()
         page.wait_for_selector(".screen .sub:has-text('夜深了')", timeout=5000)
         page.locator(".screen button:has-text('2×')").click()
+        box = page.locator(".screen label:has-text('心里话') input")
+        if not box.is_enabled():
+            fail("放映中心里话开关是灰的")
+        else:
+            box.check()
+            page.wait_for_selector(".screen .sub:has-text('（阿强心里）')", timeout=25000)
+            ok("放映中打开心里话，接下来放出的字幕里有心里话那一条")
         page.locator(".screen button:has-text('停止')").click()
         page.wait_for_selector(".screen", state="detached", timeout=5000)
         ok("放映能开始、改速度和停止")

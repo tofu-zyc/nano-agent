@@ -156,6 +156,7 @@
   let at = $state(-1);
   let ended = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let playItems: DocItem[] = []; // 开始那一刻的时间线：放映中新来的句子不插进这一遍
 
   function step(i: number) {
     clearTimeout(timer);
@@ -170,7 +171,8 @@
     timer = setTimeout(() => step(i + 1), (dur + gap) / speed);
   }
   function startPlay() {
-    cues = buildCues(items, { inner: pInner, channels: pChannels });
+    playItems = items;
+    cues = buildCues(playItems, { inner: pInner, channels: pChannels });
     ended = false;
     at = -1;
     playing = true;
@@ -179,6 +181,23 @@
       return;
     }
     step(0);
+  }
+  // 放映中切换心里话和频道：按新的开关重新排字幕，从句子号不小于当前这一条的第一条接着放
+  function togglePlay(kind: 'inner' | 'channels', on: boolean) {
+    if (kind === 'inner') pInner = on;
+    else pChannels = on;
+    if (!playing) return;
+    const line = at >= 0 && cues[at] ? cues[at].line : 0;
+    cues = buildCues(playItems, { inner: pInner, channels: pChannels });
+    if (ended) return;
+    const next = cues.findIndex((c) => c.line >= line);
+    if (next < 0) {
+      clearTimeout(timer);
+      ended = true;
+      at = cues.length - 1;
+    } else {
+      step(next);
+    }
   }
   function stopPlay() {
     clearTimeout(timer);
@@ -330,8 +349,8 @@
     {#if playing}
       <div class="screen" role="dialog" aria-label="放映">
         <div class="bar">
-          <label><input type="checkbox" bind:checked={pInner} disabled={playing && at >= 0} />心里话</label>
-          <label><input type="checkbox" bind:checked={pChannels} disabled={playing && at >= 0} />频道</label>
+          <label><input type="checkbox" checked={pInner} onchange={(e) => togglePlay('inner', (e.target as HTMLInputElement).checked)} />心里话</label>
+          <label><input type="checkbox" checked={pChannels} onchange={(e) => togglePlay('channels', (e.target as HTMLInputElement).checked)} />频道</label>
           {#each [1, 2] as s (s)}
             <button class="btn sm" class:primary={speed === s} onclick={() => changeSpeed(s)}>{s}×</button>
           {/each}
@@ -370,6 +389,7 @@
   .who { display: flex; gap: 8px; align-items: center; font-size: 13px; }
   .acts { margin-left: auto; display: flex; gap: 10px; opacity: 0; }
   .row:hover .acts, .row:focus-within .acts { opacity: 1; }
+  @media (hover: none) { .acts { opacity: 1; } } /* 手机和平板没有悬停 */
   .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
   .row.inner .text { font-style: italic; color: var(--text-2); }
   .row.narrate .text { color: var(--accent-2); }

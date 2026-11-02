@@ -135,8 +135,17 @@ func (s *Server) roomFork(w http.ResponseWriter, r *http.Request) {
 // roomExport 导出一场戏：GET /api/rooms/{id}/export?format=srt|md|json&inner=1&channels=1&from=&to=。
 func (s *Server) roomExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	from, _ := strconv.Atoi(q.Get("from"))
-	to, _ := strconv.Atoi(q.Get("to"))
+	var from, to int
+	for name, dst := range map[string]*int{"from": &from, "to": &to} {
+		if v := q.Get(name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, name+" 要是句子序号（数字）")
+				return
+			}
+			*dst = n
+		}
+	}
 	data, ctype, name, err := s.app.ExportStage(r.PathValue("id"), app.ExportOpts{
 		Format: q.Get("format"), Inner: q.Get("inner") == "1", Channels: q.Get("channels") == "1", From: from, To: to})
 	if err != nil {
