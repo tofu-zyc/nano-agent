@@ -98,7 +98,7 @@ Fork 保存分叉时的完整已提交历史、有效窗口、Summary/Base/Omitt
 
 生成、整理或工具批次进行中时，创建操作返回 pending_boundary，在安全边界发布 ready。同批工具里的 Fork 先返回操作身份，避免等待自身批次。操作持久化，重试和重启返回同一个分支。
 
-Session 工具提供 fork、list_branches、inspect、continue、pause、archive；聊天可用 /session fork 和 /branch，网页提供分支列表与操作。继续分支核验固定 agent 与来源；归档不会被迟到取消回执改回暂停。
+Session 工具提供 fork、list_branches、inspect、continue、pause、archive；聊天可用 /session fork [--attention] 和 /branch，网页提供分支列表与操作。继续分支核验固定 agent 与来源；归档不会被迟到取消回执改回暂停。
 
 分支默认 silent，普通回复、工具进度、长调用、审批、失败、恢复提示、Message、SendFile、Hook 及派生 Schedule 都不能借主人窗口回退推送。安静来源也不能修改或启动主人的普通任务来绕过投递限制。
 
@@ -181,7 +181,14 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 **汇报叠加到宿主事实上**的先后：问题先于受阻，受阻先于就绪；汇报和宿主两边都受阻时取汇报的（更具体）；`Mark` 跟着决定阶段的那条事实。
 
-**接口**：`GET /api/commitments?agent=&phase=`（只读，要登录），每件事给出种类、ID、agent、标题、契约、阶段和原因、最近一条汇报、`Mark` 和打开它的链接；每写一条承诺记录发一个网页事件 `commitments`。“知道了”和回答的入口、汇总页是 4c 的事。
+**接口**：`GET /api/commitments?agent=&phase=`（只读，要登录），每件事给出种类、ID、agent、标题、契约、阶段和原因、最近一条汇报、`Mark` 和打开它的链接；每写一条承诺记录发一个网页事件 `commitments`。**等我处理**（只给管理员）：阶段是受阻或就绪的承诺，最新的在前。
+- 网页：拓扑图上有“等我处理 N”的标记（N 为 0 不显示），点开是面板，每件事一行：agent、种类和标题、阶段和原因、问题，操作有“回答”（有问题时才有）、“知道了”、“打开”；底部展开“全部承诺”按阶段分组。
+- 聊天（管理员窗口）：`/pending` 列出，每件事带编号（有汇报的用汇报序号，没有的用 `Mark`）；`/answer <编号> <回答>`；`/seen <编号>`。接口：`GET /api/pending`、`POST /api/pending/seen`、`POST /api/pending/answer`（回答最多 2000 字）。
+- “知道了”和回答都先写进承诺记录（`seen`、`answer`）再生效；对不上当前 `Mark` 的请求（这件事已经变了）拒绝。汇报的就绪盖住了宿主自己的就绪时（`CommitView.Covered`），“知道了”把两个 `Mark` 一起记，不用点两次；受阻和就绪互相盖住时不这样。
+- 回答送到干活的地方：分支放进分支会话的下一个安全边界（和“继续”一样接着跑，已归档拒绝，判断在写记录之前）；议程项、意图在 agent 的心智状态里加一个带 ID 和回答的事件，没开始的议程项时间改成现在；定时任务下一次运行时说明里带一次“上次你问……，主人回答……”。回答过的问题不再算 `Question`。
+- 主人在别处自己动手也算处理过：分支引入结论、继续或归档后，之前的汇报都算看过；定时任务下一次成功后，上一次的汇报不再算。
+
+**attention 投递档**：分支的第三种投递档（`delivery_policy = attention`），和 `silent` 一样安静（`branchSilent` 为真）。例外：这个分支的 Report 是 ready、blocked、failed，或宿主记下这一轮出错（当作受阻），发一条通知到父会话最近的窗口（外部渠道走可靠出站，网页发 `say` 事件），不写进父会话的历史。先在承诺记录里写一条 `notify` 再入队；状态和正文与上一条推送一样的不发，每个分支每小时最多 3 条，父会话本身安静时不发——多出来的只留在“等我处理”里。只有主人明确要求才能设：`/session fork --attention [标题]`、主人会话里的 Session 工具（`delivery: "attention"`）、`SessionFork` 的 `Delivery`；life、Hook、整理记忆分出的分支一律是 `silent`。attention 分支的系统提示多一句“有结果用 Report ready，卡住用 Report blocked 问具体问题”。Session 工具的 `delivery` 枚举因此多了 `attention`，七份模型面快照随之更新。
 
 ## 经历、内心片段与长期记忆
 

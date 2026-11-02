@@ -1,6 +1,6 @@
 // 全局状态：网关的总览、配置、实时事件。通过 SSE 订阅网关的事件总线，界面上的一切都跟着实时变。
 import { api, ApiError, setUnauthorizedHandler, sidPath } from './api';
-import type { AgentInfo, JobInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
+import type { AgentInfo, JobInfo, Approval, BotInfo, Devices, Ev, FieldState, LiveItem, MachineInfo, ModelsView, Overview, PairRequest, PendingItem, RoomInfo, SessionInfo, Target, WorkspaceInfo, UpdateInfo } from './types';
 import { HOMES } from './nodes';
 
 export type Toast = {
@@ -104,6 +104,8 @@ class Store {
   connected = $state(false);
   historyTick = $state<Record<string, number>>({});
   personaTick = $state(0);
+  pending = $state<PendingItem[]>([]); // 等我处理：受阻、就绪的承诺，最新的在前
+  pendingTick = $state(0); // 承诺有变化（面板里的“全部承诺”据此重读）
   memoryTick = $state(0); // 记忆、整理记忆、内心活动有变化（记忆面板据此重读）
   feishuReg = $state<{ kind: string; text: string } | null>(null); // 扫码创建飞书机器人的结果
   botReg = $state<{ kind: string; text: string; data?: any; n: number } | null>(null); // QQ / 微信扫码的进展（每条都是新的）
@@ -198,6 +200,7 @@ class Store {
 
   private async start() {
     await Promise.all([this.refresh(), this.loadFields()]);
+    void this.loadPending();
     // 因为网关换了版本而自动刷新的：告诉一声
     try {
       const v = sessionStorage.getItem('nano.updated');
@@ -216,6 +219,22 @@ class Store {
 
   private reloadTimer: ReturnType<typeof setTimeout> | undefined;
   private agentsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 等我处理：重读一遍 */
+  async loadPending() {
+    try {
+      const r = await api.get<{ items: PendingItem[] }>('/api/pending');
+      this.pending = r.items ?? [];
+      this.pendingTick++;
+    } catch {
+      /* 下一次事件或整体刷新时再读 */
+    }
+  }
+  private pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  reloadPendingSoon() {
+    clearTimeout(this.pendingTimer);
+    this.pendingTimer = setTimeout(() => void this.loadPending(), 300);
+  }
 
   /** agent 的状态（在干嘛）跟着会话变：过一会儿只重读 agent 列表 */
   reloadAgentsSoon() {
@@ -512,8 +531,14 @@ class Store {
           this.toast({ kind: 'info', text: `${e.name ?? '它'} 来找你了`, detail: e.text ?? '', open: sid }, 12000);
         }
         break;
+      case 'commitments':
+      case 'branch':
+        // 汇报、“知道了”、回答、分支状态变了：等我处理跟着刷新
+        this.reloadPendingSoon();
+        break;
       case 'autonomy':
         // 自主活动状态变了：agent 节点上的日程、目标、想法跟着刷新
+        this.reloadPendingSoon();
         this.memoryTick++;
         this.reloadAgentsSoon();
         break;
@@ -536,6 +561,7 @@ class Store {
         if (ov && e.data) ov.search = e.data;
         break;
       case 'schedules':
+        this.reloadPendingSoon();
         if (ov && e.data) ov.schedules = e.data;
         break;
       case 'context':

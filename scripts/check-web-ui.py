@@ -51,7 +51,7 @@ def start_gateway(tmp):
     port = free_port()
     home, nano = os.path.join(tmp, "home"), os.path.join(tmp, "nano")
     os.makedirs(home)
-    os.makedirs(nano)
+    os.makedirs(nano, exist_ok=True)
     sock = tempfile.mkdtemp(prefix="nui.", dir="/tmp")
     with open(os.path.join(nano, "gateway.toml"), "w") as f:
         f.write(f'[kernel]\nlisten = "unix:{sock}/k.sock"\ntoken = "ui-check"\n'
@@ -70,6 +70,96 @@ def start_gateway(tmp):
             time.sleep(0.1)
     proc.kill()
     raise SystemExit("网关没起来，看 " + os.path.join(tmp, "gateway.log"))
+
+
+def check_pending(page, url):
+    """等我处理：拓扑图上的数字、打开面板、回答、知道了、全部承诺按阶段分组。"""
+    page.goto(url + "#/")
+    page.reload()
+    try:
+        page.wait_for_selector("[data-testid=pending-count]", timeout=8000)
+    except Exception:
+        fail("拓扑图上没有“等我处理”的标记")
+        return
+    n = page.locator("[data-testid=pending-count]").inner_text().strip()
+    if n == "2":
+        ok("拓扑图上的“等我处理”显示 2")
+    else:
+        fail("“等我处理”的数字应该是 2：" + n)
+    page.click("[data-testid=pending-badge]")
+    page.wait_for_selector("[data-testid=pending-panel]")
+    rows = page.locator("[data-testid=pending-row]")
+    if rows.count() == 2:
+        ok("面板里一件事一行")
+    else:
+        fail("面板应该有 2 行：" + str(rows.count()))
+    asked = page.locator("[data-testid=pending-row][data-id=ui-asked]")
+    failed = page.locator("[data-testid=pending-row][data-id=ui-failed]")
+    if asked.locator("[data-testid=pending-input]").count() == 1 and failed.locator("[data-testid=pending-input]").count() == 0:
+        ok("只有带问题的才有“回答”")
+    else:
+        fail("“回答”应该只在带问题的那一行")
+    if "要不要加上周末？" in asked.inner_text():
+        ok("行里有问题原文")
+    else:
+        fail("行里没有问题：" + asked.inner_text())
+    page.screenshot(path=os.path.join(SHOTS, "pending.png"))
+    # 全部承诺：按阶段分组
+    page.click("[data-testid=pending-all-toggle]")
+    page.wait_for_selector("[data-testid=pending-all] section")
+    phases = page.locator("[data-testid=pending-all] section").evaluate_all("els => els.map(e => e.dataset.phase)")
+    if phases and phases[0] == "blocked":
+        ok("全部承诺按阶段分组：" + "、".join(phases))
+    else:
+        fail("全部承诺的分组不对：" + str(phases))
+    # 知道了：那一行消失，数字减一
+    failed.locator("[data-testid=pending-seen]").click()
+    try:
+        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row]').length === 1", timeout=5000)
+        ok("点“知道了”之后这件事不再列")
+    except Exception:
+        fail("点“知道了”之后还在列")
+    # 回答：先记，再生效；之后这一行也消失，徽标不再显示（0 不显示）
+    asked.locator("[data-testid=pending-input]").fill("加上")
+    asked.locator("[data-testid=pending-answer]").click()
+    try:
+        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row]').length === 0", timeout=5000)
+        ok("回答之后这件事不再列")
+    except Exception:
+        fail("回答之后还在列")
+    page.click("[data-testid=pending-badge]")
+    page.reload()
+    page.wait_for_selector(".legend")
+    time.sleep(0.5)
+    if page.locator("[data-testid=pending-badge]").count() == 0:
+        ok("N 为 0 时不显示标记")
+    else:
+        fail("N 为 0 时标记应该不显示")
+
+
+def seed_pending(tmp):
+    """起网关之前放两个定时任务，让“等我处理”里有东西：一个上次失败（宿主自己记下的受阻），
+    一个带着问题的汇报（承诺记录里直接写，定时任务的 Report 工具本身不让带问题）。"""
+    import hashlib
+    nano = os.path.join(tmp, "nano")
+    data = os.path.join(nano, "data")
+    os.makedirs(os.path.join(data, "runtime"), exist_ok=True)
+    far = "2099-01-01T00:00:00Z"
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    base = {"when": "0 8 * * *", "agent": "default", "prompt": "x", "deliver": [], "workspaces": [], "mode": "readonly",
+            "enabled": True, "created_by": "web:admin", "creator_mode": "readonly", "catch_up": False, "next": far, "results": [], "running": False}
+    tasks = [
+        dict(base, id="ui-failed", name="界面检查·上次失败", last={"at": now, "ok": False, "summary": "接口超时"}),
+        dict(base, id="ui-asked", name="界面检查·有问题", last={"at": now, "ok": True, "summary": "好了"}),
+    ]
+    with open(os.path.join(data, "schedules.json"), "w") as f:
+        json.dump(tasks, f)
+    rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "schedule", "id": "ui-asked", "agent": "default",
+           "status": "blocked", "text": "不知道要不要带上周末", "question": "要不要加上周末？"}
+    raw = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode()
+    line = json.dumps({"version": 1, "seq": 1, "data": json.loads(raw), "sha256": hashlib.sha256(raw).hexdigest()}, ensure_ascii=False, separators=(",", ":"))
+    with open(os.path.join(data, "runtime", "commitments.jsonl"), "w") as f:
+        f.write(line + "\n")
 
 
 def launch(p):
@@ -91,6 +181,7 @@ def main():
         raise SystemExit("先 make all")
     os.makedirs(SHOTS, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="nano-ui-")
+    seed_pending(tmp)
     proc, url, nano, sock = start_gateway(tmp)
     errors = []
     try:
@@ -690,6 +781,7 @@ def run(page, url, nano):
         ok("承诺列表接口能用（" + str(len(cm["items"])) + " 件）")
     else:
         fail("承诺列表接口不对：" + str(code) + json.dumps(cm, ensure_ascii=False)[:200])
+    check_pending(page, url)
     # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
     code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
     if code != 200:

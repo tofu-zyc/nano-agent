@@ -618,3 +618,12 @@ export type HookRule = {id:string;revision:number;agent_id:string;creator:string
 export type HookDelivery = {delivery_id:string;event_id:string;hook_id:string;hook_revision:number;agent_id:string;creator:string;silent:boolean;
   target_sid?:string;run_sid?:string;status:string;attempt:number;next_at?:number;updated_ms?:number;error?:string;result?:string;preflight?:boolean};
 export type HookResponse = {rules?:HookRule[];rule?:HookRule;deliveries?:HookDelivery[];next?:string;matched?:boolean};
+
+// 承诺（GET /api/commitments、GET /api/pending）：等我处理里的一件事
+export type CommitReport = { seq: number; type: string; ts: number; kind: string; id: string; status?: string; text?: string; question?: string };
+export type CommitItem = {
+  kind: string; id: string; agent: string; title: string; phase: string; why?: string; link: string;
+  report?: CommitReport; mark?: string; covered?: string; question?: string; at?: number;
+  contract?: { goal: string };
+};
+export type PendingItem = CommitItem & { number: string };

@@ -915,6 +915,8 @@ type CommitRec struct {
 
 ### 15.3 4c：等我处理和 attention
 
+现状：**已有**（4c，2026-11-02）。实现细节见 [运行时](RUNTIME.md#承诺阶段和-report)。
+
 **等我处理**：所有阶段为 blocked 或 ready 的承诺，最新的在前。只给管理员看。
 
 - 网页：

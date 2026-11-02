@@ -129,8 +129,30 @@ def http_call(opener, method, path, body=None):
         return e.code, e.read().decode()
 
 
+def seed_pending():
+    """起网关之前放两个定时任务，让“等我处理”里有东西：上次失败的（宿主记的受阻），和带着问题的汇报。"""
+    import hashlib
+    os.makedirs(os.path.join(DATA, "runtime"), exist_ok=True)
+    at = 1793000000
+    base = {"when": "0 8 * * *", "agent": "default", "prompt": "x", "deliver": [], "workspaces": [], "mode": "readonly",
+            "enabled": True, "created_by": "cli:admin", "creator_mode": "readonly", "catch_up": False, "next": "2099-01-01T00:00:00Z",
+            "results": [], "running": False}
+    tasks = [dict(base, id="p-failed", name="失败的任务", last={"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), "ok": False, "summary": "接口超时"}),
+             dict(base, id="p-asked", name="有问题的任务", last={"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)), "ok": True, "summary": "好了"})]
+    with open(os.path.join(DATA, "schedules.json"), "w") as f:
+        json.dump(tasks, f)
+    rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "schedule", "id": "p-asked", "agent": "default",
+           "status": "blocked", "text": "不知道要不要带上周末", "question": "要不要加上周末？"}
+    raw = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode()
+    with open(os.path.join(DATA, "runtime", "commitments.jsonl"), "w") as f:
+        f.write(json.dumps({"version": 1, "seq": 1, "data": json.loads(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                           ensure_ascii=False, separators=(",", ":")) + "\n")
+    return at
+
+
 chat = None
 try:
+    seeded_at = seed_pending()
     r = run("version")
     assert r.returncode == 0 and r.stdout.strip(), (r.returncode, r.stdout, r.stderr)
     print("  ok   version")
@@ -164,6 +186,22 @@ try:
     chat.expect("/status")
     chat.expect("/restart")
     print("  ok   /status、/help")
+
+    # 等我处理：/pending 列出，/seen 记为知道了，/answer 回答；回答和知道了之后不再列
+    chat.send("/pending")
+    chat.expect("等你处理的事")
+    chat.expect("#1 · 定时任务「有问题的任务」")
+    chat.expect("问：要不要加上周末？")
+    chat.expect("#last:%d · 定时任务「失败的任务」" % seeded_at)
+    chat.send("/seen last:%d" % seeded_at)
+    chat.expect("记为知道了")
+    chat.send("/answer 1 加上")
+    chat.expect("已经把回答交给")
+    chat.send("/pending")
+    chat.expect("没有等你处理的事")
+    chat.send("/seen 99")
+    chat.expect("没有这个编号")
+    print("  ok   /pending、/seen、/answer")
 
     chat.send("/restart")
     chat.expect("网关正在重启")
@@ -213,7 +251,7 @@ try:
     r = run("status")
     assert r.returncode != 0 and "没有在运行" in (r.stdout + r.stderr), (r.returncode, r.stdout, r.stderr)
     print("  ok   stop")
-    print("control-e2e: 12 passed")
+    print("control-e2e: 13 passed")
 finally:
     if chat:
         chat.close()
