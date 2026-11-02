@@ -4,6 +4,7 @@ package web
 //   GET/POST     /api/rooms
 //   PATCH/DELETE /api/rooms/{id}
 //   POST         /api/rooms/{id}/say、/cue
+//   GET          /api/rooms/{id}/timeline、/timeline/prefix/{hash}（剧场的场景记录）
 
 import (
 	"net/http"
@@ -90,4 +91,26 @@ func (s *Server) roomCue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// roomTimeline 是剧场的场景记录：GET /api/rooms/{id}/timeline?after=<序号>&n=200。
+func (s *Server) roomTimeline(w http.ResponseWriter, r *http.Request) {
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+	items, last, err := s.app.StageTimeline(r.PathValue("id"), after, n)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"items": items, "last": last})
+}
+
+// roomTimelinePrefix 是某个前缀的全文：GET /api/rooms/{id}/timeline/prefix/{hash}。
+func (s *Server) roomTimelinePrefix(w http.ResponseWriter, r *http.Request) {
+	body, err := s.app.StagePrefix(r.PathValue("id"), r.PathValue("hash"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"hash": r.PathValue("hash"), "body": body})
 }

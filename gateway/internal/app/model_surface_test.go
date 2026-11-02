@@ -40,7 +40,8 @@ var surfaceCap = map[string]int{
 	"hook":                 8846,
 	"branch":               3601,
 	"room-member":          6586,
-	"room-member-scene":    0,
+	"room-member-scene":    5666,
+	"room-member-stage":    905,
 	"group-external-scene": 576,
 }
 
@@ -138,6 +139,24 @@ func surfaceRoles() []surfaceRole {
 			roles := map[string]scene.Role{agents.DefaultID: {Prompt: "你是庄园的管家，知道所有人的秘密，但只在被问到时才说。"}}
 			info, err := e.a.CreateRoom(RoomPatch{Name: &name, Members: &members, ScenePatch: ScenePatch{
 				Brief: strptr("晚宴上有人被毒死，大家被困在庄园里。"), Roles: &roles, Tools: json.RawMessage(`["Knowledge"]`)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.a.mu.Lock()
+			room, _ := st.Get(info.ID)
+			e.a.roomHumanSay(room, "李四", "大家好")
+			e.a.mu.Unlock()
+			return e.a.roomMemberSID(agents.DefaultID, info.ID)
+		}},
+		// 一场戏的成员：stage 和心里话；没有记忆说明，没有工具
+		{"room-member-stage", func(t *testing.T, e *env) string {
+			withAgents(t, e)
+			st, _ := rooms.Open(filepath.Join(e.dir, "data", "rooms.json"))
+			e.a.SetRooms(st)
+			name, members, yes := "谋杀之夜", []string{agents.DefaultID}, true
+			roles := map[string]scene.Role{agents.DefaultID: {Prompt: "你是庄园的管家，知道所有人的秘密，但只在被问到时才说。"}}
+			info, err := e.a.CreateRoom(RoomPatch{Name: &name, Members: &members, ScenePatch: ScenePatch{
+				Brief: strptr("晚宴上有人被毒死，大家被困在庄园里。"), Roles: &roles, Stage: &yes, Inner: &yes}})
 			if err != nil {
 				t.Fatal(err)
 			}

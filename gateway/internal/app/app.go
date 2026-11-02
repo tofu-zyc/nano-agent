@@ -162,8 +162,9 @@ type App struct {
 	roomRuns          map[string]*roomRun
 	sceneUses         map[string]*sceneUse // 场景的用量（data/runtime/scenes.json）
 	sceneUsePath      string
-	observe           *observeLog // observe 记录（第一次用到时打开）
-	observeDir        string      // data 目录
+	observe           *observeLog          // observe 记录（第一次用到时打开）
+	observeDir        string               // data 目录
+	stages            map[string]*stageLog // 开了 stage 的群的场景记录，按群 ID
 	hub               *kernel.Hub
 	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
 	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
@@ -338,6 +339,7 @@ type run struct {
 	start           time.Time
 	calls           int                              // 这一轮请求了几次模型
 	usage           llm.Usage                        // 这一轮的累计用量
+	thought         string                           // 这一轮的心里话（场景开了 inner 才有）
 	noTools         bool                             // 访客没有工作目录：不给模型工具，只聊天
 	mode            string                           // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
 	mcpOK           map[string]bool                  // 这一轮已经批准过的 MCP 服务（approval=per_turn）
@@ -2039,9 +2041,11 @@ func (a *App) finish(s *sess, status, detail string) {
 		a.deliver(o.ep, text, "")
 	}
 	// agent 在房间里的回复：先记进群记录、转给听得到的成员，再算用量（可能因此暂停），最后回合制接着叫下一位
+	body = a.sceneSplit(s, r, body) // 心里话只记进场景记录，别人只听到说出口的
 	if inRoom {
 		a.roomRunSay(roomOf, s, r, body)
 	}
+	a.sceneRunEnd(s, r, status)
 	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
 	if inRoom {
 		a.roomRunDone(roomOf, s, status, body)
@@ -2129,13 +2133,16 @@ func (a *App) generateModel(s *sess) {
 		Messages: session.BuildMessages(system, st.Summary, hist, a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
+	var tail []string // 只放在这次请求里的内容
 	if r.proactive {
 		// 自己凑上来的那一轮：只在这次请求里加一句提醒，不改历史（前缀缓存基本不受影响）
-		req.Messages = append(req.Messages, llm.Message{Role: "user",
-			Content: "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。"})
+		tail = append(tail, "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。")
 	}
 	if r.hint != "" {
-		req.Messages = append(req.Messages, llm.Message{Role: "user", Content: r.hint})
+		tail = append(tail, r.hint)
+	}
+	for _, t := range tail {
+		req.Messages = append(req.Messages, llm.Message{Role: "user", Content: t})
 	}
 	if a.cfg.Security.Redact != "off" {
 		_, e, ok := a.modelOf(s.sid)
@@ -2155,6 +2162,7 @@ func (a *App) generateModel(s *sess) {
 	req.Tools = snapshotTools
 	_, _, meterSignature, _ := a.contextParts(s.sid)
 	meterPosition := st.Base + len(a.store.History(s.sid))
+	recordModel := a.sceneModel(s, system, req, tail, st.Base, meterPosition)
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
 	r.calls++
@@ -2201,6 +2209,9 @@ func (a *App) generateModel(s *sess) {
 			return
 		}
 		r.cancelLLM = nil
+		if recordModel != nil {
+			recordModel(res, err)
+		}
 		// 拒绝回复等结果可能没有正文增量，仍需交给流式窗口显示一次。
 		if err == nil && res.Content != "" && !contentEmitted {
 			onDelta(llm.Delta{Content: res.Content})

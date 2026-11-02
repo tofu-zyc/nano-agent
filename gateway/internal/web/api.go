@@ -112,6 +112,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		"bots":           s.app.Bots(),
 		"rooms":          s.app.Rooms(),
 		"scene_tools":    s.app.SceneToolNames(),
+		"stage_tools":    s.app.StageToolNames(),
 		"sessions":       snap.Sessions,
 		"approvals":      snap.Approvals,
 		"totals":         snap.Totals,

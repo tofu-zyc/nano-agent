@@ -84,6 +84,17 @@ func (a *App) applyScene(sid string, rule groupRule) groupRule {
 // sceneToolAllow 是群聊里工具名的白名单：场景 Tools → agent 的群聊工具 → 默认表；
 // 场景 Tools 有值、agent 也设了群聊工具时取交集。最后一步（去掉这一轮拿不到的）由调用方的候选表完成。
 func (a *App) sceneToolAllow(sid string) []string {
+	if sc, ok := a.sceneOf(sid); ok && sc.Rules.Stage {
+		// 戏里只有联网查资料的工具，场景没设就一个都不给
+		out := []string{}
+		gt := a.agentOf(sid).GroupTools
+		for _, n := range sc.Rules.Tools {
+			if slices.Contains(stageToolNames(), n) && (len(gt) == 0 || slices.Contains(gt, n)) {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
 	allow := a.agentOf(sid).GroupTools
 	if len(allow) == 0 {
 		allow = sceneToolNames()
@@ -117,6 +128,9 @@ func (a *App) sceneText(sid string) string {
 	if p := strings.TrimSpace(sc.roleOf(a.agentOf(sid).ID).Prompt); p != "" {
 		parts = append(parts, "[你的角色] "+p)
 	}
+	if sc.Rules.Stage && sc.Rules.Inner {
+		parts = append(parts, innerGuide)
+	}
 	return strings.Join(parts, "\n\n")
 }
 
@@ -138,6 +152,8 @@ type ScenePatch struct {
 	Order       *[]string              `json:"order"`
 	Rounds      *int                   `json:"rounds"`
 	Channels    *[]scene.Channel       `json:"channels"`
+	Stage       *bool                  `json:"stage"` // 只能在建群时设
+	Inner       *bool                  `json:"inner"`
 	Reset       bool                   `json:"reset"` // 把这一场累计的用量清零（含轮数）
 }
 
@@ -193,6 +209,12 @@ func (p ScenePatch) apply(r scene.Rules) (scene.Rules, error) {
 	}
 	if p.Rounds != nil {
 		r.Rounds = *p.Rounds
+	}
+	if p.Stage != nil {
+		r.Stage = *p.Stage
+	}
+	if p.Inner != nil {
+		r.Inner = *p.Inner
 	}
 	if p.Channels != nil {
 		r.Channels = *p.Channels

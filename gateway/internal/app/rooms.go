@@ -8,6 +8,7 @@ package app
 // 说话方式沿用阶段 7 的群聊引擎：短、口语、不发思考，被叫到才说（或者自由模式按积极度插话）。
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,7 +142,12 @@ func (a *App) roomState(id string) *roomRun {
 }
 
 // pauseRoom 暂停一个群，并在群记录里说一声。调用方持有锁。
-func (a *App) pauseRoom(room rooms.Room, why string) {
+func (a *App) pauseRoom(room rooms.Room, why string) { a.pauseRoomWith(room, why, true) }
+
+// pauseRoomLogOnly 场景记录写不进去时的暂停：原因只写群记录，不再写场景记录。
+func (a *App) pauseRoomLogOnly(room rooms.Room, why string) { a.pauseRoomWith(room, why, false) }
+
+func (a *App) pauseRoomWith(room rooms.Room, why string, staged bool) {
 	if room.Paused {
 		return
 	}
@@ -149,8 +155,13 @@ func (a *App) pauseRoom(room rooms.Room, why string) {
 	if err := a.roomStore.Update(room); err != nil {
 		a.log.Warn("暂停房间失败", "room", room.ID, "err", err)
 	}
-	a.store.Append(roomLogSID(room.ID), session.Msg{Role: "user", Content: "[系统] " + why})
-	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: "[系统] " + why})
+	text := "[系统] " + why
+	if staged {
+		a.roomLogWrite(room, session.Msg{Role: "user", Content: text}, StageRec{Say: "system", Text: text})
+	} else if err := a.store.Append(roomLogSID(room.ID), session.Msg{Role: "user", Content: text}); err != nil {
+		a.log.Warn("保存房间记录失败", "room", room.ID, "err", err)
+	}
+	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: text})
 	a.publish(events.Event{T: "rooms"})
 	a.log.Info("房间已暂停", "room", room.ID, "why", why)
 }
@@ -284,7 +295,7 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 	if r.IsDM() {
 		kind = scene.DMRoom
 	}
-	if err := r.Rules.Validate(kind, sceneToolNames()); err != nil {
+	if err := r.Rules.Validate(kind, sceneToolNames(), stageToolNames()); err != nil {
 		return RoomInfo{}, err
 	}
 	if err := r.Rules.ValidateMembers(r.Members); err != nil {
@@ -311,6 +322,7 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if !ok {
 		return RoomInfo{}, errors.New("没有这个群")
 	}
+	before := r
 	if p.Name != nil {
 		r.Name = *p.Name
 	}
@@ -339,17 +351,20 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if p.Muted != nil {
 		r.Muted = *p.Muted
 	}
-	oldMode := r.Mode
+	oldMode, oldRules := r.Mode, r.Rules
 	rules, err := p.ScenePatch.apply(r.Rules)
 	if err != nil {
 		return RoomInfo{}, err
+	}
+	if rules.Stage != oldRules.Stage {
+		return RoomInfo{}, errors.New("是不是一场戏只能在建群时定，之后不能改")
 	}
 	r.Rules = rules
 	kind := scene.Room
 	if r.IsDM() {
 		kind = scene.DMRoom
 	}
-	if err := r.Rules.Validate(kind, sceneToolNames()); err != nil {
+	if err := r.Rules.Validate(kind, sceneToolNames(), stageToolNames()); err != nil {
 		return RoomInfo{}, err
 	}
 	if err := r.Rules.ValidateMembers(r.Members); err != nil {
@@ -363,6 +378,24 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	}
 	if err := a.roomStore.Update(r); err != nil {
 		return RoomInfo{}, err
+	}
+	// 导演的操作记进场景记录（不是一场戏的群什么都不做）
+	if r.Paused != before.Paused {
+		op := "pause"
+		if !r.Paused {
+			op = "resume"
+		}
+		a.stageOp(r, op, nil)
+	}
+	if !slices.Equal(r.Muted, before.Muted) {
+		a.stageOp(r, "mute", map[string]any{"muted": r.Muted})
+	}
+	b1, _ := json.Marshal(before.Rules)
+	if b2, _ := json.Marshal(r.Rules); !bytes.Equal(b1, b2) {
+		a.stageOp(r, "rules", r.Rules)
+	}
+	if p.Reset {
+		a.stageOp(r, "reset", nil)
 	}
 	a.setRoomTitle(r.ID, r.Name)
 	a.publish(events.Event{T: "rooms"})
@@ -484,6 +517,11 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 			reply(false, "找不到要发给谁："+to)
 			return
 		}
+	}
+	if target.Stage {
+		a.mu.Unlock()
+		reply(false, "这是一场戏，只能在导演台说话")
+		return
 	}
 	if target.Paused {
 		a.mu.Unlock()

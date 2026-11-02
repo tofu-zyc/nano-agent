@@ -147,7 +147,7 @@ func (a *App) diarySources(agentID string) []diarySource {
 	var out []diarySource
 	for _, sid := range a.sessionIDs() {
 		// 按当前执行身份算：会话中途换过 agent 的，只整理现在属于它的部分
-		if a.execAgentID(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") {
+		if a.execAgentID(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") || a.sceneIsolated(sid) {
 			continue
 		}
 		title, partner, label := a.diaryPartner(agentID, sid)

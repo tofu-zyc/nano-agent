@@ -636,6 +636,30 @@ def run(page, url, nano):
     page.reload()
     page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=10000)
     ok("刷新群聊后保留发言人的 agent 身份")
+    # 剧场的场景记录：建一场戏，旁白说一句，时间线里有这一句，前缀全文能取；普通群没有时间线
+    code, stage = api(page, "POST", "/api/rooms", {"name": "戏", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
+    if code == 200 and stage.get("stage") and stage.get("inner"):
+        api(page, "POST", "/api/rooms/" + stage["id"] + "/say", {"text": "夜深了", "as": "旁白"})
+        code, tl = api(page, "GET", "/api/rooms/" + stage["id"] + "/timeline?after=0&n=50")
+        kinds = [x["kind"] for x in tl.get("items", [])] if code == 200 else []
+        lines = [x for x in tl.get("items", []) if x["kind"] == "line"] if code == 200 else []
+        if kinds == ["line", "cursors"] and lines[0]["text"] == "夜深了" and lines[0]["say"] == "narrate" and tl["last"] == 2:
+            ok("戏的时间线：旁白那一句和 cursors 都在")
+        else:
+            fail("时间线不对：" + json.dumps(tl, ensure_ascii=False)[:300])
+        code, _ = api(page, "GET", "/api/rooms/" + room["id"] + "/timeline")
+        if code == 400:
+            ok("不是戏的群没有时间线")
+        else:
+            fail("普通群的时间线应该被拒绝：" + str(code))
+        code, bad = api(page, "PATCH", "/api/rooms/" + stage["id"], {"stage": False})
+        if code == 400:
+            ok("stage 建群以后不能改")
+        else:
+            fail("stage 不应该能改：" + str(code))
+        api(page, "DELETE", "/api/rooms/" + stage["id"])
+    else:
+        fail("建不了戏：" + json.dumps(stage, ensure_ascii=False)[:300])
     # 收拾干净，后面的检查不受影响
     for r in (room, room2, dm):
         if r.get("id"):

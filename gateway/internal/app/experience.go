@@ -81,7 +81,7 @@ func (a *App) experienceNote(sid, who string) string {
 
 func (a *App) recordRunExperience(s *sess, r *run, status, body string) {
 	ag := a.agentOf(s.sid)
-	if !ag.Life() || a.agentRoot == "" {
+	if !ag.Life() || a.agentRoot == "" || a.sceneIsolated(s.sid) { // 戏里的事不记进经历
 		return
 	}
 	kind, where, visible := "chat", s.sid, a.experienceVisibility(s.sid, r.from)

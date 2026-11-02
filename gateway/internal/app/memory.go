@@ -260,6 +260,9 @@ func (a *App) recallNote(sid, who, text string, skip []string) (string, []string
 // memoryNotes 是这一轮要放在消息前面的记忆部分：记忆说明（变了才放）和想起来的。st 会被更新，dirty 表示要保存。
 // 调用方持有锁。
 func (a *App) memoryNotes(sid, who, text string, st *session.Settings, dirty *bool) string {
+	if a.sceneIsolated(sid) {
+		return "" // 戏里只有人格、场景说明、角色和场内的话
+	}
 	var parts []string
 	if note := a.memoryNote(sid, who); note != "" {
 		if h := fmt.Sprintf("%x", sha256.Sum256([]byte(note))); h != st.MemNote {

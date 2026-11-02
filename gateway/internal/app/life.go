@@ -333,7 +333,7 @@ func (a *App) lifeTargets(ag agents.Agent) []chatTarget {
 	}
 	if a.roomStore != nil {
 		for _, r := range a.roomStore.List() {
-			if !slices.Contains(r.Members, ag.ID) || r.Paused || r.IsDM() {
+			if !slices.Contains(r.Members, ag.ID) || r.Paused || r.IsDM() || r.Stage {
 				continue
 			}
 			who, last, ts := a.lastLine(roomLogSID(r.ID))

@@ -401,7 +401,7 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 				dec.DisallowUnknownFields()
 				if err := dec.Decode(&rules); err != nil {
 					errs = append(errs, fmt.Errorf("群规则格式不对：%w", err))
-				} else if err := rules.Validate(scene.External, sceneToolNames()); err != nil {
+				} else if err := rules.Validate(scene.External, sceneToolNames(), stageToolNames()); err != nil {
 					errs = append(errs, err)
 				} else {
 					newScene, sceneChanged = &rules, true

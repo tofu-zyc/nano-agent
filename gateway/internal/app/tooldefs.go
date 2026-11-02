@@ -25,6 +25,8 @@ type gwTool struct {
 	admin string
 	// scene：能出现在群聊和场景的工具表里（没设群聊白名单时的默认范围，也是网页上可选的范围）。
 	scene bool
+	// stage：戏里也能用（场内的事不进记忆，所以只有联网查资料的两个）。
+	stage bool
 }
 
 func fixedSpec(f func() proto.ToolSpec) func(*App, string) (proto.ToolSpec, bool) {
@@ -76,9 +78,9 @@ var gwTools []gwTool
 
 func init() {
 	gwTools = []gwTool{
-		{name: "WebSearch", spec: searchSpec("WebSearch"), scene: true,
+		{name: "WebSearch", spec: searchSpec("WebSearch"), scene: true, stage: true,
 			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) { a.webTool(s, m, reply) }},
-		{name: "WebFetch", spec: searchSpec("WebFetch"), scene: true,
+		{name: "WebFetch", spec: searchSpec("WebFetch"), scene: true, stage: true,
 			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) { a.webTool(s, m, reply) }},
 		{name: "Hook", spec: fixedSpec(hookTool), state: true, started: true,
 			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) { a.hookToolCall(s, m, reply) }},
@@ -212,6 +214,17 @@ func sceneToolNames() []string {
 	return out
 }
 
+// stageToolNames 是戏里可选的工具（登记表里 stage 为真的）。
+func stageToolNames() []string {
+	var out []string
+	for _, t := range gwTools {
+		if t.stage {
+			out = append(out, t.name)
+		}
+	}
+	return out
+}
+
 // gatewayToolNames 是表里全部网关工具的名字。
 func gatewayToolNames() []string {
 	out := make([]string, 0, len(gwTools))
@@ -234,3 +247,6 @@ func unofferedCall(calls []llm.ToolCall, offered []llm.Tool) string {
 
 // SceneToolNames 是场景里可选的工具（登记表里 scene 为真的），网页用它列选项。
 func (a *App) SceneToolNames() []string { return sceneToolNames() }
+
+// StageToolNames 是戏里可选的工具，网页开了 stage 的群用它列选项。
+func (a *App) StageToolNames() []string { return stageToolNames() }

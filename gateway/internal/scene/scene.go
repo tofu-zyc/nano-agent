@@ -60,6 +60,10 @@ type Rules struct {
 	Order    []string  `json:"order,omitempty"`    // 轮流的发言顺序；空表示按成员顺序
 	Rounds   int       `json:"rounds,omitempty"`   // 轮流时这一场最多几轮
 	Channels []Channel `json:"channels,omitempty"` // 私下频道，最多 8 个
+
+	// 剧场（只用于内部群，不用于两个 agent 的私聊）
+	Stage bool `json:"stage,omitempty"` // 这是一场戏：场内的事不进成员的记忆，场外进不来，全程记录；只能在建群时设
+	Inner bool `json:"inner,omitempty"` // 心里话：成员每次先写一句心里想的，别人听不到，记进时间线；只用于 stage
 }
 
 // Channel 是内部群里的私下频道：里面的话只有频道成员听得到。
@@ -137,7 +141,7 @@ func (g Guard) EffectiveGuard() (run, pingPong int) {
 func (r Rules) IsZero() bool {
 	return r.Mode == "" && !r.Observe && r.Brief == "" && len(r.Roles) == 0 && r.Tools == nil &&
 		r.Style == (Style{}) && r.Guard == (Guard{}) && r.Budget == 0 && r.BudgetTotal == 0 &&
-		len(r.Order) == 0 && r.Rounds == 0 && len(r.Channels) == 0
+		len(r.Order) == 0 && r.Rounds == 0 && len(r.Channels) == 0 && !r.Stage && !r.Inner
 }
 
 // Clone 复制一份（映射和切片不共用）。
@@ -195,8 +199,15 @@ func (r Rules) ValidateMembers(members []string) error {
 
 var eagernessOK = []string{"", "off", "low", "normal", "high"}
 
-// Validate 检查规则。sceneTools 是登记表里 scene 为真的工具名：tools 只能从里面选。
-func (r Rules) Validate(kind Kind, sceneTools []string) error {
+// Validate 检查规则。sceneTools 是登记表里 scene 为真的工具名：tools 只能从里面选；
+// stageTools 是其中戏里也能用的（登记表里 stage 为真）：开了 stage 的场景 tools 只能从它里面选。
+func (r Rules) Validate(kind Kind, sceneTools, stageTools []string) error {
+	if r.Stage && kind != Room {
+		return errors.New("只有内部群可以当一场戏")
+	}
+	if r.Inner && !r.Stage {
+		return errors.New("心里话只能用在戏里（要先开 stage）")
+	}
 	switch r.Mode {
 	case "", ModeMention, ModeFree:
 	case ModeTurns, ModeDirector:
@@ -248,9 +259,13 @@ func (r Rules) Validate(kind Kind, sceneTools []string) error {
 			return fmt.Errorf("%s 的积极度只能是 off、low、normal、high", id)
 		}
 	}
+	allowed := sceneTools
+	if r.Stage {
+		allowed = stageTools
+	}
 	for _, t := range r.Tools {
-		if !slices.Contains(sceneTools, t) {
-			return fmt.Errorf("场景里不能用工具 %s（可选：%s）", t, strings.Join(sceneTools, "、"))
+		if !slices.Contains(allowed, t) {
+			return fmt.Errorf("场景里不能用工具 %s（可选：%s）", t, strings.Join(allowed, "、"))
 		}
 	}
 	if r.Style.Parts > 5 {

@@ -107,8 +107,10 @@ func (a *App) roomPost(room rooms.Room, l roomLine, o postOpt) {
 		role, agent = "assistant", l.From
 	}
 	log := roomLogSID(room.ID)
-	if err := a.store.Append(log, session.Msg{Role: role, Content: a.recordText(room, l), Agent: agent}); err != nil {
-		a.log.Warn("保存房间记录失败", "room", room.ID, "err", err)
+	line, ok := a.roomLogWrite(room, session.Msg{Role: role, Content: a.recordText(room, l), Agent: agent},
+		StageRec{From: l.From, Name: l.Name, Say: l.Kind, Channel: l.Channel, To: l.To, Text: l.Text})
+	if !ok {
+		return // 场景记录写不进去：这一句不发，这一场已经暂停
 	}
 	if l.From != "" {
 		a.publish(events.Event{T: "say", SID: log, Text: l.Text})
@@ -155,6 +157,7 @@ func (a *App) roomPost(room rooms.Room, l roomLine, o postOpt) {
 			a.roomTrigger(s, member, room, l.Channel)
 		}
 	}
+	a.stageCursors(room, line)
 	a.publish(events.Event{T: "rooms"})
 	// 人或旁白在公开频道说了一句：轮流模式从这里开始转
 	if l.From == "" && l.Kind != lineCue && l.Channel == "" && room.Mode == scene.ModeTurns {
