@@ -98,7 +98,8 @@
 </div>
 
 {#if external}
-  <h5 class="p-h">团队 <span class="muted p-small">名单里的人点名 agent，agent 才会建工单；发言固定为点名，主动插话只记录</span></h5>
+  <h5 class="p-h team-title">团队</h5>
+  <p class="p-note p-small">名单里的人点名 agent，agent 才会建工单；发言固定为点名，主动插话只记录。</p>
   <div class="p-card" data-testid="team-card">
     <label class="p-row"><input type="checkbox" checked={!!team} data-testid="team-on" onchange={(e) => (e.target as HTMLInputElement).checked ? saveTeam({ workspace: workspaces[0]?.id ?? '' }) : onsave({ team: null })} />
       <span class="p-grow">这个群是一个团队</span></label>
@@ -217,3 +218,7 @@
     {/each}
   </div>
 {/if}
+
+<style>
+  .team-title { white-space: nowrap; }
+</style>

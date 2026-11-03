@@ -212,6 +212,9 @@ def check_team_card(page, url):
         ok("团队设置保存后重新打开还在")
     else:
         fail("团队设置保存后没留住：" + card.inner_text()[:300])
+    # 面板淡入完、卡片滚进可视范围再截
+    page.locator("[data-testid=team-card]").scroll_into_view_if_needed()
+    time.sleep(0.8)
     page.screenshot(path=os.path.join(SHOTS, "team-card.png"))
 
 
