@@ -150,52 +150,42 @@ func (x hookExecutor) command(ctx context.Context, w hooks.Execution, done func(
 		done(hooks.Result{Err: auth})
 		return
 	}
-	var release func(bool)
-	if !native {
-		var err error
-		release, err = a.acquireExecution(ctx, lease)
-		if err != nil {
-			done(hooks.Result{Err: err, Retry: true})
-			return
-		}
-		a.executionLeaseStarted(lease)
-	}
-	command := w.Spec.Handler.Command
-	if w.Spec.Handler.Script != "" {
-		raw, err := hookScript(root, w.Delivery.AgentID, w.Spec.Handler.Script)
-		if err != nil || scriptDigest(raw) != w.Spec.Handler.Digest {
-			if release != nil {
-				release(false)
+	run := a.leasedExec(ctx, h, native, lease, func() ([]byte, error) {
+		command := w.Spec.Handler.Command
+		if w.Spec.Handler.Script != "" {
+			raw, err := hookScript(root, w.Delivery.AgentID, w.Spec.Handler.Script)
+			if err != nil || scriptDigest(raw) != w.Spec.Handler.Digest {
+				return nil, errors.New("登记的 Hook 脚本已改变或不可读，需要更新规则修订")
 			}
-			done(hooks.Result{Err: errors.New("登记的 Hook 脚本已改变或不可读，需要更新规则修订")})
-			return
-		}
-		name := "hook-" + w.Spec.Handler.Digest
-		actual, err := h.PutFiles(ctx, skills.CacheDir+"/"+name, []host.File{{Path: "handler", Data: raw, Exec: true}})
-		if err != nil {
-			if release != nil {
-				release(false)
+			name := "hook-" + w.Spec.Handler.Digest
+			actual, err := h.PutFiles(ctx, skills.CacheDir+"/"+name, []host.File{{Path: "handler", Data: raw, Exec: true}})
+			if err != nil {
+				return nil, err
 			}
-			done(hooks.Result{Err: err})
-			return
+			path := strings.TrimRight(actual, `/\`) + "/handler"
+			if windows {
+				command = "& " + shellLiteral(path, true)
+			} else {
+				command = "/bin/sh " + shellLiteral(path, false)
+			}
 		}
-		path := strings.TrimRight(actual, `/\`) + "/handler"
-		if windows {
-			command = "& " + shellLiteral(path, true)
-		} else {
-			command = "/bin/sh " + shellLiteral(path, false)
-		}
-	}
-	request, _ := json.Marshal(map[string]any{
-		"tool": "Shell", "origin": origin, "args": map[string]any{"command": command, "timeout": max(1, (w.Spec.Handler.TimeoutMS+999)/1000)},
-		"dirs": spec.Dirs, "home": spec.Home, "ro": spec.RO, "rw": spec.RW, "write": true,
-		"sandbox": sandbox, "hook_input": string(input), "tmp_key": w.Delivery.ID, "max_output": 64 << 10, "watch_stdin": true,
+		request, _ := json.Marshal(map[string]any{
+			"tool": "Shell", "origin": origin, "args": map[string]any{"command": command, "timeout": max(1, (w.Spec.Handler.TimeoutMS+999)/1000)},
+			"dirs": spec.Dirs, "home": spec.Home, "ro": spec.RO, "rw": spec.RW, "write": true,
+			"sandbox": sandbox, "hook_input": string(input), "tmp_key": w.Delivery.ID, "max_output": 64 << 10, "watch_stdin": true,
+		})
+		a.noteHookCause(machine, w.Delivery.HookID, w.Spec.Handler.TimeoutMS)
+		return append(request, '\n'), nil
 	})
-	a.noteHookCause(machine, w.Delivery.HookID, w.Spec.Handler.TimeoutMS)
-	result := h.Exec(ctx, append(request, '\n'))
-	if release != nil {
-		release(result.Lost)
+	if run.AcquireErr != nil {
+		done(hooks.Result{Err: run.AcquireErr, Retry: true})
+		return
 	}
+	if run.BuildErr != nil {
+		done(hooks.Result{Err: run.BuildErr})
+		return
+	}
+	result := run.Result
 	if !result.OK {
 		done(hooks.Result{Err: errors.New(result.Content), Uncertain: result.Lost})
 		return

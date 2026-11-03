@@ -88,6 +88,7 @@ type Ticket struct {
 
 	// 5b
 	Worktree string `json:"worktree,omitempty"`
+	GitDir   string `json:"git_dir,omitempty"`   // worktree 自己的 git 目录 <仓库>/.git/worktrees/tk-<序号>，分支可写
 	Branch   string `json:"branch,omitempty"`    // git 分支 nano/tk-<序号>
 	Base     string `json:"base,omitempty"`      // 从哪个提交开始
 	RunSID   string `json:"run_sid,omitempty"`   // 干活的分支会话
