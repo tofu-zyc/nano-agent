@@ -181,7 +181,13 @@ func (a *App) driveTicketStart(id string) {
 	}
 	a.mu.Unlock()
 
-	base, gitDir, err := a.createWorktree(a.ctx, t, repo)
+	src, serr := a.startSource(t) // 连了 GitHub 的仓库：起点从连接的仓库 fetch
+	var base, gitDir string
+	if serr == nil {
+		base, gitDir, err = a.createWorktree(a.ctx, t, repo, src)
+	} else {
+		err = serr
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -338,6 +344,17 @@ func (a *App) acceptTicket(id string) {
 		}
 		a.reworkTicket(t, log)
 	default:
+		if _, connected := a.repoOfTicket(t); connected {
+			// 连了 GitHub：记下提交和验收结果（状态还是 checking），推送、开 PR，之后才是 ready
+			if _, err := a.tickets.Update(id, func(t *ticket.Ticket) { t.Commit, t.CheckLog = commitRes.Commit, check.Log }); err != nil {
+				a.ticketHealth(err)
+				return
+			}
+			a.mu.Unlock()
+			a.deliverTicketPR(id, commitRes.Summary, false, "")
+			a.mu.Lock()
+			return
+		}
 		if _, err := a.tickets.Update(id, func(t *ticket.Ticket) {
 			t.Status, t.WantCheck, t.Commit, t.CheckLog = ticket.StatusReady, false, commitRes.Commit, check.Log
 		}); err != nil {
@@ -375,7 +392,10 @@ func deliveryText(t ticket.Ticket, c commitResult) string {
 
 // reworkTicket 是验收没过：返工加一，把验收输出的最后 40 行放进分支的下一个安全边界接着跑；
 // 返工用完（到上限还没过）受阻，问派活的人。调用方持有锁。
-func (a *App) reworkTicket(t ticket.Ticket, log string) {
+func (a *App) reworkTicket(t ticket.Ticket, log string) { a.reworkTicketFrom(t, "验收", log) }
+
+// reworkTicketFrom 是返工：source 是“验收”（本地验收命令）或 CI（PR 上的检查），两种共用 Rework 计数和上限。
+func (a *App) reworkTicketFrom(t ticket.Ticket, source, log string) {
 	cap := t.EffectiveReworkCap()
 	n := t.Rework + 1
 	if n >= cap {
@@ -384,7 +404,7 @@ func (a *App) reworkTicket(t ticket.Ticket, log string) {
 		}); err != nil {
 			a.ticketHealth(err)
 		}
-		a.ticketBlock(t.ID, "rework", fmt.Sprintf("验收没过（返工 %d 次了）：%s", n, clip(tailLines(log, 8), 600)), "继续改、放弃，还是先收下？", true)
+		a.ticketBlock(t.ID, "rework", fmt.Sprintf("%s没过（返工 %d 次了）：%s", source, n, clip(tailLines(log, 8), 600)), "继续改、放弃，还是先收下？", true)
 		return
 	}
 	if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) {
@@ -393,7 +413,11 @@ func (a *App) reworkTicket(t ticket.Ticket, log string) {
 		a.ticketHealth(err)
 		return
 	}
-	msg := fmt.Sprintf("[验收没过] 验收命令 %s 的输出（最后 40 行）：\n%s\n请改好后再用 Report ready 汇报。这是第 %d 次返工（最多 %d 次）。", orNone(t.Check), log, n, cap)
+	what := fmt.Sprintf("验收命令 %s 的输出（最后 40 行）", orNone(t.Check))
+	if source == "CI" {
+		what = "PR 上 CI 的失败信息"
+	}
+	msg := fmt.Sprintf("[%s没过] %s：\n%s\n请改好后再用 Report ready 汇报。这是第 %d 次返工（最多 %d 次）。", source, what, log, n, cap)
 	if err := a.startBranchRunLocked(t.RunSID, msg, ticketIdentityPrefix+t.ID); err != nil {
 		a.ticketBlock(t.ID, "error", "没法让分支接着改："+err.Error(), "", true)
 	}
@@ -407,6 +431,9 @@ func (a *App) reworkTicket(t ticket.Ticket, log string) {
 func (a *App) acceptTicketAction(t ticket.Ticket, by string) (string, error) {
 	switch {
 	case t.Status == ticket.StatusReady:
+		if _, connected := a.repoOfTicket(t); connected {
+			return "", errors.New("这个工作目录连了 GitHub，工单以 PR 合并为准，没有收下这一项")
+		}
 		return a.finishAccept(t, by, false)
 	case t.Status == ticket.StatusBlocked && t.BlockedBy == "rework":
 		if a.ticketBusy == nil {
@@ -440,6 +467,13 @@ func (a *App) acceptTicketAction(t ticket.Ticket, by string) (string, error) {
 					return
 				}
 				cur, _ = a.tickets.Get(t.ID)
+				if _, connected := a.repoOfTicket(cur); connected {
+					// 先收下也开 PR（正文写明验收没过、由谁收下），工单等 PR 合并才 done
+					a.mu.Unlock()
+					a.deliverTicketPR(t.ID, c.Summary, true, by)
+					a.mu.Lock()
+					return
+				}
 				if msg, err := a.finishAccept(cur, by, true); err == nil {
 					a.ticketPush(t.ID, "ready", msg, "")
 				}
@@ -517,6 +551,23 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 	if t.RunSID == "" {
 		return errors.New("工单还没有干活的分支")
 	}
+	if t.Status == ticket.StatusBlocked && (t.BlockedBy == "push" || t.BlockedBy == "pr") {
+		// 推送或开 PR 失败后续上：不用分支再做什么，重做交付（先查远端分支和 PR 在不在，成功过的那一步不重放）
+		if t.Renewals >= ticket.MaxRenewals {
+			return fmt.Errorf("这张工单已经续了 %d 次，不能再续了；只能叫停或放弃", ticket.MaxRenewals)
+		}
+		if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) {
+			t.Renewals++
+			t.Renewed = append(t.Renewed, ticket.Renewal{By: by, At: a.now().Unix(), What: "重试交付"})
+			t.Status, t.Reason, t.BlockedBy = ticket.StatusChecking, "", ""
+		}); err != nil {
+			a.ticketHealth(err)
+			return fmt.Errorf("没有记下来（%v）", err)
+		}
+		a.publishCommitments()
+		go a.deliverTicketPR(t.ID, "", false, by)
+		return nil
+	}
 	if t.Status == ticket.StatusBlocked {
 		if t.Renewals >= ticket.MaxRenewals {
 			return fmt.Errorf("这张工单已经续了 %d 次，不能再续了；只能叫停或放弃", ticket.MaxRenewals)
@@ -537,6 +588,13 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 			}
 			t.BlockedBy = ""
 		}); err != nil {
+			a.ticketHealth(err)
+			return fmt.Errorf("没有记下来（%v）", err)
+		}
+		a.publishCommitments()
+	}
+	if t.Status == ticket.StatusReady { // PR 在等合并时来了意见：回到干活，不算返工
+		if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) { t.Status, t.WantCheck = ticket.StatusWorking, false }); err != nil {
 			a.ticketHealth(err)
 			return fmt.Errorf("没有记下来（%v）", err)
 		}

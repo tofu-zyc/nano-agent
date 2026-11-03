@@ -83,8 +83,13 @@ func (r ticketRepo) branchSpec(t ticket.Ticket) proto.WorkspaceSpec {
 
 // runTicketShell 跑一条脚本，沙箱必须有（"on"）。非零退出码返回错误，错误里带输出的最后几行。
 func (a *App) runTicketShell(ctx context.Context, t ticket.Ticket, repo ticketRepo, spec proto.WorkspaceSpec, script, key string, timeout time.Duration) (string, error) {
+	return a.runTicketShellEnv(ctx, t, repo, spec, script, key, timeout, nil)
+}
+
+// runTicketShellEnv 同 runTicketShell，还带环境变量（只有推送和连了仓库时的 fetch 带凭据）。
+func (a *App) runTicketShellEnv(ctx context.Context, t ticket.Ticket, repo ticketRepo, spec proto.WorkspaceSpec, script, key string, timeout time.Duration, env map[string]string) (string, error) {
 	res, err := a.gatewayShell(ctx, shellRun{Machine: repo.machine, Spec: spec, Sandbox: "on", Command: script, Timeout: timeout,
-		Key: t.ID + "-" + key, Agent: t.Agent, Session: t.Auth.Scene, By: "ticket:" + t.ID, Priority: 10})
+		Key: t.ID + "-" + key, Agent: t.Agent, Session: t.Auth.Scene, By: "ticket:" + t.ID, Priority: 10, Env: env})
 	if err != nil {
 		return "", err
 	}
@@ -116,18 +121,26 @@ func marker(out, name string) string {
 
 // createWorktree 建工单的 worktree 和分支；已经在了就接着用。返回起点提交和 worktree 自己的 git 目录。
 // git 目录从主仓库的 worktree 登记里查（worktree list 里有这个路径，再按管理目录里记的 gitdir 找名字），不读 worktree 里的 .git 文件。
-func (a *App) createWorktree(ctx context.Context, t ticket.Ticket, repo ticketRepo) (base, gitDir string, err error) {
+func (a *App) createWorktree(ctx context.Context, t ticket.Ticket, repo ticketRepo, src ...repoSource) (base, gitDir string, err error) {
 	root, wt, branch := shellLiteral(repo.root, false), shellLiteral(repo.worktree(t.ID), false), shellLiteral(ticketBranch(t.ID), false)
+	// 起点：连了 GitHub 的仓库，从连接的那个网址 fetch 默认分支到一个私有的引用（不碰 origin：凭据只给连接的这个仓库），
+	// fetch 失败就是失败；没连的，有远端就 fetch origin、取 origin/HEAD，没有就取当前签出的分支。
+	startRef := "if g remote | grep -q .; then g fetch --quiet origin || true; fi\n" +
+		"ref=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)\n" +
+		"[ -n \"$ref\" ] || ref=$(g symbolic-ref --quiet --short HEAD 2>/dev/null || true)\n" +
+		"[ -n \"$ref\" ] || ref=HEAD\n"
+	var env map[string]string
+	if len(src) > 0 && src[0].URL != "" {
+		startRef = "g fetch --quiet --no-tags " + shellLiteral(src[0].URL, false) + " " + shellLiteral("+refs/heads/"+src[0].Base+":refs/nano/base", false) + "\n" +
+			"ref=refs/nano/base\n"
+		env = src[0].Env
+	}
 	script := repo.repoEnv() + `set -eu
 repo=` + root + `; wt=` + wt + `; branch=` + branch + `
 cd "$repo"
 mkdir -p "$repo/.nano/worktrees" "$repo/.git/info"
 grep -qx '/.nano/' "$repo/.git/info/exclude" 2>/dev/null || echo '/.nano/' >> "$repo/.git/info/exclude"
-if g remote | grep -q .; then g fetch --quiet origin || true; fi
-ref=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-[ -n "$ref" ] || ref=$(g symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-[ -n "$ref" ] || ref=HEAD
-registered() { g worktree list --porcelain | grep -qxF "worktree $wt"; }
+` + startRef + `registered() { g worktree list --porcelain | grep -qxF "worktree $wt"; }
 if g show-ref --verify --quiet "refs/heads/$branch"; then
   if ! registered; then
     if [ -e "$wt" ]; then echo "NANO_ERR=worktree 目录在但没有登记，不动它" ; exit 0; fi
@@ -146,7 +159,11 @@ for d in "$repo"/.git/worktrees/*/; do
 done
 echo "NANO_BASE=$base"
 `
-	out, err := a.runTicketShell(ctx, t, repo, repo.hostSpec([]string{repo.root}, nil), script, "worktree", ticketGitTimeout)
+	var roExtra []string
+	if len(src) > 0 && strings.HasPrefix(src[0].URL, "/") { // 本地路径的“远端”（只有测试里会这样）要读得到
+		roExtra = []string{src[0].URL}
+	}
+	out, err := a.runTicketShellEnv(ctx, t, repo, repo.hostSpec([]string{repo.root}, roExtra), script, "worktree", ticketGitTimeout, env)
 	if err != nil {
 		return "", "", fmt.Errorf("建 worktree 失败：%w", err)
 	}

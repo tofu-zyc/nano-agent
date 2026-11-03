@@ -205,8 +205,6 @@ func (a *App) trackedPRs(r repos.Repo) []int {
 	return a.repoTrackedPRsLocked(r)
 }
 
-func (a *App) repoTrackedPRsLocked(repos.Repo) []int { return nil }
-
 // ---- webhook ----
 
 // RepoWebhook 收一次 webhook 投递，返回 HTTP 状态码。签名校验、事件类型白名单、先记再回 2xx 都在这里（不在 web 层），

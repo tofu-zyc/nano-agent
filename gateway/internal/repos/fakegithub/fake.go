@@ -31,6 +31,8 @@ type Server struct {
 	*httptest.Server
 	Owner, Name, Token, Bot string
 	DefaultBranch           string
+	// HeadResolver 给新开的 PR 定 head 提交（测试里去读推上来的裸仓库）；空就用一个假值
+	HeadResolver func(branch string) string
 
 	mu        sync.Mutex
 	now       func() time.Time
@@ -170,6 +172,18 @@ func (s *Server) openPull(title, body, head, headSHA string) repos.Pull {
 	}{URL: s.URL}
 	s.issues = append(s.issues, pr)
 	return *p
+}
+
+// PullBody 是 PR 的正文（开 PR 时给的）。
+func (s *Server) PullBody(n int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, i := range s.issues {
+		if i.Number == n {
+			return i.Body
+		}
+	}
+	return ""
 }
 
 // Pull 是现在的 PR。
@@ -352,7 +366,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case path == prefix+"/pulls" && r.Method == "POST":
 		var in struct{ Title, Body, Head, Base string }
 		_ = json.Unmarshal([]byte(body), &in)
-		reply(201, s.openPull(in.Title, in.Body, in.Head, "sha-of-"+in.Head), nil)
+		sha := "sha-of-" + in.Head
+		if s.HeadResolver != nil {
+			sha = s.HeadResolver(in.Head)
+		}
+		reply(201, s.openPull(in.Title, in.Body, in.Head, sha), nil)
 	case strings.HasPrefix(path, prefix+"/pulls/") && strings.HasSuffix(path, "/reviews"):
 		n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, prefix+"/pulls/"), "/reviews"))
 		reply(200, s.reviews[n], nil)

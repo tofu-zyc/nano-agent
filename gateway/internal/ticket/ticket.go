@@ -105,7 +105,9 @@ type Ticket struct {
 	Renewals  int       `json:"renewals,omitempty"`   // 主人（名单里的人）从受阻里续上的次数（最多 MaxRenewals）
 	Renewed   []Renewal `json:"renewed,omitempty"`    // 每次续上：谁、什么时候、续的什么
 	// 5c
-	PR string `json:"pr,omitempty"`
+	PR        string `json:"pr,omitempty"`         // PR 号
+	PRHead    string `json:"pr_head,omitempty"`    // 推到 PR 上的提交：检查结果只认这个提交的
+	CIHandled string `json:"ci_handled,omitempty"` // 已经按 CI 失败返工过的提交（每个提交只算一次）
 
 	Created int64 `json:"created"` // 秒
 	Updated int64 `json:"updated"`

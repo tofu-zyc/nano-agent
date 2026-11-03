@@ -128,7 +128,21 @@ func (a *App) allowedOnRepo(r repos.Repo, actor string) bool {
 // routeRepoEvent 把一件事交给议题会话或者工单。调用方不持有锁。
 func (a *App) routeRepoEvent(r repos.Repo, ev repos.Event) error {
 	switch ev.Kind {
-	case repos.KindIssue, repos.KindComment:
+	case repos.KindPR:
+		return a.onPRState(r, ev)
+	case repos.KindCheck:
+		return a.onCheck(r, ev)
+	case repos.KindReview, repos.KindRComment:
+		return a.onReview(r, ev)
+	case repos.KindComment:
+		a.mu.Lock()
+		_, isTicketPR := a.ticketByPR(r, ev.Number)
+		a.mu.Unlock()
+		if isTicketPR { // 工单的 PR 上的评论：当审阅意见
+			return a.onReview(r, ev)
+		}
+		return a.routeIssueMessage(r, ev)
+	case repos.KindIssue:
 		return a.routeIssueMessage(r, ev)
 	}
 	return nil

@@ -60,6 +60,7 @@ type shellRun struct {
 	Session  string              // 记在哪个会话名下（租约和事件日志用）
 	By       string              // 谁发起的
 	Priority int
+	Env      map[string]string // 网关发起的执行才能带（5c 的推送、5d 的外部 agent）；Hook 命令不填
 }
 
 // gatewayShell 在 r.Machine 上跑一条命令，返回执行器的输出。没有机器、机器不可用、没拿到租约都返回错误。
@@ -81,11 +82,11 @@ func (a *App) gatewayShell(ctx context.Context, r shellRun) (host.Result, error)
 	a.mu.Unlock()
 	timeout := max(1, int(r.Timeout/time.Second))
 	run := a.leasedExec(ctx, h, native, lease, func() ([]byte, error) {
-		req, _ := json.Marshal(map[string]any{
+		req, _ := json.Marshal(withEnv(map[string]any{
 			"tool": "Shell", "origin": origin, "args": map[string]any{"command": r.Command, "timeout": timeout},
 			"dirs": r.Spec.Dirs, "home": r.Spec.Home, "ro": r.Spec.RO, "rw": r.Spec.RW, "write": true,
 			"sandbox": r.Sandbox, "tmp_key": r.Key, "max_output": 64 << 10, "watch_stdin": true,
-		})
+		}, r.Env))
 		return append(req, '\n'), nil
 	})
 	if run.AcquireErr != nil {
@@ -95,4 +96,12 @@ func (a *App) gatewayShell(ctx context.Context, r shellRun) (host.Result, error)
 		return host.Result{}, run.BuildErr
 	}
 	return run.Result, nil
+}
+
+// withEnv 给请求加顶层 env（空就不加）。
+func withEnv(req map[string]any, env map[string]string) map[string]any {
+	if len(env) > 0 {
+		req["env"] = env
+	}
+	return req
 }

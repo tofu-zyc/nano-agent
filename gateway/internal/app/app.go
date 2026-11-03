@@ -147,12 +147,14 @@ type App struct {
 	repos           *repos.Store
 	ghChan          *channel.GitHub
 	repoRTs         map[string]*repoRT
-	repoAPIBase     string            // GitHub API 地址；空是真的 GitHub，测试里换成假的
-	repoNoLoop      bool              // 测试用：不开轮询循环
-	lastRepoEventID string            // 测试用：最近一次写进事件日志的仓库事件
-	ticketNoStart   bool              // 测试用：建了工单不自动开工
-	ticketBusy      map[string]bool   // 正在由后台步骤处理的工单（开工、验收）：同一张工单同一时刻只一个
-	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
+	lastPushOutcome string                  // 测试用：最近一次推送是 done 还是 skip（远端已经有就不重推）
+	repoPushURL     func(repos.Repo) string // 测试用：推送和 fetch 的网址（默认是连接的那个 https://github.com/...）
+	repoAPIBase     string                  // GitHub API 地址；空是真的 GitHub，测试里换成假的
+	repoNoLoop      bool                    // 测试用：不开轮询循环
+	lastRepoEventID string                  // 测试用：最近一次写进事件日志的仓库事件
+	ticketNoStart   bool                    // 测试用：建了工单不自动开工
+	ticketBusy      map[string]bool         // 正在由后台步骤处理的工单（开工、验收）：同一张工单同一时刻只一个
+	stageBad        map[string]string       // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
 	runWaitSerial   uint64
