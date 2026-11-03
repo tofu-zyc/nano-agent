@@ -113,10 +113,10 @@ def check_pending(page, url):
         ok("全部承诺按阶段分组：" + "、".join(phases))
     else:
         fail("全部承诺的分组不对：" + str(phases))
-    # 工单：出现在全部承诺的“等待”里，种类叫“工单”；主人在网页上叫停，要写理由，叫停后进“stopped”
-    tk = page.locator("[data-testid=pending-all] section[data-phase=waiting] .lrow", has_text="工单「界面检查·工单」")
+    # 工单：出现在全部承诺的“暂停”里（种子工单是 paused，免得重启后自己开工），种类叫“工单”；主人在网页上叫停，要写理由，叫停后进“stopped”
+    tk = page.locator("[data-testid=pending-all] section[data-phase=paused] .lrow", has_text="工单「界面检查·工单」")
     if tk.count() == 1:
-        ok("工单出现在全部承诺的等待里")
+        ok("工单出现在全部承诺的暂停里（种子工单是暂停的，不让它自己开工）")
     else:
         fail("全部承诺里没有工单：" + page.locator("[data-testid=pending-all]").inner_text()[:300])
     tk.locator("[data-testid=ticket-cancel]").click()
@@ -284,7 +284,7 @@ def seed_pending(tmp):
     # 一张工单（Ticket 工具只有模型能调，这里网关停着时直接写记录）
     now_s = int(time.time())
     tk = {"type": "ticket", "ticket": {"id": "tk-1", "agent": "default", "title": "界面检查·工单", "goal": "检查叫停", "check": "make test", "budget": 1000,
-          "status": "open", "created": now_s, "updated": now_s,
+          "status": "paused", "created": now_s, "updated": now_s,
           "auth": {"by": "telegram:1", "scene": "main", "workspace": "ws1", "mode": "ask", "tools": [], "at": now_s,
                    "source": {"channel": "telegram", "chat": "-100", "msg_id": "m1", "text": "@bot 修一下"}}}}
     traw = json.dumps(tk, ensure_ascii=False, separators=(",", ":")).encode()
