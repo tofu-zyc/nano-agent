@@ -72,7 +72,7 @@
 - 阶段由一个纯函数从记录推出，表格从上往下第一行命中，每一行都有测试。
 - 没有证据或放弃理由，承诺不能结束。
 
-现状：**部分**。Agenda 已有完成条件、检查点和工具回执验收；Hook 和 Job 登记时固定来源、创建者、权限上限和工作目录；分支有宿主生成的最近进展。缺共用契约、阶段函数、结构化汇报，以及"等我处理"的汇总视图。
+现状：**部分**。约定、意图、回访、定时任务、Hook、分支共用契约和阶段函数（`internal/commit`），有 Report 汇报和"等我处理"（第 4 步）。缺工单（第 5 步）和角色的秘密目标。
 
 ### 3.5 规则（Policy）
 
@@ -99,7 +99,7 @@
 **执行器（Executor）**：推进承诺的一方。
 
 - 现有实现：内核的一轮 run、后台 Job、本机/SSH/其他节点的代执行、MCP。现状：**已有**。
-- 外部 agent（Claude Code、Codex 等）也是一种实现：作为 Job 在工作目录里运行，结果由 nano-agent 自己验收（跑测试、看改动），不采信它们的自述。现状：**未做**。
+- 外部 agent（Claude Code、Codex 等）也是一种实现：作为 Job 在工作目录里运行，结果由 nano-agent 自己验收（跑测试、看改动），不采信它们的自述。现状：**未做**，见 16.4。
 
 **出口（Outbox）**：发往渠道和场景的消息。
 
@@ -207,8 +207,8 @@
 | 1 事实层（已完成） | 可靠出站（作为从 App 拆出的投递服务）；健康状态（每个部件认领一个条目，只由它写）；模型面快照测试 | 全部 | R1、R12、R3 的投递部分 |
 | 2 场景（已完成） | 内部群升级为场景：角色提示词、可见性、发言规则、时钟、预算池、结束条件、场内工具；外部群可绑定场景规则，群聊规则以场景为准（agent 上的群聊设置作为没单独设置时的默认值）；主动插话的 `observe` 档。分 2a、2b、2c 三段，见第 13 节 | 全部 | R6 |
 | 3 剧场（已完成） | 导演台（插入事件、暂停、禁言、分出平行世界、倒带）；统一时间线；导出时间轴字幕；可重放记录。分 3a、3b、3c 三段，见第 14 节 | 剧场 | — |
-| 4 承诺 | 共用契约和阶段函数；Report 工具；"等我处理"汇总；分支新增 attention 投递档（只发就绪、问题和受阻，现有 silent 不变）。分 4a、4b、4c 三段，见第 15 节 | 陪伴、团队 | R2、R7 |
-| 5 团队 | 仓库与团队群来源；准入表与授权记录；工单；外部 agent 执行器；工作目录内的 git worktree 隔离；说话纪律 | 团队 | — |
+| 4 承诺（已完成） | 共用契约和阶段函数；Report 工具；"等我处理"汇总；分支新增 attention 投递档（只发就绪、问题和受阻，现有 silent 不变）。分 4a、4b、4c 三段，见第 15 节 | 陪伴、团队 | R2、R7 |
+| 5 团队 | 团队群和 GitHub 来源；准入名单与授权记录；工单；每个工单一个 git worktree；外部 agent（登记成命令）；说话纪律。分 5a、5b、5c、5d 四段，见第 16 节 | 团队 | — |
 
 按表中顺序推进，先做剧场、后做团队（2026-10-31 确定）。剧场没有外部副作用，能用模型替身做端到端验收，直接检验"场景"这个核心抽象，又能最早产出内容；团队要动真实仓库和真实的人，需要实机联调，等承诺层稳定后再做。剧场完成时检查场景的实现里没有为内部群写特殊分支，避免抽象被剧场带偏。
 
@@ -249,7 +249,7 @@
 
 1. 分支是否新增 attention 投递档：已定，加（见第 15 节）。
 2. 工单从 Agenda 扩展，还是作为承诺的新种类单独建对象：已定，单独建对象，第 5 步做（见第 15 节）。
-3. 外部 agent 执行器如何开启，在沙箱中怎样联网、凭据放在哪里；先做小规模试验再定（第 5 步前定）。
+3. 外部 agent 执行器如何开启，在沙箱中怎样联网、凭据放在哪里：已定，不做原生适配，登记成外部命令，按工作目录显式开启，只让它自己看到登录目录（见 16.4）。沙箱本来就允许联网。
 
 ## 12 第 1 步：事实层
 
@@ -647,6 +647,8 @@ type ModelRec struct {
 
 ## 15 第 4 步：承诺
 
+已完成（2026-11-03，最后一个提交 `04369d9`），已实现的行为见 [运行时](RUNTIME.md#承诺阶段和-report)。下面保留各段的设计，供第 5 步引用。
+
 目标：约定、回访、定时任务、Hook、分支这几种承诺共用一份工作契约和一套阶段推导；主人在一个地方看到"等我处理"的事；干活的会话用 Report 汇报，原对话里只出现确认、要人回答的问题和结果。各种承诺仍是各自的对象，保留自己的到期、补跑、取消和验收规则（见 3.4）。分三段做，每段单独验收；后一段等前一段审过再开始：
 
 | 段 | 内容 |
@@ -988,6 +990,324 @@ type CommitRec struct {
   - silent、report 分支的行为和现在一样。
 - 网页检查脚本覆盖：标记的数字、打开面板、回答、知道了、"全部承诺"的分组。`/pending`、`/answer`、`/seen` 有端到端测试。
 - 第 4 步收尾：按第 7 节检查，承诺的实现没有在消息入口和 run 的启动路径里加分支；"每个进行中的承诺恰好处在一个阶段"和"没有证据或理由不能结束"两条不变量有测试。
+
+## 16 第 5 步：团队
+
+目标：agent 进入团队群和 GitHub 仓库；名单里的人点名后，agent 建一个工单。工单在自己的 git worktree 里由一个分支完成，需要时由分支调用外部 agent 命令。宿主跑验收命令，通过后推分支、开 PR，结果回到原来的对话。原对话里只出现一次确认、要人回答的问题和最终结果（第 4 节）。
+
+分四段做，每段单独验收；后一段等前一段审过再开始：
+
+| 段 | 内容 |
+| --- | --- |
+| 5a | 团队场景和工单：场景规则里的团队设置（准入名单、仓库工作目录、验收命令）；工单对象和记录；Ticket 工具；授权记录；工单接进承诺列表和等我处理；工单的消息只回原对话。还不动代码 |
+| 5b | 工作区、执行和验收：每个工单一个 git worktree；干活的分支；宿主跑验收命令、宿主提交；返工有上限；先交付到本地分支 |
+| 5c | GitHub：仓库连接（token，轮询或 webhook，按仓库选）；GitHub 渠道（议题和 PR 是对话）；推分支、开 PR；跟踪 PR 和 CI。网关发起的执行可以带环境变量 |
+| 5d | 外部 agent：登记成命令，按工作目录显式开启，只有它自己看得到登录目录 |
+
+默认不改变现有行为：没设团队规则的群、没连接仓库时，一切照旧。Ticket 工具只出现在设了团队规则的会话里，其他会话的快照不变。
+
+消息入口和 run 的启动路径不加分支：
+
+- GitHub 是一个渠道；
+- PR 和 CI 的状态是事件来源；
+- 工单是承诺的一种，共用第 15 节的契约和阶段函数。
+
+开始前单独提一个只做 gofmt 的提交。hooks_test.go、interject_journal_test.go、life_policy_test.go、proto/proto.go、session/store.go 在 main 上就没格式化。之后每段都检查 `gofmt -l` 为空。
+
+### 16.1 5a：团队场景和工单
+
+**团队规则**：场景规则加一项 `Team`，用于外部群和 5c 的 GitHub 议题。
+
+```go
+type Team struct {
+	Roster    []string `json:"roster"`           // 准入名单：能派活的人（渠道身份，如 feishu:ou_x、tg:123、gh:alice）；管理员总算在内
+	Workspace string   `json:"workspace"`        // 仓库所在的工作目录 ID（data/workspaces.json）
+	Check     string   `json:"check,omitempty"`  // 验收命令，在工单的 worktree 里跑，如 make test；空表示只看有没有改动
+	Budget    int      `json:"budget,omitempty"` // 每个工单最多多少 token，默认 2000000
+}
+// scene.Rules 加 Team *Team `json:"team,omitempty"`
+```
+
+- 设了团队规则的群：
+  - 发言规则固定为点名（`mention`），主动插话固定为 `observe`。
+  - 网页上外部群的场景设置里编辑这几项。
+- 准入：
+  - 名单里的人点名 agent，agent 才能建工单。
+  - 不在名单里的人点名，agent 可以回话，但 Ticket create 拒绝，说要名单里的人来派。
+  - 谁派的看这一轮的触发消息（`run.from` 和消息 ID），不采信模型填的。
+  - 不做 dsh-superagent 的授权重校验、后续消息归属和交还（第 8 节）。
+
+**工单**：承诺的新种类 `ticket`，代码在 `internal/ticket`。
+
+```go
+type Ticket struct {
+	ID    string `json:"id"` // tk-<序号>
+	Agent string `json:"agent"`
+	Title string `json:"title"`
+	Goal  string `json:"goal"` // 要做成什么，模型写，最多 2000 字
+	Auth  Auth   `json:"auth"` // 授权记录，建的时候定下，之后不变
+	Check  string `json:"check"`  // 验收命令，建的时候从团队规则取
+	Budget int    `json:"budget"`
+	Status string `json:"status"` // open | working | checking | ready | done | dropped | failed | stopped | paused
+	Reason string `json:"reason,omitempty"`
+	// 5b
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`    // git 分支 nano/tk-<序号>
+	Base     string `json:"base,omitempty"`      // 从哪个提交开始
+	RunSID   string `json:"run_sid,omitempty"`   // 干活的分支会话
+	Commit   string `json:"commit,omitempty"`    // 验收通过后宿主做的提交
+	CheckLog string `json:"check_log,omitempty"` // 最近一次验收：退出码和最后 40 行
+	Rework   int    `json:"rework,omitempty"`
+	// 5c
+	PR string `json:"pr,omitempty"`
+	Created, Updated int64
+}
+
+type Auth struct {
+	By        string   `json:"by"`        // 谁派的（名单里的身份）
+	Scene     string   `json:"scene"`     // 在哪个场景（团队群或议题的会话）
+	Source    Source   `json:"source"`    // 原消息：渠道、对话、消息 ID、开头 200 字
+	Workspace string   `json:"workspace"` // 能动到哪里
+	Mode      string   `json:"mode"`      // 权限模式，不超过工作目录和 agent 的上限
+	Tools     []string `json:"tools"`     // 场景工具表和 agent 上限的交集
+	At        int64    `json:"at"`
+}
+```
+
+- 存储：`data/runtime/tickets.jsonl`，用 `internal/journal`，单条 16KB，整份 16MB。
+  - 每次改动写一条完整的工单，重放时每个 ID 留最后一条。
+  - 超过 8MB 时整份重写，结束超过 30 天的丢掉。
+  - 先记再说：写不进去就返回错误，健康条目 `tickets` 变 degraded。
+- 编号 `tk-<序号>`，序号取记录里的最大值加一。
+
+**Ticket 工具**：只给设了团队规则的会话（团队群、16.3 的议题会话）。
+
+```json
+{"action": "create | list | show | note | accept | cancel",
+ "title": "…", "goal": "…", "id": "tk-…", "text": "…"}
+```
+
+- `create`：建工单，状态 open。
+  - 同一条原消息只建一个：按 `Auth.Source` 去重，重试返回同一个工单。
+  - 派活的人不在名单里、场景没设团队规则、仓库工作目录不在线：拒绝。
+  - 返回里写清：在回复里确认一次；过程不用说，结果和问题会自动发回这里。
+- `note`：名单里的人后来补充的话，转进工单。工单在跑时排到分支的下一个安全边界，和回答一样。
+- `accept`：名单里的人收下一个就绪的工单（5b 交付到本地分支时用；连了 GitHub 的仓库以 PR 合并为准，没有这一项）。
+- `cancel`：名单里的人或管理员叫停，要写理由，结束为 stopped。
+- `list`、`show`：只读。
+
+**说话纪律**：
+
+- 原对话里只出现三样：
+  - 建工单那一轮 agent 自己的确认；
+  - 要人回答的问题；
+  - 最终结果。
+- 问题和结果由宿主发，作为原消息的回复（`deliver` 带 `replyTo`）。外部渠道走可靠出站。
+- 和 attention 一样先在承诺记录里写 `notify` 再入队；同样去重，每个工单每小时最多 3 条。
+- 工单的进展、工具输出、分支里的回复都不发到群里。
+
+**契约和事实**（`ticketCommit`，接进 `commitItems`）：
+
+- 契约：
+  - 目标：`Goal`。
+  - 授权：`Auth`。
+  - 完成标准：验收命令通过、开了 PR。5c 之前是验收通过、提交在本地分支。
+  - 汇报去处：原消息。
+  - 停止条件：预算，返工最多 2 次。
+- 事实：
+
+| 事实 | 工单 |
+| --- | --- |
+| Ended | done：PR 合并了（证据是合并提交），5c 之前是有人 `accept`（证据是提交和验收结果）；dropped：not_needed 汇报（理由）；failed：主人在受阻时放弃（理由）；stopped：叫停（理由）、PR 被关掉没合并 |
+| Paused | paused |
+| Running | working、checking |
+| Blocked | 返工用完验收还没过；预算用完；推送或开 PR 失败；汇报 |
+| Ready | PR 开着等人合并（Mark `pr:<号>`）；5c 之前是验收通过、已提交（Mark `c:<提交>`）；汇报 |
+| Due | — |
+| Wait | open：等开工（5a 里一直是这个） |
+
+- 在工单的分支里调用 Report，汇报的是这个工单，不是分支。
+- 回答问题：送进工单的分支，和分支一样排到下一个安全边界。5a 里还没有分支，拒绝回答。
+- 网页：工单出现在等我处理和全部承诺里，种类叫"工单"；"打开"打开工单的分支（5a 是来源会话）。主人能在网页上叫停。
+
+**验收**：
+
+- 名单里的人点名后建出工单，授权记录对；不在名单里的人建不了；同一条消息重试只有一个工单。
+- 工单进承诺列表，open 是等待；叫停后是 stopped 并有理由；重启后工单还在。
+- 群里只有 agent 自己的一次确认，工单不往群里发别的。
+- 没设团队规则的群和私聊：快照不变，没有 Ticket 工具。设了团队规则的群新增一份金样。
+
+### 16.2 5b：工作区、执行和验收
+
+**网关发起的执行**：建 worktree、跑验收命令、提交、推送都由宿主做，不经过模型。沿用 Hook 命令处理器的执行方式（`hook_command.go`）：明确的读写范围，结果进事件日志。
+
+**worktree**：每个工单一个，开工时建。
+
+- 位置：`<仓库>/.nano/worktrees/tk-<序号>`，并把 `/.nano/` 写进 `<仓库>/.git/info/exclude`（不提交），主仓库的 `git status` 看不到它。
+- 建法：`git -C <仓库> worktree add -b nano/tk-<序号> <位置> <起点>`。
+  - 起点是默认分支当前的提交；有远端时先 `fetch`。
+  - 起点记进 `Base`。
+- 登记成一个派生工作目录（`Workspace.Ticket` 是工单 ID）：
+  - 网页上挂在仓库工作目录下；
+  - 不能选给别的会话；
+  - 权限模式不超过仓库工作目录的。
+- 工单结束后删掉 worktree 和这条登记。git 分支留到交付完。
+
+**干活的分支**：从派活的那个会话分出来，带着到派活那条消息为止的上下文。
+
+- 工作目录是工单的 worktree，权限模式是 `Auth.Mode`，工具是 `Auth.Tools`。
+- 沙箱：
+  - 可写：worktree，和它自己的 git 目录 `<仓库>/.git/worktrees/tk-<序号>`；
+  - 只读：`<仓库>/.git` 的其余部分。
+  - 所以分支里能改文件、`git status`、`git diff`；`git add`、提交、改 ref、改仓库的 hooks 都做不到。提交由宿主做。
+- 投递：和 silent 一样安静。
+  - Report ready 触发验收（下面）。
+  - blocked、failed 按说话纪律发回原消息。
+  - 都不发到父会话。
+- 第一条消息是开工说明：目标、验收命令，以及"不要提交或推送；改完用 Report ready，附上你跑过的测试"。
+
+**验收**：分支 Report ready 后，宿主在 worktree 里跑验收命令 `Check`，超时 30 分钟。
+
+- 通过（退出码 0，并且有改动）：
+  - 宿主 `git add -A` 并提交：作者用 agent 的名字，提交说明是标题加工单号。
+  - 记 `Commit` 和 `CheckLog`，状态 ready。
+- 没改动，或退出码不是 0：
+  - `Rework` 加一，把验收输出的最后 40 行作为一条消息放进分支的下一个安全边界，接着跑。
+  - `Rework` 到 2 还没过：状态 blocked，问派活的人："验收没过……继续改、放弃，还是先收下？"
+- 验收结果是证据，不采信分支的自述（第 2 条原则）。
+
+**预算**：工单分支用掉的 token 超过 `Budget` 时，停下这一轮，状态 blocked，理由是预算用完了。回答"继续"再给一份。
+
+**交付（5c 之前）**：本地分支 `nano/tk-<序号>`。
+
+- 结果发回原消息："改好了：<改动摘要>。验收 <命令> 通过，提交 <短号> 在本地分支 nano/tk-<序号>。"
+- 名单里的人 `accept` 后，工单 done，删掉 worktree。
+
+**验收**：用临时目录里的真 git 仓库和模型替身。
+
+- 建 worktree；分支只能写 worktree，提交不了。
+- 主仓库的工作区、分支和 hooks 不被改动。
+- 验收命令过与不过；返工两次后受阻；预算用完受阻。
+- 结束后 worktree 清理掉。
+- 重启后：
+  - 在跑的工单接着跑，或明确受阻；
+  - 不重复建 worktree，不重复提交。
+
+### 16.3 5c：GitHub
+
+**仓库连接**：`data/repos.json`，在网页上仓库工作目录的设置里填。
+
+```go
+type Repo struct {
+	ID        string     `json:"id"`
+	Workspace string     `json:"workspace"`          // 本地克隆所在的工作目录
+	Owner     string     `json:"owner"`
+	Name      string     `json:"name"`
+	Base      string     `json:"base"`               // 默认分支
+	Token     string     `json:"token"`              // 加密存（internal/secret）
+	Bot       string     `json:"bot"`                // token 对应的 GitHub 账号
+	Intake    string     `json:"intake"`             // poll（默认）| webhook
+	Interval  int        `json:"interval,omitempty"` // 轮询间隔秒，默认 120，最少 60
+	Secret    string     `json:"secret,omitempty"`   // webhook 的签名密钥，加密存
+	Team      scene.Team `json:"team"`               // 议题对话的团队规则（名单用 gh:<账号>）
+}
+```
+
+- token：
+  - 用细粒度 token：内容、PR、议题读写，检查只读。
+  - 只在网关里用：不进模型、不进工具参数、不进命令行参数。
+- 要用一个单独的 GitHub 账号。用主人自己的账号时，主人自己的评论会被当成 agent 发的而忽略。网页上写明这一点。
+
+**事件怎么进来**：两种都做，每个仓库选一种。
+
+- 轮询：
+  - 每 `Interval` 秒，用 `since` 和 ETag 取新议题、新评论，以及工单相关 PR 的状态和检查结果。
+  - 游标存在仓库连接的状态文件里。
+- webhook：`POST /api/repos/{id}/webhook`。
+  - 不要登录，但必须校验 `X-Hub-Signature-256`。
+  - 正文最多 1MB。
+  - 只认 issues、issue_comment、pull_request、pull_request_review、pull_request_review_comment、check_suite。
+  - 先记，再回 2xx。
+  - 网关要能从公网访问，这由主人自己配。网页上显示要填的地址和密钥。
+- 两种方式都按 GitHub 的事件或投递 ID 去重，同一件事只受理一次。PR 和检查的状态进事件日志（`repo.*`），由工单读取。
+
+**GitHub 渠道**（`internal/channel/github.go`）：议题和 PR 是对话，正文和评论是消息。
+
+- 对话 ID 是 `owner/name#号`；发消息就是发评论，`replyTo` 忽略；照常走可靠出站。
+- 点名：正文里有 `@<Bot>`。
+  - 名单里的人点名才算；
+  - 其余的只记进事件日志，不进会话。
+  - 不在名单里的人写的议题正文和评论，不交给模型。
+- 议题会话的场景规则用仓库连接上的 `Team`。
+- Ticket 工具在这里同样可用：工单的原消息是这个议题，问题和结果都回到议题里。
+
+**网关发起的执行可以带环境变量**：
+
+- 内核的执行请求加一个 `env`，只有网关发起的执行能带，模型的工具调用不能。
+- 推送时凭据走 `GIT_CONFIG_COUNT`、`GIT_CONFIG_KEY_0`、`GIT_CONFIG_VALUE_0`，传一个 `http.extraheader`，不写文件、不进参数。
+
+**交付**：验收通过、宿主提交之后：
+
+- 推送：网关发起的执行 `git push origin nano/tk-<序号>`。
+- 开 PR：网关调 API。
+  - 标题是工单标题；正文写目标、谁派的、原消息链接、验收命令和结果。
+  - 记 `PR`，状态 ready（Mark `pr:<号>`）。
+  - 结果发回原消息：PR 链接和一句摘要。
+- 之后：
+  - PR 合并了：done，证据是合并提交，不再发消息；删掉 worktree 和本地分支。
+  - PR 被关掉、没合并：stopped，理由是 PR 被关了。
+  - PR 上的 CI 失败：算一次返工，上限同 5b。
+  - 名单里的人在 PR 上提的审阅意见：作为 `note` 送进分支，不算返工次数。
+- 推送或开 PR 失败：blocked，带上错误。重试前先查远端分支和 PR 在不在，不重放已经成功的那一步。
+
+**验收**：用本地的假 GitHub（httptest）。
+
+- 轮询和 webhook 各自收到议题、评论、PR 和检查事件，重复的只受理一次。
+- 签名不对的 webhook 被拒。
+- 名单外的人点名不进会话。
+- 推送的命令行参数里没有 token。
+- PR 合并、关闭、CI 失败各自推出对的阶段。
+- 实机联调由主人在一个测试仓库上做。
+
+### 16.4 5d：外部 agent
+
+Claude Code、Codex 都是命令行程序，不做原生适配，登记成命令就能用。
+
+现在还用不了，差在登录凭据。沙箱本来就允许联网，但执行器把 HOME 换成了沙箱的目录，可读写的也只有工作目录。所以它们找不到也写不了自己的登录目录（`~/.claude`、`~/.codex`）。
+
+```go
+type ExternalAgent struct {
+	Name string            `json:"name"`          // claude、codex
+	Argv []string          `json:"argv"`          // 命令模板，{prompt} 换成这次的要求
+	Dirs []string          `json:"dirs"`          // 它自己的配置和登录目录，可读写
+	Env  map[string]string `json:"env,omitempty"` // 比如 CLAUDE_CONFIG_DIR、CODEX_HOME
+}
+```
+
+例如：`{"name": "claude", "argv": ["claude", "-p", "{prompt}"], "dirs": ["~/.claude"], "env": {"CLAUDE_CONFIG_DIR": "~/.claude"}}`。
+
+- 登记和开启：
+  - 主人在网页上登记，存在 `data/external-agents.json`。
+  - 在工作目录上显式开启哪些能用（`Workspace.External []string`），默认都不开。
+  - 工单的 worktree 继承仓库工作目录的开关。
+- 工具：新工具 `External`，参数 `name` 和 `prompt`。只出现在开启了外部 agent 的工作目录的会话里。
+  - 网关按模板拼出参数，不经 shell。
+  - `Dirs` 只加进这一个进程的可读写范围，`Env` 只加进它的环境。
+  - 作为后台 Job 在 worktree 里跑，用 Job 工具看输出。
+  - 同一会话里的普通 Shell 调用看不到这些目录。
+- 这是对沙箱的放宽：开启后，这个外部 agent 能读写自己的登录凭据，也能联网。
+  - 网页上开启时写明这一点。
+  - 只在名单里的人派的工单里有意义。议题正文是不可信的输入。
+- 它改完之后仍然走 5b 的验收，不采信它的输出。
+
+**验收**：
+
+- 用一个替身脚本当外部 agent：
+  - 只在开启了的工作目录里能跑；
+  - 它能读写登记的目录，同一会话里的普通 Shell 读不到；
+  - `{prompt}` 不经 shell 解释；
+  - 改完照常验收。
+- 实机：主人在一台机器上开启 claude 或 codex，派一个小工单跑通一次。
 
 ## 参考
 
