@@ -305,6 +305,8 @@ func TestPendingAnswerWhileTheRunIsStillGoing(t *testing.T) {
 	if !strings.Contains(got, "/answer "+p.Number+" ") {
 		t.Fatalf("通知里的编号要能用：%q / %s", got, p.Number)
 	}
+	e.say("/pending")
+	e.ch.wait(t, "进行中") // 还在跑的事不写成受阻
 	e.say("/answer " + p.Number + " 第一个")
 	e.ch.wait(t, "已经把回答交给")
 	e.a.mu.Lock()

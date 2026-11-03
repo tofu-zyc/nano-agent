@@ -134,10 +134,10 @@ type App struct {
 	hEvents         *health.Handle
 	hAutonomy       *health.Handle
 	hSchedule       *health.Handle
-	hStage          *health.Handle // 场景记录：有一场写不进去就是 degraded
-	hCommit         *health.Handle // 承诺记录：写不进去就是 degraded
-	commits         *commit.Store  // 承诺记录（Report、知道了、回答）
-	schedPrior map[string]uint64 // 定时任务这一轮开始时承诺记录的最大序号：成功后更早的汇报算处理过
+	hStage          *health.Handle    // 场景记录：有一场写不进去就是 degraded
+	hCommit         *health.Handle    // 承诺记录：写不进去就是 degraded
+	commits         *commit.Store     // 承诺记录（Report、知道了、回答）
+	schedPrior      map[string]uint64 // 定时任务这一轮开始时承诺记录的最大序号：成功后更早的汇报算处理过
 	commitsErr      error
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence

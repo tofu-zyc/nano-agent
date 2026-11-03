@@ -252,10 +252,15 @@ func commitKindLabel(k string) string {
 }
 
 func pendingPhaseLabel(p string) string {
-	if p == commit.Ready {
+	switch p {
+	case commit.Ready:
 		return "就绪"
+	case commit.Running:
+		return "进行中"
+	case commit.Blocked:
+		return "受阻"
 	}
-	return "受阻"
+	return p
 }
 
 // pendingByNumber 按编号找；编号重复（两件事恰好同一个 Mark）就让主人去网页上处理。

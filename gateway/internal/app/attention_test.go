@@ -52,11 +52,17 @@ func TestAttentionOnlyOwnerCanSetIt(t *testing.T) {
 	if d != session.BranchDeliveryAttention || !silent {
 		t.Fatalf("主人要求的 attention：%q 安静=%v", d, silent)
 	}
-	// 自主活动分出的（life、Hook、整理记忆）设不成
-	for _, by := range []string{"@default/life", "hook:r1", "@default/dream"} {
+	// 自主活动分出的（life、Hook、整理记忆）设不成。发起人是 life:<id>、dream:<id>（不是会话 ID）；
+	// agent 开了 life 时 isAdmin("life:<id>") 为真，这时只有 !autonomousForker 在挡。
+	store, _ := withAgents(t, e)
+	makeLife(t, e, store, nil)
+	for _, by := range []string{"life:default", "dream:default"} {
 		br, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "自动", RequestID: "att-auto-" + by, By: by, Delivery: session.BranchDeliveryAttention})
 		if err != nil {
-			continue // 创建本身被拒绝也算设不成
+			if by == "life:default" {
+				t.Fatalf("%s 应该能分出 silent 的分支：%v", by, err)
+			}
+			continue // 整理记忆连来源会话都读不到，根本分不出来
 		}
 		e.a.mu.Lock()
 		d := e.a.branchDelivery(br.BranchSID)
@@ -239,12 +245,14 @@ func TestSessionForkCommandAttention(t *testing.T) {
 	e.say("/session fork --attention 查竞品")
 	e.ch.wait(t, "会通知这个聊天")
 	var got *session.BranchMeta
+	e.a.mu.Lock() // 分支的快照在后台 goroutine 里发布，读的时候要拿锁
 	for _, m := range e.a.store.Branches() {
 		if m.Title == "查竞品" {
 			m := m
 			got = &m
 		}
 	}
+	e.a.mu.Unlock()
 	if got == nil || got.Delivery != session.BranchDeliveryAttention {
 		t.Fatalf("/session fork --attention：%+v", got)
 	}
