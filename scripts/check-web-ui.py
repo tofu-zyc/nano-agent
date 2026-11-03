@@ -50,7 +50,7 @@ def free_port():
 def start_gateway(tmp):
     port = free_port()
     home, nano = os.path.join(tmp, "home"), os.path.join(tmp, "nano")
-    os.makedirs(home)
+    os.makedirs(home, exist_ok=True)
     os.makedirs(nano, exist_ok=True)
     sock = tempfile.mkdtemp(prefix="nui.", dir="/tmp")
     with open(os.path.join(nano, "gateway.toml"), "w") as f:
@@ -93,7 +93,7 @@ def check_pending(page, url):
         ok("面板里一件事一行")
     else:
         fail("面板应该有 2 行：" + str(rows.count()))
-    asked = page.locator("[data-testid=pending-row][data-id=ui-asked]")
+    asked = page.locator("[data-testid=pending-row][data-kind=branch]")
     failed = page.locator("[data-testid=pending-row][data-id=ui-failed]")
     if asked.locator("[data-testid=pending-input]").count() == 1 and failed.locator("[data-testid=pending-input]").count() == 0:
         ok("只有带问题的才有“回答”")
@@ -119,14 +119,28 @@ def check_pending(page, url):
         ok("点“知道了”之后这件事不再列")
     except Exception:
         fail("点“知道了”之后还在列")
-    # 回答：先记，再生效；之后这一行也消失，徽标不再显示（0 不显示）
+    # 回答：先记，再生效；分支接着跑，跑完是它自己的就绪，再点一次“知道了”（那是另一件事）
+    if "问：" in asked.inner_text() and "等你回答" not in asked.locator(".why").all_inner_texts().__str__():
+        ok("有问题时不重复显示“等你回答”")
+    else:
+        fail("有问题时 why 和问题显示了两遍")
     asked.locator("[data-testid=pending-input]").fill("加上")
     asked.locator("[data-testid=pending-answer]").click()
     try:
-        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row]').length === 0", timeout=5000)
-        ok("回答之后这件事不再列")
+        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row] .q').length === 0", timeout=5000)
+        ok("回答之后问题不再列")
     except Exception:
-        fail("回答之后还在列")
+        fail("回答之后问题还在：" + page.locator("[data-testid=pending-panel]").inner_text()[:400])
+    end = time.time() + 15
+    while time.time() < end and page.locator("[data-testid=pending-row]").count():
+        btn = page.locator("[data-testid=pending-seen]")
+        if btn.count():
+            btn.first.click()
+        time.sleep(0.5)
+    if page.locator("[data-testid=pending-row]").count() == 0:
+        ok("分支带着回答跑完、点过知道了之后没有等我处理的事")
+    else:
+        fail("还有没处理的：" + page.locator("[data-testid=pending-panel]").inner_text()[:200])
     page.click("[data-testid=pending-badge]")
     page.reload()
     page.wait_for_selector(".legend")
@@ -138,28 +152,57 @@ def check_pending(page, url):
 
 
 def seed_pending(tmp):
-    """起网关之前放两个定时任务，让“等我处理”里有东西：一个上次失败（宿主自己记下的受阻），
-    一个带着问题的汇报（承诺记录里直接写，定时任务的 Report 工具本身不让带问题）。"""
+    """起网关之前放一个上次失败的定时任务（宿主自己记下的受阻，没有汇报）；再起一次网关，用 /session fork 分出一个分支，
+    停掉，往承诺记录里写一条分支上带问题的汇报（Report 工具只有模型能调）。之后正式的那一次网关启动时，
+    “等我处理”里就有这两件事。"""
     import hashlib
+    import http.cookiejar
     nano = os.path.join(tmp, "nano")
     data = os.path.join(nano, "data")
-    os.makedirs(os.path.join(data, "runtime"), exist_ok=True)
-    far = "2099-01-01T00:00:00Z"
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    base = {"when": "0 8 * * *", "agent": "default", "prompt": "x", "deliver": [], "workspaces": [], "mode": "readonly",
-            "enabled": True, "created_by": "web:admin", "creator_mode": "readonly", "catch_up": False, "next": far, "results": [], "running": False}
-    tasks = [
-        dict(base, id="ui-failed", name="界面检查·上次失败", last={"at": now, "ok": False, "summary": "接口超时"}),
-        dict(base, id="ui-asked", name="界面检查·有问题", last={"at": now, "ok": True, "summary": "好了"}),
-    ]
+    os.makedirs(data, exist_ok=True)
+    task = {"id": "ui-failed", "name": "界面检查·上次失败", "when": "0 8 * * *", "agent": "default", "prompt": "x", "deliver": [],
+            "workspaces": [], "mode": "readonly", "enabled": True, "created_by": "web:admin", "creator_mode": "readonly",
+            "catch_up": False, "next": "2099-01-01T00:00:00Z", "results": [], "running": False,
+            "last": {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ok": False, "summary": "接口超时"}}
     with open(os.path.join(data, "schedules.json"), "w") as f:
-        json.dump(tasks, f)
-    rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "schedule", "id": "ui-asked", "agent": "default",
+        json.dump([task], f)
+
+    proc, url, _, _ = start_gateway(tmp)
+    try:
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+        def call(method, path, body=None):
+            req = urllib.request.Request(url.rstrip("/") + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"X-Nano": "1", "Content-Type": "application/json"})
+            with op.open(req, timeout=10) as r:
+                return json.loads(r.read().decode() or "{}")
+
+        call("POST", "/api/login", {"password": PASSWORD})
+        call("POST", "/api/chat", {"sid": "main", "text": "你好"})
+        time.sleep(1)
+        call("POST", "/api/chat", {"sid": "main", "text": "/session fork 界面检查·有问题的分支"})
+        branch = ""
+        for _ in range(50):
+            got = call("GET", "/api/sessions/main/branches").get("branches") or []
+            if got and got[0].get("status") == "ready":
+                branch = got[0]["sid"]
+                break
+            time.sleep(0.2)
+        if not branch:
+            raise SystemExit("分支没有做出来")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "branch", "id": branch, "agent": "default",
            "status": "blocked", "text": "不知道要不要带上周末", "question": "要不要加上周末？"}
     raw = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode()
-    line = json.dumps({"version": 1, "seq": 1, "data": json.loads(raw), "sha256": hashlib.sha256(raw).hexdigest()}, ensure_ascii=False, separators=(",", ":"))
+    os.makedirs(os.path.join(data, "runtime"), exist_ok=True)
     with open(os.path.join(data, "runtime", "commitments.jsonl"), "w") as f:
-        f.write(line + "\n")
+        f.write(json.dumps({"version": 1, "seq": 1, "data": json.loads(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                           ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def launch(p):

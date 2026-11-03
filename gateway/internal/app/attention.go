@@ -49,6 +49,9 @@ func (a *App) attentionPush(sid, state, text, question, number string) {
 		a.commitHealth(err)
 		return
 	}
+	if n := a.branchNumber(sid); n != "" { // 通知里的编号要和“等我处理”里的一致
+		number = n
+	}
 	body := attentionBody(m.Title, state, text, question, number)
 	a.publish(events.Event{T: "say", SID: m.ParentSID, Text: body})
 	if ep, ok := a.lastEndpoint(m.ParentSID); ok {

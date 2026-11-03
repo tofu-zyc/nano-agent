@@ -442,7 +442,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if len(task.Deliver) > 0 && !task.Silent {
 		ep = parseEndpoint(task.Deliver[0])
 	}
-	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.takeScheduleAnswer(task.ID) + a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
+	s.queue = []queued{{ep: ep, who: task.CreatedBy, m: channel.Message{Text: a.scheduleNote(task) + task.Prompt, ChatID: ep.chat}}}
 	a.startRun(s)
 	if s.run == nil {
 		if s.scheduled == nil {

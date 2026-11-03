@@ -26,11 +26,25 @@ type PendingView struct {
 	Number string `json:"number"`
 }
 
-func pendingNumber(v CommitView) string {
-	if n, ok := strings.CutPrefix(v.Mark, "r:"); ok {
+func pendingNumber(v CommitView) string { return markNumber(v.Mark) }
+
+func markNumber(mark string) string {
+	if n, ok := strings.CutPrefix(mark, "r:"); ok {
 		return n
 	}
-	return v.Mark
+	return mark
+}
+
+// branchNumber 是这个分支在“等我处理”里的编号：决定阶段的那条事实的 Mark（汇报的 r:<序号>，或宿主自己的）。
+// 不看这一轮是不是还在跑，通知发出时它可能还没结束。没有 Mark 返回空。调用方持有锁。
+func (a *App) branchNumber(sid string) string {
+	m, ok := a.store.Branch(sid)
+	if !ok {
+		return ""
+	}
+	it := branchCommit(m, false, autonomousForker(m.CreatedBy), a.now().Unix())
+	a.overlayReport(&it)
+	return markNumber(it.Facts.Mark)
 }
 
 // Pending 列出等我处理的承诺，最新的在前。
@@ -43,7 +57,10 @@ func (a *App) Pending() []PendingView {
 func (a *App) pendingLocked() []PendingView {
 	out := []PendingView{}
 	for _, v := range a.commitViewsLocked("", "") {
-		if (v.Phase != commit.Blocked && v.Phase != commit.Ready) || v.Mark == "" {
+		// 受阻、就绪的列进来；还没回答的问题不管这件事现在处在哪个阶段（比如这一轮还在跑）也列：
+		// 主人照通知回 /answer，回答会排进下一个安全边界。结束了的不列。
+		listed := v.Phase == commit.Blocked || v.Phase == commit.Ready || (v.Question != "" && !commit.IsEnded(v.Phase))
+		if !listed || v.Mark == "" {
 			continue
 		}
 		out = append(out, PendingView{CommitView: v, Number: pendingNumber(v)})
@@ -144,8 +161,8 @@ func (a *App) checkAnswerTarget(p PendingView) error {
 		if m.SnapshotID == "" || m.Status == session.BranchPreparing || m.Status == session.BranchPendingBoundary {
 			return errors.New("分支还没有就绪")
 		}
-	case commit.KindAgenda, commit.KindIntention, commit.KindSchedule:
-	default:
+	case commit.KindAgenda, commit.KindIntention:
+	default: // 定时任务、Hook 的 Report 不能带问题，没有人接着问
 		return errors.New("这种承诺不接受回答")
 	}
 	return nil
@@ -166,7 +183,6 @@ func (a *App) deliverAnswer(p PendingView, text, by string) {
 	case commit.KindAgenda, commit.KindIntention:
 		a.answerToMind(p, body)
 	}
-	// 定时任务：下一次运行时由 takeScheduleAnswer 带进任务说明
 }
 
 // answerToMind 在 agent 的心智状态里加一个带 ID 和回答的事件；议程项还没开始的，时间改成现在。
@@ -188,27 +204,6 @@ func (a *App) answerToMind(p PendingView, body string) {
 	}
 	a.saveMinds()
 	a.publishAutonomy(p.Agent)
-}
-
-// takeScheduleAnswer 是定时任务下一次运行要带的“上次你问……，主人回答……”：取走就记一笔，只带一次。
-func (a *App) takeScheduleAnswer(taskID string) string {
-	if a.commits == nil {
-		return ""
-	}
-	n, ok := a.commits.Notice(commit.KindSchedule, taskID)
-	if !ok || n.Question == "" {
-		return ""
-	}
-	mark := fmt.Sprintf("r:%d", n.Seq)
-	ans, ok := a.commits.Answer(commit.KindSchedule, taskID, mark)
-	if !ok || a.commits.Seen(commit.KindSchedule, taskID, "ans:"+mark) {
-		return ""
-	}
-	if _, err := a.commits.Append(commit.CommitRec{Type: commit.TypeSeen, Kind: commit.KindSchedule, ID: taskID, Mark: "ans:" + mark, By: "system"}); err != nil {
-		a.commitHealth(err)
-		return ""
-	}
-	return answerText(n.Question, ans.Answer) + "\n\n"
 }
 
 // ---- 聊天命令（只在管理员窗口）----

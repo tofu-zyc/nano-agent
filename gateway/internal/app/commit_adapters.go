@@ -294,7 +294,7 @@ func hookCommit(r eventlog.RuleRecord, spec hooks.Spec, last *eventlog.Delivery,
 func branchCommit(m session.BranchMeta, running, autonomous bool, now int64) commitItem {
 	goal := firstNonEmpty(m.Intent, m.Title)
 	var report []string
-	if m.Delivery == session.BranchDeliveryReport {
+	if m.Delivery == session.BranchDeliveryReport || m.Delivery == session.BranchDeliveryAttention {
 		report = []string{m.ParentSID}
 	}
 	stop := ""

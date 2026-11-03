@@ -76,8 +76,11 @@
               <strong>{agentName(p.agent)} · {kinds[p.kind] ?? p.kind}「{p.title}」</strong>
               <span class="ph {p.phase}">{phases[p.phase] ?? p.phase}</span>
             </div>
-            {#if p.why}<p class="why">{p.why}</p>{/if}
-            {#if p.question}<p class="q">问：{p.question}</p>{/if}
+            {#if p.question}
+              <p class="q">问：{p.question}</p>
+            {:else if p.why}
+              <p class="why">{p.why}</p>
+            {/if}
             {#if p.at}<p class="muted small">{ago(p.at * 1000)} · 编号 {p.number}</p>{/if}
             <div class="act">
               {#if p.question}

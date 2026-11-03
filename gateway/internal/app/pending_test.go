@@ -8,6 +8,7 @@ import (
 
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/commit"
+	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -238,27 +239,6 @@ func TestPendingAnswerWakesAgendaAndMovesItToNow(t *testing.T) {
 	}
 }
 
-func TestPendingAnswerScheduleRidesNextRunOnce(t *testing.T) {
-	e := setup(t)
-	// 定时任务的 Report 不允许带问题，但记录里有问题时（别的来源写的）回答也要能送到
-	r := appendRec(t, e, commit.CommitRec{Type: commit.TypeReport, Kind: commit.KindSchedule, ID: "t9", Agent: "default", Status: commit.StatusBlocked, Text: "x", Question: "要不要加上周末？"})
-	mark := fmt.Sprintf("r:%d", r.Seq)
-	if got := e.a.takeScheduleAnswer("t9"); got != "" {
-		t.Fatalf("没回答之前不带：%q", got)
-	}
-	appendRec(t, e, commit.CommitRec{Type: commit.TypeAnswer, Kind: commit.KindSchedule, ID: "t9", Mark: mark, By: "web:admin", Answer: "加上"})
-	e.a.mu.Lock()
-	first := e.a.takeScheduleAnswer("t9")
-	second := e.a.takeScheduleAnswer("t9")
-	e.a.mu.Unlock()
-	if !strings.Contains(first, "要不要加上周末？") || !strings.Contains(first, "加上") {
-		t.Fatalf("下一次运行带上回答：%q", first)
-	}
-	if second != "" {
-		t.Fatalf("只带一次：%q", second)
-	}
-}
-
 // 主人在别处自己动手也算处理过。
 func TestHandledByOwner(t *testing.T) {
 	e := setup(t)
@@ -297,4 +277,104 @@ func TestPendingChatCommands(t *testing.T) {
 	e.ch.wait(t, "知道了")
 	e.say("/seen 12345")
 	e.ch.wait(t, "没有这个编号")
+}
+
+// 问题在这一轮还在跑的时候就问出来了：照通知回 /answer 要答得进去，回答排进下一个安全边界。
+func TestPendingAnswerWhileTheRunIsStillGoing(t *testing.T) {
+	e := setup(t)
+	sid := attentionBranch(t, e, "pending-running")
+	if _, err := e.a.SessionBranchAction("continue", sid, "查一下", "fake:u1"); err != nil {
+		t.Fatal(err)
+	}
+	in := e.k.expect(proto.TInput)
+	if in.SID != sid {
+		t.Fatalf("在分支里跑：%s", in.SID)
+	}
+	e.a.mu.Lock()
+	s := e.a.sessions[sid]
+	_, err := e.a.reportCall(s, reportArgs(map[string]any{"status": "blocked", "text": "两个方案", "question": "用哪个？"}))
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pendingOf(e, commit.KindBranch, sid)
+	if p == nil || p.Question != "用哪个？" || p.Phase != commit.Running {
+		t.Fatalf("这一轮还在跑，问题也要列进来：%+v", p)
+	}
+	got := e.ch.wait(t, "需要你回答")
+	if !strings.Contains(got, "/answer "+p.Number+" ") {
+		t.Fatalf("通知里的编号要能用：%q / %s", got, p.Number)
+	}
+	e.say("/answer " + p.Number + " 第一个")
+	e.ch.wait(t, "已经把回答交给")
+	e.a.mu.Lock()
+	var queued string
+	for _, q := range e.a.sessions[sid].queue {
+		queued += q.m.Text
+	}
+	e.a.mu.Unlock()
+	if !strings.Contains(queued, "[主人的回答]") || !strings.Contains(queued, "第一个") {
+		t.Fatalf("回答排在队列里：%q", queued)
+	}
+	if p := pendingOf(e, commit.KindBranch, sid); p != nil && p.Question != "" {
+		t.Fatalf("回答过的问题不再列：%+v", p)
+	}
+	// 这一轮结束后，下一轮在分支里带着回答跑
+	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
+	in2 := e.k.expect(proto.TInput)
+	if in2.SID != sid {
+		t.Fatalf("下一轮在分支里：%s", in2.SID)
+	}
+	e.k.send(proto.Msg{T: proto.TModel, SID: sid})
+	e.k.expect(proto.TTurn)
+	var sentToModel string
+	for _, m := range e.llm.lastReq().Messages {
+		sentToModel += m.Content
+	}
+	if !strings.Contains(sentToModel, "[主人的回答]") || !strings.Contains(sentToModel, "第一个") {
+		t.Fatalf("下一轮的模型请求带着回答：%q", sentToModel)
+	}
+	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
+	waitIdle(t, e, sid)
+}
+
+// 结束了的承诺上的问题不列（比如分支已经归档）。
+func TestPendingQuestionOnEndedBranchIsNotListed(t *testing.T) {
+	e := setup(t)
+	sid := ownerBranch(t, e, "pending-ended")
+	appendRec(t, e, commit.CommitRec{Type: commit.TypeReport, Kind: commit.KindBranch, ID: sid, Agent: "default", Status: commit.StatusBlocked, Text: "x", Question: "用哪个？"})
+	setBranch(t, e, sid, func(m *session.BranchMeta) { m.Status = session.BranchArchived; m.Note = "归档了" })
+	if p := pendingOf(e, commit.KindBranch, sid); p != nil {
+		t.Fatalf("结束了的不列：%+v", p)
+	}
+}
+
+// 定时任务、Hook 的汇报不能带问题，没有人接着问：回答它们一律拒绝。
+func TestPendingAnswerRefusedForScheduleAndHook(t *testing.T) {
+	e := setup(t)
+	for _, kind := range []string{commit.KindSchedule, commit.KindHook} {
+		r := appendRec(t, e, commit.CommitRec{Type: commit.TypeReport, Kind: kind, ID: "x1", Agent: "default", Status: commit.StatusBlocked, Text: "x", Question: "?"})
+		if err := e.a.PendingAnswer(kind, "x1", fmt.Sprintf("r:%d", r.Seq), "好", "web:admin"); err == nil {
+			t.Fatalf("%s 不接受回答", kind)
+		}
+	}
+}
+
+// 宿主记下出错时，通知里的编号取这件事在“等我处理”里的编号：这一轮里还有没处理的汇报受阻，决定阶段的是汇报那条。
+func TestAttentionNumberFollowsTheDecidingFact(t *testing.T) {
+	e := setup(t)
+	sid := attentionBranch(t, e, "att-number")
+	r := appendRec(t, e, commit.CommitRec{Type: commit.TypeReport, Kind: commit.KindBranch, ID: sid, Agent: "default", Status: commit.StatusBlocked, Text: "缺密钥"})
+	drainSent(e)
+	e.a.mu.Lock()
+	s := e.a.sessOf(sid)
+	e.a.branchDone(s, &run{outcome: "error", final: "内核掉线了", asked: "查一下"})
+	e.a.mu.Unlock()
+	got := e.ch.wait(t, "内核掉线了")
+	want := fmt.Sprintf("/seen %d", r.Seq)
+	if !strings.Contains(got, want) {
+		t.Fatalf("编号要是决定阶段的汇报那条 %q：%q", want, got)
+	}
+	e.say(want)
+	e.ch.wait(t, "知道了")
 }

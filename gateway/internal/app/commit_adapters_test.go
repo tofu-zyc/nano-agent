@@ -344,3 +344,14 @@ func TestBranchIntroducedBeforeUpgradeIsNotReady(t *testing.T) {
 	m.Progress = "完成：又做了一轮"
 	wantPhase(t, "引入之后又做了一轮", branchCommit(m, false, false, nowU), commit.Ready, "")
 }
+
+// 契约的汇报去处：report 和 attention 的分支都汇报到父会话，silent 只留在自己的记录里。
+func TestBranchContractReportTo(t *testing.T) {
+	for delivery, want := range map[string]int{session.BranchDeliverySilent: 0, session.BranchDeliveryReport: 1, session.BranchDeliveryAttention: 1} {
+		m := session.BranchMeta{SID: "b1", ParentSID: "main", OwnerAgent: "default", CreatedBy: "web:me", Title: "t", Status: session.BranchReady, Delivery: delivery}
+		got := branchCommit(m, false, false, 1000).Contract.ReportTo
+		if len(got) != want || (want == 1 && got[0] != "main") {
+			t.Errorf("%s 的汇报去处：%v", delivery, got)
+		}
+	}
+}

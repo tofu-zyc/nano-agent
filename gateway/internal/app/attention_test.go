@@ -53,7 +53,7 @@ func TestAttentionOnlyOwnerCanSetIt(t *testing.T) {
 		t.Fatalf("主人要求的 attention：%q 安静=%v", d, silent)
 	}
 	// 自主活动分出的（life、Hook、整理记忆）设不成
-	for _, by := range []string{"life:default", "hook:r1", "dream:default"} {
+	for _, by := range []string{"@default/life", "hook:r1", "@default/dream"} {
 		br, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "自动", RequestID: "att-auto-" + by, By: by, Delivery: session.BranchDeliveryAttention})
 		if err != nil {
 			continue // 创建本身被拒绝也算设不成
@@ -250,20 +250,38 @@ func TestSessionForkCommandAttention(t *testing.T) {
 	}
 }
 
-// 模型通过 Session 工具只能要 silent 或 attention；report 一律当 silent，非管理员要 attention 也只得到 silent。
+// 模型通过 Session 工具只能要 silent 或 attention；report 一律当 silent，非管理员要 attention 也只得到 silent；
+// attention 只能从主人聊天的普通会话里要：定时任务、分支、life、Hook、整理记忆里一律 silent。
 func TestAttentionToolDeliveryIsRestricted(t *testing.T) {
-	if toolDelivery("report") != session.BranchDeliverySilent || toolDelivery("") != session.BranchDeliverySilent ||
-		toolDelivery("attention") != session.BranchDeliveryAttention {
-		t.Fatal("toolDelivery 的映射不对")
-	}
 	e := setup(t)
 	withAgents(t, e)
-	br, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "访客", RequestID: "att-guest", By: "fake:guest", Delivery: session.BranchDeliveryAttention})
+	br := attentionBranch(t, e, "att-tool-src")
+	e.a.mu.Lock()
+	cases := []struct {
+		name, sid, ask, want string
+	}{
+		{"普通会话要 attention", mainSID, "attention", session.BranchDeliveryAttention},
+		{"普通会话要 report", mainSID, "report", session.BranchDeliverySilent},
+		{"普通会话没要", mainSID, "", session.BranchDeliverySilent},
+		{"定时任务里", "cron:t1", "attention", session.BranchDeliverySilent},
+		{"分支里", br, "attention", session.BranchDeliverySilent},
+		{"life 会话", "@default/life", "attention", session.BranchDeliverySilent},
+		{"整理记忆", "@default/dream", "attention", session.BranchDeliverySilent},
+		{"Hook 会话", "hook:r1", "attention", session.BranchDeliverySilent},
+	}
+	for _, c := range cases {
+		if got := e.a.toolDelivery(c.sid, c.ask); got != c.want {
+			t.Errorf("%s：%q 想要 %q，得到 %q", c.name, c.sid, c.ask, got)
+		}
+	}
+	e.a.mu.Unlock()
+	// 非管理员要 attention 也只得到 silent
+	g, err := e.a.SessionFork(SessionForkRequest{SourceSID: mainSID, Title: "访客", RequestID: "att-guest", By: "fake:guest", Delivery: session.BranchDeliveryAttention})
 	if err != nil {
-		return // 访客根本分不了也算
+		return
 	}
 	e.a.mu.Lock()
-	d := e.a.branchDelivery(br.BranchSID)
+	d := e.a.branchDelivery(g.BranchSID)
 	e.a.mu.Unlock()
 	if d != session.BranchDeliverySilent {
 		t.Fatalf("非管理员只能是 silent：%q", d)

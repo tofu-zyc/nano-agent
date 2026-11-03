@@ -890,22 +890,6 @@ func (a *App) branchSilent(sid string) bool {
 	return a.silentTaskSID(sid)
 }
 
-// branchNote 是给模型看的分支说明：继承的历史是分叉前的经历，当前任务以这次的要求为准。
-func (a *App) branchNote(sid string) string {
-	m, ok := a.branchMeta(sid)
-	if !ok {
-		return ""
-	}
-	parent := m.ParentSID
-	if p, ok := a.store.Branch(m.ParentSID); ok && p.Title != "" {
-		parent = p.Title
-	} else if info := a.sessionInfo(m.ParentSID); info.Title != "" {
-		parent = info.Title
-	}
-	return "[分支] 这是一个从「" + parent + "」分出来的独立分支，上面的对话是分叉前的经历。" +
-		"当前任务以这次的要求为准，不要自动重放已经做过的操作；结果默认留在分支里，不会发回原来的聊天。"
-}
-
 // topicOfTrigger 是这次自主活动的话题：一个意图或一个日程。同一个话题复用同一个持久分支。
 func topicOfTrigger(t autonomy.Trigger) string {
 	if t.IntentionID != "" {
@@ -975,7 +959,7 @@ func (a *App) handleSessionTool(s *sess, m *proto.Msg) (string, bool) {
 			src = s.sid
 		}
 		res, err := a.sessionForkLocked(SessionForkRequest{SourceSID: src, CallerSID: s.sid, Title: args.Title, Prompt: args.Prompt,
-			Start: args.Start != nil && *args.Start, Delivery: toolDelivery(args.Delivery), RequestID: args.RequestID, By: from})
+			Start: args.Start != nil && *args.Start, Delivery: a.toolDelivery(s.sid, args.Delivery), RequestID: args.RequestID, By: from})
 		if err != nil {
 			return err.Error(), false
 		}
@@ -1144,10 +1128,15 @@ func autonomousOwner(by string) string {
 }
 
 // toolDelivery 是模型能要的投递档：silent 或 attention，别的（包括 report）一律当 silent。
-// attention 还要 sessionForkLocked 确认发起人不是自主活动。
-func toolDelivery(d string) string {
-	if d == session.BranchDeliveryAttention {
-		return d
+// attention 只能从主人聊天的普通会话里要：定时任务、分支、life、Hook、整理记忆里的模型一律是 silent；
+// 发起人是不是管理员由 sessionForkLocked 再确认。
+func (a *App) toolDelivery(callerSID, d string) string {
+	if d != session.BranchDeliveryAttention {
+		return session.BranchDeliverySilent
 	}
-	return session.BranchDeliverySilent
+	if isCronSID(callerSID) || isLifeSID(callerSID) || isDreamSID(callerSID) || isHookSID(callerSID) ||
+		a.sessionHook(callerSID) != nil || a.isBranchSID(callerSID) {
+		return session.BranchDeliverySilent
+	}
+	return d
 }
