@@ -33,6 +33,15 @@ import (
 type fakeCh struct {
 	name string
 	sent chan string
+
+	mu       sync.Mutex
+	replyTos []string // 每条消息的 replyTo（按发出顺序）
+}
+
+func (f *fakeCh) replies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replyTos...)
 }
 
 func (f *fakeCh) Name() string {
@@ -42,7 +51,13 @@ func (f *fakeCh) Name() string {
 	return f.name
 }
 func (f *fakeCh) Run(ctx context.Context, _ channel.Handler) error { <-ctx.Done(); return nil }
-func (f *fakeCh) Send(_ context.Context, _, text, _ string) error  { f.sent <- text; return nil }
+func (f *fakeCh) Send(_ context.Context, _, text, replyTo string) error {
+	f.mu.Lock()
+	f.replyTos = append(f.replyTos, replyTo)
+	f.mu.Unlock()
+	f.sent <- text
+	return nil
+}
 
 func (f *fakeCh) wait(t *testing.T, substr string) string {
 	t.Helper()

@@ -11,6 +11,7 @@ import (
 	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/session"
+	"nano-agent/gateway/internal/ticket"
 )
 
 // 承诺的适配函数（设计 §15.2）：每一种承诺从自己的记录推出契约和事实，阶段交给 commit.Phase。
@@ -342,4 +343,49 @@ func branchIntroduced(m session.BranchMeta) bool {
 		return m.ReportedAt >= m.ProgressAt
 	}
 	return strings.HasPrefix(m.Progress, "已把结论带回来源会话：")
+}
+
+// ticketCommit 是一张工单（设计 §16.1）。5a 里工单只会是 open、stopped（叫停）；其余状态由 5b 以后的执行写上。
+func ticketCommit(t ticket.Ticket, now int64) commitItem {
+	done := "验收命令通过、提交在本地分支"
+	if t.Check == "" {
+		done = "有改动、提交在本地分支"
+	}
+	c := commitItem{Kind: commit.KindTicket, ID: t.ID, Agent: t.Agent, Title: t.Title, Link: "#/sessions/" + t.Auth.Scene,
+		Contract: commit.Contract{
+			Goal: t.Goal, By: t.Auth.By, Scene: t.Auth.Scene,
+			Scope:    scopeText(t.Auth.Mode, []string{t.Auth.Workspace}, t.Auth.Tools),
+			Done:     done,
+			ReportTo: []string{"原消息 " + t.Auth.Source.Channel + ":" + t.Auth.Source.Chat},
+			Stop:     fmt.Sprintf("预算 %d token；返工最多 %d 次", t.Budget, ticket.MaxRework),
+		}}
+	f := commit.Facts{Now: now}
+	switch t.Status {
+	case ticket.StatusOpen:
+		f.Due, f.Wait = max(t.Created, 1), "等开工" // 阶段表要 Due 才显示 Wait
+	case ticket.StatusWorking, ticket.StatusChecking:
+		f.Running = true
+	case ticket.StatusPaused:
+		f.Paused = true
+	case ticket.StatusReady:
+		if t.PR != "" {
+			f.Ready, f.Mark = "PR 开着，等人合并", "pr:"+t.PR
+		} else {
+			f.Ready, f.Mark = firstNonEmpty("验收通过，已提交 "+t.Commit, "验收通过"), "c:"+t.Commit
+		}
+		c.At = t.Updated
+	case ticket.StatusDone:
+		f.Ended, f.Evidence = commit.Done, firstNonEmpty(t.Reason, t.Commit, t.CheckLog)
+	case ticket.StatusDropped:
+		f.Ended, f.Reason = commit.Dropped, t.Reason
+	case ticket.StatusFailed:
+		f.Ended, f.Reason = commit.Failed, t.Reason
+	case ticket.StatusStopped:
+		f.Ended, f.Reason = commit.Stopped, t.Reason
+	}
+	c.Facts = f
+	if f.Ended != "" {
+		c.EndedAt = t.Updated
+	}
+	return c
 }

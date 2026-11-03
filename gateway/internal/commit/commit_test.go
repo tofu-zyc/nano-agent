@@ -102,7 +102,7 @@ func TestPhaseInvariants(t *testing.T) {
 }
 
 func TestKindsAndPhasesAreFixed(t *testing.T) {
-	if len(Kinds) != 6 || len(Phases) != 9 {
+	if len(Kinds) != 7 || len(Phases) != 9 {
 		t.Fatalf("%d 种 %d 个阶段", len(Kinds), len(Phases))
 	}
 	for _, p := range Phases[:5] {

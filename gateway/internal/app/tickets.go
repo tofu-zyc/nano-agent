@@ -2,6 +2,7 @@ package app
 
 import (
 	"path/filepath"
+	"time"
 
 	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/ticket"
@@ -19,7 +20,7 @@ func (a *App) openTickets() {
 		a.hTicket.Set(health.Error, "工单记录打不开："+err.Error())
 		return
 	}
-	s.Now = a.now
+	s.Now = func() time.Time { return a.now() } // 每次现取：测试和运行时换了时钟也跟着走
 	a.tickets = s
 }
 

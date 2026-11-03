@@ -11,10 +11,11 @@ const (
 	KindSchedule  = "schedule"  // 定时任务
 	KindHook      = "hook"      // Hook 规则（不是单次投递）
 	KindBranch    = "branch"    // 分支
+	KindTicket    = "ticket"    // 工单（团队，设计 §16）
 )
 
-// Kinds 是固定顺序的六种。
-var Kinds = []string{KindAgenda, KindIntention, KindFollowUp, KindSchedule, KindHook, KindBranch}
+// Kinds 是固定顺序的七种。
+var Kinds = []string{KindAgenda, KindIntention, KindFollowUp, KindSchedule, KindHook, KindBranch, KindTicket}
 
 // 阶段：前五个是进行中，后四个是结束，对应设计第 4 节的四种结束。
 const (

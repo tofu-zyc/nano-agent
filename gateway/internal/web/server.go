@@ -294,6 +294,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rooms", s.auth(s.listRooms))
 	mux.HandleFunc("GET /api/commitments", s.auth(s.listCommitments))
 	mux.HandleFunc("GET /api/pending", s.auth(s.listPending))
+	mux.HandleFunc("POST /api/tickets/{id}/cancel", s.auth(s.cancelTicket))
 	mux.HandleFunc("POST /api/pending/seen", s.auth(s.pendingSeen))
 	mux.HandleFunc("POST /api/pending/answer", s.auth(s.pendingAnswer))
 	mux.HandleFunc("POST /api/rooms", s.auth(s.createRoom))

@@ -405,3 +405,20 @@ func TestPendingAPI(t *testing.T) {
 		t.Fatalf("回答超过 2000 字返回 400：%d", code)
 	}
 }
+
+func TestTicketCancelAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": "x"}, true); code != http.StatusUnauthorized {
+		t.Fatalf("未登录应该 401：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": "x"}, true); code != http.StatusBadRequest {
+		t.Fatalf("没有这张工单返回 400：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": ""}, true); code != http.StatusBadRequest {
+		t.Fatalf("没写理由返回 400：%d", code)
+	}
+}

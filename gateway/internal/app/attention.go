@@ -32,21 +32,7 @@ func (a *App) attentionPush(sid, state, text, question, number string) {
 	if !ok || a.commits == nil || m.ParentSID == "" || a.branchSilent(m.ParentSID) {
 		return
 	}
-	notes := a.commits.Notes(commit.KindBranch, sid)
-	if n := len(notes); n > 0 && notes[n-1].Status == state && notes[n-1].Text == text {
-		return // 和上一条推送一样
-	}
-	recent, cutoff := 0, a.now().Add(-time.Hour).UnixMilli()
-	for _, n := range notes {
-		if n.TS >= cutoff {
-			recent++
-		}
-	}
-	if recent >= attentionPerHour {
-		return // 多出来的只留在“等我处理”里
-	}
-	if _, err := a.commits.Append(commit.CommitRec{Type: commit.TypeNotify, Kind: commit.KindBranch, ID: sid, Agent: m.OwnerAgent, Status: state, Text: text}); err != nil {
-		a.commitHealth(err)
+	if !a.notifyGate(commit.KindBranch, sid, m.OwnerAgent, state, text) {
 		return
 	}
 	if n := a.branchNumber(sid); n != "" { // 通知里的编号要和“等我处理”里的一致
@@ -72,4 +58,31 @@ func attentionBody(title, state, text, question, number string) string {
 		fmt.Fprintf(&b, "\n在网页的“等我处理”里处理，或回复 /seen %s 记为知道了。", number)
 	}
 	return b.String()
+}
+
+// notifyGate 是推送的去重和限频，通过就先在承诺记录里写一条 notify（先写记录，再入队）：
+// 状态和正文都和上一条推送一样的不发；每件事每小时最多 attentionPerHour 条，多出来的只留在“等我处理”里。
+// 调用方持有锁；返回 false 就不要发。
+func (a *App) notifyGate(kind, id, agent, state, text string) bool {
+	if a.commits == nil {
+		return false
+	}
+	notes := a.commits.Notes(kind, id)
+	if n := len(notes); n > 0 && notes[n-1].Status == state && notes[n-1].Text == text {
+		return false
+	}
+	recent, cutoff := 0, a.now().Add(-time.Hour).UnixMilli()
+	for _, n := range notes {
+		if n.TS >= cutoff {
+			recent++
+		}
+	}
+	if recent >= attentionPerHour {
+		return false
+	}
+	if _, err := a.commits.Append(commit.CommitRec{Type: commit.TypeNotify, Kind: kind, ID: id, Agent: agent, Status: state, Text: text}); err != nil {
+		a.commitHealth(err)
+		return false
+	}
+	return true
 }

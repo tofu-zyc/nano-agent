@@ -108,6 +108,11 @@ func (a *App) commitItems(agent string, now time.Time) []commitItem {
 			add(branchCommit(m, busy, autonomousForker(m.CreatedBy), n))
 		}
 	}
+	if a.tickets != nil {
+		for _, t := range a.tickets.List() {
+			add(ticketCommit(t, n))
+		}
+	}
 	for i := range out {
 		a.overlayReport(&out[i])
 	}

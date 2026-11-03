@@ -200,3 +200,18 @@ func (s *Server) pendingAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
+
+// cancelTicket 是网页上叫停一张工单：POST /api/tickets/{id}/cancel {reason}。
+func (s *Server) cancelTicket(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.CancelTicket(r.PathValue("id"), req.Reason); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}

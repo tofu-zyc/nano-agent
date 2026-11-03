@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/session"
+	"nano-agent/gateway/internal/ticket"
 )
 
 // 六个适配函数：给出各自的记录，推出的事实和阶段都对。
@@ -353,5 +355,60 @@ func TestBranchContractReportTo(t *testing.T) {
 		if len(got) != want || (want == 1 && got[0] != "main") {
 			t.Errorf("%s 的汇报去处：%v", delivery, got)
 		}
+	}
+}
+
+// 工单（设计 §16.1）：open 是等待（Due 取创建时间，显示“等开工”）；叫停是 stopped 带理由；就绪带 Mark。
+func TestTicketCommitFacts(t *testing.T) {
+	base := ticket.Ticket{ID: "tk-1", Status: ticket.StatusOpen, Agent: "default", Title: "修登录", Goal: "手机上错位", Check: "make test", Budget: 100, Created: 500, Updated: 900,
+		Auth: ticket.Auth{By: "telegram:1", Scene: "g1", Workspace: "ws1", Mode: "auto", Tools: []string{"Read"},
+			Source: ticket.Source{Channel: "telegram", Chat: "-100", MsgID: "m1"}}}
+	with := func(mod func(*ticket.Ticket)) commitItem {
+		x := base
+		mod(&x)
+		return ticketCommit(x, 1000)
+	}
+	phase := func(c commitItem) (string, string) { return commit.Phase(c.Facts) }
+	c := ticketCommit(base, 1000)
+	if p, why := phase(c); p != commit.Waiting || why != "等开工" {
+		t.Fatalf("open：%s %s", p, why)
+	}
+	if c.Kind != commit.KindTicket || c.Contract.Goal != "手机上错位" || c.Contract.By != "telegram:1" || c.Contract.Scene != "g1" ||
+		c.Contract.Done != "验收命令通过、提交在本地分支" || len(c.Contract.ReportTo) != 1 || !strings.Contains(c.Contract.ReportTo[0], "telegram:-100") ||
+		!strings.Contains(c.Contract.Stop, "返工最多 2 次") || c.Link != "#/sessions/g1" || c.Contract.Scope == "" {
+		t.Fatalf("契约：%+v", c)
+	}
+	if got := with(func(x *ticket.Ticket) { x.Check = "" }).Contract.Done; got != "有改动、提交在本地分支" {
+		t.Fatalf("没有验收命令：%q", got)
+	}
+	for status, want := range map[string]string{ticket.StatusWorking: commit.Running, ticket.StatusChecking: commit.Running, ticket.StatusPaused: commit.Paused} {
+		if p, _ := phase(with(func(x *ticket.Ticket) { x.Status = status })); p != want {
+			t.Errorf("%s → %s，想要 %s", status, p, want)
+		}
+	}
+	stopped := with(func(x *ticket.Ticket) { x.Status, x.Reason = ticket.StatusStopped, "不做了" })
+	if p, why := phase(stopped); p != commit.Stopped || why != "不做了" || stopped.EndedAt != 900 {
+		t.Fatalf("叫停：%s %s %d", p, why, stopped.EndedAt)
+	}
+	// 没有理由的结束算受阻（共用的不变量）
+	if p, _ := phase(with(func(x *ticket.Ticket) { x.Status = ticket.StatusStopped })); p != commit.Blocked {
+		t.Fatalf("没有理由的叫停：%s", p)
+	}
+	if p, why := phase(with(func(x *ticket.Ticket) { x.Status, x.Reason = ticket.StatusFailed, "放弃" })); p != commit.Failed || why != "放弃" {
+		t.Fatalf("失败：%s %s", p, why)
+	}
+	if p, _ := phase(with(func(x *ticket.Ticket) { x.Status = ticket.StatusDone })); p != commit.Blocked {
+		t.Fatalf("没有证据的完成算受阻：%s", p)
+	}
+	if p, _ := phase(with(func(x *ticket.Ticket) { x.Status, x.Commit = ticket.StatusDone, "abc123" })); p != commit.Done {
+		t.Fatal("有提交的完成")
+	}
+	ready := with(func(x *ticket.Ticket) { x.Status, x.Commit = ticket.StatusReady, "abc123" })
+	if p, _ := phase(ready); p != commit.Ready || ready.Facts.Mark != "c:abc123" {
+		t.Fatalf("就绪的 Mark：%s %q", ready.Facts.Mark, ready.Facts.Mark)
+	}
+	pr := with(func(x *ticket.Ticket) { x.Status, x.PR = ticket.StatusReady, "42" })
+	if pr.Facts.Mark != "pr:42" {
+		t.Fatalf("PR 开着的 Mark：%q", pr.Facts.Mark)
 	}
 }

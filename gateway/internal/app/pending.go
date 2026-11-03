@@ -161,6 +161,8 @@ func (a *App) checkAnswerTarget(p PendingView) error {
 		if m.SnapshotID == "" || m.Status == session.BranchPreparing || m.Status == session.BranchPendingBoundary {
 			return errors.New("分支还没有就绪")
 		}
+	case commit.KindTicket:
+		return errors.New("工单还没有干活的分支，现在不能回答")
 	case commit.KindAgenda, commit.KindIntention:
 	default: // 定时任务、Hook 的 Report 不能带问题，没有人接着问
 		return errors.New("这种承诺不接受回答")

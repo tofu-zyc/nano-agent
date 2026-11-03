@@ -13,7 +13,7 @@
   let busy = $state('');
   let error = $state('');
 
-  const kinds: Record<string, string> = { agenda: '日程', intention: '意图', followup: '回访', schedule: '定时任务', hook: 'Hook', branch: '分支' };
+  const kinds: Record<string, string> = { agenda: '日程', intention: '意图', followup: '回访', schedule: '定时任务', hook: 'Hook', branch: '分支', ticket: '工单' };
   const phases: Record<string, string> = { blocked: '受阻', ready: '就绪', running: '进行中', waiting: '等待', paused: '暂停', done: '完成', dropped: '无需处理', failed: '失败', stopped: '叫停' };
   const order = ['blocked', 'ready', 'running', 'waiting', 'paused', 'failed', 'done', 'dropped', 'stopped'];
 
@@ -53,6 +53,22 @@
       await store.loadPending();
     } finally {
       busy = '';
+    }
+  }
+  // 叫停一张工单：要写理由
+  let cancelling = $state('');
+  let reason = $state('');
+  const ended = ['done', 'dropped', 'failed', 'stopped'];
+  async function cancelTicket(it: CommitItem) {
+    error = '';
+    try {
+      await api.post(`/api/tickets/${encodeURIComponent(it.id)}/cancel`, { reason: reason.trim() });
+      cancelling = '';
+      reason = '';
+      await loadAll();
+      await store.loadPending();
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
     }
   }
   function openItem(p: CommitItem) {
@@ -99,7 +115,18 @@
               <section data-phase={g.ph}>
                 <h4>{phases[g.ph] ?? g.ph} · {g.list.length}</h4>
                 {#each g.list as it (key(it))}
-                  <button class="line" onclick={() => openItem(it)}>{agentName(it.agent)} · {kinds[it.kind] ?? it.kind}「{it.title}」{#if it.why}<span class="muted"> — {it.why}</span>{/if}</button>
+                  <div class="lrow">
+                    <button class="line" onclick={() => openItem(it)}>{agentName(it.agent)} · {kinds[it.kind] ?? it.kind}「{it.title}」{#if it.why}<span class="muted"> — {it.why}</span>{/if}</button>
+                    {#if it.kind === 'ticket' && !ended.includes(it.phase)}
+                      <button class="btn sm" data-testid="ticket-cancel" onclick={() => (cancelling = cancelling === key(it) ? '' : key(it))}>叫停</button>
+                    {/if}
+                  </div>
+                  {#if cancelling === key(it)}
+                    <div class="act">
+                      <input type="text" maxlength="500" placeholder="叫停的理由" bind:value={reason} data-testid="ticket-reason" />
+                      <button class="btn sm primary" disabled={!reason.trim()} onclick={() => cancelTicket(it)} data-testid="ticket-cancel-ok">确认叫停</button>
+                    </div>
+                  {/if}
                 {/each}
               </section>
             {:else}
@@ -132,5 +159,7 @@
   .err { color: var(--err, #d64545); font-size: 12.5px; margin: 0 0 6px; }
   .more { margin-top: 8px; background: none; border: 0; color: var(--accent-2); cursor: pointer; font-size: 12.5px; padding: 0; }
   .all h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
+  .lrow { display: flex; gap: 6px; align-items: center; }
+  .lrow .line { flex: 1; }
   .line { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 3px 0; cursor: pointer; color: var(--text); font-size: 12.5px; }
 </style>

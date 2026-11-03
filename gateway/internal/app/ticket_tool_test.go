@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/proto"
@@ -286,4 +289,114 @@ func TestTicketsSurviveRestart(t *testing.T) {
 	if tk, ok := a2.tickets.Get("tk-1"); !ok || tk.Title != "修登录" || tk.Auth.By != "fake:u2" {
 		t.Fatalf("重启后工单还在：%+v %v", tk, ok)
 	}
+}
+
+// 工单进承诺列表：open 是等待；叫停后是 stopped 并有理由；重启后还在；也进“全部承诺”但 open 不进等我处理。
+func TestTicketsAppearInCommitmentsAndSurviveRestart(t *testing.T) {
+	e := setup(t)
+	sid := teamGroup(t, e)
+	mention(e, "@机器人 修登录", "g1", "u2", "李四")
+	e.k.expect(proto.TInput)
+	if _, err := callTicket(e, sid, `{"action":"create","title":"修登录","goal":"手机上错位"}`); err != nil {
+		t.Fatal(err)
+	}
+	finishGroupRun(t, e, sid)
+	v := findCommit(e.a.Commitments("", ""), commit.KindTicket, "tk-1")
+	if v == nil || v.Phase != commit.Waiting || v.Why != "等开工" || v.Title != "修登录" || v.Contract.By != "fake:u2" {
+		t.Fatalf("open 是等待：%+v", v)
+	}
+	if p := pendingOf(e, commit.KindTicket, "tk-1"); p != nil {
+		t.Fatalf("等待中的不进等我处理：%+v", p)
+	}
+	// 回答：5a 里没有干活的分支
+	r := appendRec(t, e, commit.CommitRec{Type: commit.TypeReport, Kind: commit.KindTicket, ID: "tk-1", Agent: "default", Status: commit.StatusBlocked, Text: "x", Question: "用哪个？"})
+	if err := e.a.PendingAnswer(commit.KindTicket, "tk-1", fmt.Sprintf("r:%d", r.Seq), "第一个", "web:admin"); err == nil {
+		t.Fatal("5a 里工单没有分支，拒绝回答")
+	}
+	// 主人在网页上叫停：要理由
+	if err := e.a.CancelTicket("tk-1", "  "); err == nil {
+		t.Fatal("叫停要写理由")
+	}
+	if err := e.a.CancelTicket("tk-9", "x"); err == nil {
+		t.Fatal("没有这张工单")
+	}
+	if err := e.a.CancelTicket("tk-1", "需求取消了"); err != nil {
+		t.Fatal(err)
+	}
+	v = findCommit(e.a.Commitments("", ""), commit.KindTicket, "tk-1")
+	if v == nil || v.Phase != commit.Stopped || v.Why != "需求取消了" {
+		t.Fatalf("叫停后是 stopped 并有理由：%+v", v)
+	}
+	if err := e.a.CancelTicket("tk-1", "再来"); err == nil {
+		t.Fatal("已经结束的不能再叫停")
+	}
+	e.a.mu.Lock()
+	e.a.tickets.Close()
+	e.a.commits.Close()
+	e.a.mu.Unlock()
+	a2 := newAppAt(t, e.dir, nil)
+	v = findCommit(a2.Commitments("", ""), commit.KindTicket, "tk-1")
+	if v == nil || v.Phase != commit.Stopped {
+		t.Fatalf("重启后工单还在：%+v", v)
+	}
+}
+
+// 说话纪律：建工单、补充、叫停都不往群里发别的；通知只有结果和问题，作为原消息的回复，去重、每小时 3 条、结束后不发。
+func TestTicketSpeechDiscipline(t *testing.T) {
+	e := setup(t)
+	sid := teamGroup(t, e)
+	mention(e, "@机器人 修登录", "g1", "u2", "李四")
+	e.k.expect(proto.TInput)
+	drainSent(e)
+	for _, a := range []string{`{"action":"create","title":"修登录","goal":"手机上错位"}`, `{"action":"note","id":"tk-1","text":"补一句"}`, `{"action":"list"}`} {
+		if _, err := callTicket(e, sid, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sent := drainSent(e); len(sent) != 0 {
+		t.Fatalf("工单的过程不往群里发：%v", sent)
+	}
+	push := func(state, text, q string) {
+		e.a.mu.Lock()
+		e.a.ticketPush("tk-1", state, text, q)
+		e.a.mu.Unlock()
+	}
+	push("ready", "改好了：验收通过", "")
+	got := e.ch.wait(t, "[工单 tk-1「修登录」· 就绪] 改好了")
+	if got == "" {
+		t.Fatal("没发")
+	}
+	if rs := e.ch.replies(); len(rs) == 0 || rs[len(rs)-1] != "g1" {
+		t.Fatalf("作为原消息的回复：%v", rs)
+	}
+	push("ready", "改好了：验收通过", "") // 和上一条一样：不发
+	push("blocked", "验收没过", "继续改还是放弃？")
+	q := e.ch.wait(t, "需要你回答")
+	if !strings.Contains(q, "问：继续改还是放弃？") {
+		t.Fatalf("问题：%q", q)
+	}
+	push("ready", "第二版", "")
+	push("ready", "第三版", "") // 这一小时的第 4 条：不发
+	if sent := drainSent(e); len(sent) != 1 {
+		t.Fatalf("去重和每小时 3 条之后只剩一条：%v", sent)
+	}
+	e.a.mu.Lock()
+	n := len(e.a.commits.Notes(commit.KindTicket, "tk-1"))
+	e.a.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("先写 notify 记录：%d", n)
+	}
+	// 结束了的工单：问题和失败不再发
+	if err := e.a.CancelTicket("tk-1", "不做了"); err != nil {
+		t.Fatal(err)
+	}
+	e.a.mu.Lock()
+	e.a.commits.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	e.a.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	e.a.mu.Unlock()
+	push("blocked", "还有问题", "")
+	if sent := drainSent(e); len(sent) != 0 {
+		t.Fatalf("结束了的工单不发问题：%v", sent)
+	}
+	finishGroupRun(t, e, sid)
 }
