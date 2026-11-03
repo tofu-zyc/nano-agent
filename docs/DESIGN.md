@@ -1056,7 +1056,7 @@ type Ticket struct {
 	Auth  Auth   `json:"auth"` // 授权记录，建的时候定下，之后不变
 	Check  string `json:"check"`  // 验收命令，建的时候从团队规则取
 	Budget int    `json:"budget"`
-	Status string `json:"status"` // open | working | checking | ready | done | dropped | failed | stopped | paused
+	Status string `json:"status"` // open | working | checking | blocked | ready | done | dropped | failed | stopped | paused
 	Reason string `json:"reason,omitempty"`
 	// 5b
 	Worktree string `json:"worktree,omitempty"`
@@ -1076,8 +1076,8 @@ type Auth struct {
 	Scene     string   `json:"scene"`     // 在哪个场景（团队群或议题的会话）
 	Source    Source   `json:"source"`    // 原消息：渠道、对话、消息 ID、开头 200 字
 	Workspace string   `json:"workspace"` // 能动到哪里
-	Mode      string   `json:"mode"`      // 权限模式，不超过工作目录和 agent 的上限
-	Tools     []string `json:"tools"`     // 场景工具表和 agent 上限的交集
+	Mode      string   `json:"mode"`      // 工单分支的权限模式，见下
+	Tools     []string `json:"tools"`     // 工单分支的工具，见下
 	At        int64    `json:"at"`
 }
 ```
@@ -1116,6 +1116,22 @@ type Auth struct {
 - 和 attention 一样先在承诺记录里写 `notify` 再入队；同样去重，每个工单每小时最多 3 条。
 - 工单的进展、工具输出、分支里的回复都不发到群里。
 - 5a 里问题和结果还没有来源（要等 5b 的分支）：先把发送函数和它的规则做好，测试直接调用；5b 接到 Report 和验收上。
+- 问题的末尾写一句怎么回答："@<agent 名> 回复就行"。
+  - 名单里的人在群里 @ agent 回答时，agent 用 Ticket note 转进工单。
+  - 工单有还没回答的问题时，这条 note 同时记作回答：在承诺记录里写 `answer`，问题就不再出现在等我处理里。
+  - 主人也可以在等我处理里回答，和分支一样送进工单的分支。
+  - `/answer` 只在管理员窗口里有，群里不提它。
+
+**授权记录里的权限和工具**说的是工单分支（5b）能用什么，不是团队群自己的设置：
+
+- `Mode`：agent 的默认权限模式，最高 `auto`，不用 `full`。不看团队群会话自己的模式，那是群里聊天用的。agent 的默认模式是只读时，接不了工单，create 拒绝。
+- `Tools`：先列出工单需要的工具，再和 agent 的上限取交集。
+  - 列出的是：内核的 Read、Write、Edit、Grep、Shell，加上 Job、Report、WebSearch、WebFetch、Skill。5d 起再加 External。
+  - 不给：
+    - 对外发声和派生新承诺的工具：Message、SendFile、Session、Schedule、Hook、FollowUp、Agenda、Ticket；
+    - 心智工具：Idea、Mind、Diary；
+    - 网关管理工具：Gateway、GatewayAdmin。
+  - 和团队群的场景工具表无关。
 
 **契约和事实**（`ticketCommit`，接进 `commitItems`）：
 
@@ -1132,7 +1148,7 @@ type Auth struct {
 | Ended | done：PR 合并了（证据是合并提交），5c 之前是有人 `accept`（证据是提交和验收结果）；dropped：not_needed 汇报（理由）；failed：主人在受阻时放弃（理由）；stopped：叫停（理由）、PR 被关掉没合并 |
 | Paused | paused |
 | Running | working、checking |
-| Blocked | 返工用完验收还没过；预算用完；推送或开 PR 失败；汇报 |
+| Blocked | blocked：宿主记下的受阻（返工用完验收还没过、预算用完、推送或开 PR 失败），理由在 `Reason`，Mark `b:<Updated>`；汇报 |
 | Ready | PR 开着等人合并（Mark `pr:<号>`）；5c 之前是验收通过、已提交（Mark `c:<提交>`）；汇报 |
 | Due | open：创建时间（阶段表要 Due 才显示 Wait，同 15.2 的分支） |
 | Wait | open：等开工（5a 里一直是这个） |
@@ -1187,7 +1203,14 @@ type Auth struct {
   - `Rework` 到 2 还没过：状态 blocked，问派活的人："验收没过……继续改、放弃，还是先收下？"
 - 验收结果是证据，不采信分支的自述（第 2 条原则）。
 
-**预算**：工单分支用掉的 token 超过 `Budget` 时，停下这一轮，状态 blocked，理由是预算用完了。回答"继续"再给一份。
+**预算**：工单分支用掉的 token 超过 `Budget` 时，停下这一轮，状态 blocked，理由是预算用完了。
+
+**从受阻里出来**：工单受阻时收到回答或名单里的人的 note，状态回到 working，回答送进分支接着跑。
+
+- 因为返工用完而受阻的，再给两次返工；
+- 因为预算用完而受阻的，再给一份预算；
+- 不做了：名单里的人用 Ticket cancel 叫停，或者分支看了回答后 Report not_needed、failed。代码不去猜回答的意思；
+- 每次续上都记在工单上（谁、什么时候），不会无限续：一张工单最多续 3 次，之后只能叫停或放弃。
 
 **交付（5c 之前）**：本地分支 `nano/tk-<序号>`。
 
