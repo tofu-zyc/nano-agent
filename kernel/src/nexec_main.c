@@ -327,7 +327,7 @@ static void add_path_dirs(const xctx *x, char ***ro, size_t *nro)
 }
 #endif
 
-static int enter_sandbox(const xctx *x, int mode, buf_t *err)
+static int enter_sandbox(xctx *x, int mode, buf_t *err)
 {
     if (mode == SB_OFF) {
         /* 明确关闭：按当前 OS 用户身份直接执行，不套 Landlock / seccomp / no_new_privs。
@@ -350,9 +350,31 @@ static int enter_sandbox(const xctx *x, int mode, buf_t *err)
     if (resolv) push(&ro, &nro, resolv);
 #endif
 
+    /* 真实的家目录不在可读范围里：HOME 换成这次执行的私有目录（可写，按 tmp_key 保留）。
+     * 否则 git 读不了 ~/.gitconfig 直接报错，go、npm、cargo 往家目录写缓存也会失败。
+     * 先算好（要用沙箱规则里的目录），沙箱真的施加上以后才换：没施加（auto 降级）时家目录照常可读。 */
+    bool home_readable = false;
+#if !NA_WINDOWS
+    for (size_t i = 0; i < nrw && !home_readable; i++) home_readable = plat_inside(x->home, rw[i]);
+    for (size_t i = 0; i < nro && !home_readable; i++) home_readable = plat_inside(x->home, ro[i]);
+#endif
     sb_rules r = { .rw = (const char *const *)rw, .nrw = nrw, .ro = (const char *const *)ro, .nro = nro };
     char msg[512] = {0};
     int rc = sb_apply(&r, msg, sizeof msg);
+#if !NA_WINDOWS
+    if (rc == 0 && !home_readable) {
+        char *priv = plat_join(x->tmp, "home");
+        if (plat_makedirs(priv) == 0) {
+            for (char **e = x->env; *e; e++)
+                if (!strncmp(*e, "HOME=", 5)) {
+                    free(*e);
+                    *e = xasprintf("HOME=%s", priv);
+                    break;
+                }
+        }
+        free(priv);
+    }
+#endif
     if (rc < 0) {
         buf_puts(err, "沙箱启动失败，没有执行：");
         buf_puts(err, msg);

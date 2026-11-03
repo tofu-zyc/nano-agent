@@ -268,7 +268,8 @@ def t_cancel():
 
 @case("沙箱：读不到工作目录外的文件（包括 HOME），写不了 /tmp", need_sandbox=True)
 def t_sandbox_fs():
-    for cmd in ["cat ~/.secret", "cat ../other/secret.txt", "cat link_file", "ls ~",
+    # 真实的家目录用绝对路径写：$HOME / ~ 在沙箱里是这次执行的私有目录
+    for cmd in ["cat " + os.path.join(HOME, ".secret"), "cat ../other/secret.txt", "cat link_file", "ls " + HOME,
                 "echo x > ../other/new.txt", "echo x > /tmp/na-exec-escape-test"]:
         c = bad(run("Shell", {"command": cmd}))
         assert "Permission denied" in c or "权限" in c, (cmd, c)
@@ -276,7 +277,7 @@ def t_sandbox_fs():
     assert not os.path.exists("/tmp/na-exec-escape-test")
     ok(run("Shell", {"command": "cat /etc/hostname >/dev/null && echo sys-ok"}), "sys-ok")
     ok(run("Shell", {"command": "echo hi > \"$TMPDIR/t\" && cat \"$TMPDIR/t\""}), "hi")
-    ok(run("Shell", {"command": "cat ~/.gitconfig"}, ro=["~/.gitconfig"]), "tester")
+    ok(run("Shell", {"command": "cat " + os.path.join(HOME, ".gitconfig")}, ro=["~/.gitconfig"]), "tester")
     c = bad(run("Shell", {"command": "touch x"}, write=False))
     assert "Permission denied" in c or "Read-only" in c, c
 
@@ -302,8 +303,26 @@ def t_sandbox_modes():
 
 @case("沙箱：环境变量里的密钥不会带进来", need_sandbox=False)
 def t_sandbox_env():
-    c = ok(run("Shell", {"command": "env"}), "TMPDIR=", "HOME=" + HOME)
+    c = ok(run("Shell", {"command": "env"}), "TMPDIR=")
     assert "sk-should-not-leak" not in c and "SECRET_TOKEN" not in c, c
+
+
+@case("沙箱：真实的家目录读不了时 HOME 换成这次执行的私有可写目录（按 tmp_key 保留）", need_sandbox=True)
+def t_sandbox_private_home():
+    priv = os.path.join(HOME, ".nano-agent", "tmp", "test", "home")
+    c = ok(run("Shell", {"command": "echo H=$HOME; echo 缓存 > \"$HOME/cache.txt\"; cat \"$HOME/cache.txt\""}, sandbox="on"), "H=" + priv, "缓存")
+    # 同一个 tmp_key 下保留：下一次执行还能读到上次写的
+    ok(run("Shell", {"command": "cat \"$HOME/cache.txt\""}, sandbox="on"), "缓存")
+    # git 读 ~/.gitconfig：私有 HOME 里没有，不再因为读不了而报错
+    ok(run("Shell", {"command": "git config --global user.name 工单 && git config --global user.name"}, sandbox="on"), "工单")
+    # 真实家目录里的东西仍然读不了
+    bad(run("Shell", {"command": "cat " + os.path.join(HOME, ".secret")}, sandbox="on"))
+
+
+@case("沙箱：家目录本来就可读（挂了它）或没开沙箱时 HOME 不换", need_sandbox=True)
+def t_sandbox_home_kept():
+    ok(run("Shell", {"command": "echo H=$HOME"}, dirs=(HOME,), sandbox="on"), "H=" + HOME)
+    ok(run("Shell", {"command": "echo H=$HOME"}, sandbox="off"), "H=" + HOME)
 
 
 @case("沙箱：不能连 unix socket（D-Bus、systemd、docker 之类）", linux_only=True)
@@ -415,7 +434,7 @@ def t_elevated_write():
 def t_home_mode():
     ok(run("Shell", {"command": "pwd"}, dirs=(), home=True, write=False), HOME)
     ok(run("Shell", {"command": "cat ~/.gitconfig"}, dirs=(), ro=("/",), home=True, write=False), "tester")
-    bad(run("Shell", {"command": "echo x > ~/nope"}, dirs=(), home=True, write=False), "Permission denied")
+    bad(run("Shell", {"command": "echo x > ~/nope"}, dirs=(), ro=("/",), home=True, write=False), "Permission denied")
     ok(run("Shell", {"command": "echo hi > \"$TMPDIR/t\" && cat \"$TMPDIR/t\""}, dirs=(), home=True, write=False), "hi")
 
 
@@ -449,7 +468,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_stream, t_hook_input, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
+                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0
