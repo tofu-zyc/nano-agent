@@ -45,6 +45,18 @@ func (a *App) workspaceOf(sid string) workspace {
 }
 func (a *App) workspaceBase(sid string) workspace {
 	st := a.store.Settings(sid)
+	// 工单的分支：模式和工作目录以工单为准，不看会话的设置（网页上改了也不生效）。
+	// 模式是会话设置和 Auth.Mode 里较低的一个，工作目录只认这张工单的 worktree。
+	if t, ok := a.ticketOfSession(sid); ok {
+		w := workspace{mode: t.Auth.Mode}
+		if st.Mode != "" && modeRank(st.Mode) >= 0 && modeRank(st.Mode) < modeRank(w.mode) {
+			w.mode = st.Mode
+		}
+		if x := a.findWorkspace("w-" + t.ID); x != nil {
+			w.wss = []*Workspace{x}
+		}
+		return w
+	}
 	// 权限模式：会话自己的 > agent 的 > 全局默认
 	w := workspace{mode: a.agentModeDefault(sid)}
 	if st.Mode != "" {

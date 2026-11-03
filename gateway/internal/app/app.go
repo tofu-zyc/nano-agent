@@ -1296,6 +1296,14 @@ func (a *App) startRun(s *sess) {
 		s.queue = nil
 		return
 	}
+	if id := ticketIDOfIdentity(head.who); id != "" && node != "" && a.nodes[node] != nil && a.nodes[node].info.Features["hook_check"] < 1 {
+		// 工单分支的每次调用都要内核在调用前问网关（hook_check）：内核不支持就不开这一轮
+		if _, ok := a.ticketIdentity(head.who); ok {
+			a.ticketBlock(id, "kernel", "内核太旧，做不了调用前检查", "", true)
+		}
+		s.queue = nil
+		return
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})

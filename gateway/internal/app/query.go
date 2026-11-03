@@ -325,6 +325,9 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
+	if a.isTicketBranch(sid) && (p.Mode != nil || p.Workspaces != nil) {
+		return errors.New("这是工单的分支：权限模式和工作目录以工单为准，不能改")
+	}
 	st := a.store.Settings(sid)
 	oldAgent := a.execAgent(sid)
 	newAgentID := oldAgent.ID

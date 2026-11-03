@@ -94,13 +94,16 @@ func TestTicketEndToEndToLocalBranch(t *testing.T) {
 		t.Fatalf("工作目录：%+v", in.Workspaces)
 	}
 	ws := in.Workspaces[0]
-	if len(ws.Dirs) != 2 || ws.Dirs[0] != g.r.worktree("tk-1") || ws.Dirs[1] != tk.GitDir {
-		t.Fatalf("可写只有 worktree 和它自己的 git 目录：%v", ws.Dirs)
+	if len(ws.Dirs) != 1 || ws.Dirs[0] != g.r.worktree("tk-1") {
+		t.Fatalf("可写只有 worktree：%v", ws.Dirs)
 	}
 	for _, ro := range ws.RO {
 		if ro == "/" {
 			t.Fatal("不给整台机器只读")
 		}
+	}
+	if !in.HookChecks {
+		t.Fatal("工单的分支每次调用前都要内核问网关")
 	}
 	if !slices.Contains(ws.RO, g.r.gitDir()) {
 		t.Fatalf("<仓库>/.git 只读：%v", ws.RO)

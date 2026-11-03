@@ -49,6 +49,9 @@ func newGitEnv(t *testing.T) *gitEnv {
 	}
 	e := setup(t)
 	e.a.SetHosts(hookRealHosts{local, e.hosts})
+	e.a.mu.Lock()
+	e.a.nodes["test"].info.Features = map[string]int{"hook_check": 1} // 工单的分支要求内核支持调用前检查
+	e.a.mu.Unlock()
 	repo := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)

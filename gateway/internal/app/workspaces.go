@@ -34,9 +34,8 @@ type Workspace struct {
 	OS          string `json:"os,omitempty"`
 	Default     bool   `json:"default,omitempty"`
 	// Ticket 是工单的派生工作目录（设计 §16.2）：工单的 worktree。不存进 workspaces.json，由工单推出来；
-	// 只有这张工单的分支能挂它。ExtraRW 是除了目录本身还可写的（worktree 自己的 git 目录），ExtraRO 是只读的（<仓库>/.git）。
+	// 只有这张工单的分支能挂它。可写只有目录本身；ExtraRO 是只读的（<仓库>/.git，包括 worktree 自己的 git 目录）。
 	Ticket  string   `json:"ticket,omitempty"`
-	ExtraRW []string `json:"extra_rw,omitempty"`
 	ExtraRO []string `json:"extra_ro,omitempty"`
 }
 

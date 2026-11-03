@@ -84,9 +84,6 @@ func (a *App) syncTicketWorkspaces() {
 		}
 		root := ticketRepo{machine: repo.Host, root: repo.Path}
 		w := Workspace{ID: "w-" + t.ID, Host: repo.Host, Path: t.Worktree, OS: repo.OS, SandboxMode: repo.SandboxMode, Ticket: t.ID, ExtraRO: []string{root.gitDir()}}
-		if t.GitDir != "" {
-			w.ExtraRW = []string{t.GitDir}
-		}
 		want[w.ID] = w
 	}
 	kept := a.wss[:0]
@@ -118,7 +115,7 @@ func ticketKickoff(t ticket.Ticket) string {
 		fmt.Fprintf(&b, "补充（%s）：%s\n", n.By, n.Text)
 	}
 	b.WriteString("规矩：不要提交或推送——提交由系统在验收通过后做；改完用 Report ready 汇报，附上你跑过的测试；卡住了用 Report blocked 问一个具体问题；这件事不用做了用 Report not_needed 写理由。\n")
-	b.WriteString("沙箱读不了 ~/.gitconfig，用 git 前先 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null XDG_CONFIG_HOME=/nonexistent。")
+	b.WriteString("git status、git diff 可以用（git 目录是只读的，写不了索引会跳过）。")
 	return b.String()
 }
 
@@ -285,7 +282,7 @@ func (a *App) ticketRunEnded(s *sess, r *run) {
 	case t.WantCheck:
 		go a.acceptTicket(t.ID)
 	case r.reports == 0:
-		a.ticketBlock(t.ID, "silent", "干活的分支这一轮结束了，但没有用 Report 汇报结果或问题", "", true)
+		go a.settleSilentRun(t.ID)
 	}
 }
 
@@ -410,7 +407,7 @@ func (a *App) reworkTicket(t ticket.Ticket, log string) {
 func (a *App) acceptTicketAction(t ticket.Ticket, by string) (string, error) {
 	switch {
 	case t.Status == ticket.StatusReady:
-		return a.finishAccept(t)
+		return a.finishAccept(t, by, false)
 	case t.Status == ticket.StatusBlocked && t.BlockedBy == "rework":
 		if a.ticketBusy == nil {
 			a.ticketBusy = map[string]bool{}
@@ -443,7 +440,7 @@ func (a *App) acceptTicketAction(t ticket.Ticket, by string) (string, error) {
 					return
 				}
 				cur, _ = a.tickets.Get(t.ID)
-				if msg, err := a.finishAccept(cur); err == nil {
+				if msg, err := a.finishAccept(cur, by, true); err == nil {
 					a.ticketPush(t.ID, "ready", msg, "")
 				}
 			}
@@ -453,9 +450,12 @@ func (a *App) acceptTicketAction(t ticket.Ticket, by string) (string, error) {
 	return "", fmt.Errorf("工单还没有就绪（现在是 %s）", t.Status)
 }
 
-// finishAccept 收下：done、收尾。调用方持有锁。
-func (a *App) finishAccept(t ticket.Ticket) (string, error) {
-	reason := fmt.Sprintf("收下了：提交 %s，验收结果 %s", t.Commit, clip(strings.TrimSpace(t.CheckLog), 100))
+// finishAccept 收下：done、收尾；证据是提交和验收结果，写明是谁收下的；返工用完“先收下”的（forced）还写明验收没过。调用方持有锁。
+func (a *App) finishAccept(t ticket.Ticket, by string, forced bool) (string, error) {
+	reason := fmt.Sprintf("由 %s 收下：提交 %s，验收结果 %s", by, t.Commit, clip(strings.TrimSpace(t.CheckLog), 100))
+	if forced {
+		reason = fmt.Sprintf("验收没过，由 %s 收下：提交 %s，最近一次验收 %s", by, t.Commit, clip(strings.TrimSpace(t.CheckLog), 100))
+	}
 	if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) {
 		t.Status, t.Reason, t.WantCheck, t.BlockedBy = ticket.StatusDone, reason, false, ""
 	}); err != nil {
@@ -521,7 +521,7 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 		if t.Renewals >= ticket.MaxRenewals {
 			return fmt.Errorf("这张工单已经续了 %d 次，不能再续了；只能叫停或放弃", ticket.MaxRenewals)
 		}
-		what := map[string]string{"rework": "再给 2 次返工", "budget": "再给一份预算", "interrupted": "重启中断后续上", "sandbox": "沙箱问题后续上", "error": "出错后续上", "silent": "没汇报后续上"}[t.BlockedBy]
+		what := map[string]string{"rework": "再给 2 次返工", "budget": "再给一份预算", "interrupted": "重启中断后续上", "sandbox": "沙箱问题后续上", "kernel": "更新内核后续上", "error": "出错后续上", "silent": "没汇报后续上"}[t.BlockedBy]
 		if what == "" {
 			what = "续上"
 		}
@@ -709,5 +709,47 @@ func (a *App) ticketReported(id, status, text, question string) {
 			a.wrapUpTicket(t)
 		}
 		a.publishCommitments()
+	}
+}
+
+// settleSilentRun 是分支这一轮结束了但没有 Report：worktree 里有改动就照常验收（当作 ready）；
+// 没有改动才受阻，理由是“这一轮结束了，没有改动也没有汇报”。不持有锁。
+func (a *App) settleSilentRun(id string) {
+	a.mu.Lock()
+	if a.ticketBusy == nil {
+		a.ticketBusy = map[string]bool{}
+	}
+	t, ok := a.tickets.Get(id)
+	if !ok || ticket.IsEnded(t.Status) || t.Status != ticket.StatusWorking || a.ticketBusy[id] {
+		a.mu.Unlock()
+		return
+	}
+	repo, err := a.ticketRepoOf(t)
+	a.ticketBusy[id] = true
+	a.mu.Unlock()
+	dirty := false
+	if err == nil {
+		dirty, err = a.worktreeDirty(a.ctx, t, repo)
+	}
+	a.mu.Lock()
+	delete(a.ticketBusy, id)
+	cur, ok := a.tickets.Get(id)
+	if !ok || cur.Status != ticket.StatusWorking {
+		a.mu.Unlock()
+		return
+	}
+	switch {
+	case err != nil:
+		a.ticketBlock(id, "error", "看不出 worktree 有没有改动："+err.Error(), "", true)
+		a.mu.Unlock()
+	case dirty:
+		if _, uerr := a.tickets.Update(id, func(t *ticket.Ticket) { t.WantCheck = true }); uerr != nil {
+			a.ticketHealth(uerr)
+		}
+		a.mu.Unlock()
+		a.acceptTicket(id)
+	default:
+		a.ticketBlock(id, "silent", "这一轮结束了，没有改动也没有汇报", "", true)
+		a.mu.Unlock()
 	}
 }
