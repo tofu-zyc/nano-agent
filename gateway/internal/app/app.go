@@ -314,6 +314,17 @@ type queued struct {
 	ticket  uint64          // immutable queue admission order; cleared together with this entry
 	inner   bool            // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
 	report  *session.Report // 宿主生成的报告卡片（分支报告）：随这条消息一起进历史
+	trig    *trigger        // 触发这一轮的消息（群里排上这次回复的那条点名）；没有就是这一项自己的 m
+}
+
+// trigger 是触发一轮的那条消息：谁、在哪、消息 ID 和开头一段。工单的派活人看它，不采信模型填的。
+// 记在排队的那一项上、这一轮开始时带进 run，不记在会话上：这一轮还在跑时别人又点名，改不掉这一轮是谁派的。
+type trigger struct {
+	who   string // 渠道名:发送人 ID
+	ch    string // 渠道名
+	chat  string // 对话 ID
+	msgID string
+	text  string // 开头 200 字
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -331,6 +342,7 @@ type out struct {
 }
 
 type run struct {
+	trig                 *trigger // 触发这一轮的消息
 	hook                 *hookInvocation
 	experienceActions    []string
 	experienceActionTurn int
@@ -752,7 +764,7 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		}
 		a.listenGroup(c.s, ep, m, who)
 		if m.Mentioned || groupMentionsName(m.Text, a.agentOf(c.s.sid).Name) {
-			a.groupReply(c.s, ep, who)
+			a.groupReply(c.s, ep, who, m)
 		}
 		return
 	}
@@ -1423,7 +1435,7 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{hook: head.hook, scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+	r := &run{trig: a.triggerOf(head), hook: head.hook, scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
 		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(8)), asked: text,
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}

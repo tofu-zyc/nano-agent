@@ -79,6 +79,7 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		}
 		names = append(names, "SendFile")
 		tools = a.groupTools(sid, a.toolsNamed(sid, names...))
+		tools = append(tools, a.toolsNamed(sid, "Ticket")...) // 只有设了团队规则的群有；不在场景工具表里，不能被选
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
 			tools = a.toolsFor(sid, n, false, admin)

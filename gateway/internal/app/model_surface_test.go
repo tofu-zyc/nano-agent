@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"nano-agent/gateway/internal/host"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,6 +45,7 @@ var surfaceCap = map[string]int{
 	"room-member-scene":    5666,
 	"room-member-stage":    905,
 	"group-external-scene": 576,
+	"group-team":           3000,
 }
 
 type surfaceRole struct {
@@ -165,6 +168,24 @@ func surfaceRoles() []surfaceRole {
 			e.a.roomHumanSay(room, "李四", "大家好")
 			e.a.mu.Unlock()
 			return e.a.roomMemberSID(agents.DefaultID, info.ID)
+		}},
+		// 设了团队规则的外部群：多一个 Ticket 工具
+		{"group-team", func(t *testing.T, e *env) string {
+			e.sid = "fake:c1"
+			e.say("大家好", group(true), from("u2", "李四"))
+			e.k.expect(proto.TInput)
+			ws, err := e.a.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.a.mu.Lock()
+			defer e.a.mu.Unlock()
+			st := e.a.store.Settings(e.sid)
+			st.Scene = &scene.Rules{Team: &scene.Team{Roster: []string{"fake:u2"}, Workspace: ws.ID, Check: "make test"}}
+			if err := e.a.store.SaveSettings(e.sid, st); err != nil {
+				t.Fatal(err)
+			}
+			return e.sid
 		}},
 		// 带规则的外部群
 		{"group-external-scene", func(t *testing.T, e *env) string {

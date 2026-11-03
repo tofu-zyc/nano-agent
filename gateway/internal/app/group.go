@@ -152,7 +152,7 @@ func groupMentionsName(text, name string) bool {
 }
 
 // groupReply 排一次回复：等 2 秒，把紧接着的几条一起交给模型。调用方持有锁。
-func (a *App) groupReply(s *sess, ep endpoint, who string) {
+func (a *App) groupReply(s *sess, ep endpoint, who string, m channel.Message) {
 	if s.groupTimer != nil {
 		return // 已经排上了，后面的消息都进了历史，等这一次一起看
 	}
@@ -162,6 +162,7 @@ func (a *App) groupReply(s *sess, ep endpoint, who string) {
 		return
 	}
 	sid, key := s.sid, ep.key()
+	trig := &trigger{who: who, ch: ep.ch, chat: ep.chat, msgID: m.MsgID, text: clipText(m.Text, 200)} // 排上这次回复的那条点名
 	s.groupTimer = time.AfterFunc(2*time.Second, func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -172,7 +173,7 @@ func (a *App) groupReply(s *sess, ep endpoint, who string) {
 		s.groupFresh = false
 		s.groupProactive, s.groupObserve = false, nil
 		ep2 := parseEndpoint(key)
-		s.queue = append(s.queue, queued{ep: ep2, who: who, trigger: true, m: channel.Message{ChatID: ep2.chat, Group: true}})
+		s.queue = append(s.queue, queued{ep: ep2, who: who, trigger: true, trig: trig, m: channel.Message{ChatID: ep2.chat, Group: true}})
 		a.startRun(s)
 	})
 }
@@ -457,4 +458,21 @@ func (a *App) groupGate(s *sess, now time.Time) float64 {
 // isNoteMsg 是网关自己放进历史的说明（记忆、近况、想起来的、[系统]），不是谁说的话。
 func isNoteMsg(content string) bool {
 	return strings.HasPrefix(content, memNoteOpen) || strings.HasPrefix(content, recallOpen) || strings.HasPrefix(content, lifeRecentOp) || strings.HasPrefix(content, "[系统] ")
+}
+
+// triggerOf 是触发这一轮的消息：群里是排队时记下的那条点名；其余（私聊、议题）就是这一项自己的消息。
+func (a *App) triggerOf(head queued) *trigger {
+	if head.trig != nil {
+		return head.trig
+	}
+	return &trigger{who: head.who, ch: head.ep.ch, chat: head.ep.chat, msgID: head.m.MsgID, text: clipText(head.m.Text, 200)}
+}
+
+// clipText 取开头 n 个字。
+func clipText(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
