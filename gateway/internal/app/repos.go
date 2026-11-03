@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -40,6 +41,9 @@ func (a *App) openRepos() {
 	}
 	a.repos = s
 	a.repoRTs = map[string]*repoRT{}
+	if base := os.Getenv("NANO_GITHUB_API"); base != "" && a.repoAPIBase == "" { // GitHub Enterprise，或者界面检查里的假 GitHub
+		a.repoAPIBase = base
+	}
 }
 
 // startRepos 让每个连接开始接事件（启动时调用一次，调用方不持有锁）。

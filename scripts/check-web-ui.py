@@ -28,6 +28,7 @@ GATEWAY = os.path.join(ROOT, "gateway", "nano-gateway")
 SHOTS = os.path.join(ROOT, "build", "ui-check")
 PASSWORD = "ui-check-password"
 GROUP_SID = "telegram:ui-group"
+FAKE_GH_API = ""  # 界面检查里的假 GitHub 的地址（main 里起）
 FAILS = []
 
 
@@ -59,6 +60,8 @@ def start_gateway(tmp):
                 f'[web]\nlisten = "127.0.0.1:{port}"\npassword = "{PASSWORD}"\n'
                 '[cli]\nenabled = false\n[llm]\nprovider = "mock"\nmodel = "mock"\n')
     env = {"PATH": "/usr/bin:/bin", "HOME": home, "NANO_HOME": nano, "USERPROFILE": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+    if FAKE_GH_API:
+        env["NANO_GITHUB_API"] = FAKE_GH_API
     log = open(os.path.join(tmp, "gateway.log"), "w")
     proc = subprocess.Popen([GATEWAY, "-c", os.path.join(nano, "gateway.toml")], cwd=tmp, env=env,
                             stdout=subprocess.DEVNULL, stderr=log)
@@ -218,6 +221,90 @@ def check_team_card(page, url):
     page.screenshot(path=os.path.join(SHOTS, "team-card.png"))
 
 
+def start_fake_github():
+    """一个最小的假 GitHub：只认 token ui-token，回 /user 和仓库信息。保存连接时网关用 token 查一次。"""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.headers.get("Authorization") != "Bearer ui-token":
+                code, body = 401, {"message": "Bad credentials"}
+            elif self.path == "/user":
+                code, body = 200, {"login": "ui-bot"}
+            elif self.path == "/repos/acme/app":
+                code, body = 200, {"default_branch": "main"}
+            else:
+                code, body = 404, {"message": "Not Found"}
+            raw = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def check_repo_connect(page, url):
+    """工作目录节点上的“GitHub 连接”：填错 token 不保存、错误里没有 token；填对了保存，token 不回显；webhook 显示地址。"""
+    ws = api(page, "GET", "/api/workspaces")[1]
+    items = ws if isinstance(ws, list) else ws.get("items") or ws.get("workspaces") or []
+    repo = [w for w in items if w["path"].endswith("/repo")]
+    if not repo:
+        fail("找不到种子工作目录：" + json.dumps(ws, ensure_ascii=False)[:200])
+        return
+    page.goto(url + "#/")
+    page.reload()
+    page.wait_for_selector(f'g.node[data-id="w:{repo[0]["id"]}"]', timeout=8000)
+    page.click(f'g.node[data-id="w:{repo[0]["id"]}"]')
+    try:
+        page.wait_for_selector("[data-testid=repo-connect]", timeout=5000)
+    except Exception:
+        fail("工作目录面板里没有“GitHub 连接”")
+        return
+    page.click("[data-testid=repo-connect-btn]")
+    page.fill("[data-testid=repo-owner]", "acme")
+    page.fill("[data-testid=repo-name]", "app")
+    page.fill("[data-testid=repo-token]", "wrong-token-zzz")
+    page.fill("[data-testid=repo-roster]", "gh:alice")
+    page.click("[data-testid=repo-save]")
+    try:
+        page.wait_for_selector("[data-testid=repo-error]", timeout=8000)
+        msg = page.locator("[data-testid=repo-error]").inner_text()
+        if "wrong-token-zzz" in msg:
+            fail("错误里不能有 token：" + msg)
+        else:
+            ok("token 不对：不保存，错误里没有 token")
+    except Exception:
+        fail("token 不对应该报错")
+    code, cur = api(page, "GET", "/api/repos")
+    if cur.get("items"):
+        fail("token 不对不该保存")
+    page.fill("[data-testid=repo-token]", "ui-token")
+    page.select_option("[data-testid=repo-intake]", "webhook")
+    page.fill("[data-testid=repo-secret]", "ui-secret")
+    page.click("[data-testid=repo-save]")
+    try:
+        page.wait_for_selector("[data-testid=repo-summary]", timeout=8000)
+    except Exception:
+        fail("保存没成功：" + page.locator("[data-testid=repo-connect]").inner_text()[:300])
+        return
+    summary = page.locator("[data-testid=repo-summary]").inner_text()
+    hook = page.locator("[data-testid=repo-webhook-url]").inner_text()
+    body = json.dumps(api(page, "GET", "/api/repos")[1], ensure_ascii=False)
+    if "ui-bot" in summary and "acme/app" in summary and hook.endswith("/webhook") and "ui-token" not in body and "ui-secret" not in body:
+        ok("GitHub 连接：保存时查出机器人账号，webhook 地址有，token 和密钥不回显")
+    else:
+        fail("保存后的显示不对：" + summary + " " + hook + " " + body[:200])
+    page.screenshot(path=os.path.join(SHOTS, "repo-connect.png"))
+
+
 def seed_pending(tmp):
     """起网关之前放一个上次失败的定时任务（宿主自己记下的受阻，没有汇报）；再起一次网关，用 /session fork 分出一个分支，
     停掉，往承诺记录里写一条分支上带问题的汇报（Report 工具只有模型能调）。之后正式的那一次网关启动时，
@@ -315,6 +402,9 @@ def main():
         raise SystemExit("先 make all")
     os.makedirs(SHOTS, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="nano-ui-")
+    fake_gh = start_fake_github()
+    global FAKE_GH_API
+    FAKE_GH_API = "http://127.0.0.1:%d" % fake_gh.server_address[1]
     seed_pending(tmp)
     proc, url, nano, sock = start_gateway(tmp)
     errors = []
@@ -917,6 +1007,7 @@ def run(page, url, nano):
         fail("承诺列表接口不对：" + str(code) + json.dumps(cm, ensure_ascii=False)[:200])
     check_pending(page, url)
     check_team_card(page, url)
+    check_repo_connect(page, url)
     # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
     code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
     if code != 200:

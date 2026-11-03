@@ -1277,6 +1277,8 @@ type Auth struct {
 
 ### 16.3 5c：GitHub
 
+现状：**已有**（5c，2026-11-03）。实现细节见 [运行时](RUNTIME.md#github5c)。
+
 **仓库连接**：`data/repos.json`，在网页上仓库工作目录的设置里填。
 
 ```go
