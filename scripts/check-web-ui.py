@@ -27,6 +27,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATEWAY = os.path.join(ROOT, "gateway", "nano-gateway")
 SHOTS = os.path.join(ROOT, "build", "ui-check")
 PASSWORD = "ui-check-password"
+GROUP_SID = "telegram:ui-group"
 FAILS = []
 
 
@@ -165,6 +166,55 @@ def check_pending(page, url):
         fail("N 为 0 时标记应该不显示")
 
 
+def check_team_card(page, url):
+    """外部群的场景设置里的“团队”卡片：勾上、勾名单成员（显示名字）、选工作目录，保存后重新打开还在。"""
+    target = url + "#/sessions/" + urllib.request.quote(GROUP_SID, safe="")
+    def open_settings():
+        page.goto(target)
+        page.reload()
+        page.click("button[title=会话设置]")
+    open_settings()
+    try:
+        page.wait_for_selector("[data-testid=team-card]", timeout=8000)
+    except Exception:
+        page.screenshot(path=os.path.join(SHOTS, "team-card-missing.png"))
+        fail("外部群的场景设置里没有“团队”卡片：" + page.locator("body").inner_text()[:300].replace("\n", " | "))
+        return
+    on = page.locator("[data-testid=team-on]")
+    if on.is_checked():
+        fail("团队默认不该开着")
+    on.check()
+    try:
+        page.wait_for_selector("[data-testid=team-card] select[data-testid=team-workspace]", timeout=5000)
+    except Exception:
+        fail("勾上之后没有出现工作目录：" + page.locator("[data-testid=team-card]").inner_text()[:300])
+        return
+    card = page.locator("[data-testid=team-card]")
+    text = card.inner_text()
+    if "张三" in text and "李四" in text and "telegram:1" not in text and "feishu:ou_x" not in text:
+        ok("团队名单显示名字，不显示 ID")
+    else:
+        fail("名单应该显示名字、不显示 ID：" + text[:300])
+    card.locator("label", has_text="张三").locator("input[type=checkbox]").check()
+    page.wait_for_function("document.querySelector('[data-testid=team-card] input[type=checkbox]:checked') !== null")
+    sel = card.locator("[data-testid=team-workspace]")
+    want = sel.evaluate("el => el.value")
+    if not want:
+        want = sel.evaluate("el => Array.from(el.options).map(o => o.value).find(v => v)")
+        sel.select_option(want)
+    time.sleep(0.8)
+    open_settings()
+    page.wait_for_selector("[data-testid=team-card]", timeout=8000)
+    card = page.locator("[data-testid=team-card]")
+    boxes = card.locator("label", has_text="张三").locator("input[type=checkbox]")
+    if (page.locator("[data-testid=team-on]").is_checked() and boxes.count() == 1 and boxes.first.is_checked()
+            and page.locator("[data-testid=team-workspace]").evaluate("el => el.value") == want and want):
+        ok("团队设置保存后重新打开还在")
+    else:
+        fail("团队设置保存后没留住：" + card.inner_text()[:300])
+    page.screenshot(path=os.path.join(SHOTS, "team-card.png"))
+
+
 def seed_pending(tmp):
     """起网关之前放一个上次失败的定时任务（宿主自己记下的受阻，没有汇报）；再起一次网关，用 /session fork 分出一个分支，
     停掉，往承诺记录里写一条分支上带问题的汇报（Report 工具只有模型能调）。之后正式的那一次网关启动时，
@@ -192,6 +242,9 @@ def seed_pending(tmp):
                 return json.loads(r.read().decode() or "{}")
 
         call("POST", "/api/login", {"password": PASSWORD})
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo, exist_ok=True)
+        call("POST", "/api/workspaces", {"host": "本机", "path": repo})
         call("POST", "/api/chat", {"sid": "main", "text": "你好"})
         time.sleep(1)
         call("POST", "/api/chat", {"sid": "main", "text": "/session fork 界面检查·有问题的分支"})
@@ -210,6 +263,17 @@ def seed_pending(tmp):
             proc.wait(5)
         except subprocess.TimeoutExpired:
             proc.kill()
+    # 一个外部群会话（group: true，成员表里两个人）：“团队”卡片的检查用
+    key = GROUP_SID.encode().hex()
+    sdir = os.path.join(data, "v1", "sessions")
+    os.makedirs(sdir, exist_ok=True)
+    os.makedirs(os.path.join(data, "v1", "active"), exist_ok=True)
+    with open(os.path.join(data, "v1", "active", key), "w") as f:
+        f.write(key)
+    with open(os.path.join(sdir, key + ".jsonl"), "w") as f:
+        f.write(json.dumps({"role": "user", "content": "[10:00][张三] 大家好"}, ensure_ascii=False) + "\n")
+    with open(os.path.join(sdir, key + ".settings.json"), "w") as f:
+        json.dump({"group": True, "members": {"张三": "telegram:1", "李四": "feishu:ou_x"}}, f, ensure_ascii=False)
     rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "branch", "id": branch, "agent": "default",
            "status": "blocked", "text": "不知道要不要带上周末", "question": "要不要加上周末？"}
     raw = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode()
@@ -849,6 +913,7 @@ def run(page, url, nano):
     else:
         fail("承诺列表接口不对：" + str(code) + json.dumps(cm, ensure_ascii=False)[:200])
     check_pending(page, url)
+    check_team_card(page, url)
     # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
     code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
     if code != 200:

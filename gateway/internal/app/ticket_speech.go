@@ -39,20 +39,24 @@ func (a *App) ticketPush(id, state, text, question string) {
 	if !a.notifyGate(commit.KindTicket, id, t.Agent, state, text+"\x00"+question) {
 		return
 	}
-	body := ticketBody(t, state, text, question)
+	name := t.Agent
+	if ag, ok := a.agentByID(t.Agent); ok && ag.Name != "" {
+		name = ag.Name
+	}
+	body := ticketBody(t, state, text, question, name)
 	src := t.Auth.Source
 	a.publish(events.Event{T: "say", SID: t.Auth.Scene, Text: body})
 	a.deliver(endpoint{ch: src.Channel, chat: src.Chat}, body, src.MsgID)
 }
 
-func ticketBody(t ticket.Ticket, state, text, question string) string {
+func ticketBody(t ticket.Ticket, state, text, question, agentName string) string {
 	label := map[string]string{"ready": "就绪", "blocked": "受阻", "failed": "失败"}[state]
 	if question != "" {
 		label = "需要你回答"
 	}
 	s := fmt.Sprintf("[工单 %s「%s」· %s] %s", t.ID, t.Title, label, text)
 	if question != "" {
-		s += "\n问：" + question
+		s += "\n问：" + question + "\n@" + agentName + " 回复就行"
 	}
 	return s
 }

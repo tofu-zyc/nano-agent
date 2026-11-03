@@ -390,6 +390,17 @@ func TestTicketCommitFacts(t *testing.T) {
 	if p, why := phase(stopped); p != commit.Stopped || why != "不做了" || stopped.EndedAt != 900 {
 		t.Fatalf("叫停：%s %s %d", p, why, stopped.EndedAt)
 	}
+	// 宿主记下的受阻：Blocked 是理由，Mark 是 b:<Updated>；没写理由也是受阻
+	blocked := with(func(x *ticket.Ticket) { x.Status, x.Reason = ticket.StatusBlocked, "返工用完了，验收还没过" })
+	if p, why := phase(blocked); p != commit.Blocked || why != "返工用完了，验收还没过" || blocked.Facts.Mark != "b:900" || blocked.At != 900 {
+		t.Fatalf("blocked：%s %s %q", p, why, blocked.Facts.Mark)
+	}
+	if p, _ := phase(with(func(x *ticket.Ticket) { x.Status = ticket.StatusBlocked })); p != commit.Blocked {
+		t.Fatal("没有理由的 blocked 也是受阻")
+	}
+	if ticket.IsEnded(ticket.StatusBlocked) {
+		t.Fatal("blocked 不是结束状态")
+	}
 	// 没有理由的结束算受阻（共用的不变量）
 	if p, _ := phase(with(func(x *ticket.Ticket) { x.Status = ticket.StatusStopped })); p != commit.Blocked {
 		t.Fatalf("没有理由的叫停：%s", p)

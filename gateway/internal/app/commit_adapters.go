@@ -367,6 +367,9 @@ func ticketCommit(t ticket.Ticket, now int64) commitItem {
 		f.Running = true
 	case ticket.StatusPaused:
 		f.Paused = true
+	case ticket.StatusBlocked: // 宿主记下的受阻；Mark 是 b:<Updated>，主人点“知道了”之后再有新的受阻才会再出现
+		f.Blocked, f.Mark = firstNonEmpty(t.Reason, "受阻了"), fmt.Sprintf("b:%d", t.Updated)
+		c.At = t.Updated
 	case ticket.StatusReady:
 		if t.PR != "" {
 			f.Ready, f.Mark = "PR 开着，等人合并", "pr:"+t.PR

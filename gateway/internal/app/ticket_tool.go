@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -112,6 +113,10 @@ func (a *App) ticketCreate(s *sess, team *scene.Team, who string, x ticketArgs) 
 	if n := utf8.RuneCountInString(goal); n > ticket.MaxGoal {
 		return "", fmt.Errorf("goal 最多 %d 字（现在 %d）", ticket.MaxGoal, n)
 	}
+	mode, tools, err := a.ticketAuthority(s.sid)
+	if err != nil {
+		return "", err
+	}
 	ws := a.findWorkspace(team.Workspace)
 	if ws == nil || !a.hostUsable(ws.Host) {
 		return "", errors.New("团队的仓库所在的机器现在不在线，建不了工单")
@@ -119,8 +124,8 @@ func (a *App) ticketCreate(s *sess, team *scene.Team, who string, x ticketArgs) 
 	t := s.run.trig
 	t0, existed, err := a.tickets.Create(ticket.Ticket{
 		Agent: a.execAgentID(s.sid), Title: title, Goal: goal, Check: team.Check, Budget: team.EffectiveBudget(),
-		Auth: ticket.Auth{By: who, Scene: s.sid, Workspace: team.Workspace, Mode: a.workspaceBase(s.sid).mode,
-			Tools: a.sceneToolAllow(s.sid), At: a.now().Unix(),
+		Auth: ticket.Auth{By: who, Scene: s.sid, Workspace: team.Workspace, Mode: mode,
+			Tools: tools, At: a.now().Unix(),
 			Source: ticket.Source{Channel: t.ch, Chat: t.chat, MsgID: t.msgID, Text: t.text}},
 	})
 	if err != nil {
@@ -229,4 +234,30 @@ func (a *App) cancelTicketLocked(t ticket.Ticket, reason string) error {
 	a.ticketHealth(nil)
 	a.publishCommitments()
 	return nil
+}
+
+// ticketTools 是工单的分支能用的工具（设计 §16.1）：内核的文件和命令工具，加上 Job、Report、联网和技能。
+// 不给：对外发声和派生新承诺的（Message、SendFile、Session、Schedule、Hook、FollowUp、Agenda、Ticket）、
+// 心智工具（Idea、Mind、Diary）、网关管理（Gateway、GatewayAdmin）、Knowledge。和团队群的场景工具表无关。
+var ticketTools = []string{"Read", "Write", "Edit", "Grep", "Shell", "Job", "Report", "WebSearch", "WebFetch", "Skill"}
+
+// ticketAuthority 是授权记录里的权限模式和工具：说的是工单的分支能用什么，不是团队群自己的设置。
+// 模式取 agent 的默认模式，最高 auto（不用 full）；agent 是只读的就接不了工单。工具是上面的固定集合和 agent 的工具上限的交集。
+func (a *App) ticketAuthority(sid string) (mode string, tools []string, err error) {
+	mode = a.agentModeDefault(sid)
+	if r := modeRank(mode); r < modeRank(proto.ModeAsk) {
+		return "", nil, errors.New("这个 agent 是只读的，接不了工单")
+	} else if r > modeRank(proto.ModeAuto) {
+		mode = proto.ModeAuto
+	}
+	limit := a.agentOf(sid).Tools
+	for _, t := range ticketTools {
+		if len(limit) == 0 || slices.Contains(limit, t) {
+			tools = append(tools, t)
+		}
+	}
+	if len(tools) == 0 {
+		return "", nil, errors.New("这个 agent 的工具上限里没有工单需要的工具，接不了工单")
+	}
+	return mode, tools, nil
 }

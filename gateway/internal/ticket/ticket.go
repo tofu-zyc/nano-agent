@@ -36,6 +36,7 @@ const (
 	StatusOpen     = "open"     // 建好了，等开工
 	StatusWorking  = "working"  // 干活的分支在跑（5b）
 	StatusChecking = "checking" // 宿主在跑验收命令（5b）
+	StatusBlocked  = "blocked"  // 宿主记下的受阻：返工用完验收还没过、预算用完、推送或开 PR 失败；理由在 Reason（5b）
 	StatusReady    = "ready"    // 验收通过、已提交，等人收下（5b）
 	StatusDone     = "done"     // 收下了，或 PR 合并了
 	StatusDropped  = "dropped"  // 不用做了

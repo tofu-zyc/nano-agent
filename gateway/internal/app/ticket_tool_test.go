@@ -3,10 +3,12 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/host"
@@ -372,7 +374,10 @@ func TestTicketSpeechDiscipline(t *testing.T) {
 	push("ready", "改好了：验收通过", "") // 和上一条一样：不发
 	push("blocked", "验收没过", "继续改还是放弃？")
 	q := e.ch.wait(t, "需要你回答")
-	if !strings.Contains(q, "问：继续改还是放弃？") {
+	e.a.mu.Lock()
+	ag, _ := e.a.agentByID("default")
+	e.a.mu.Unlock()
+	if ag.Name == "" || !strings.Contains(q, "问：继续改还是放弃？") || !strings.Contains(q, "@"+ag.Name+" 回复就行") || strings.Contains(q, "/answer") {
 		t.Fatalf("问题：%q", q)
 	}
 	push("ready", "第二版", "")
@@ -399,4 +404,84 @@ func TestTicketSpeechDiscipline(t *testing.T) {
 		t.Fatalf("结束了的工单不发问题：%v", sent)
 	}
 	finishGroupRun(t, e, sid)
+}
+
+// 授权记录里的权限和工具说的是工单的分支，不是团队群自己的设置。
+func TestTicketAuthorityIsAboutTheTicketBranch(t *testing.T) {
+	create := func(e *env, sid string, id string) error {
+		mention(e, "@机器人 修登录", id, "u2", "李四")
+		e.k.expect(proto.TInput)
+		_, err := callTicket(e, sid, `{"action":"create","title":"修登录","goal":"x"}`)
+		finishGroupRun(t, e, sid)
+		return err
+	}
+	// 群会话自己设成只读：Auth.Mode 仍是 agent 的默认模式
+	e := setup(t)
+	sid := teamGroup(t, e)
+	e.a.mu.Lock()
+	st := e.a.store.Settings(sid)
+	st.Mode = "readonly"
+	_ = e.a.store.SaveSettings(sid, st)
+	want := e.a.agentModeDefault(sid)
+	e.a.mu.Unlock()
+	if err := create(e, sid, "g1"); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := e.a.tickets.Get("tk-1")
+	if tk.Auth.Mode != want || tk.Auth.Mode == "readonly" {
+		t.Fatalf("Auth.Mode 是 agent 的默认模式 %q，不是群会话的只读：%q", want, tk.Auth.Mode)
+	}
+	// 工具：固定的工单工具集；有 Shell，没有对外发声和派生承诺的
+	for _, must := range []string{"Read", "Write", "Edit", "Grep", "Shell", "Job", "Report", "WebSearch", "WebFetch", "Skill"} {
+		if !slices.Contains(tk.Auth.Tools, must) {
+			t.Errorf("工单工具里缺 %s：%v", must, tk.Auth.Tools)
+		}
+	}
+	for _, not := range []string{"Message", "SendFile", "Session", "Schedule", "Hook", "FollowUp", "Agenda", "Ticket", "Idea", "Mind", "Diary", "Gateway", "GatewayAdmin", "Knowledge"} {
+		if slices.Contains(tk.Auth.Tools, not) {
+			t.Errorf("工单工具里不该有 %s", not)
+		}
+	}
+	// 契约的范围显示新的值
+	if v := findCommit(e.a.Commitments("", ""), commit.KindTicket, "tk-1"); v == nil || !strings.Contains(v.Contract.Scope, "Shell") || strings.Contains(v.Contract.Scope, "SendFile") {
+		t.Fatalf("Scope：%+v", v)
+	}
+
+	// agent 的默认模式是 full：压成 auto
+	e2 := setup(t)
+	e2.a.cfg.Workspace.Mode = "full"
+	sid2 := teamGroup(t, e2)
+	if err := create(e2, sid2, "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := e2.a.tickets.Get("tk-1"); tk.Auth.Mode != "auto" {
+		t.Fatalf("full 压成 auto：%q", tk.Auth.Mode)
+	}
+
+	// agent 是只读的：接不了
+	e3 := setup(t)
+	e3.a.cfg.Workspace.Mode = "readonly"
+	sid3 := teamGroup(t, e3)
+	if err := create(e3, sid3, "g1"); err == nil || !strings.Contains(err.Error(), "只读") {
+		t.Fatalf("只读的 agent 接不了工单：%v", err)
+	}
+	if len(e3.a.tickets.List()) != 0 {
+		t.Fatal("不该有工单")
+	}
+
+	// agent 的工具上限：取交集
+	e4 := setup(t)
+	store, _ := withAgents(t, e4)
+	ag, _ := store.Get(agents.DefaultID)
+	ag.Tools = []string{"Read", "Shell", "SendFile"}
+	if err := store.Update(ag); err != nil {
+		t.Fatal(err)
+	}
+	sid4 := teamGroup(t, e4)
+	if err := create(e4, sid4, "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := e4.a.tickets.Get("tk-1"); !slices.Equal(tk.Auth.Tools, []string{"Read", "Shell"}) {
+		t.Fatalf("工具是固定集合和 agent 上限的交集：%v", tk.Auth.Tools)
+	}
 }

@@ -106,7 +106,7 @@
       <div class="p-label">准入名单（管理员总算在内）
         {#each speakerList as [name, who] (who)}
           <label class="p-row"><input type="checkbox" checked={team.roster.includes(who)} onchange={(e) => toggleRoster(who, (e.target as HTMLInputElement).checked)} />
-            <span>{name} <span class="tiny">{who}</span></span></label>
+            <span>{name}</span></label>
         {:else}
           <p class="p-note p-small">这个群里还没有人说过话。有人说话以后，在这里勾选。</p>
         {/each}
