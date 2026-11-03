@@ -1288,7 +1288,7 @@ type Repo struct {
 	Agent     string     `json:"agent,omitempty"`    // 议题会话由哪个 agent 回答，空是默认 agent
 	Owner     string     `json:"owner"`
 	Name      string     `json:"name"`
-	Base      string     `json:"base"`               // 默认分支，空表示取 origin/HEAD
+	Base      string     `json:"base"`               // 默认分支，空就问 GitHub
 	Token     string     `json:"token"`              // 加密存（internal/secret）
 	Bot       string     `json:"bot"`                // token 对应的 GitHub 账号，保存时用 token 查出来，不用手填
 	Intake    string     `json:"intake"`             // poll（默认）| webhook
@@ -1303,7 +1303,8 @@ type Repo struct {
   - 只在网关里用：不进模型、不进工具参数、不进命令行参数，错误信息和日志里也不带。
   - 保存连接时用它查一次账号（填 `Bot`）和这个仓库能不能访问，不通就不保存。
 - 要用一个单独的 GitHub 账号。用主人自己的账号时，主人自己的评论会被当成 agent 发的而忽略。网页上写明这一点。
-- 仓库工作目录连了 GitHub，这个工作目录的工单就都走 PR 交付，不管工单是从团队群还是议题来的；问题和结果仍回到原消息。起点和 PR 的目标分支都是 fetch 之后的 `origin/<Base>`。
+- 仓库工作目录连了 GitHub，这个工作目录的工单就都走 PR 交付，不管工单是从团队群还是议题来的；问题和结果仍回到原消息。起点是从连接的网址（不是 `origin`）fetch 下来的 `<Base>`，放在私有引用 `refs/nano/base`；PR 的目标分支是 `<Base>`。
+- API 地址只有 github.com。`NANO_GITHUB_API` 只给测试换成假 GitHub；不支持 GitHub Enterprise（推送的网址和凭据的键都只认 github.com）。
 - 遇到 GitHub 的限流（403、429 带 Retry-After 或 X-RateLimit-Reset）按它说的时间退避，不加快重试。
 
 **事件怎么进来**：两种都做，每个仓库选一种。
@@ -1311,17 +1312,25 @@ type Repo struct {
 - 轮询：
   - 每 `Interval` 秒，用 `since` 和 ETag 取新议题、新评论，以及工单相关 PR 的状态和检查结果。
   - 游标存在仓库连接的状态文件里。
+  - 只有在上一轮游标之后**创建**的议题才当新议题受理：`/issues` 按更新时间返回，旧议题来一条评论、改个标签都会出现在里面，不能当成新开的。评论、行内意见同样按创建时间。按键去重是第二道（键表有上限，旧键会被挤掉）。
+  - 评论按更新时间排（`sort=updated`），一页 100 条取不完时游标不会跳过没取到的。
 - webhook：`POST /api/repos/{id}/webhook`。
   - 不要登录，但必须校验 `X-Hub-Signature-256`。
   - 正文最多 1MB。
   - 只认 issues、issue_comment、pull_request、pull_request_review、pull_request_review_comment、check_suite。
-  - 先记，再回 2xx。
+  - 先记，再回 2xx：记下就回，处理放到后台（和轮询串行）。GitHub 最多等 10 秒，处理里有 API 调用（取议题正文、取检查详情），不能让投递等着。
+  - 这一条路由不过 `X-Nano` 和 Host 的守卫（GitHub 不是浏览器），靠签名。例外只认 `POST /api/repos/<id>/webhook` 这一个形状，其他路由照旧。
   - 只在这个仓库选了 webhook、配了密钥时才接；否则和 ID 不存在一样，返回 404。签名不对返回 401。
   - 网关要能从公网访问，这由主人自己配。网页上显示要填的地址和密钥。
 - 去重的键是 GitHub 对象本身，两种方式共用，切换方式或两边都收到也只受理一次：
   - 议题、评论、审阅意见按对象 ID：`issue:<id>`、`comment:<id>`、`review:<id>`。不要带 `updated_at`：议题每来一条评论它的 `updated_at` 都会变，带上就会把原来的正文当成新消息再交给 agent 一次。改了正文也不重新受理。
   - 状态按"对象加状态"：`pr:<号>:merged`、`pr:<号>:closed`、`check:<suite id>:<结论>`。
   - webhook 的 `X-GitHub-Delivery` 另记一份，同一次投递重发直接丢。
+- 处理失败：
+  - 存储写不进去之类的，事件留着，下次重放；每个事件最多重放 5 次，之后丢掉、记一条警告。
+  - 业务上的拒绝（比如工单续满了）算处理完，记一笔日志，不再重放。
+  - `repo.*` 事件日志每个事件只写一次，重放不重写。
+- 检查的结论里 failure、timed_out、cancelled、action_required、startup_failure 都算失败，轮询和 webhook 一样。
 - PR 和检查的状态既交给工单处理，也写进事件日志（`repo.*`），Hook 可以订阅。
 
 **GitHub 渠道**（`internal/channel/github.go`）：议题和 PR 是对话，正文和评论是消息。
@@ -1343,7 +1352,7 @@ type Repo struct {
 - 网关这边只有两处会填 `env`：5c 的推送和 5d 的外部 agent。Hook 命令不填，Hook 的规格里也没有这一项。
 - 执行器的限制：
   - 最多 16 项，总共不超过 8KB；
-  - 名字是 `[A-Z_][A-Z0-9_]*`，值里不能有 NUL；
+  - 名字是 `[A-Z_][A-Z0-9_]*`，值里不能有 NUL（网关填 `env` 时就查：执行器用的 JSON 库把 `\u0000` 之后的截掉，自己看不出来）；
   - 拒绝 PATH、HOME、TMPDIR、SHELL、IFS、`LD_*`、`DYLD_*`、`NANO_*`、BASH_ENV、ENV。
 - 推送时凭据走 `GIT_CONFIG_COUNT`、`GIT_CONFIG_KEY_0`、`GIT_CONFIG_VALUE_0`：
   - 键是按网址限定的 `http.https://github.com/.extraheader`，只发给 github.com；
@@ -1367,11 +1376,18 @@ type Repo struct {
   - PR 被关掉、没合并：stopped，理由是 PR 被关了。
   - PR 上的 CI 失败：算一次返工，上限同 5b。
   - 名单里的人在 PR 上提的审阅意见：作为 `note` 送进分支，不算返工次数。
+    - 审阅（带正文、状态是 CHANGES_REQUESTED 或 COMMENTED）和行内意见不用点名。
+    - PR 对话里的普通评论要点名 `@<Bot>` 才送：那里也是人和人说话的地方。
+    - APPROVED 的审阅只记事件日志，不送进分支：批准不是要它再干一轮。
+  - PR 开了之后的各轮（审阅意见、CI 返工）：结果作为评论发在 PR 上，不再发回原消息。推了新提交就写"改了：<摘要>（提交 <前 7 位>）"；没推新的就写"看过了，没有新的改动：<摘要>"。受阻的问题仍发回原消息。
+- 按分支查到的 PR，只有开着的才接着用；合并了或关了的不算（可能是以前装的网关留下的同名分支），开新的。
 - 推送或开 PR 失败：blocked，带上错误。重试前先查远端分支和 PR 在不在，不重放已经成功的那一步。
+  - 重试也占着工单（同一时刻只一个后台步骤）；先收下的那句说明，重试时照样写进 PR。
 
 **验收**：用本地的假 GitHub（httptest）。
 
 - 轮询和 webhook 各自收到议题、评论、PR 和检查事件，重复的只受理一次；议题来了新评论，议题的正文不会再交给 agent 一次。
+- 连接之前就有的议题（名单里的人写的、点了名），之后有人评论：不当新议题受理。
 - 签名不对的 webhook 被拒；没选 webhook 的仓库返回 404。
 - 名单外的人点名不进会话，正文也不进事件日志。
 - 推送的命令行参数里没有 token；推送的目标是连接的仓库，不是 `origin`；验收和提交的环境里没有凭据。
