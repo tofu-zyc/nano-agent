@@ -454,7 +454,7 @@ func (rt route) find(name string) *mount {
 // spec 是交给内核的工作目录：同一台机器上挂的别的工作目录也能读写（方便在它们之间拷文件）。
 // 管理员可以读整个文件系统（RO "/"），但只能写工作目录；访客仍然只能读工作目录和技能缓存。
 func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
-	dirs := []string{m.ws.Path}
+	dirs := append([]string{m.ws.Path}, m.ws.ExtraRW...)
 	for _, o := range rt.mounts {
 		if o.ws.Host == m.ws.Host && o.ws.ID != m.ws.ID {
 			dirs = append(dirs, o.ws.Path)
@@ -464,6 +464,7 @@ func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
 	if readAll {
 		ro = []string{"/"}
 	}
+	ro = append(ro, m.ws.ExtraRO...)
 	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock,
 		OS: m.os, SandboxMode: m.sandboxMode, SandboxRequired: m.sandboxRequired}
 }

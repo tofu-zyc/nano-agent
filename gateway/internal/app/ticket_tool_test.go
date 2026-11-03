@@ -31,6 +31,7 @@ func teamGroup(t *testing.T, e *env, roster ...string) string {
 		roster = []string{"fake:u2"}
 	}
 	setScene(t, e, sid, &scene.Rules{Team: &scene.Team{Roster: roster, Workspace: ws.ID, Check: "make test", Budget: 500}})
+	e.a.ticketNoStart = true // 这些测试只看工单和授权记录，不开工（开工有自己的测试）
 	return sid
 }
 

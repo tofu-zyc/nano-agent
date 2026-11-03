@@ -143,6 +143,8 @@ type App struct {
 	hTicket         *health.Handle // 工单记录：写不进去就是 degraded
 	tickets         *ticket.Store
 	ticketsErr      error
+	ticketNoStart   bool              // 测试用：建了工单不自动开工
+	ticketBusy      map[string]bool   // 正在由后台步骤处理的工单（开工、验收）：同一张工单同一时刻只一个
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
@@ -343,6 +345,7 @@ type out struct {
 
 type run struct {
 	trig                 *trigger // 触发这一轮的消息
+	ticketSettled        bool     // 工单分支的这一轮用的 token 已经记进工单
 	hook                 *hookInvocation
 	experienceActions    []string
 	experienceActionTurn int
@@ -555,12 +558,14 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.loadEndpoints()
 	a.recoverForksLocked()
 	a.loadWorkspaces()
+	a.syncTicketWorkspaces()
 	a.loadSchedules()
 	a.skills.Scan()
 	go a.maintenance()
 	go a.scheduleLoop()
 	go a.groupLoop()
 	go a.agentLoop()
+	go a.ticketLoop()
 	return a
 }
 
@@ -1517,7 +1522,7 @@ func (a *App) startRun(s *sess) {
 	r.mode = mode
 	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
-		HookChecks:  a.nodes[node].info.Features["hook_check"] >= 1 && a.hookEngine != nil && a.hasBeforeHooks(s.sid),
+		HookChecks:  a.nodes[node].info.Features["hook_check"] >= 1 && (a.hookEngine != nil && a.hasBeforeHooks(s.sid) || a.isTicketRun(r.from)),
 		SandboxMode: r.sandboxMode, Silent: a.branchSilent(s.sid), OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
 	if r.inner || a.isBranchSID(s.sid) {
 		in.Priority = 10
@@ -1540,7 +1545,8 @@ func (a *App) startRun(s *sess) {
 	for _, m := range rt.mounts {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
-	r.write = admin && (mode == proto.ModeAuto || mode == proto.ModeAsk)
+	_, ticketRun := a.ticketIdentity(r.from) // 工单的分支：按工单的授权写 worktree，但不能提权
+	r.write = (admin || ticketRun) && (mode == proto.ModeAuto || mode == proto.ModeAsk)
 	in.Elevate = admin
 	if len(rt.mounts) == 0 {
 		if admin && mode != proto.ModeNone && node != "" && a.nodes[node] != nil && a.nodes[node].info.Local {
@@ -2274,6 +2280,7 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 		a.addUsage(r, u)
+		a.ticketBudgetCheck(s, r) // 工单分支：每次模型调用结束时看预算
 		a.publish(events.Event{T: "model", SID: s.sid, RunID: r.runID, TurnID: r.turnID, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
 		// 边界二：生成完整结束（用量已经结算），但还没把结果交给内核。这期间收到的插话要

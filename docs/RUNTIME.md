@@ -206,6 +206,22 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 **承诺列表**：`ticketCommit` 接进 `commitItems`（第 7 种承诺，种类“工单”）。open 是等待（`Due` 取创建时间，显示“等开工”）；`blocked` 是宿主记下的受阻（理由在 `Reason`，Mark `b:<Updated>`，5a 里没有地方会写它）；叫停是 stopped 带理由；回答问题要等 5b 有了干活的分支，5a 拒绝。网页的“全部承诺”里工单有“叫停”（`POST /api/tickets/{id}/cancel {reason}`），“打开”打开来源会话。
 
+### 工单的执行（5b）
+
+设计见第 16.2 节。建 worktree、跑验收命令、提交都由宿主做，不经过模型。
+
+- **网关发起的执行**：`leasedExec`（拿执行租约、准备请求、执行、释放）从 `hook_command.go` 抽出，Hook 和工单共用；`gatewayShell` 在仓库所在的机器上按给定的读写范围跑一条命令。git 步骤（`ticket_git.go`）都带 `gitPrelude`（不读全局、系统和 XDG 的 git 配置：沙箱读不了 `~/.gitconfig`，而 git 把读不了当致命错误）。这些脚本假定 POSIX shell，Windows 上的仓库暂不支持。
+- **worktree**：`<仓库>/.nano/worktrees/tk-<序号>`，`/.nano/` 写进 `<仓库>/.git/info/exclude`；起点是 fetch 后 `origin/HEAD` 指向的分支，没有远端取仓库当前签出的分支。worktree 和分支 `nano/tk-<序号>` 已经在了就接着用。登记成派生工作目录（`Workspace.Ticket`，ID `w-tk-<序号>`）：不存进 `workspaces.json`，由工单推出来（`syncTicketWorkspaces`）；不在选择器和拓扑里列，也不能选给别的会话。沙箱模式照抄仓库工作目录的。
+- **干活的分支**：从派活的会话分出，`By` 是 `ticket:<编号>`（`SessionForkRequest.host` 跳过调用人的访问检查），第一次开跑前 `prepareTicketBranch` 把会话设成不是群聊、工作目录只有工单的 worktree、权限模式是 `Auth.Mode`。身份 `ticket:<编号>` 不是管理员，不能提权；`runMode` 认它，模式就是 `Auth.Mode`，`run.write` 照 `Auth.Mode` 开；每次工具调用前内核问网关（前置检查），不在 `Auth.Tools` 里的一律拒绝，提供给模型的工具也按它过滤。`ask` 模式的审批发到这个 agent 主会话的管理员窗口，不发到团队群。
+- **读写范围**：`Workspace.ExtraRW`（worktree 自己的 git 目录）由 `route.spec` 加进可写，`ExtraRO`（`<仓库>/.git`）加进只读；分支和验收的 `readAll` 为假，不给整台机器只读，系统目录和 PATH 里的目录执行器本来就放行。宿主提交那一步可写 worktree 和 `<仓库>/.git`，分支拿不到这份范围。没有 Landlock 的机器上工单 blocked（不降级）。
+- **验收**：分支 Report ready 只记 `WantCheck`；这一轮结束后宿主在 worktree 里跑验收命令（超时 30 分钟，沙箱同分支）。通过且有改动：宿主 `git add -A` 并提交（作者是 agent 的名字，末尾一行 `Nano-Ticket: tk-<序号>`，不执行仓库的 hook），记 `Commit`、`CheckLog`，状态 ready，把结果作为对原消息的回复发回；重做时 worktree 是干净的、已经有带这一行的提交就收养它。没过或没改动：返工加一，验收输出最后 40 行作为一条消息放进分支的下一个安全边界；到上限（2 次）还没过 blocked，问“继续改、放弃，还是先收下？”。
+- **预算**：每次模型调用结束时（`addUsage` 之后）检查已用加这一轮用的（输入加输出）有没有超过现在的上限，超了停下这一轮、blocked；每轮用量只记一次。
+- **从受阻里出来**：受阻时收到回答、名单里的人的 note，状态回到 working，回答送进分支；返工用完的再给两次返工，预算用完的再给一份预算；每次续上记在工单上（`Renewed`：谁、什么时候、续的什么），最多 3 次，再往后只能叫停或放弃。`accept` 在因为返工用完而受阻时是“先收下”：把现在的改动提交下来再收下。
+- **回答**：问题的末尾写“@agent 回复就行”；名单里的人回复时 agent 用 Ticket note，在有没回答的问题时同时写 `answer`；主人在等我处理里回答，送进分支。在等人回答的工单重启后不替人续。
+- **重启**：`resumeTickets` 在有内核在线之后做一次：open 的重新开工，checking 的重跑验收，working 的重新排一条“接着做”（`Resumes` 单独计数，最多 3 次，再被打断 blocked，理由“多次被打断”）。每一步按工单状态可以重做，不重复建 worktree、不重复提交。
+- **收尾**：收下、叫停、失败、不用做了之后，停掉干活的分支（归档）、去掉派生工作目录、删 worktree（git 分支留着）。
+- **Report**：在工单的分支里汇报的是这张工单。blocked 带着问题发回原消息；failed、not_needed 结束工单并发回原消息。
+
 ## 经历、内心片段与长期记忆
 
 真实聊天、工具行动、自主活动与分支结果形成可追溯经历。经历是有界派生索引，最多 500 条、30 天；写入失败不撤销真实结果，也不宣称与历史构成跨文件事务。可见范围按 agent、会话与权限过滤，安静分支经历不对访客开放。

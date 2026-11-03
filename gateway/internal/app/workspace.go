@@ -109,6 +109,9 @@ func (a *App) runMode(w workspace, from string) string {
 	if a.isAdmin(from) {
 		return w.mode
 	}
+	if _, ok := a.ticketIdentity(from); ok { // 工单的分支：权限模式就是授权记录里的（会话设置里已经定成 Auth.Mode）
+		return w.mode
+	}
 	if a.cfg.Access.Guest == proto.ModeReadonly {
 		return proto.ModeReadonly
 	}

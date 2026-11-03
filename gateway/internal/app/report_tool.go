@@ -69,6 +69,9 @@ func (a *App) reportSubject(s *sess) (kind, id, agent string, canAsk bool, err e
 			}
 		}
 		return "", "", "", false, errors.New("这一轮是自己安排的检查，不对应任何承诺，不能汇报；有结果想让主人知道，用 Message 发给他")
+	case a.isTicketBranch(s.sid): // 工单的分支：汇报的是这张工单，不是分支
+		t, _ := a.ticketOfSession(s.sid)
+		return commit.KindTicket, t.ID, t.Agent, true, nil
 	case a.isBranchSID(s.sid):
 		return commit.KindBranch, s.sid, agent, true, nil
 	case s.scheduled != nil:
@@ -142,6 +145,9 @@ func (a *App) reportCall(s *sess, raw []byte) (string, error) {
 	a.commitHealth(nil)
 	s.run.reports++
 	a.publishCommitments()
+	if kind == commit.KindTicket {
+		a.ticketReported(id, x.Status, x.Text, x.Question)
+	}
 	if kind == commit.KindBranch && a.branchAttention(id) {
 		switch x.Status {
 		case commit.StatusReady, commit.StatusBlocked, commit.StatusFailed:

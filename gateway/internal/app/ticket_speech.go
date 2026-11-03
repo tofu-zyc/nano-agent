@@ -33,7 +33,7 @@ func (a *App) ticketPush(id, state, text, question string) {
 		return
 	}
 	t, ok := a.tickets.Get(id)
-	if !ok || ticket.IsEnded(t.Status) && state != "ready" {
+	if !ok || ticket.IsEnded(t.Status) && state == "blocked" { // 结束了的工单不再问问题
 		return
 	}
 	if !a.notifyGate(commit.KindTicket, id, t.Agent, state, text+"\x00"+question) {
@@ -50,7 +50,7 @@ func (a *App) ticketPush(id, state, text, question string) {
 }
 
 func ticketBody(t ticket.Ticket, state, text, question, agentName string) string {
-	label := map[string]string{"ready": "就绪", "blocked": "受阻", "failed": "失败"}[state]
+	label := map[string]string{"ready": "就绪", "blocked": "受阻", "failed": "失败", "dropped": "不用做了"}[state]
 	if question != "" {
 		label = "需要你回答"
 	}

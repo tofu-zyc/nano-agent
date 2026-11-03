@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"nano-agent/gateway/internal/ticket"
 	"sort"
 	"strings"
 	"time"
@@ -162,7 +163,10 @@ func (a *App) checkAnswerTarget(p PendingView) error {
 			return errors.New("分支还没有就绪")
 		}
 	case commit.KindTicket:
-		return errors.New("工单还没有干活的分支，现在不能回答")
+		t, ok := a.tickets.Get(p.ID)
+		if !ok || t.RunSID == "" || ticket.IsEnded(t.Status) {
+			return errors.New("这张工单没有在跑的分支，不能回答")
+		}
 	case commit.KindAgenda, commit.KindIntention:
 	default: // 定时任务、Hook 的 Report 不能带问题，没有人接着问
 		return errors.New("这种承诺不接受回答")
@@ -184,6 +188,12 @@ func (a *App) deliverAnswer(p PendingView, text, by string) {
 		a.publish(events.Event{T: "branch", SID: p.ID, Kind: "answer"})
 	case commit.KindAgenda, commit.KindIntention:
 		a.answerToMind(p, body)
+	case commit.KindTicket:
+		if t, ok := a.tickets.Get(p.ID); ok {
+			if err := a.ticketDeliver(t, by, body); err != nil {
+				a.log.Warn("回答没能送进工单的分支", "ticket", p.ID, "err", err)
+			}
+		}
 	}
 }
 

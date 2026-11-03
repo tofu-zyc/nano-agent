@@ -95,11 +95,49 @@ type Ticket struct {
 	Commit   string `json:"commit,omitempty"`    // 验收通过后宿主做的提交
 	CheckLog string `json:"check_log,omitempty"` // 最近一次验收：退出码和最后 40 行
 	Rework   int    `json:"rework,omitempty"`
+	// 5b：执行状态
+	BlockedBy string    `json:"blocked_by,omitempty"` // 宿主记下受阻的原因类别：rework | budget | interrupted | sandbox | error | silent
+	WantCheck bool      `json:"want_check,omitempty"` // 分支 Report ready 了，等这一轮结束后验收
+	Spent     int       `json:"spent,omitempty"`      // 已用 token（输入加输出）
+	Cap       int       `json:"cap,omitempty"`        // 现在的预算上限；0 表示 Budget
+	ReworkCap int       `json:"rework_cap,omitempty"` // 现在的返工上限；0 表示 MaxRework
+	Resumes   int       `json:"resumes,omitempty"`    // 被重启打断而自动续上的次数（最多 MaxResumes）
+	Renewals  int       `json:"renewals,omitempty"`   // 主人（名单里的人）从受阻里续上的次数（最多 MaxRenewals）
+	Renewed   []Renewal `json:"renewed,omitempty"`    // 每次续上：谁、什么时候、续的什么
 	// 5c
 	PR string `json:"pr,omitempty"`
 
 	Created int64 `json:"created"` // 秒
 	Updated int64 `json:"updated"`
+}
+
+// Renewal 是一次从受阻里续上：谁、什么时候、续的什么（返工、预算、被打断、别的）。
+type Renewal struct {
+	By   string `json:"by"`
+	At   int64  `json:"at"`
+	What string `json:"what"`
+}
+
+// 续上的次数上限。重启续上和主人续上是两个计数，各自最多这么多次。
+const (
+	MaxResumes  = 3
+	MaxRenewals = 3
+)
+
+// EffectiveCap 是现在的预算上限。
+func (t Ticket) EffectiveCap() int {
+	if t.Cap > 0 {
+		return t.Cap
+	}
+	return t.Budget
+}
+
+// EffectiveReworkCap 是现在的返工上限。
+func (t Ticket) EffectiveReworkCap() int {
+	if t.ReworkCap > 0 {
+		return t.ReworkCap
+	}
+	return MaxRework
 }
 
 // Note 是补充的一句话。
@@ -193,6 +231,7 @@ func (s *Store) Get(id string) (Ticket, bool) {
 func clone(t Ticket) Ticket {
 	t.Auth.Tools = append([]string(nil), t.Auth.Tools...)
 	t.Notes = append([]Note(nil), t.Notes...)
+	t.Renewed = append([]Renewal(nil), t.Renewed...)
 	return t
 }
 

@@ -14,6 +14,10 @@ import (
 
 // approvalOuts 自主活动不广播过程，但审批仍送回创建日程的管理员会话。
 func (a *App) approvalOuts(s *sess) []out {
+	if s.run != nil && a.isTicketRun(s.run.from) {
+		// 工单的分支是安静的，但审批要有人批：送到这个 agent 主会话的管理员窗口（和 life 一样），不发到团队群
+		return a.adminWindowsOf(a.execAgentID(s.sid))
+	}
 	if a.branchSilent(s.sid) {
 		return nil
 	}
@@ -187,4 +191,16 @@ func (a *App) canApproveFrom(c in, ap *approval) bool {
 		}
 	}
 	return false
+}
+
+// adminWindowsOf 是这个 agent 主会话上的管理员窗口。调用方持有锁。
+func (a *App) adminWindowsOf(agentID string) []out {
+	target := agents.SessionFor(agentID, mainSID)
+	var outs []out
+	for key, ep := range a.eps {
+		if ep.Session == target && a.isAdmin(ep.Who) {
+			outs = append(outs, out{ep: parseEndpoint(key)})
+		}
+	}
+	return outs
 }

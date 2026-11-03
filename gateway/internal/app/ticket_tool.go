@@ -137,6 +137,9 @@ func (a *App) ticketCreate(s *sess, team *scene.Team, who string, x ticketArgs) 
 		return fmt.Sprintf("这条消息已经建过工单 %s（%s），没有重复建。", t0.ID, t0.Title), nil
 	}
 	a.publishCommitments()
+	if !a.ticketNoStart {
+		a.startTicket(t0.ID) // 后台开工：建 worktree、分出干活的分支
+	}
 	return fmt.Sprintf("已建工单 %s。在回复里确认一次就好；过程不用说，结果和问题会自动发回这里。", t0.ID), nil
 }
 
@@ -200,12 +203,17 @@ func (a *App) ticketAct(x ticketArgs, t ticket.Ticket, who string) (string, erro
 			return "", fmt.Errorf("没有记下来（%v）", err)
 		}
 		a.ticketHealth(nil)
-		return "记下了，会转给干活的分支。", nil
-	case "accept":
-		if t.Status != ticket.StatusReady {
-			return "", fmt.Errorf("工单还没有就绪（现在是 %s）", t.Status)
+		if t.RunSID == "" { // 还没有分支：开工说明里会带上
+			return "记下了，开工时会带给干活的分支。", nil
 		}
-		return "", errors.New("收下工单还没有实现")
+		a.answerPendingQuestion(t, who, text) // 工单有没回答的问题时，这条同时记作回答
+		cur, _ := a.tickets.Get(t.ID)
+		if err := a.ticketDeliver(cur, who, "[补充] "+text); err != nil {
+			return "", err
+		}
+		return "记下了，已经转给干活的分支（排在它的下一个安全边界）。", nil
+	case "accept":
+		return a.acceptTicketAction(t, who)
 	case "cancel":
 		if text == "" {
 			return "", errors.New("叫停要在 text 里写理由")
@@ -233,6 +241,9 @@ func (a *App) cancelTicketLocked(t ticket.Ticket, reason string) error {
 	}
 	a.ticketHealth(nil)
 	a.publishCommitments()
+	if cur, ok := a.tickets.Get(t.ID); ok {
+		a.wrapUpTicket(cur) // 停掉干活的分支、删 worktree
+	}
 	return nil
 }
 

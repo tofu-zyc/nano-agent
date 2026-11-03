@@ -110,6 +110,10 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if n := a.nodes[rt.kernel]; len(tools) > 0 && n != nil && n.info.Features["bounded_parallel"] >= 1 {
 		system = strings.TrimSpace(system + "\n\n[工具调度] 相互独立的工具调用可以在同一次响应中一起提出；运行时会按执行槽和资源锁有界调度。结果按调用身份关联，全部结果返回后才继续模型请求。有数据依赖的步骤分到下一次响应，不能假定同批调用按顺序完成。")
 	}
+	if t, ok := a.ticketOfSession(sid); ok {
+		// 工单的分支：只给授权记录里的工具（每次调用还会再查一遍）
+		tools = slices.DeleteFunc(tools, func(tl llm.Tool) bool { return !ticketToolAllowed(t, tl.Function.Name) })
+	}
 	if inv := a.sessionHook(sid); inv != nil && inv.work.Spec.Scope.Tools != nil {
 		// Report 只汇报情况，不扩大权限：登记 Hook 时的工具表里没有它也照给
 		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {

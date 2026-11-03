@@ -18,7 +18,22 @@ func (a *App) preToolCheck(s *sess, m *proto.Msg) {
 			OK: proto.Bool(result.Allow), ForceApproval: result.RequireApproval, Detail: result.Detail})
 	}
 	call, ok := r.callArgs[m.ID]
-	if !ok || call.Name != m.Name || m.RequestID != m.ID || m.RunID != r.runID || m.TurnID != r.turnID || a.hookEngine == nil {
+	if !ok || call.Name != m.Name || m.RequestID != m.ID || m.RunID != r.runID || m.TurnID != r.turnID {
+		reply(hooks.CheckResult{Detail: "前置检查调用身份无效"})
+		return
+	}
+	// 工单的分支：不在授权工具里的调用一律拒绝；在里面的，没有前置 Hook 时直接放行
+	if isTicket, allow, detail := a.ticketPreCheck(s, call.Name); isTicket {
+		if !allow {
+			reply(hooks.CheckResult{Detail: detail})
+			return
+		}
+		if a.hookEngine == nil || !a.hasBeforeHooks(s.sid) {
+			reply(hooks.CheckResult{Allow: true})
+			return
+		}
+	}
+	if a.hookEngine == nil {
 		reply(hooks.CheckResult{Detail: "前置检查调用身份无效"})
 		return
 	}

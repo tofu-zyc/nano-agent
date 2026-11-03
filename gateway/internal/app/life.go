@@ -459,6 +459,7 @@ func (a *App) branchDone(s *sess, r *run) {
 		m.ProgressAt = a.now().Unix()
 		m.LastActive = a.now().Unix()
 	})
+	a.ticketRunEnded(s, r)
 	if status == session.BranchNeedsAttention && a.branchAttention(s.sid) {
 		// 宿主自己记下的出错也当作受阻发一条；编号是它的 Mark
 		got, _ := a.store.Branch(s.sid)

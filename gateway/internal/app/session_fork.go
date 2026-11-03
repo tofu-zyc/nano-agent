@@ -36,6 +36,7 @@ type SessionForkRequest struct {
 	Delivery  string `json:"delivery"`
 	RequestID string `json:"request_id"`
 	By        string `json:"created_by"`
+	host      bool   // 网关自己发起（工单开工）：不查调用人对来源会话的访问权限
 }
 
 // SessionForkResult 是创建分支的结果。Status=pending_boundary 时表示还在等源会话的边界，
@@ -150,7 +151,7 @@ func (a *App) sessionForkLocked(req SessionForkRequest) (SessionForkResult, erro
 	if src == "" {
 		src = mainSID
 	}
-	if !a.canAccessForkContext(req.By, req.CallerSID, src) {
+	if !req.host && !a.canAccessForkContext(req.By, req.CallerSID, src) {
 		return SessionForkResult{}, errors.New("没有这个来源会话的访问权限")
 	}
 	if !a.hasSession(src) && !a.isBranchSID(src) {
@@ -444,6 +445,7 @@ func (a *App) materializeForkLocked(branchSID string) (SessionForkResult, error)
 		a.publish(events.Event{T: "branch", SID: branchSID, Name: meta.ParentSID, Kind: "ready", Data: map[string]any{"status": session.BranchReady, "snapshot_id": snap.SnapshotID, "title": meta.Title}})
 		a.store.UnloadHistory(branchSID)
 		if current.StartRequested && strings.TrimSpace(current.Intent) != "" {
+			a.prepareTicketBranch(branchSID) // 工单的分支：先把会话设成工单要的样子
 			if err := a.startBranchRunLocked(branchSID, current.Intent, current.CreatedBy); err != nil {
 				// 暂停或预算用完：分支保留就绪状态，等恢复后再由 agent 自己继续
 				_ = a.store.SetBranch(branchSID, func(m *session.BranchMeta) {
