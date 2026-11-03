@@ -27,11 +27,13 @@ SANDBOX = PROBE["landlock"] > 0
 
 
 def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30,
-        sandbox=None, hook_input=None):
+        sandbox=None, hook_input=None, env=None):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
            "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
     if hook_input is not None:
         req["hook_input"] = hook_input
+    if env is not None:
+        req["env"] = env
     if sandbox is not None:
         req["sandbox"] = sandbox
     p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
@@ -325,6 +327,32 @@ def t_sandbox_home_kept():
     ok(run("Shell", {"command": "echo H=$HOME"}, sandbox="off"), "H=" + HOME)
 
 
+@case("env：网关发起的执行可以带顶层 env；模型的工具参数里带 env 被拒绝；黑名单和限制")
+def t_env():
+    # 顶层 env（网关发起的执行）：进命令的环境，覆盖同名的，别的环境变量照旧不带进来
+    c = ok(run("Shell", {"command": "echo A=$GIT_CONFIG_COUNT B=$GIT_CONFIG_KEY_0 C=$GIT_CONFIG_VALUE_0"},
+               env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                    "GIT_CONFIG_VALUE_0": "Authorization: Basic abc"}),
+           "A=1", "B=http.https://github.com/.extraheader", "C=Authorization: Basic abc")
+    assert "SECRET_TOKEN" not in c, c
+    # 没带 env 的下一次执行：看不到上一次的
+    c = ok(run("Shell", {"command": "echo A=[$GIT_CONFIG_COUNT]"}), "A=[]")
+    # 模型的工具参数（args）里出现 env：明确拒绝，不执行
+    bad(run("Shell", {"command": "echo ran > args-env-ran", "env": {"X": "1"}}), "不能放在工具参数里")
+    assert not os.path.exists(os.path.join(WORK, "args-env-ran"))
+    bad(run("Write", {"path": "x.txt", "content": "x", "env": {"X": "1"}}), "不能放在工具参数里")
+    # 黑名单、名字、个数、总长
+    for k in ["PATH", "HOME", "TMPDIR", "SHELL", "IFS", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "NANO_HOME"]:
+        bad(run("Shell", {"command": "true"}, env={k: "x"}), "不能设置这个名字")
+    for k in ["lower", "1BAD", "A-B", "A B", ""]:
+        bad(run("Shell", {"command": "true"}, env={k: "x"}), "不能设置这个名字")
+    bad(run("Shell", {"command": "true"}, env={f"K{i}": "x" for i in range(17)}), "最多 16 项")
+    ok(run("Shell", {"command": "true"}, env={f"K{i}": "x" for i in range(16)}))
+    bad(run("Shell", {"command": "true"}, env={"BIG": "x" * 9000}), "8KB")
+    bad(run("Shell", {"command": "true"}, env={"X": 1}), "字符串")
+    bad(run("Shell", {"command": "true"}, env=["X=1"]), "JSON 对象")
+
+
 @case("沙箱：不能连 unix socket（D-Bus、systemd、docker 之类）", linux_only=True)
 def t_sandbox_unix():
     path = os.path.join(T, "s.sock")
@@ -468,7 +496,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_stream, t_hook_input, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
+                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

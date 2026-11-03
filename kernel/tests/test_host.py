@@ -291,6 +291,23 @@ def t_host_run(gw):
     gw.expect("run_result", id="p3", ok=False)
 
 
+@case("env：网关发起的 run 能带顶层 env；模型的 Shell 调用（参数里带 env）被拒绝，也带不出顶层 env")
+def t_env(gw):
+    gw.send(t="run", id="env1", req={"tool": "Shell", "args": {"command": "echo V=$GIT_CONFIG_VALUE_0"}, "dirs": [WORK], "write": True,
+                                      "env": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "k", "GIT_CONFIG_VALUE_0": "from-gateway"}})
+    gw.expect("run_result", id="env1", ok=True, content=lambda c: "V=from-gateway" in c)
+    gw.send(t="run", id="env2", req={"tool": "Shell", "args": {"command": "echo V=$LD_PRELOAD"}, "dirs": [WORK], "write": True,
+                                      "env": {"LD_PRELOAD": "/tmp/x.so"}})
+    gw.expect("run_result", id="env2", ok=False, content=lambda c: "不能设置这个名字" in c)
+    # 模型的工具调用：内核从零构造请求，参数整个放进 args；args 里带 env 被执行器明确拒绝，命令没有执行
+    start_run(gw, "senv")
+    call(gw, "senv", ("e1", "Shell", {"command": "echo model-ran > env-model-ran; echo V=$GIT_CONFIG_VALUE_0", "env": {"GIT_CONFIG_VALUE_0": "from-model"}}))
+    r = gw.expect("result", sid="senv", id="e1", ok=False)
+    assert "不能放在工具参数里" in r["content"] and "from-model" not in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "env-model-ran"))
+    finish(gw, "senv")
+
+
 @case("工具往返：Write 写文件，Read 读回来")
 def t_roundtrip(gw):
     start_run(gw, "s1")
@@ -1091,7 +1108,7 @@ def main():
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
+            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,

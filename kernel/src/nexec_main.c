@@ -240,6 +240,60 @@ static char *safe_key(const char *k)
     return s;
 }
 
+/* 网关发起的执行可以带顶层 env（5c 的推送、5d 的外部 agent）：最多 16 项、总共不超过 8KB，
+ * 名字 [A-Z_][A-Z0-9_]*，拒绝会改变执行环境本身的名字。模型的工具调用由内核从零构造请求，参数整个放在 args 里，
+ * 带不出顶层的 env；args 里出现 env 在 main 里明确拒绝。 */
+static bool env_name_ok(const char *k)
+{
+    if (!k || !*k) return false;
+    for (const char *p = k; *p; p++)
+        if (!((*p >= 'A' && *p <= 'Z') || *p == '_' || (p != k && *p >= '0' && *p <= '9'))) return false;
+    static const char *const deny[] = { "PATH", "HOME", "TMPDIR", "SHELL", "IFS", "BASH_ENV", "ENV" };
+    for (size_t i = 0; i < sizeof deny / sizeof *deny; i++)
+        if (!strcmp(k, deny[i])) return false;
+    static const char *const deny_prefix[] = { "LD_", "DYLD_", "NANO_" };
+    for (size_t i = 0; i < sizeof deny_prefix / sizeof *deny_prefix; i++)
+        if (!strncmp(k, deny_prefix[i], strlen(deny_prefix[i]))) return false;
+    return true;
+}
+
+static int apply_extra_env(xctx *x, const cJSON *req, buf_t *err)
+{
+    const cJSON *env = cJSON_GetObjectItemCaseSensitive(req, "env");
+    if (!env) return 0;
+    if (!cJSON_IsObject(env)) { buf_puts(err, "env 应为 JSON 对象"); return -1; }
+    size_t count = 0, total = 0;
+    for (const cJSON *e = env->child; e; e = e->next) {
+        count++;
+        if (!cJSON_IsString(e) || !e->string) { buf_puts(err, "env 的值应为字符串"); return -1; }
+        if (!env_name_ok(e->string)) {
+            buf_puts(err, "env 里不能设置这个名字：");
+            buf_puts(err, e->string);
+            return -1;
+        }
+        total += strlen(e->string) + strlen(e->valuestring) + 2;
+    }
+    if (count > 16) { buf_puts(err, "env 最多 16 项"); return -1; }
+    if (total > 8192) { buf_puts(err, "env 总共不超过 8KB"); return -1; }
+    size_t n = 0;
+    while (x->env[n]) n++;
+    for (const cJSON *e = env->child; e; e = e->next) {
+        size_t kl = strlen(e->string);
+        for (size_t i = 0; i < n; i++)  /* 同名的先去掉：不让两个同名项并存 */
+            if (!strncmp(x->env[i], e->string, kl) && x->env[i][kl] == '=') {
+                free(x->env[i]);
+                x->env[i] = x->env[--n];
+                x->env[n] = NULL;
+                i--;
+            }
+        x->env = realloc(x->env, (n + 2) * sizeof *x->env);
+        if (!x->env) abort();
+        x->env[n++] = xasprintf("%s=%s", e->string, e->valuestring);
+        x->env[n] = NULL;
+    }
+    return 0;
+}
+
 static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
 {
     memset(x, 0, sizeof *x);
@@ -304,7 +358,7 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
         return -1;
     }
     x->env = plat_build_env(x->home, x->tmp, x->cache);
-    return 0;
+    return apply_extra_env(x, req, err);
 }
 
 #if !NA_WINDOWS
@@ -570,6 +624,8 @@ int main(int argc, char **argv)
         buf_puts(&out, name ? name : "（空）");
     } else if (args && !cJSON_IsObject(args)) {
         buf_puts(&out, "参数应为 JSON 对象");
+    } else if (args && cJSON_GetObjectItemCaseSensitive(args, "env")) {
+        buf_puts(&out, "env 只能由网关发起的执行放在请求的顶层，不能放在工具参数里");
     } else if (mode < 0) {
         buf_puts(&out, "sandbox 只能是 auto、on 或 off");
     } else if (setup(&x, req, mode, &out) == 0 && enter_sandbox(&x, mode, &out) == 0) {
