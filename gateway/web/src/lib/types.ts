@@ -85,6 +85,7 @@ export type SessionInfo = {
   group?: boolean; // 群聊里的会话
   scene?: SceneRules; // 外部群的群规则
   scene_use?: SceneUse;
+  speakers?: Record<string, string>; // 外部群里说过话的人：名字 → 身份
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
@@ -478,7 +479,9 @@ export type SceneRules = {
   channels?: { id: string; name: string; members: string[] }[];
   stage?: boolean; // 这是一场戏（只能在建群时设）
   inner?: boolean; // 心里话
+  team?: TeamRules | null; // 团队（外部群）
 };
+export type TeamRules = { roster: string[]; workspace: string; check?: string; budget?: number };
 export type SceneUse = { day_tokens: number; total: number; since?: number; round?: number; over: boolean };
 export type ObserveRecord = {
   at: number;

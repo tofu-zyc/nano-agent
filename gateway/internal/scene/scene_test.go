@@ -77,3 +77,57 @@ func TestEffectiveGuardAndZero(t *testing.T) {
 		t.Fatal("IsZero")
 	}
 }
+
+// 团队设置：只能在外部群；名单写法、工作目录、上限；设了团队的规则生效时固定点名、只记录。
+func TestTeamValidateAndEffective(t *testing.T) {
+	team := func(mod func(*Team)) Rules {
+		t := &Team{Roster: []string{"telegram:123", "feishu:ou_x"}, Workspace: "ws1", Check: "make test"}
+		if mod != nil {
+			mod(t)
+		}
+		return Rules{Team: t}
+	}
+	if err := team(nil).Validate(External, nil, nil); err != nil {
+		t.Fatalf("合法的团队：%v", err)
+	}
+	for _, kind := range []Kind{Room, DMRoom} {
+		if err := team(nil).Validate(kind, nil, nil); err == nil {
+			t.Errorf("%s 不能设团队", kind)
+		}
+	}
+	for name, mod := range map[string]func(*Team){
+		"没有工作目录":  func(x *Team) { x.Workspace = " " },
+		"名单没有冒号":  func(x *Team) { x.Roster = []string{"123"} },
+		"名单里有空格":  func(x *Team) { x.Roster = []string{"telegram: 123"} },
+		"名单重复":    func(x *Team) { x.Roster = []string{"a:1", "a:1"} },
+		"名单太长":    func(x *Team) { x.Roster = make([]string, MaxRoster+1) },
+		"验收命令太长":  func(x *Team) { x.Check = strings.Repeat("x", MaxCheck+1) },
+		"预算是负数":   func(x *Team) { x.Budget = -1 },
+		"身份只有渠道名": func(x *Team) { x.Roster = []string{"telegram:"} },
+	} {
+		if err := team(mod).Validate(External, nil, nil); err == nil {
+			t.Errorf("%s 应该被拒绝", name)
+		}
+	}
+	r := Rules{Mode: ModeFree, Team: &Team{Workspace: "ws1"}}.Effective()
+	if r.Mode != ModeMention || !r.Observe {
+		t.Fatalf("设了团队：固定点名、只记录：%+v", r)
+	}
+	if r := (Rules{Mode: ModeFree}).Effective(); r.Mode != ModeFree || r.Observe {
+		t.Fatalf("没设团队不变：%+v", r)
+	}
+	if (Rules{Team: &Team{}}).IsZero() {
+		t.Fatal("设了团队不是零值")
+	}
+	// 克隆不共用名单
+	a := team(nil)
+	b := a.Clone()
+	b.Team.Roster[0] = "x:1"
+	if a.Team.Roster[0] != "telegram:123" {
+		t.Fatal("Clone 共用了名单")
+	}
+	tm := Team{Roster: []string{"a:1"}}
+	if !tm.InRoster("a:1") || tm.InRoster("a:2") || tm.InRoster("") || tm.EffectiveBudget() != DefaultTicketBudget || (Team{Budget: 5}).EffectiveBudget() != 5 {
+		t.Fatal("名单、预算默认值")
+	}
+}

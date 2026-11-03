@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/dispatch"
 	"path/filepath"
@@ -44,32 +45,33 @@ func (t *Totals) add(u llm.Usage) {
 }
 
 type SessionInfo struct {
-	SID            string         `json:"sid"`
-	Agent          string         `json:"agent"`       // 当前执行身份：人格、模型、工具、限制、记忆按它算（可以切换）
-	RouteAgent     string         `json:"route_agent"` // 会话 ID 的命名空间（机器人接线、主会话按它算，不跟着切换变）
-	AgentFixed     bool           `json:"agent_fixed"` // 身份固定：内心活动、整理记忆、定时任务、房间成员
-	CanSwitchAgent bool           `json:"can_switch_agent"`
-	SwitchBlocked  string         `json:"switch_blocked,omitempty"` // 现在不能切换的原因（空表示可以）
-	Group          bool           `json:"group"`                    // 这是某个群聊里的会话
-	Scene          *scene.Rules   `json:"scene,omitempty"`          // 外部群的群规则（没设就没有这一项）
-	SceneUse       *SceneUsage    `json:"scene_use,omitempty"`      // 外部群的用量
-	Channel        string         `json:"channel"`                  // 主要的渠道（第一个接着的窗口所在的），网页配色用
-	Endpoints      []EndpointInfo `json:"endpoints"`                // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
-	Title          string         `json:"title"`
-	Workspaces     []MountInfo    `json:"workspaces"` // 挂载的工作目录，空表示只读
-	Kernel         string         `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
-	RunNode        string         `json:"run_node"`   // 正在跑这一轮的内核
-	Running        bool           `json:"running"`
-	Pending        int            `json:"pending"` // 待审批的工具调用
-	LastAt         int64          `json:"last_at"` // 最后一条消息的时间（秒）
-	Messages       int            `json:"messages"`
-	SandboxMode    string         `json:"sandbox_mode"`
-	Mode           string         `json:"mode"`
-	Thinking       string         `json:"thinking"`
-	ThinkingLevels []string       `json:"thinking_levels"` // 这个模型的思考强度可选值
-	Model          string         `json:"model"`           // 这个会话选的模型 ID，空表示用默认模型
-	ModelUsed      string         `json:"model_used"`      // 实际用的模型 ID
-	ModelLabel     string         `json:"model_label"`     // 实际用的模型的名字
+	SID            string            `json:"sid"`
+	Agent          string            `json:"agent"`       // 当前执行身份：人格、模型、工具、限制、记忆按它算（可以切换）
+	RouteAgent     string            `json:"route_agent"` // 会话 ID 的命名空间（机器人接线、主会话按它算，不跟着切换变）
+	AgentFixed     bool              `json:"agent_fixed"` // 身份固定：内心活动、整理记忆、定时任务、房间成员
+	CanSwitchAgent bool              `json:"can_switch_agent"`
+	SwitchBlocked  string            `json:"switch_blocked,omitempty"` // 现在不能切换的原因（空表示可以）
+	Group          bool              `json:"group"`                    // 这是某个群聊里的会话
+	Scene          *scene.Rules      `json:"scene,omitempty"`          // 外部群的群规则（没设就没有这一项）
+	SceneUse       *SceneUsage       `json:"scene_use,omitempty"`      // 外部群的用量
+	Speakers       map[string]string `json:"speakers,omitempty"`       // 外部群里说过话的人：名字 → 身份（团队名单从这里勾选）
+	Channel        string            `json:"channel"`                  // 主要的渠道（第一个接着的窗口所在的），网页配色用
+	Endpoints      []EndpointInfo    `json:"endpoints"`                // 接着这个会话的聊天窗口（网页不算，网页能接入任何会话）
+	Title          string            `json:"title"`
+	Workspaces     []MountInfo       `json:"workspaces"` // 挂载的工作目录，空表示只读
+	Kernel         string            `json:"kernel"`     // 跑这一轮的内核（没在跑时是下一轮会用的）
+	RunNode        string            `json:"run_node"`   // 正在跑这一轮的内核
+	Running        bool              `json:"running"`
+	Pending        int               `json:"pending"` // 待审批的工具调用
+	LastAt         int64             `json:"last_at"` // 最后一条消息的时间（秒）
+	Messages       int               `json:"messages"`
+	SandboxMode    string            `json:"sandbox_mode"`
+	Mode           string            `json:"mode"`
+	Thinking       string            `json:"thinking"`
+	ThinkingLevels []string          `json:"thinking_levels"` // 这个模型的思考强度可选值
+	Model          string            `json:"model"`           // 这个会话选的模型 ID，空表示用默认模型
+	ModelUsed      string            `json:"model_used"`      // 实际用的模型 ID
+	ModelLabel     string            `json:"model_label"`     // 实际用的模型的名字
 
 	Persona     string              `json:"persona"`      // 用的人格文件名
 	PersonaFile string              `json:"persona_file"` // 这个会话专属人格的文件名（不一定存在）
@@ -181,6 +183,7 @@ func (a *App) sessionInfo(sid string) SessionInfo {
 		rules := sc.Rules.Clone()
 		use := a.sceneUsageOf(sc.Key, rules)
 		info.Scene, info.SceneUse = &rules, &use
+		info.Speakers = maps.Clone(st.Members)
 	}
 	if meta, ok := a.store.Branch(sid); ok {
 		info.Branch = &BranchInfo{}
@@ -403,7 +406,12 @@ func (a *App) UpdateSession(sid string, p SessionPatch) error {
 					errs = append(errs, fmt.Errorf("群规则格式不对：%w", err))
 				} else if err := rules.Validate(scene.External, sceneToolNames(), stageToolNames()); err != nil {
 					errs = append(errs, err)
+				} else if rules.Team != nil && a.findWorkspace(rules.Team.Workspace) == nil {
+					errs = append(errs, fmt.Errorf("团队的工作目录 %s 不存在", rules.Team.Workspace))
 				} else {
+					if rules.Team != nil { // 存的就是生效的：点名、只记录
+						rules = rules.Effective()
+					}
 					newScene, sceneChanged = &rules, true
 				}
 			}

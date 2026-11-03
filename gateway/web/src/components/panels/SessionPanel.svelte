@@ -215,7 +215,7 @@
       <div class="p-warn">这是在群聊里的会话：每条群消息都记进历史，被 @ 或叫到名字才回；群里安静够了、额度也够时可以插一句。默认不挂工作目录，工具只有群聊白名单里的。</div>
       {#if sess.scene && !room && !sid.startsWith('@')}
         <h4 class="p-h">群规则</h4>
-        <SceneRules rules={sess.scene} use={sess.scene_use} sceneKey={sid} external members={[sess.agent]}
+        <SceneRules rules={sess.scene} use={sess.scene_use} sceneKey={sid} external members={[sess.agent]} speakers={sess.speakers}
           onsave={(p) => patch({ scene: { ...sess.scene, ...p } })} onreset={() => patch({ scene_reset: true })} />
       {/if}
     {/if}

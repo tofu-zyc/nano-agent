@@ -27,7 +27,7 @@ func (a *App) sceneOf(sid string) (sceneInfo, bool) {
 		if room.IsDM() {
 			kind = scene.DMRoom
 		}
-		return sceneInfo{Kind: kind, Key: roomLogSID(room.ID), Room: &room, Rules: room.Rules}, true
+		return sceneInfo{Kind: kind, Key: roomLogSID(room.ID), Room: &room, Rules: room.Rules.Effective()}, true
 	}
 	st := a.store.Settings(sid)
 	if !st.Group {
@@ -35,7 +35,7 @@ func (a *App) sceneOf(sid string) (sceneInfo, bool) {
 	}
 	info := sceneInfo{Kind: scene.External, Key: sid}
 	if st.Scene != nil {
-		info.Rules = *st.Scene
+		info.Rules = st.Scene.Effective()
 	}
 	return info, true
 }

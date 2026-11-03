@@ -64,6 +64,43 @@ type Rules struct {
 	// 剧场（只用于内部群，不用于两个 agent 的私聊）
 	Stage bool `json:"stage,omitempty"` // 这是一场戏：场内的事不进成员的记忆，场外进不来，全程记录；只能在建群时设
 	Inner bool `json:"inner,omitempty"` // 心里话：成员每次先写一句心里想的，别人听不到，记进时间线；只用于 stage
+
+	// 团队（只用于外部群，5c 起还有 GitHub 议题会话）：名单里的人点名 agent，agent 才能建工单
+	Team *Team `json:"team,omitempty"`
+}
+
+// Team 是场景里的团队设置（设计 §16.1）。设了它的场景发言规则固定为点名，主动插话固定为只记录。
+type Team struct {
+	Roster    []string `json:"roster"`           // 准入名单：能派活的人，写法和 access.admins 一样是“渠道名:发送人 ID”；管理员总算在内
+	Workspace string   `json:"workspace"`        // 仓库所在的工作目录 ID（data/workspaces.json）
+	Check     string   `json:"check,omitempty"`  // 验收命令，在工单的 worktree 里跑，如 make test；空表示只看有没有改动
+	Budget    int      `json:"budget,omitempty"` // 每个工单最多多少 token，0 表示默认
+}
+
+// 团队设置的上限和默认值。
+const (
+	DefaultTicketBudget = 2000000
+	MaxRoster           = 100
+	MaxCheck            = 500
+)
+
+// EffectiveBudget 是每个工单生效的 token 上限。
+func (t Team) EffectiveBudget() int {
+	if t.Budget <= 0 {
+		return DefaultTicketBudget
+	}
+	return t.Budget
+}
+
+// InRoster 是这个身份在名单里。管理员由调用方另外判断。
+func (t Team) InRoster(who string) bool { return who != "" && slices.Contains(t.Roster, who) }
+
+// Effective 是生效的规则：设了团队的场景固定点名、主动插话只记录，不管存的是什么。
+func (r Rules) Effective() Rules {
+	if r.Team != nil {
+		r.Mode, r.Observe = ModeMention, true
+	}
+	return r
 }
 
 // Channel 是内部群里的私下频道：里面的话只有频道成员听得到。
@@ -141,7 +178,7 @@ func (g Guard) EffectiveGuard() (run, pingPong int) {
 func (r Rules) IsZero() bool {
 	return r.Mode == "" && !r.Observe && r.Brief == "" && len(r.Roles) == 0 && r.Tools == nil &&
 		r.Style == (Style{}) && r.Guard == (Guard{}) && r.Budget == 0 && r.BudgetTotal == 0 &&
-		len(r.Order) == 0 && r.Rounds == 0 && len(r.Channels) == 0 && !r.Stage && !r.Inner
+		len(r.Order) == 0 && r.Rounds == 0 && len(r.Channels) == 0 && !r.Stage && !r.Inner && r.Team == nil
 }
 
 // Clone 复制一份（映射和切片不共用）。
@@ -157,6 +194,11 @@ func (r Rules) Clone() Rules {
 		r.Tools = slices.Clone(r.Tools)
 	}
 	r.Order = slices.Clone(r.Order)
+	if r.Team != nil {
+		t := *r.Team
+		t.Roster = slices.Clone(t.Roster)
+		r.Team = &t
+	}
 	if r.Channels != nil {
 		chans := make([]Channel, len(r.Channels))
 		for i, c := range r.Channels {
@@ -202,6 +244,14 @@ var eagernessOK = []string{"", "off", "low", "normal", "high"}
 // Validate 检查规则。sceneTools 是登记表里 scene 为真的工具名：tools 只能从里面选；
 // stageTools 是其中戏里也能用的（登记表里 stage 为真）：开了 stage 的场景 tools 只能从它里面选。
 func (r Rules) Validate(kind Kind, sceneTools, stageTools []string) error {
+	if r.Team != nil {
+		if kind != External {
+			return errors.New("团队设置只能用在外部群")
+		}
+		if err := r.Team.validate(); err != nil {
+			return err
+		}
+	}
 	if r.Stage && kind != Room {
 		return errors.New("只有内部群可以当一场戏")
 	}
@@ -294,6 +344,33 @@ func (r Rules) Validate(kind Kind, sceneTools, stageTools []string) error {
 		if r.BudgetTotal != 0 {
 			return errors.New("外部群只有每天的预算")
 		}
+	}
+	return nil
+}
+
+func (t Team) validate() error {
+	if strings.TrimSpace(t.Workspace) == "" {
+		return errors.New("团队要指定仓库所在的工作目录")
+	}
+	if len(t.Roster) > MaxRoster {
+		return fmt.Errorf("准入名单最多 %d 人", MaxRoster)
+	}
+	seen := map[string]bool{}
+	for _, w := range t.Roster {
+		ch, id, ok := strings.Cut(w, ":")
+		if !ok || strings.TrimSpace(ch) == "" || strings.TrimSpace(id) == "" || strings.ContainsAny(w, " \t\r\n") || len(w) > 200 {
+			return fmt.Errorf("名单里的 %q 写法不对，应该是“渠道名:发送人 ID”", w)
+		}
+		if seen[w] {
+			return fmt.Errorf("名单里 %s 重复了", w)
+		}
+		seen[w] = true
+	}
+	if n := utf8.RuneCountInString(t.Check); n > MaxCheck {
+		return fmt.Errorf("验收命令最多 %d 字（现在 %d）", MaxCheck, n)
+	}
+	if t.Budget < 0 {
+		return errors.New("工单预算不能是负数")
 	}
 	return nil
 }

@@ -5,7 +5,7 @@
   import { store } from '../lib/state.svelte';
   import { toolLabel } from '../lib/labels';
   import { ago } from '../lib/format';
-  import type { ObserveRecord, SceneRules, SceneUse } from '../lib/types';
+  import type { ObserveRecord, SceneRules, SceneUse, TeamRules } from '../lib/types';
 
   let {
     rules,
@@ -13,6 +13,7 @@
     sceneKey,
     external = false,
     members,
+    speakers,
     onsave,
     onreset,
   }: {
@@ -21,6 +22,7 @@
     sceneKey: string;
     external?: boolean;
     members: string[];
+    speakers?: Record<string, string>; // 外部群里说过话的人：名字 → 身份串
     onsave: (p: Record<string, unknown>) => Promise<void> | void;
     onreset?: () => void;
   } = $props();
@@ -43,6 +45,19 @@
   }
   const num = (e: Event) => Number((e.target as HTMLInputElement).value) || 0;
   const str = (e: Event) => (e.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).value;
+
+  // 团队：名单里的人点名 agent 才能建工单。名单从这个群说过话的人里勾选，显示名字、存身份串
+  const team = $derived(rules.team ?? null);
+  const speakerList = $derived(Object.entries(speakers ?? {}).sort((a, b) => a[0].localeCompare(b[0])));
+  const speakerName = (who: string) => speakerList.find(([, w]) => w === who)?.[0] ?? who;
+  const workspaces = $derived(store.ov?.workspaces ?? []);
+  function saveTeam(p: Partial<TeamRules>) {
+    onsave({ team: { roster: [], workspace: '', ...(team ?? {}), ...p } });
+  }
+  function toggleRoster(who: string, on: boolean) {
+    const cur = team?.roster ?? [];
+    saveTeam({ roster: on ? [...cur.filter((w) => w !== who), who] : cur.filter((w) => w !== who) });
+  }
 
   let recs = $state<ObserveRecord[]>([]);
   let showSilent = $state(false);
@@ -81,6 +96,38 @@
     </label>
   {/each}
 </div>
+
+{#if external}
+  <h5 class="p-h">团队 <span class="muted p-small">名单里的人点名 agent，agent 才会建工单；发言固定为点名，主动插话只记录</span></h5>
+  <div class="p-card" data-testid="team-card">
+    <label class="p-row"><input type="checkbox" checked={!!team} data-testid="team-on" onchange={(e) => (e.target as HTMLInputElement).checked ? saveTeam({ workspace: workspaces[0]?.id ?? '' }) : onsave({ team: null })} />
+      <span class="p-grow">这个群是一个团队</span></label>
+    {#if team}
+      <div class="p-label">准入名单（管理员总算在内）
+        {#each speakerList as [name, who] (who)}
+          <label class="p-row"><input type="checkbox" checked={team.roster.includes(who)} onchange={(e) => toggleRoster(who, (e.target as HTMLInputElement).checked)} />
+            <span>{name} <span class="tiny">{who}</span></span></label>
+        {:else}
+          <p class="p-note p-small">这个群里还没有人说过话。有人说话以后，在这里勾选。</p>
+        {/each}
+        {#each team.roster.filter((w) => !speakerList.some(([, x]) => x === w)) as who (who)}
+          <label class="p-row"><input type="checkbox" checked onchange={(e) => toggleRoster(who, (e.target as HTMLInputElement).checked)} />
+            <span>{speakerName(who)} <span class="tiny">不在最近说过话的人里</span></span></label>
+        {/each}
+      </div>
+      <label class="p-label">仓库所在的工作目录
+        <select class="p-select" value={team.workspace} data-testid="team-workspace" onchange={(e) => saveTeam({ workspace: str(e) })}>
+          <option value="">（选一个）</option>
+          {#each workspaces as w (w.id)}<option value={w.id}>{w.path}（{w.host || '本机'}）</option>{/each}
+        </select>
+      </label>
+      <label class="p-label">验收命令（在工单的工作区里跑，如 make test；空表示只看有没有改动）
+        <input class="p-input" maxlength="500" value={team.check ?? ''} onchange={(e) => saveTeam({ check: str(e) })} /></label>
+      <label class="p-label">每个工单最多用多少 token（0 用默认 2000000）
+        <input class="p-input" inputmode="numeric" value={team.budget ?? 0} onchange={(e) => saveTeam({ budget: num(e) })} /></label>
+    {/if}
+  </div>
+{/if}
 
 <details class="p-more">
   <summary>更多规则</summary>

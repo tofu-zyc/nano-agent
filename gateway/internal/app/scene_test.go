@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"nano-agent/gateway/internal/autonomy"
+	"nano-agent/gateway/internal/host"
 	"os"
 	"path/filepath"
 	"slices"
@@ -645,5 +646,50 @@ func TestDeleteSessionForgetsSceneUse(t *testing.T) {
 	e.a.mu.Unlock()
 	if left {
 		t.Fatal("用量条目应该删掉")
+	}
+}
+
+// 外部群的团队设置：存的是生效的规则（点名、只记录）；工作目录要存在；内部群设了拒绝；说过话的人给网页勾选。
+func TestTeamSceneRulesOnExternalGroup(t *testing.T) {
+	e := setup(t)
+	withAgents(t, e)
+	ext := extGroup(t, e)
+	set := func(sid, body string) error {
+		var p SessionPatch
+		if err := json.Unmarshal([]byte(body), &p); err != nil {
+			t.Fatal(err)
+		}
+		return e.a.UpdateSession(sid, p)
+	}
+	ws, err := e.a.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := set(ext, `{"scene":{"mode":"free","team":{"roster":["fake:u1"],"workspace":"no-such"}}}`); err == nil {
+		t.Fatal("工作目录不存在要拒绝")
+	}
+	body := fmt.Sprintf(`{"scene":{"mode":"free","team":{"roster":["fake:u1"],"workspace":%q,"check":"make test"}}}`, ws.ID)
+	if err := set(ext, body); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := e.a.Session(ext)
+	if info.Scene == nil || info.Scene.Team == nil || info.Scene.Mode != "mention" || !info.Scene.Observe || info.Scene.Team.Check != "make test" {
+		t.Fatalf("存的是生效的规则：%+v", info.Scene)
+	}
+	e.a.mu.Lock()
+	sc, _ := e.a.sceneOf(ext)
+	free := sc.free()
+	e.a.mu.Unlock()
+	if free {
+		t.Fatal("团队群不按积极度主动插话")
+	}
+	// 说过话的人：名字 → 身份
+	e.a.mu.Lock()
+	st := e.a.store.Settings(ext)
+	st.Members = map[string]string{"张三": "fake:u1"}
+	_ = e.a.store.SaveSettings(ext, st)
+	e.a.mu.Unlock()
+	if info, _ := e.a.Session(ext); info.Speakers["张三"] != "fake:u1" {
+		t.Fatalf("speakers：%+v", info.Speakers)
 	}
 }
