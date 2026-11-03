@@ -34,6 +34,10 @@ func (a *App) sceneOf(sid string) (sceneInfo, bool) {
 		return sceneInfo{}, false
 	}
 	info := sceneInfo{Kind: scene.External, Key: sid}
+	if rules, ok := a.githubScene(sid); ok { // 议题会话：规则每次从仓库连接上取
+		info.Rules = rules
+		return info, true
+	}
 	if st.Scene != nil {
 		info.Rules = st.Scene.Effective()
 	}

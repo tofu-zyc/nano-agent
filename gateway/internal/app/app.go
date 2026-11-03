@@ -145,6 +145,7 @@ type App struct {
 	tickets         *ticket.Store
 	ticketsErr      error
 	repos           *repos.Store
+	ghChan          *channel.GitHub
 	repoRTs         map[string]*repoRT
 	repoAPIBase     string            // GitHub API 地址；空是真的 GitHub，测试里换成假的
 	repoNoLoop      bool              // 测试用：不开轮询循环

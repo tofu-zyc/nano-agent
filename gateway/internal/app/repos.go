@@ -48,6 +48,7 @@ func (a *App) startRepos() {
 		return
 	}
 	for _, r := range a.repos.List() {
+		a.ensureGitHubChannel()
 		a.startRepo(r)
 	}
 }
@@ -148,12 +149,14 @@ func (a *App) PollRepo(ctx context.Context, id string) (time.Duration, error) {
 // handleRepoEvent 处理一件事：写进事件日志（repo.*，不带正文），再交给议题渠道和工单。
 func (a *App) handleRepoEvent(id string, ev repos.Event) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	r, ok := a.repos.Get(id)
+	if ok {
+		a.emitRepoLog(r, ev, "repo."+ev.Kind)
+	}
+	a.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	a.emitRepoLog(r, ev, "repo."+ev.Kind)
 	return a.dispatchRepoEvent(r, ev)
 }
 
@@ -192,7 +195,7 @@ func (a *App) dispatchRepoEvent(r repos.Repo, ev repos.Event) error {
 	if dispatchRepoEventHook != nil {
 		return dispatchRepoEventHook(a, r, ev)
 	}
-	return nil
+	return a.routeRepoEvent(r, ev)
 }
 
 // trackedPRs 是工单相关的、还开着的 PR（轮询要看它们的状态和检查）。
@@ -350,6 +353,7 @@ func (a *App) SaveRepo(req RepoSave) (RepoView, error) {
 	if err != nil {
 		return RepoView{}, err
 	}
+	a.ensureGitHubChannel()
 	a.startRepo(saved)
 	return repoView(saved), nil
 }

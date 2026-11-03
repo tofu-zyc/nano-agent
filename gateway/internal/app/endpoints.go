@@ -178,7 +178,7 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	r := a.eps[key]
 	changed := false
 	// 这个渠道（机器人）归哪个 agent：窗口接到的会话跟着它，一个机器人只属于一个 agent
-	agentID := a.agentForChannel(ep.ch)
+	agentID := a.agentForEndpoint(ep)
 	// 群聊：每个群一个会话，管理员在群里也不接到主会话
 	base := key
 	if a.isAdmin(who) && !m.Group {
