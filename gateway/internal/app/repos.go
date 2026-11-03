@@ -86,6 +86,8 @@ func (a *App) startRepo(r repos.Repo) {
 	a.repoRTs[r.ID] = rt
 	a.mu.Unlock()
 	go func() {
+		rt.pollMu.Lock() // 状态日志不加锁：和轮询、webhook 串行
+		defer rt.pollMu.Unlock()
 		if err := rt.intake.Replay(); err != nil {
 			a.log.Warn("重放仓库事件失败", "repo", r.Slug(), "err", err)
 		}
