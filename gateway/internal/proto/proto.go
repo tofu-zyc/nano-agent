@@ -64,8 +64,8 @@ const (
 	TToolStarted        = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
 	THookCheck          = "hook_check"
 	THookResult         = "hook_result"
-	TWatchSync          = "watch_sync"  // 网关 → 内核：明确文件或非递归目录的完整观察集合
-	TFileEvent          = "file_event"  // 内核 → 网关：至少观察到一次变化，resync_required 表示有缺口
+	TWatchSync          = "watch_sync"   // 网关 → 内核：明确文件或非递归目录的完整观察集合
+	TFileEvent          = "file_event"   // 内核 → 网关：至少观察到一次变化，resync_required 表示有缺口
 	TExecStarted        = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
 	TExecQueued         = "exec_queued"
 	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）

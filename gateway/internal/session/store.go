@@ -48,13 +48,13 @@ type Msg struct {
 	//   Kind      "user_interjection" 表示这是任务进行中收到的用户补充，不是新起的一轮
 	//   ParentRun 这条插话属于哪一次 run（历史分组、压缩、撤回按它识别，不把一次任务拆成几次）
 	//   SourceID  平台上的原始消息 ID；Sender 平台确认的发送者
-	Kind      string `json:"kind,omitempty"`
+	Kind string `json:"kind,omitempty"`
 	// Report 是宿主生成的报告卡片内容（目前只有分支报告）；Kind=branch_report 时才有，
 	// 网页按它画卡片，不靠正文前缀判断。
-	Report *Report `json:"report,omitempty"`
-	ParentRun string `json:"parent_run_id,omitempty"`
-	SourceID  string `json:"source_id,omitempty"`
-	Sender    string `json:"sender,omitempty"`
+	Report    *Report `json:"report,omitempty"`
+	ParentRun string  `json:"parent_run_id,omitempty"`
+	SourceID  string  `json:"source_id,omitempty"`
+	Sender    string  `json:"sender,omitempty"`
 	// ID 是这条消息的稳定标识（插话批量注入时用它和历史对账，位置/Base 只作辅助）。
 	ID string `json:"id,omitempty"`
 	// SourceIDs 是这条消息由哪些插话合并而来（按接收顺序）。

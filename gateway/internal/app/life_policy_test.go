@@ -15,10 +15,10 @@ func sp(v string) *string { return &v }
 // 档位默认值：low / normal / high 仍然是 4 / 8 / 16 次，间隔也跟随档位。
 func TestEffectiveLifePolicyDefaultsFollowLevel(t *testing.T) {
 	cases := []struct {
-		level  string
-		wakes  int
+		level   string
+		wakes   int
 		reaches int
-		min    time.Duration
+		min     time.Duration
 	}{
 		{"low", 4, 1, 2 * time.Hour},
 		{"normal", 8, 2, time.Hour},

@@ -908,7 +908,7 @@ func TestResetFailureReportsError(t *testing.T) {
 func TestArchiveLookupDoesNotLoadWholeHistory(t *testing.T) {
 	e := setup(t)
 	big := strings.Repeat("很长的历史内容", 200) // 每个约 4.2 KB
-	for i := 0; i < 4000; i++ {                 // ~16 MiB
+	for i := 0; i < 4000; i++ {           // ~16 MiB
 		if err := e.a.store.Append(e.sid, session.Msg{Role: "user", Content: big}); err != nil {
 			t.Fatal(err)
 		}
