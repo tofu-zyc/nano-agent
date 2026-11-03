@@ -39,6 +39,7 @@ import (
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/repos"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/search"
@@ -143,6 +144,11 @@ type App struct {
 	hTicket         *health.Handle // 工单记录：写不进去就是 degraded
 	tickets         *ticket.Store
 	ticketsErr      error
+	repos           *repos.Store
+	repoRTs         map[string]*repoRT
+	repoAPIBase     string            // GitHub API 地址；空是真的 GitHub，测试里换成假的
+	repoNoLoop      bool              // 测试用：不开轮询循环
+	lastRepoEventID string            // 测试用：最近一次写进事件日志的仓库事件
 	ticketNoStart   bool              // 测试用：建了工单不自动开工
 	ticketBusy      map[string]bool   // 正在由后台步骤处理的工单（开工、验收）：同一张工单同一时刻只一个
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
@@ -542,6 +548,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.observeDir = store.Dir()
 	a.openCommits()
 	a.openTickets()
+	a.openRepos()
 	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -566,6 +573,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	go a.groupLoop()
 	go a.agentLoop()
 	go a.ticketLoop()
+	go a.startRepos()
 	return a
 }
 

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"nano-agent/gateway/internal/host"
+	"nano-agent/gateway/internal/repos"
+	"nano-agent/gateway/internal/repos/fakegithub"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -420,5 +423,66 @@ func TestTicketCancelAPI(t *testing.T) {
 	}
 	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": ""}, true); code != http.StatusBadRequest {
 		t.Fatalf("没写理由返回 400：%d", code)
+	}
+}
+
+// webhook 不要登录，但要签名；web 层限正文 1MB；只有选了 webhook 的连接才接。
+func TestRepoWebhookRouteNeedsNoLoginButNeedsSignature(t *testing.T) {
+	srv, s, _ := setup(t)
+	gh := fakegithub.New("acme", "app", "ghp_webtest", "bot")
+	defer gh.Close()
+	s.app.SetRepoAPIBase(gh.URL)
+	s.app.SetRepoNoLoop(true)
+	ws, err := s.app.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.app.SaveRepo(app.RepoSave{Workspace: ws.ID, Owner: "acme", Name: "app", Token: "ghp_webtest", Intake: "webhook", Secret: "whsec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(path string, body []byte, hdr map[string]string) int {
+		req, _ := http.NewRequest("POST", srv.URL+path, strings.NewReader(string(body)))
+		for k, x := range hdr {
+			req.Header.Set(k, x)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	body := []byte(`{"action":"created","issue":{"number":3},"comment":{"id":9,"body":"hi","user":{"login":"alice"}}}`)
+	good := map[string]string{"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d1", "X-Hub-Signature-256": repos.Sign("whsec", body)}
+	if code := post(v.WebhookPath, body, good); code != 202 {
+		t.Fatalf("没登录、签名对：%d", code)
+	}
+	if code := post(v.WebhookPath, body, map[string]string{"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d2", "X-Hub-Signature-256": repos.Sign("bad", body)}); code != 401 {
+		t.Fatalf("签名不对：%d", code)
+	}
+	if code := post("/api/repos/no-such/webhook", body, good); code != 404 {
+		t.Fatalf("没有这个连接：%d", code)
+	}
+	big := make([]byte, repos.MaxWebhookBody+10)
+	if code := post(v.WebhookPath, big, good); code != 413 {
+		t.Fatalf("超过 1MB：%d", code)
+	}
+	// 管理接口要登录
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/repos", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("列连接要登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatal(code)
+	}
+	code, out := c.do("GET", "/api/repos", nil, false)
+	items, _ := out["items"].([]any)
+	if code != 200 || len(items) != 1 {
+		t.Fatalf("列连接：%d %v", code, out)
+	}
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), "ghp_webtest") || strings.Contains(string(raw), "whsec") {
+		t.Fatalf("token 和密钥不回显：%s", raw)
 	}
 }

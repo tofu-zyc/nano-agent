@@ -9,11 +9,13 @@ package web
 //   GET          /api/rooms/{id}/timeline、/timeline/prefix/{hash}（剧场的场景记录）
 
 import (
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 
 	"nano-agent/gateway/internal/app"
+	"nano-agent/gateway/internal/repos"
 )
 
 func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
@@ -214,4 +216,43 @@ func (s *Server) cancelTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// listRepos 是仓库连接：GET /api/repos。token 和密钥不回显。
+func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"items": s.app.Repos()})
+}
+
+// saveRepo 保存一个连接：POST /api/repos。保存时用 token 查一次账号和仓库访问，不通就不保存。
+func (s *Server) saveRepo(w http.ResponseWriter, r *http.Request) {
+	var req app.RepoSave
+	if !readJSON(w, r, &req) {
+		return
+	}
+	v, err := s.app.SaveRepo(req)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) deleteRepo(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.DeleteRepo(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// repoWebhook 收 GitHub 的 webhook：POST /api/repos/{id}/webhook，不要登录。
+// web 层只限正文大小（1MB，超了 413）；签名校验、事件白名单、先记再回都在 app 层。
+func (s *Server) repoWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, repos.MaxWebhookBody))
+	if err != nil {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		return
+	}
+	code := s.app.RepoWebhook(r.PathValue("id"), r.Header.Get("X-GitHub-Event"), r.Header.Get("X-GitHub-Delivery"), r.Header.Get("X-Hub-Signature-256"), body)
+	w.WriteHeader(code)
 }

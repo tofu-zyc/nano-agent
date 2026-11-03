@@ -294,6 +294,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rooms", s.auth(s.listRooms))
 	mux.HandleFunc("GET /api/commitments", s.auth(s.listCommitments))
 	mux.HandleFunc("GET /api/pending", s.auth(s.listPending))
+	mux.HandleFunc("GET /api/repos", s.auth(s.listRepos))
+	mux.HandleFunc("POST /api/repos", s.auth(s.saveRepo))
+	mux.HandleFunc("DELETE /api/repos/{id}", s.auth(s.deleteRepo))
+	mux.HandleFunc("POST /api/repos/{id}/webhook", s.repoWebhook) // 不走登录：靠签名
 	mux.HandleFunc("POST /api/tickets/{id}/cancel", s.auth(s.cancelTicket))
 	mux.HandleFunc("POST /api/pending/seen", s.auth(s.pendingSeen))
 	mux.HandleFunc("POST /api/pending/answer", s.auth(s.pendingAnswer))
@@ -328,6 +332,11 @@ func (s *Server) Handler() http.Handler {
 // guard：监听本机时只接受本机的 Host（防 DNS 重绑定）；改动类请求必须带 X-Nano 头（防跨站请求）。
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GitHub 的 webhook 不是浏览器发的：带不了 X-Nano，Host 也是对外的域名。它不靠这两道，靠签名（app 层校验）。
+		if isRepoWebhook(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.loopback {
 			host := r.Host
 			if h, _, err := net.SplitHostPort(host); err == nil {
@@ -407,4 +416,17 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// isRepoWebhook 是 POST /api/repos/<id>/webhook。
+func isRepoWebhook(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/repos/")
+	if !ok {
+		return false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	return ok && id != "" && tail == "webhook"
 }
