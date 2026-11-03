@@ -44,6 +44,7 @@ import (
 	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
+	"nano-agent/gateway/internal/ticket"
 )
 
 // Command 是一个聊天命令。/help、网页输入框里打 / 时的提示都用这张表。
@@ -139,6 +140,9 @@ type App struct {
 	commits         *commit.Store     // 承诺记录（Report、知道了、回答）
 	schedPrior      map[string]uint64 // 定时任务这一轮开始时承诺记录的最大序号：成功后更早的汇报算处理过
 	commitsErr      error
+	hTicket         *health.Handle // 工单记录：写不进去就是 degraded
+	tickets         *ticket.Store
+	ticketsErr      error
 	stageBad        map[string]string // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
@@ -484,6 +488,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.hSchedule, _ = a.health.Claim("schedule")
 	a.hStage, _ = a.health.Claim("stage")
 	a.hCommit, _ = a.health.Claim("commitments")
+	a.hTicket, _ = a.health.Claim("tickets")
 	for _, recovery := range []struct {
 		name string
 		run  func() error
@@ -521,6 +526,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.openOutbox(ctx, store.Dir())
 	a.observeDir = store.Dir()
 	a.openCommits()
+	a.openTickets()
 	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
@@ -2406,6 +2412,7 @@ func (a *App) Wait() {
 		a.outbox.Close()
 	}
 	a.commits.Close()
+	a.tickets.Close()
 	if a.hookEngine != nil {
 		a.hookEngine.Close()
 	}
