@@ -198,6 +198,8 @@ managed_job *jobs_create(job_manager *m,const cJSON *origin,const cJSON *request
     cJSON_AddNumberToObject(model,"created_at",(double)time(NULL));
     cJSON_AddBoolToObject(model,"background",false);
     cJSON_AddItemToObject(model,"request",cJSON_Duplicate(request,true));
+    /* env 不落盘：调用方自己留着给启动进程用 */
+    cJSON_DeleteItemFromObjectCaseSensitive(cJSON_GetObjectItemCaseSensitive(model,"request"),"env");
     for(const char *const *key=(const char *const[]){"wait_id","wait_sid","lease",NULL};*key;key++) {
         const cJSON *value=cJSON_GetObjectItemCaseSensitive(request,*key);
         if(value)cJSON_AddItemToObject(model,*key,cJSON_Duplicate(value,true));

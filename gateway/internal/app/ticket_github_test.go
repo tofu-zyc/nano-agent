@@ -710,10 +710,8 @@ func TestForcedRoundAfterThePRIsOpenSaysWhoAccepted(t *testing.T) {
 	in, n := p.openPR(t, sid)
 	for i, content := range []string{"一\n二\n三\n", "一\n二\n三\n四\n"} {
 		tk := p.tk("tk-1")
-		pl, _ := p.gh.Pull(n)
 		p.gh.SetHead(n, tk.PRHead)
 		p.gh.SetChecks(tk.PRHead, fakegithub.Check("build", int64(30+i), "completed", "failure", "挂了"))
-		_ = pl
 		p.poll(t)
 		if i == 0 {
 			p.k.expect(proto.TInput)
@@ -730,4 +728,45 @@ func TestForcedRoundAfterThePRIsOpenSaysWhoAccepted(t *testing.T) {
 	eventually(t, "PR 上有先收下的回复", func() bool { return strings.Contains(p.prComments(n), "验收没过，由 fake:u2 收下：") })
 	eventually(t, "回到 ready", func() bool { return p.tk("tk-1").Status == ticket.StatusReady })
 	finishGroupRun(t, p.env, sid)
+}
+
+// 先收下开了 PR，之后按审阅意见做的一轮验收通过了、查 PR 失败、重试：PR 上不说“验收没过”。
+func TestZZRetryAfterAPassingRoundIsNotForced(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "grep -q ok a.txt")
+	in := p.startWork(t, sid)
+	for i := 0; i < 2; i++ {
+		p.round(t, in, strings.Repeat("改\n", i+1))
+		if i == 0 {
+			p.k.expect(proto.TInput)
+		}
+	}
+	eventually(t, "返工用完受阻", func() bool { return p.tk("tk-1").Status == ticket.StatusBlocked })
+	mention(p.env, "@机器人 先收下", "g700", "u2", "李四")
+	p.k.expect(proto.TInput)
+	if _, err := callTicket(p.env, sid, `{"action":"accept","id":"tk-1"}`); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "PR 开了", func() bool { tk := p.tk("tk-1"); return tk.PR != "" && tk.Status == ticket.StatusReady })
+	finishGroupRun(t, p.env, sid)
+	var n int
+	for _, pl := range p.gh.Pulls() {
+		n = pl.Number
+	}
+	p.gh.AddReview(n, "alice", "CHANGES_REQUESTED", "写上 ok")
+	p.poll(t)
+	p.k.expect(proto.TInput)
+	p.gh.FailNext("/pulls", 500, "boom", nil)
+	p.round(t, in, "ok\n")
+	eventually(t, "查 PR 失败受阻", func() bool { tk := p.tk("tk-1"); return tk.Status == ticket.StatusBlocked && tk.BlockedBy == "pr" })
+	mention(p.env, "@机器人 再试一次", "g701", "u2", "李四")
+	p.k.expect(proto.TInput)
+	if _, err := callTicket(p.env, sid, `{"action":"note","id":"tk-1","text":"重试一下"}`); err != nil {
+		t.Fatal(err)
+	}
+	finishGroupRun(t, p.env, sid)
+	eventually(t, "PR 上有回复", func() bool { return strings.Contains(p.prComments(n), "改了：") })
+	if c := p.prComments(n); strings.Contains(c, "验收没过") {
+		t.Fatalf("这一轮验收通过了，PR 上却说：%s", c)
+	}
 }

@@ -1164,9 +1164,11 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
         cJSON_AddStringToObject(req,"wait_sid",q->sid);
         cJSON_DeleteItemFromObjectCaseSensitive(req,"lease");
         cJSON_AddItemToObject(req,"lease",cJSON_Parse(q->lease_spec));
+        /* env 只留在内存里给启动进程用：Job 的记录（meta.json）里不存（推送的 token 就在这里面） */
+        cJSON *env=cJSON_DetachItemFromObjectCaseSensitive(req,"env");
         managed_job *owned=jobs_create(k->jobs,cJSON_GetObjectItemCaseSensitive(req,"origin"),req,
                                       q->res_keys,q->res_xkeys,kind,err,errlen);
-        if(!owned){execq_free(q);return false;}
+        if(!owned){cJSON_Delete(env);execq_free(q);return false;}
         job_binding *b=xcalloc(1,sizeof *b);
         b->job=owned;b->sid=xstrdup(q->sid);b->run_id=xstrdup(q->run_id);
         b->turn_id=q->turn_id;b->id=xstrdup(q->id);b->kind=kind;b->admitted_at=now;
@@ -1176,6 +1178,7 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
         free(q->lease_spec);q->lease_spec=cJSON_PrintUnformatted(spec);cJSON_Delete(spec);
         b->lease_spec=xstrdup(q->lease_spec);
         cJSON_Delete(q->req);q->req=cJSON_Duplicate(jobs_request(owned),true);
+        if(env)cJSON_AddItemToObject(q->req,"env",env);
         b->next=k->job_bindings;k->job_bindings=b;
     }
     execq_t **pp = &k->execq;

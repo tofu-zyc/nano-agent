@@ -173,8 +173,13 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 	}
 	r, connected := a.repoOfTicket(t)
 	repo, rerr := a.ticketRepoOf(t)
-	if connected && forced && t.ForcedBy != by { // 记下是谁先收下的：交付失败重试时，PR 正文还要写这句
-		if _, err := a.tickets.Update(id, func(t *ticket.Ticket) { t.ForcedBy = by }); err != nil {
+	// ForcedBy 按这一次交付设：先收下的设成谁，验收通过的一轮清掉（重试照着它写，重试时不变）
+	want := ""
+	if forced {
+		want = by
+	}
+	if connected && t.ForcedBy != want {
+		if _, err := a.tickets.Update(id, func(t *ticket.Ticket) { t.ForcedBy = want }); err != nil {
 			a.ticketHealth(err)
 		}
 	}
