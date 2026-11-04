@@ -359,7 +359,24 @@ def t_env(gw):
     r = gw.expect("result", sid="senv", id="e2", ok=False)
     assert "agent_rw 只能由网关发起的执行放在请求的顶层" in r["content"], r
     assert not os.path.exists(os.path.join(WORK, "rw-model-ran"))
+    gw.expect("model", sid="senv")
+    call(gw, "senv", ("e3", "Shell", {"command": "echo model-ran > rw-model-ran", "agent_rw_deny": [T]}))
+    r = gw.expect("result", sid="senv", id="e3", ok=False)
+    assert "agent_rw_deny 只能由网关发起的执行放在请求的顶层" in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "rw-model-ran"))
     finish(gw, "senv")
+    # 网关发起的 run 带的顶层 agent_rw、agent_rw_deny 穿过内核到执行器：互相包含的整次拒绝
+    home = os.path.join(T, "home")
+    for d in ("repo-x/src", ".claude-x"):
+        os.makedirs(os.path.join(home, d), exist_ok=True)
+    gw.send(t="run", id="rw1", req={"tool": "Shell", "args": {"command": "echo ran > rw-gateway-ran"}, "dirs": [WORK], "write": True,
+                                     "agent_rw": ["~/repo-x/src"], "agent_rw_deny": ["~/repo-x"]})
+    gw.expect("run_result", id="rw1", ok=False, content=lambda c: "仓库的根" in c and "没有执行" in c)
+    gw.send(t="run", id="rw2", req={"tool": "Shell", "args": {"command": "echo ran > rw-gateway-ran"}, "dirs": [WORK], "write": True,
+                                     "agent_rw": ["~/.claude-x"], "agent_rw_deny": ["~/repo-x"]})
+    gw.expect("run_result", id="rw2", ok=True)
+    assert os.path.exists(os.path.join(WORK, "rw-gateway-ran"))
+    os.remove(os.path.join(WORK, "rw-gateway-ran"))
 
 
 @case("工具往返：Write 写文件，Read 读回来")

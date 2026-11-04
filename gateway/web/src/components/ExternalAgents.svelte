@@ -102,7 +102,8 @@
       <input class="p-input" bind:value={f.name} data-testid="ext-name" /></label>
     <label class="p-label">命令，一行一项；{'{prompt}'} 单独占一行，换成这次的要求（不经 shell 解释）
       <textarea class="p-input" rows="4" bind:value={f.argv} data-testid="ext-argv"></textarea></label>
-    <label class="p-label">它自己的配置和登录目录，一行一个，以 ~/ 开头（装在家目录里的程序，安装目录也要写上）
+    <label class="p-label">它自己的配置和登录目录，一行一个，以 ~/ 开头。装在家目录里的程序，登记它的安装目录（比如 ~/.local/share/claude）；
+      不要登记 PATH 里放启动脚本的目录（比如 ~/.local/bin）：那里的程序主人自己的终端和宿主之后的步骤都会去跑，不能让外部 agent 改，和它互相包含的目录执行时会被拒绝
       <textarea class="p-input" rows="2" bind:value={f.dirs} data-testid="ext-dirs" placeholder="~/.claude"></textarea></label>
     <label class="p-label">环境变量，一行一个 名字=值：放路径和开关，不放密钥（HOME、PATH 这些改不了）
       <textarea class="p-input" rows="2" bind:value={f.env} data-testid="ext-env" placeholder="CLAUDE_CONFIG_DIR=~/.claude"></textarea></label>

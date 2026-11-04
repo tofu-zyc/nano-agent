@@ -27,18 +27,21 @@ SANDBOX = PROBE["landlock"] > 0
 
 
 def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30,
-        sandbox=None, hook_input=None, env=None, agent_rw=None):
+        sandbox=None, hook_input=None, env=None, agent_rw=None, agent_rw_deny=None, path=None, tmp_key="test"):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
-           "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
+           "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": tmp_key, "max_output": max_output, "watch_stdin": True}
     if hook_input is not None:
         req["hook_input"] = hook_input
     if env is not None:
         req["env"] = env
     if agent_rw is not None:
         req["agent_rw"] = agent_rw
+    if agent_rw_deny is not None:
+        req["agent_rw_deny"] = agent_rw_deny
     if sandbox is not None:
         req["sandbox"] = sandbox
-    p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
+    penv = ENV if path is None else dict(ENV, PATH=path)   # 执行器自己环境里的 PATH
+    p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=penv)
     p.stdin.write((json.dumps(req) + "\n").encode())
     p.stdin.flush()
     out = p.stdout.readline()
@@ -387,6 +390,93 @@ def t_agent_rw_checks():
     assert os.path.exists(mark)
 
 
+@case("agent_rw：不能和执行器 PATH 里的目录互相包含（解析符号链接；相对的、不存在的 PATH 项跳过；沙箱关着也一样）")
+def t_agent_rw_path():
+    proj = os.path.join(HOME, "proj")
+    for d in (proj, os.path.join(HOME, "tools", "bin", "sub"), os.path.join(HOME, "realbin"), os.path.join(HOME, ".claude"),
+              os.path.join(HOME, "apps", "claude")):
+        os.makedirs(d, exist_ok=True)
+    if not os.path.lexists(os.path.join(HOME, "linkbin")):
+        os.symlink(os.path.join(HOME, "realbin"), os.path.join(HOME, "linkbin"))
+    base = ENV["PATH"]
+    path = ":".join([os.path.join(HOME, "tools", "bin"), os.path.join(HOME, "linkbin"), "bin", "", os.path.join(HOME, "ghost-bin"), base])
+    mark = os.path.join(proj, "path-ran")
+    cmd = {"command": "echo ran > " + mark}
+    cases = [
+        (["~/tools/bin"], os.path.join(HOME, "tools", "bin")),         # 就是 PATH 里的目录
+        (["~/tools"], os.path.join(HOME, "tools", "bin")),             # 包着 PATH 里的目录
+        (["~/tools/bin/sub"], os.path.join(HOME, "tools", "bin")),     # 在 PATH 里的目录里面
+        (["~/realbin"], os.path.join(HOME, "linkbin")),                # PATH 里是符号链接，解析成真实路径再比
+        (["~/linkbin"], os.path.join(HOME, "linkbin")),                # agent_rw 自己是符号链接
+        (["~/.claude", "~/tools/bin/sub"], os.path.join(HOME, "tools", "bin")),   # 一项不行整次拒绝，写明是哪个 PATH 目录
+    ]
+    for sandbox in ("auto", "off"):
+        for rw, want in cases:
+            r = bad(run("Shell", cmd, agent_rw=rw, sandbox=sandbox, path=path), "PATH 里的目录 " + want, "互相包含", "没有执行")
+            assert not os.path.exists(mark), (rw, sandbox)
+    # 不相干的、PATH 里相对的、空的、不存在的项都不挡
+    ok(run("Shell", cmd, agent_rw=["~/.claude", "~/apps/claude"], sandbox="off", path=path))
+    assert os.path.exists(mark)
+    os.remove(mark)
+    # PATH 没有这些目录时同一个请求能过：拒绝是因为 PATH
+    ok(run("Shell", cmd, agent_rw=["~/tools/bin"], sandbox="off"))
+    assert os.path.exists(mark)
+    os.remove(mark)
+    # 校验不过时什么都没建：这次执行的临时目录不存在
+    key = "rejected-key"
+    bad(run("Shell", cmd, agent_rw=["~/tools/bin"], path=path, tmp_key=key), "PATH")
+    assert not os.path.exists(os.path.join(HOME, ".nano-agent", "tmp", key))
+
+
+@case("agent_rw_deny：网关带的仓库根，只用来查互相包含，不加进任何读写范围；也只能放在请求顶层")
+def t_agent_rw_deny():
+    repo = os.path.join(HOME, "repo")
+    wt = os.path.join(repo, ".nano", "worktrees", "tk-1")
+    for d in (wt, os.path.join(repo, "src"), os.path.join(HOME, ".claude"), os.path.join(HOME, "other-app")):
+        os.makedirs(d, exist_ok=True)
+    mark = os.path.join(wt, "deny-ran")
+    cmd = {"command": "echo ran > " + mark}
+    ro = (os.path.join(repo, ".git"),)
+    os.makedirs(ro[0], exist_ok=True)
+    cases = [
+        (["~/repo/src"], "仓库的根"),             # 在仓库里、又不在 worktree 和 .git 里
+        (["~/repo"], "和这次的工作目录互相包含"),   # 包着 worktree：dirs 那条先拦住
+        (["~/repo/.nano"], "和这次的工作目录互相包含"),
+        (["~/.claude", "~/repo/src"], "~/repo/src"),
+    ]
+    for sandbox in ("auto", "off"):
+        for rw, want in cases:
+            bad(run("Shell", cmd, dirs=(wt,), ro=ro, agent_rw=rw, agent_rw_deny=[repo], sandbox=sandbox), want, "没有执行")
+            assert not os.path.exists(mark), (rw, sandbox)
+    # 仓库根包着 agent_rw：不带 deny 时通过，带了就拒绝，用的是解析后的路径
+    if not os.path.lexists(os.path.join(HOME, "repo-link")):
+        os.symlink(repo, os.path.join(HOME, "repo-link"))
+    bad(run("Shell", cmd, dirs=(wt,), ro=ro, agent_rw=["~/repo/src"], agent_rw_deny=["~/repo-link"], sandbox="off"), "仓库的根")
+    bad(run("Shell", cmd, dirs=(wt,), ro=ro, agent_rw=["~/repo/src"], agent_rw_deny=[repo + "/../repo"], sandbox="off"), "仓库的根")
+    ok(run("Shell", cmd, dirs=(wt,), ro=ro, agent_rw=["~/.claude", "~/other-app"], agent_rw_deny=[repo], sandbox="off"))
+    assert os.path.exists(mark)
+    os.remove(mark)
+    # 形状不对整次拒绝
+    for deny, want in (("~/repo", "字符串数组"), ([repo] * 9, "最多 8 项"), (["repo"], "不是绝对路径"), ([""], "不是绝对路径"), ([3], "不是绝对路径")):
+        bad(run("Shell", cmd, dirs=(wt,), ro=ro, agent_rw=["~/.claude"], agent_rw_deny=deny, sandbox="off"), want)
+        assert not os.path.exists(mark), deny
+    # 模型的参数里带：拒绝，不执行
+    bad(run("Shell", dict(cmd, agent_rw_deny=[repo]), dirs=(wt,), ro=ro), "agent_rw_deny 只能由网关发起的执行放在请求的顶层")
+    assert not os.path.exists(mark)
+
+
+@case("agent_rw_deny：不加进读写范围（沙箱里照样写不进去）", need_sandbox=True)
+def t_agent_rw_deny_not_writable():
+    denied, claude = os.path.join(HOME, "deny-only"), os.path.join(HOME, ".claude")
+    for d in (denied, claude):
+        os.makedirs(d, exist_ok=True)
+    cmd = {"command": "echo x > " + os.path.join(denied, "w") + " && echo wrote; echo y > " + os.path.join(claude, "w2") + " && echo wrote2"}
+    c = ok(run("Shell", cmd, agent_rw=["~/.claude"], agent_rw_deny=[denied], sandbox="on"), "wrote2")   # agent_rw 能写
+    assert "Permission denied" in c and "wrote\n" not in c.replace("wrote2", ""), c               # deny 的目录写不进
+    assert not os.path.exists(os.path.join(denied, "w")), c
+    os.remove(os.path.join(claude, "w2"))
+
+
 @case("agent_rw：加进这一个进程的可写范围；env 里 ~/ 开头的值用真实 HOME 展开（HOME 换成私有目录也找得到）", need_sandbox=True)
 def t_agent_rw_writable():
     claude = os.path.join(HOME, ".claude")
@@ -545,7 +635,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_stream, t_hook_input, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_env, t_agent_rw_checks, t_agent_rw_writable, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
+                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_env, t_agent_rw_checks, t_agent_rw_path, t_agent_rw_deny, t_agent_rw_deny_not_writable, t_agent_rw_writable, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

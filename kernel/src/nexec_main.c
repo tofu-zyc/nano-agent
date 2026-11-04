@@ -260,13 +260,106 @@ static bool env_name_ok(const char *k)
 
 /* 外部 agent 自己的配置和登录目录（设计 §16.4）：和 env 一样只有网关发起的执行能带（请求顶层），
  * 参数里出现在 main 里拒绝。用这台机器真实的 HOME 展开 ~/、解析符号链接（在换私有 HOME 之前）；
- * 必须是存在的目录、在家目录里面、不是家目录本身，不和这次的 dirs、ro 互相包含，不和 NANO_HOME 互相包含。
+ * 必须是存在的目录、在家目录里面、不是家目录本身，不和这次的 dirs、ro 互相包含，不和 NANO_HOME 互相包含，
+ * 不和执行器环境里 PATH 的任何目录互相包含（那里的程序宿主之后的步骤和主人自己的终端都会去跑，外部 agent 不该能改），
+ * 不和请求顶层的 agent_rw_deny 互相包含（工单里网关带仓库的根：执行器不知道它在哪，它又不在 worktree 和 .git 里）。
+ * agent_rw_deny 只用来查，不加进任何读写范围，和 agent_rw 一样只有网关能带。
  * 任何一项不满足整次拒绝，写明是哪一项；沙箱关着也照样校验。都满足的只加进这一个进程的可写范围。 */
 static bool overlaps(const char *p, char **list, size_t n)
 {
     for (size_t i = 0; i < n; i++)
         if (plat_inside(p, list[i]) || plat_inside(list[i], p)) return true;
     return false;
+}
+
+typedef struct { char **real; char **raw; size_t n; } pathset;
+
+static void pathset_add(pathset *s, char *real, const char *raw)
+{
+    s->real = xrealloc(s->real, (s->n + 1) * sizeof *s->real);
+    s->raw = xrealloc(s->raw, (s->n + 1) * sizeof *s->raw);
+    s->real[s->n] = real;
+    s->raw[s->n++] = xstrdup(raw);
+}
+
+static void pathset_free(pathset *s)
+{
+    for (size_t i = 0; i < s->n; i++) { free(s->real[i]); free(s->raw[i]); }
+    free(s->real);
+    free(s->raw);
+    memset(s, 0, sizeof *s);
+}
+
+/* 执行器环境里 PATH 的目录，每项解析成真实路径；不是绝对路径的、不存在的跳过 */
+static void path_env_dirs(const xctx *x, pathset *out)
+{
+    const char *path = NULL;
+    for (char **e = x->env; e && *e; e++)
+        if (!strncmp(*e, "PATH=", 5)) path = *e + 5;
+    if (!path) return;
+#if NA_WINDOWS
+    const char sep = ';';
+#else
+    const char sep = ':';
+#endif
+    for (const char *d = path; d;) {
+        const char *e = strchr(d, sep);
+        char *one = e ? xasprintf("%.*s", (int)(e - d), d) : xstrdup(d);
+        d = e ? e + 1 : NULL;
+        if (plat_is_abs(one)) {
+            char *real = plat_canonical(one);
+            plat_stat_t st;
+            if (real && plat_stat(real, &st) && st.is_dir) pathset_add(out, real, one);
+            else free(real);
+        }
+        free(one);
+    }
+}
+
+/* agent_rw_deny：展开 ~/、解析符号链接；写不出绝对路径的整次拒绝（不知道它是什么就没法保证不互相包含） */
+static int load_deny(const cJSON *req, pathset *deny, buf_t *err)
+{
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(req, "agent_rw_deny");
+    if (!arr) return 0;
+    if (!cJSON_IsArray(arr) || cJSON_GetArraySize(arr) > 8) {
+        buf_puts(err, "agent_rw_deny 应为最多 8 项的字符串数组");
+        return -1;
+    }
+    const cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        const char *raw = cJSON_IsString(it) ? it->valuestring : "";
+        char *p = *raw ? plat_expand_home(raw) : NULL;
+        char *real = p && plat_is_abs(p) ? plat_canonical(p) : NULL;
+        free(p);
+        if (!real) {
+            buf_puts(err, "agent_rw_deny 里的 ");
+            buf_puts(err, *raw ? raw : "（空）");
+            buf_puts(err, " 不是绝对路径。没有执行");
+            return -1;
+        }
+        pathset_add(deny, real, raw);
+    }
+    return 0;
+}
+
+static char *agent_rw_why(const char *real, const xctx *x, const char *home, const char *nh,
+                          const pathset *path, const pathset *deny)
+{
+    plat_stat_t st;
+    if (!plat_stat(real, &st) || !st.is_dir) return xstrdup("目录不存在");
+    if (!home || !plat_inside(real, home)) return xstrdup("不在家目录里面");
+    if (plat_path_eq(real, home)) return xstrdup("是家目录本身");
+    if (overlaps(real, x->dirs, x->ndirs)) return xstrdup("和这次的工作目录互相包含");
+    if (overlaps(real, x->ro, x->nro)) return xstrdup("和这次的只读目录互相包含");
+    if (plat_inside(real, nh) || plat_inside(nh, real)) return xstrdup("和 NANO_HOME 互相包含");
+    for (size_t i = 0; i < path->n; i++)
+        if (plat_inside(real, path->real[i]) || plat_inside(path->real[i], real))
+            return xasprintf("和执行器 PATH 里的目录 %s 互相包含（装在家目录里的程序，登记它的安装目录，"
+                             "不要登记 PATH 里放启动脚本的目录）", path->raw[i]);
+    for (size_t i = 0; i < deny->n; i++)
+        if (plat_inside(real, deny->real[i]) || plat_inside(deny->real[i], real))
+            return xasprintf("和仓库的根 %s 互相包含", deny->raw[i]);
+    return NULL;
 }
 
 static int load_agent_rw(xctx *x, const cJSON *req, const char *nano_home, buf_t *err)
@@ -280,25 +373,20 @@ static int load_agent_rw(xctx *x, const cJSON *req, const char *nano_home, buf_t
     char *home = plat_canonical(x->home);
     char *nh = plat_canonical(nano_home);
     if (!nh) nh = xstrdup(nano_home);
-    int rc = 0;
+    pathset path = {0}, deny = {0};
+    int rc = load_deny(req, &deny, err);
+    if (rc == 0) path_env_dirs(x, &path);
     const cJSON *it;
-    cJSON_ArrayForEach(it, arr) {
+    if (rc == 0) cJSON_ArrayForEach(it, arr) {
         const char *raw = cJSON_IsString(it) ? it->valuestring : "";
-        const char *why = NULL;
-        char *real = NULL;
-        plat_stat_t st;
+        char *why = NULL, *real = NULL;
         if (!*raw) {
-            why = "不是非空字符串";
+            why = xstrdup("不是非空字符串");
         } else {
             char *p = plat_expand_home(raw);
             real = plat_canonical(p);
             free(p);
-            if (!real || !plat_stat(real, &st) || !st.is_dir) why = "目录不存在";
-            else if (!home || !plat_inside(real, home)) why = "不在家目录里面";
-            else if (plat_path_eq(real, home)) why = "是家目录本身";
-            else if (overlaps(real, x->dirs, x->ndirs)) why = "和这次的工作目录互相包含";
-            else if (overlaps(real, x->ro, x->nro)) why = "和这次的只读目录互相包含";
-            else if (plat_inside(real, nh) || plat_inside(nh, real)) why = "和 NANO_HOME 互相包含";
+            why = real ? agent_rw_why(real, x, home, nh, &path, &deny) : xstrdup("目录不存在");
         }
         if (why) {
             buf_puts(err, "agent_rw 里的 ");
@@ -311,12 +399,15 @@ static int load_agent_rw(xctx *x, const cJSON *req, const char *nano_home, buf_t
             buf_puts(err, " 不能用：");
             buf_puts(err, why);
             buf_puts(err, "。没有执行");
+            free(why);
             free(real);
             rc = -1;
             break;
         }
         push(&x->agent_rw, &x->nagent_rw, real);
     }
+    pathset_free(&path);
+    pathset_free(&deny);
     free(home);
     free(nh);
     return rc;
@@ -402,6 +493,14 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
     if (!nh && errno != ENOENT) { buf_puts(err, "读取 NANO_HOME 的 Unicode 值失败"); return -1; }
     char *base = nh && plat_is_abs(nh) ? xstrdup(nh) : plat_join(x->home, ".nano-agent");
     free(nh);
+    char *key = safe_key(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "tmp_key")));
+    char *tmpbase = plat_join(base, "tmp");
+    x->tmp = plat_join(tmpbase, key);
+    x->cache = plat_join(base, "cache");
+    free(tmpbase);
+    free(key);
+    /* 先建好环境（agent_rw 要查它的 PATH），再校验；校验不过时什么目录都还没建 */
+    x->env = plat_build_env(x->home, x->tmp, x->cache);
     if (load_agent_rw(x, req, base, err) < 0) {
         free(base);
         return -1;
@@ -411,13 +510,7 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
     char *skill_real = plat_canonical(skill_path);
     free(skill_path);
     if (skill_real) push(&x->ro, &x->nro, skill_real);
-    char *key = safe_key(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "tmp_key")));
-    char *tmpbase = plat_join(base, "tmp");
-    x->tmp = plat_join(tmpbase, key);
-    x->cache = plat_join(base, "cache");
-    free(tmpbase);
     free(base);
-    free(key);
     const char *failed_path = NULL;
     if (plat_makedirs(x->tmp) < 0) failed_path = x->tmp;
     else if (plat_makedirs(x->cache) < 0) failed_path = x->cache;
@@ -428,7 +521,6 @@ static int setup(xctx *x, const cJSON *req, int mode, buf_t *err)
         free(detail);
         return -1;
     }
-    x->env = plat_build_env(x->home, x->tmp, x->cache);
     return apply_extra_env(x, req, err);
 }
 
@@ -700,6 +792,8 @@ int main(int argc, char **argv)
         buf_puts(&out, "env 只能由网关发起的执行放在请求的顶层，不能放在工具参数里");
     } else if (args && cJSON_GetObjectItemCaseSensitive(args, "agent_rw")) {
         buf_puts(&out, "agent_rw 只能由网关发起的执行放在请求的顶层，不能放在工具参数里");
+    } else if (args && cJSON_GetObjectItemCaseSensitive(args, "agent_rw_deny")) {
+        buf_puts(&out, "agent_rw_deny 只能由网关发起的执行放在请求的顶层，不能放在工具参数里");
     } else if (mode < 0) {
         buf_puts(&out, "sandbox 只能是 auto、on 或 off");
     } else if (setup(&x, req, mode, &out) == 0 && enter_sandbox(&x, mode, &out) == 0) {

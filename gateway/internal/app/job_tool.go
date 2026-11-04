@@ -66,6 +66,9 @@ func renderJob(j JobInfo) string {
 	if j.Error != "" {
 		line += "\n" + j.Error
 	}
+	if j.Reason != "" {
+		line += "\n原因：" + j.Reason
+	}
 	return line
 }
 func renderJobResponse(out JobResponse) string {

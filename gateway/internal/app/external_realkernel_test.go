@@ -123,3 +123,71 @@ func TestRealKernelExternalRunsAsBackgroundJob(t *testing.T) {
 		t.Fatalf("HOME 是它自己的私有目录（按 ext-<名字>-<会话> 分）：%s", env)
 	}
 }
+
+// 真内核：启动前就被执行器拒绝的 Job（登记的目录不存在），Job 工具的 status、wait 带上失败原因；
+// 别的后台 Job 失败也一样（取执行器回的内容的前 500 字）；list 不带原因。
+func TestRealKernelJobFailureReasonVisible(t *testing.T) {
+	e, _ := setupRealKernel(t)
+	work := filepath.Join(e.dir, "ext-work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ag := extagent.Agent{Name: "fake", Argv: []string{"sh", "-c", "true", "fake-agent", extagent.PromptSlot}, Dirs: []string{"~/.missing-agent"}, Timeout: 60}
+	if _, err := e.a.SaveExternalAgent(ag); err != nil {
+		t.Fatal(err)
+	}
+	model := &externalModel{prompt: "x"}
+	e.a.mu.Lock()
+	nodeName := ""
+	for name := range e.a.nodes {
+		nodeName = name
+	}
+	ws := Workspace{ID: "ext-work", Host: e.a.machineOf(nodeName), Path: work, External: []string{"fake"}}
+	e.a.wss = []Workspace{ws}
+	st := e.a.store.Settings(e.sid)
+	st.Mode = "full"
+	st.WorkspacesSet, st.Workspaces = true, []string{ws.ID}
+	err := e.a.store.SaveSettings(e.sid, st)
+	e.a.llm = model
+	e.a.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.say("让外部 agent 改一下")
+	deadline := time.After(30 * time.Second)
+	for done := false; !done; {
+		select {
+		case s := <-e.ch.sent:
+			done = strings.Contains(s, "external done")
+		case <-deadline:
+			t.Fatalf("等不到这一轮结束；内核日志：%s", readFileTail(filepath.Join(e.dir, "kernel.log")))
+		}
+	}
+	model.mu.Lock()
+	waited := model.waited
+	model.mu.Unlock()
+	var got JobResponse
+	if err := json.Unmarshal([]byte(waited), &got); err != nil || got.Job == nil {
+		t.Fatalf("Job wait 的结果：%s", waited)
+	}
+	if got.Job.Status != "failed" || !strings.Contains(got.Job.Reason, "agent_rw 里的 ~/.missing-agent") || !strings.Contains(got.Job.Reason, "目录不存在") {
+		t.Fatalf("wait 带上失败原因：%+v", got.Job)
+	}
+	// 同一个任务再 status：还在；list 不带原因
+	status, err := e.a.JobAction(context.Background(), "fake:u1", "", JobRequest{Action: "status", JobID: got.Job.JobID})
+	if err != nil || status.Job == nil || status.Job.Reason != got.Job.Reason {
+		t.Fatalf("status 带上失败原因：%+v %v", status, err)
+	}
+	list, err := e.a.JobAction(context.Background(), "fake:u1", "", JobRequest{Action: "list"})
+	if err != nil || len(list.Jobs) == 0 {
+		t.Fatalf("list：%+v %v", list, err)
+	}
+	for _, j := range list.Jobs {
+		if j.Reason != "" {
+			t.Fatalf("list 不带原因：%+v", j)
+		}
+	}
+	if !strings.Contains(renderJobResponse(status), "原因：agent_rw") {
+		t.Fatalf("/job 的文字也写出原因：%s", renderJobResponse(status))
+	}
+}

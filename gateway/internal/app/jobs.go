@@ -45,6 +45,9 @@ type JobInfo struct {
 	OutputGap    bool   `json:"output_gap"`
 	Online       bool   `json:"online"`
 	Error        string `json:"error,omitempty"`
+	// Reason 是失败原因的前 500 字：Job 失败（包括启动前就被执行器拒绝）时，Job 工具的 status、wait 带上它，
+	// 模型才知道为什么没跑起来。list 不带（一页最多 100 个任务）。
+	Reason string `json:"reason,omitempty"`
 }
 type JobResponse struct {
 	Accepted    bool             `json:"accepted,omitempty"`
@@ -72,6 +75,32 @@ func (a *App) jobInfo(j eventlog.JobRecord) JobInfo {
 		Background: q.Background, Silent: j.Silent, CreatedAt: q.CreatedAt, StartedAt: q.StartedAt, EndedAt: q.EndedAt,
 		DeadlineAt: q.DeadlineAt, Sandbox: q.SandboxEffective, OutputCursor: q.OutputCursor, OutputGap: q.OutputGap,
 		Online: n != nil, Error: q.Error}
+}
+
+const jobReasonRunes = 500
+
+// jobReason 是失败的任务的原因：内核记下的 error，没有就取执行器回的内容（启动前被拒绝时就是拒绝的原因，
+// 命令自己失败时是它的输出）；前 500 个字，对所有后台任务一样。
+func jobReason(q proto.JobSnapshot) string {
+	if q.Status != "failed" {
+		return ""
+	}
+	text := q.Error
+	if text == "" && q.Result != nil {
+		text = q.Result.Content
+	}
+	text = strings.TrimSpace(strings.ToValidUTF8(text, "�"))
+	if r := []rune(text); len(r) > jobReasonRunes {
+		text = string(r[:jobReasonRunes]) + "…"
+	}
+	return text
+}
+
+// jobInfoDetail 是 jobInfo 加上失败原因：status、wait 和控制操作的回执用，list 不带。
+func (a *App) jobInfoDetail(j eventlog.JobRecord) JobInfo {
+	info := a.jobInfo(j)
+	info.Reason = jobReason(j.Receipt)
+	return info
 }
 
 // Permission is checked against the frozen source, never the currently bound
@@ -217,7 +246,7 @@ func (a *App) JobAction(ctx context.Context, by, caller string, req JobRequest) 
 		a.mu.Unlock()
 		return JobResponse{}, err
 	}
-	info := a.jobInfo(j)
+	info := a.jobInfoDetail(j)
 	if req.Action == "status" {
 		a.mu.Unlock()
 		return JobResponse{Job: &info}, nil
@@ -256,7 +285,7 @@ func (a *App) JobAction(ctx context.Context, by, caller string, req JobRequest) 
 		delete(a.jobCompletions, id)
 		latest, readErr := a.jobRecord(req, by, caller)
 		if readErr == nil {
-			info = a.jobInfo(latest)
+			info = a.jobInfoDetail(latest)
 		}
 		a.mu.Unlock()
 		if err != nil {
@@ -332,7 +361,7 @@ func (a *App) JobAction(ctx context.Context, by, caller string, req JobRequest) 
 	latest, readErr := a.jobRecord(req, by, caller)
 	err = readErr
 	if err == nil {
-		info = a.jobInfo(latest)
+		info = a.jobInfoDetail(latest)
 	}
 	a.mu.Unlock()
 	if err != nil {

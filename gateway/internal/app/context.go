@@ -189,16 +189,25 @@ func (a *App) permSignature(sid string) string {
 		sum := sha256.Sum256(raw)
 		ceiling = fmt.Sprintf("|hook:%x", sum[:8])
 	}
-	// 内核换了版本（同一个名字）、交回网关的工具变了，也要换
-	var missing []string
+	sig := fmt.Sprintf("%t|%s|%t|%s|%s%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling)
+	// 只在真的少了工具时才往后面加东西：内核不交回来的网关工具（旧内核没有 Report、Ticket、External），
+	// 内核升级、名单变了就换。新内核什么都不少，判据和加这一段之前一模一样，升级后会话的工具快照不刷新，前缀缓存不受影响。
 	if n := a.nodes[rt.kernel]; n != nil {
+		var missing []string
 		for _, name := range gatewayToolNames() {
 			if !n.handsBack(name) {
 				missing = append(missing, name)
 			}
 		}
+		if len(missing) > 0 {
+			sig += "|missing:" + strings.Join(missing, ",")
+		}
 	}
-	return fmt.Sprintf("%t|%s|%t|%s|%s%s|%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling, strings.Join(missing, ","), a.externalSig(sid, admin))
+	// External 只在挂的工作目录上开启了外部 agent 的会话里有，开关、登记变了它的定义跟着变；没有时什么都不加
+	if ext := a.externalSig(sid, admin); ext != "" {
+		sig += "|ext:" + ext
+	}
+	return sig
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {
