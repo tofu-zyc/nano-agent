@@ -85,6 +85,8 @@ type KernelInfo struct {
 	SandboxEffective string `json:"sandbox_effective,omitempty"`
 	MaxParallelTools int    `json:"max_parallel_tools,omitempty"`
 	MaxActiveRuns    int    `json:"max_active_runs,omitempty"`
+	// GatewayTools 是内核会交回网关执行的工具名单；旧内核不报（nil），见 handsBack
+	GatewayTools []string `json:"gateway_tools,omitempty"`
 }
 
 type node struct {
@@ -111,6 +113,17 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 		n.tools = append(n.tools, toolOf(t))
 		n.info.Tools = append(n.info.Tools, t.Name)
 	}
+}
+
+// legacyNotHandedBack 是没报名单的旧内核不交给网关的网关工具：它们会落到执行器，回“未知工具”。
+var legacyNotHandedBack = []string{"Report", "Ticket", "External"}
+
+// handsBack 是这个内核会不会把网关工具 name 交回网关执行。没报名单的旧内核按它写死的名单算。
+func (n *node) handsBack(name string) bool {
+	if n.info.GatewayTools == nil {
+		return !slices.Contains(legacyNotHandedBack, name)
+	}
+	return slices.Contains(n.info.GatewayTools, name)
 }
 
 // toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill）；管理员再加 Gateway /
@@ -192,6 +205,7 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	n := &node{info: KernelInfo{NodeEpoch: hello.NodeEpoch, LeasesReady: hello.Feature("machine_leases") == 0, Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
 		Proto: hello.V, Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
+	n.info.GatewayTools = hello.GatewayTools
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock

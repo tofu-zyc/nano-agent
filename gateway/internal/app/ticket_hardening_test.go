@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -220,6 +221,44 @@ func TestTicketNeedsHookCheckKernel(t *testing.T) {
 	eventually(t, "受阻", func() bool { return g.tk("tk-1").Status == ticket.StatusBlocked })
 	tk := g.tk("tk-1")
 	if tk.BlockedBy != "kernel" || !strings.Contains(tk.Reason, "内核太旧，做不了调用前检查") {
+		t.Fatalf("内核太旧：%+v", tk)
+	}
+	if m, _ := g.k.recv(300 * 1e6); m.T == proto.TInput {
+		t.Fatal("不该开这一轮")
+	}
+}
+
+// 没报交给网关的工具名单的旧内核：Report、Ticket 会落到执行器，不给模型；工单的分支不开工。
+func TestOldKernelWithoutGatewayToolListGetsNoReportOrTicket(t *testing.T) {
+	g := newGitEnv(t)
+	sid := g.teamGroupOnRepo(t, "true")
+	offered := func() []string {
+		g.a.mu.Lock()
+		defer g.a.mu.Unlock()
+		_, tools, _, _ := g.a.contextParts(sid)
+		var names []string
+		for _, tl := range tools {
+			names = append(names, tl.Function.Name)
+		}
+		return names
+	}
+	if !slices.Contains(offered(), "Ticket") {
+		t.Fatalf("报了名单的内核：团队群里有 Ticket：%v", offered())
+	}
+	g.a.mu.Lock()
+	g.a.nodes["test"].info.GatewayTools = nil // hello 里没有名单
+	g.a.mu.Unlock()
+	if got := offered(); slices.Contains(got, "Ticket") || !slices.Contains(got, "SendFile") {
+		t.Fatalf("旧内核不交 Ticket，不给模型；别的网关工具照给：%v", got)
+	}
+	mention(g.env, "@机器人 修登录页", "g100", "u2", "李四")
+	g.k.expect(proto.TInput)
+	if _, err := callTicket(g.env, sid, `{"action":"create","title":"修登录页","goal":"x"}`); err != nil {
+		t.Fatal(err)
+	}
+	finishGroupRun(t, g.env, sid)
+	eventually(t, "受阻", func() bool { return g.tk("tk-1").Status == ticket.StatusBlocked })
+	if tk := g.tk("tk-1"); tk.BlockedBy != "kernel" || !strings.Contains(tk.Reason, "内核太旧，不会把 Report 交给网关") {
 		t.Fatalf("内核太旧：%+v", tk)
 	}
 	if m, _ := g.k.recv(300 * 1e6); m.T == proto.TInput {

@@ -291,7 +291,9 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
 
 ## 网关工具登记和本轮工具
 
-网关自己提供的工具（Skill、Session、Job、Schedule、Hook、Message、Gateway、GatewayAdmin、SendFile、Knowledge、FollowUp、Agenda、Idea、Mind、Diary、WebSearch、WebFetch）登记在 `internal/app/tooldefs.go` 的一张表里：名字、生成定义的函数、执行入口、是否走 `gateway:tools` 状态租约、受理后直接报“开始”还是先报“排队”、是否只给管理员、能不能出现在群聊和场景的工具表。exec 分发、网页上的工具列表（`toolNames`）、群聊白名单的默认范围都从这张表推出；哪类会话提供哪些工具仍在 `contextParts` 和 `toolsFor` 里，但定义只通过表取。内核工具（Read、Shell 等）和 MCP 工具不在表里，C 侧的执行策略不变。
+网关自己提供的工具（Skill、Session、Job、Schedule、Hook、Message、Gateway、GatewayAdmin、SendFile、Knowledge、FollowUp、Agenda、Report、Ticket、Idea、Mind、Diary、WebSearch、WebFetch）登记在 `internal/app/tooldefs.go` 的一张表里：名字、生成定义的函数、执行入口、是否走 `gateway:tools` 状态租约、受理后直接报“开始”还是先报“排队”、是否只给管理员、能不能出现在群聊和场景的工具表。exec 分发、网页上的工具列表（`toolNames`）、群聊白名单的默认范围都从这张表推出；哪类会话提供哪些工具仍在 `contextParts` 和 `toolsFor` 里，但定义只通过表取。内核工具（Read、Shell 等）和 MCP 工具不在表里，C 侧的执行策略不变。
+
+这些工具要内核交回网关才能用：内核按 `main.c` 里写死的名单（`GATEWAY_TOOLS`）把它们用 `exec` 交给网关，不在名单里的会去挑工作目录、交给执行器（回“未知工具”，没挂工作目录时回“没有挂载工作目录”）。内核在 `hello` 的 `gateway_tools` 里报这份名单，网关只把这个会话的内核会交回来的网关工具给模型（`node.handsBack`）；没报名单的旧内核按它写死的名单算，不交 Report、Ticket、External。名单变了（内核换了版本）工具快照会刷新。工单的分支靠 Report 交回结果，内核不交 Report 时不开工，工单 blocked，理由“内核太旧，不会把 Report 交给网关”。`TestRealKernelHandsBackEveryGatewayTool` 用真内核核对这张表里每个工具都在名单里，加网关工具忘了改内核会失败。权限上，Report、Ticket 和 Agenda 一样是“公开只读”（授权由网关自己做）。
 
 模型回复里的每个工具调用，名字必须在这次请求的工具表里。有一个不在，整批不接受、不执行，按 `unaccepted_tool_proposal` 写进历史，原因是“这一轮没有提供工具 X”；处理器里原有的权限检查保留。
 

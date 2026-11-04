@@ -1318,6 +1318,14 @@ func (a *App) startRun(s *sess) {
 		s.queue = nil
 		return
 	}
+	if id := ticketIDOfIdentity(head.who); id != "" && node != "" && a.nodes[node] != nil && !a.nodes[node].handsBack("Report") {
+		// 分支靠 Report 交回结果：内核不把它交给网关，分支做完了也汇报不了
+		if _, ok := a.ticketIdentity(head.who); ok {
+			a.ticketBlock(id, "kernel", "内核太旧，不会把 Report 交给网关", "", true)
+		}
+		s.queue = nil
+		return
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})

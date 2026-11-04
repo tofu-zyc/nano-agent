@@ -220,7 +220,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	k := &fakeKernel{t: t, conn: conn, sc: bufio.NewScanner(conn)}
-	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "test",
+	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "test", GatewayTools: gatewayToolNames(),
 		Tools: []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 	k.expect(proto.TWelcome)
 	waitNode(a, "test", true)

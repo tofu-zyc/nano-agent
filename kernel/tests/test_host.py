@@ -230,6 +230,26 @@ def t_skill(gw):
     finish(gw, "sk")
 
 
+@case("网关工具 Report、Ticket 交给网关")
+def t_gateway_tool_routing(gw):
+    # 以前内核的网关工具名单里没有它们：挂了工作目录回“未知工具：Report”，没挂的回“没有挂载工作目录”
+    for i, (name, args, wss) in enumerate([("Agenda", {"action": "list"}, None), ("Report", {"status": "ready", "summary": "x"}, None),
+                                           ("Ticket", {"action": "list"}, None), ("Report", {"status": "ready", "summary": "x"}, []),
+                                           ("Ticket", {"action": "list"}, [])]):
+        sid = "gwt-%d" % i
+        if wss is None:
+            start_run(gw, sid, mode="auto", frm="tg:admin")
+        else:
+            gw.send(t="input", sid=sid, mode="auto", workspaces=wss, **{"from": "tg:admin"})
+            gw.expect("model", sid=sid)
+        call(gw, sid, ("c1", name, args))
+        m = gw.expect("exec", sid=sid, id="c1", name=name)
+        assert m["args"] == args and "workspace" not in m, m
+        gw.send(t="exec_result", sid=sid, id="c1", ok=True, content="ok")
+        gw.expect("result", sid=sid, id="c1", ok=True, content="ok")
+        finish(gw, sid)
+
+
 @case("多个工作目录：按 workspace 参数决定在哪台机器上执行", approvals=True)
 def t_multi_ws(gw):
     start_run(gw, "mw", workspaces=[local_ws(), box_ws(landlock=0)])
@@ -1104,11 +1124,13 @@ def main():
             feat = hello.get("features", {})
             assert feat.get("call_identity") == 1 and feat.get("bounded_parallel") == 1, feat
             assert feat.get("max_parallel_tools") and feat.get("max_active_runs"), feat
+            # 交给网关的工具名单：网关只把这里有的网关工具给模型
+            assert {"Report", "Ticket", "Agenda", "Job", "Skill"} <= set(hello.get("gateway_tools", [])), hello.get("gateway_tools")
             gw.send(t="welcome", v=11)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
+            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_gateway_tool_routing, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,

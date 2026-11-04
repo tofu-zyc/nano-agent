@@ -190,6 +190,7 @@ type Msg struct {
 	// hello：上次自动更新失败、已经退回的版本，网关别再自动推它
 	UpdateFailed string      `json:"update_failed,omitempty"`
 	Tools        []ToolSpec  `json:"tools,omitempty"`
+	GatewayTools []string    `json:"gateway_tools,omitempty"` // hello：内核交给网关执行的工具名单（旧内核不报）
 	Skills       []SkillSpec `json:"skills,omitempty"`
 	Sandbox      *Sandbox    `json:"sandbox,omitempty"`
 

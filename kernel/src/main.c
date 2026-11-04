@@ -159,6 +159,12 @@ static cJSON *msg_new(const char *type, const char *sid)
     return m;
 }
 
+/* 由网关执行的工具名单：内核只转给网关（见 gateway_tool），也在 hello 里报给网关。
+ * 网关只把这里有的网关工具给模型：漏了的话，模型调用它会落到执行器，回“未知工具”。 */
+static const char *const GATEWAY_TOOLS[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
+                                             "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session",
+                                             "Job", "Hook", "Report", "Ticket" };
+
 static void send_hello(kernel_t *k)
 {
     cJSON *m = msg_new("hello", NULL);
@@ -176,6 +182,9 @@ static void send_hello(kernel_t *k)
         free(failed);
     }
     cJSON_AddItemToObject(m, "tools", tools_specs());
+    cJSON *gw = cJSON_AddArrayToObject(m, "gateway_tools");
+    for (size_t i = 0; i < sizeof GATEWAY_TOOLS / sizeof GATEWAY_TOOLS[0]; i++)
+        cJSON_AddItemToArray(gw, cJSON_CreateString(GATEWAY_TOOLS[i]));
     /* 能力集合：网关按机器分别协商，缺能力时不暴露相应参数 */
     cJSON *ft = cJSON_AddObjectToObject(m, "features");
     cJSON_AddNumberToObject(ft, "call_identity", 1);
@@ -1194,10 +1203,8 @@ static bool exec_admit(kernel_t *k, cJSON *req, const char *sid, const char *run
 /* 由网关执行的工具：内核只转给网关，不挑工作目录、不交给执行器 */
 static bool gateway_tool(const char *name)
 {
-    static const char *const names[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
-                                         "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session", "Job", "Hook" };
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
-        if (!strcmp(name, names[i])) return true;
+    for (size_t i = 0; i < sizeof GATEWAY_TOOLS / sizeof GATEWAY_TOOLS[0]; i++)
+        if (!strcmp(name, GATEWAY_TOOLS[i])) return true;
     return false;
 }
 

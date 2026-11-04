@@ -107,6 +107,10 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}
+	if n := a.nodes[rt.kernel]; n != nil {
+		// 网关工具要内核交回网关才能用：内核不交的（旧内核没有 Report、Ticket）不给模型，不然调用会落到执行器
+		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool { return toolDef(t.Function.Name) != nil && !n.handsBack(t.Function.Name) })
+	}
 	if n := a.nodes[rt.kernel]; len(tools) > 0 && n != nil && n.info.Features["bounded_parallel"] >= 1 {
 		system = strings.TrimSpace(system + "\n\n[工具调度] 相互独立的工具调用可以在同一次响应中一起提出；运行时会按执行槽和资源锁有界调度。结果按调用身份关联，全部结果返回后才继续模型请求。有数据依赖的步骤分到下一次响应，不能假定同批调用按顺序完成。")
 	}
@@ -182,7 +186,16 @@ func (a *App) permSignature(sid string) string {
 		sum := sha256.Sum256(raw)
 		ceiling = fmt.Sprintf("|hook:%x", sum[:8])
 	}
-	return fmt.Sprintf("%t|%s|%t|%s|%s%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling)
+	// 内核换了版本（同一个名字）、交回网关的工具变了，也要换
+	var missing []string
+	if n := a.nodes[rt.kernel]; n != nil {
+		for _, name := range gatewayToolNames() {
+			if !n.handsBack(name) {
+				missing = append(missing, name)
+			}
+		}
+	}
+	return fmt.Sprintf("%t|%s|%t|%s|%s%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling, strings.Join(missing, ","))
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {
