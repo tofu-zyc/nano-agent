@@ -485,4 +485,23 @@ func TestRepoWebhookRouteNeedsNoLoginButNeedsSignature(t *testing.T) {
 	if strings.Contains(string(raw), "ghp_webtest") || strings.Contains(string(raw), "whsec") {
 		t.Fatalf("token 和密钥不回显：%s", raw)
 	}
+	// 守卫的例外只认 webhook 这一个形状：登录了但不带 X-Nano，其他改动类请求都是 403
+	if code, _ := c.do("POST", "/api/repos", map[string]any{"owner": "acme"}, false); code != http.StatusForbidden {
+		t.Fatalf("保存连接不带 X-Nano：%d", code)
+	}
+	if code, _ := c.do("DELETE", "/api/repos/"+v.ID, nil, false); code != http.StatusForbidden {
+		t.Fatalf("删连接不带 X-Nano：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/repos/"+v.ID+"/webhook/x", nil, false); code != http.StatusForbidden {
+		t.Fatalf("webhook 后面多一段不算 webhook：%d", code)
+	}
+	// 监听本机时，外来的 Host 访问管理接口也是 403
+	s.loopback = true
+	req := httptest.NewRequest("GET", "/api/repos", nil)
+	req.Host = "evil.example:7788"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("外来的 Host：%d", w.Code)
+	}
 }

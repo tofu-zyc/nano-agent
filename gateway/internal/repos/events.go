@@ -92,6 +92,9 @@ func prEvent(p Pull) (Event, bool) {
 }
 
 func checkEvent(pr int, suite int64, conclusion, sha string) Event {
+	if FailedConclusion(conclusion) { // 失败的几种结论是同一件事：轮询和 webhook 的键一致
+		conclusion = "failure"
+	}
 	return Event{Key: fmt.Sprintf("check:%d:%s", suite, conclusion), Kind: KindCheck, Number: pr, State: conclusion, SHA: sha, IsPR: true}
 }
 
@@ -208,4 +211,13 @@ func ParseWebhook(eventType, delivery string, body []byte) ([]Event, error) {
 		}
 	}
 	return out, nil
+}
+
+// FailedConclusion 是检查的结论算不算失败：轮询和 webhook 一致。
+func FailedConclusion(c string) bool {
+	switch c {
+	case "failure", "timed_out", "cancelled", "action_required", "startup_failure":
+		return true
+	}
+	return false
 }

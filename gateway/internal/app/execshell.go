@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"nano-agent/gateway/internal/dispatch"
@@ -66,6 +67,9 @@ type shellRun struct {
 // gatewayShell 在 r.Machine 上跑一条命令，返回执行器的输出。没有机器、机器不可用、没拿到租约都返回错误。
 // 调用方不持有 App.mu。
 func (a *App) gatewayShell(ctx context.Context, r shellRun) (host.Result, error) {
+	if err := checkEnvNUL(r.Env); err != nil {
+		return host.Result{}, err
+	}
 	a.mu.Lock()
 	h, _, why := a.hostFor(r.Machine)
 	if h == nil {
@@ -104,4 +108,14 @@ func withEnv(req map[string]any, env map[string]string) map[string]any {
 		req["env"] = env
 	}
 	return req
+}
+
+// checkEnvNUL 拒绝名字或值里有 NUL 的 env：执行器用的 JSON 库把 \u0000 之后的截掉，执行器自己看不出来，所以网关填的时候就查。
+func checkEnvNUL(env map[string]string) error {
+	for k, v := range env {
+		if strings.ContainsRune(k, 0) || strings.ContainsRune(v, 0) {
+			return fmt.Errorf("env %q 的名字或值里有 NUL，不执行", k)
+		}
+	}
+	return nil
 }

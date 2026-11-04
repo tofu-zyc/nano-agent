@@ -545,6 +545,9 @@ func (a *App) cleanupTicket(t ticket.Ticket) {
 
 // ---- 从受阻里出来、补充、回答 ----
 
+// errTicketStore 是工单记录写不进去（存储的错误，和业务上的拒绝区分开）。
+var errTicketStore = errors.New("没有记下来")
+
 // ticketDeliver 把一句话（回答或补充）送进工单的分支：工单受阻时先续上（最多 MaxRenewals 次，记下谁、什么时候、续的什么），
 // 回到 working；工单在跑就排到分支的下一个安全边界。调用方持有锁。
 func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
@@ -552,6 +555,9 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 		return errors.New("工单还没有干活的分支")
 	}
 	if t.Status == ticket.StatusBlocked && (t.BlockedBy == "push" || t.BlockedBy == "pr") {
+		if a.ticketBusy[t.ID] {
+			return errors.New("这张工单正在处理，稍后再试")
+		}
 		// 推送或开 PR 失败后续上：不用分支再做什么，重做交付（先查远端分支和 PR 在不在，成功过的那一步不重放）
 		if t.Renewals >= ticket.MaxRenewals {
 			return fmt.Errorf("这张工单已经续了 %d 次，不能再续了；只能叫停或放弃", ticket.MaxRenewals)
@@ -562,10 +568,17 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 			t.Status, t.Reason, t.BlockedBy = ticket.StatusChecking, "", ""
 		}); err != nil {
 			a.ticketHealth(err)
-			return fmt.Errorf("没有记下来（%v）", err)
+			return fmt.Errorf("%w（%v）", errTicketStore, err)
 		}
 		a.publishCommitments()
-		go a.deliverTicketPR(t.ID, "", false, by)
+		if a.ticketBusy == nil {
+			a.ticketBusy = map[string]bool{}
+		}
+		a.ticketBusy[t.ID] = true // 重试也占着工单：同一时刻只一个后台步骤
+		go func() {
+			defer func() { a.mu.Lock(); delete(a.ticketBusy, t.ID); a.mu.Unlock() }()
+			a.deliverTicketPR(t.ID, "", t.ForcedBy != "", t.ForcedBy)
+		}()
 		return nil
 	}
 	if t.Status == ticket.StatusBlocked {
@@ -589,14 +602,14 @@ func (a *App) ticketDeliver(t ticket.Ticket, by, body string) error {
 			t.BlockedBy = ""
 		}); err != nil {
 			a.ticketHealth(err)
-			return fmt.Errorf("没有记下来（%v）", err)
+			return fmt.Errorf("%w（%v）", errTicketStore, err)
 		}
 		a.publishCommitments()
 	}
 	if t.Status == ticket.StatusReady { // PR 在等合并时来了意见：回到干活，不算返工
 		if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) { t.Status, t.WantCheck = ticket.StatusWorking, false }); err != nil {
 			a.ticketHealth(err)
-			return fmt.Errorf("没有记下来（%v）", err)
+			return fmt.Errorf("%w（%v）", errTicketStore, err)
 		}
 		a.publishCommitments()
 	}

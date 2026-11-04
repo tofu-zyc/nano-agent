@@ -28,7 +28,16 @@ type repoRT struct {
 	state  *repos.State
 	intake *repos.Intake
 	stop   context.CancelFunc
-	pollMu sync.Mutex // 一个仓库同一时刻只轮询一次
+	pollMu sync.Mutex // 一个仓库同一时刻只轮询、处理一次
+	wake   chan struct{}
+}
+
+// kick 叫后台协程去处理记下了但还没处理的事件。
+func (rt *repoRT) kick() {
+	select {
+	case rt.wake <- struct{}{}:
+	default:
+	}
 }
 
 // openRepos 打开仓库连接。打不开就保留现场，网关其余照旧。
@@ -41,7 +50,7 @@ func (a *App) openRepos() {
 	}
 	a.repos = s
 	a.repoRTs = map[string]*repoRT{}
-	if base := os.Getenv("NANO_GITHUB_API"); base != "" && a.repoAPIBase == "" { // GitHub Enterprise，或者界面检查里的假 GitHub
+	if base := os.Getenv("NANO_GITHUB_API"); base != "" && a.repoAPIBase == "" { // 只给测试：界面检查里的假 GitHub
 		a.repoAPIBase = base
 	}
 }
@@ -78,18 +87,34 @@ func (a *App) startRepo(r repos.Repo) {
 		a.log.Error("仓库的状态日志打不开", "repo", r.Slug(), "err", err)
 		return
 	}
-	rt := &repoRT{id: r.ID, state: st}
-	rt.intake = &repos.Intake{State: st, Handle: func(ev repos.Event) error { return a.handleRepoEvent(r.ID, ev) }}
+	rt := &repoRT{id: r.ID, state: st, wake: make(chan struct{}, 1)}
+	rt.intake = &repos.Intake{State: st, Handle: func(ev repos.Event) error { return a.handleRepoEvent(r.ID, rt, ev) },
+		Warn: func(ev repos.Event, err error) {
+			a.log.Warn("仓库事件处理失败太多次，丢掉", "repo", r.Slug(), "event", ev.Key, "err", err.Error())
+		}}
 	ctx, cancel := context.WithCancel(a.ctx)
 	rt.stop = cancel
 	a.mu.Lock()
 	a.repoRTs[r.ID] = rt
 	a.mu.Unlock()
+	// 后台处理：启动时重放没处理完的；webhook 记下事件后叫它来处理。和轮询用同一把锁，串行
 	go func() {
-		rt.pollMu.Lock() // 状态日志不加锁：和轮询、webhook 串行
-		defer rt.pollMu.Unlock()
-		if err := rt.intake.Replay(); err != nil {
-			a.log.Warn("重放仓库事件失败", "repo", r.Slug(), "err", err)
+		rt.kick()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-rt.wake:
+			}
+			rt.pollMu.Lock()
+			if ctx.Err() != nil {
+				rt.pollMu.Unlock()
+				return
+			}
+			if err := rt.intake.Replay(); err != nil {
+				a.log.Warn("处理仓库事件失败", "repo", r.Slug(), "err", err)
+			}
+			rt.pollMu.Unlock()
 		}
 	}()
 	if r.Intake == "webhook" || a.repoNoLoop {
@@ -153,10 +178,10 @@ func (a *App) PollRepo(ctx context.Context, id string) (time.Duration, error) {
 }
 
 // handleRepoEvent 处理一件事：写进事件日志（repo.*，不带正文），再交给议题渠道和工单。
-func (a *App) handleRepoEvent(id string, ev repos.Event) error {
+func (a *App) handleRepoEvent(id string, rt *repoRT, ev repos.Event) error {
 	a.mu.Lock()
 	r, ok := a.repos.Get(id)
-	if ok {
+	if ok && rt.state.Once(ev.Key, "repo."+ev.Kind) { // 每个事件只写一次，重放不重写
 		a.emitRepoLog(r, ev, "repo."+ev.Kind)
 	}
 	a.mu.Unlock()
@@ -164,6 +189,14 @@ func (a *App) handleRepoEvent(id string, ev repos.Event) error {
 		return nil
 	}
 	return a.dispatchRepoEvent(r, ev)
+}
+
+// emitRepoLogOnce 同 emitRepoLog，但同一个事件的同一条只写一次（重放不重写）。调用方持有锁。
+func (a *App) emitRepoLogOnce(r repos.Repo, ev repos.Event, name string) {
+	if rt := a.repoRTs[r.ID]; rt != nil && !rt.state.Once(ev.Key, name) {
+		return
+	}
+	a.emitRepoLog(r, ev, name)
 }
 
 // emitRepoLog 把事件记进事件日志：只有种类、号、账号、键和状态，没有正文（名单外的人写的东西不进日志）。调用方持有锁。
@@ -233,23 +266,24 @@ func (a *App) RepoWebhook(id, event, delivery, signature string, body []byte) in
 	if rt == nil {
 		return http.StatusServiceUnavailable
 	}
-	rt.pollMu.Lock() // 状态日志不加锁：和轮询串行
-	defer rt.pollMu.Unlock()
+	// 请求里只做：验签（上面）、记下、投递去重。记不下来返回 500（GitHub 会重发）；记下了就回 202，
+	// 处理（里面有 API 调用，GitHub 只等 10 秒）放到后台，和轮询串行
+	events, err := repos.ParseWebhook(event, delivery, body)
+	if err != nil {
+		return http.StatusBadRequest
+	}
+	for _, ev := range events { // 先记事件（按键去重，重发无害），再记投递：中途失败 GitHub 重发还能记下
+		if _, err := rt.intake.Record(ev); err != nil {
+			a.log.Warn("记下 webhook 事件失败", "repo", r.Slug(), "event", ev.Key, "err", err.Error())
+			return http.StatusInternalServerError
+		}
+	}
 	if seen, err := rt.state.SeenDelivery(delivery); err != nil {
 		return http.StatusInternalServerError
 	} else if seen {
 		return http.StatusOK // 同一次投递重发：直接丢
 	}
-	events, err := repos.ParseWebhook(event, delivery, body)
-	if err != nil {
-		return http.StatusBadRequest
-	}
-	for _, ev := range events {
-		// 先记下（Submit 先写状态日志再处理）；处理失败的留在待处理里，下次重放，投递照样回 2xx
-		if _, err := rt.intake.Submit(ev); err != nil {
-			a.log.Warn("处理 webhook 事件失败", "repo", r.Slug(), "event", ev.Key, "err", err.Error())
-		}
-	}
+	rt.kick()
 	return http.StatusAccepted
 }
 
@@ -380,7 +414,7 @@ func randHexN(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// SetRepoAPIBase 换 GitHub API 的地址（GitHub Enterprise；测试里是假 GitHub）。要在连接开始接事件之前调用。
+// SetRepoAPIBase 换 GitHub API 的地址（只给测试：假 GitHub）。要在连接开始接事件之前调用。
 func (a *App) SetRepoAPIBase(base string) {
 	a.mu.Lock()
 	a.repoAPIBase = base

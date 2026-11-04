@@ -8,12 +8,21 @@ import (
 	"time"
 )
 
+// MaxReplays 是一个处理失败的事件最多重放几次，之后丢掉。
+const MaxReplays = 5
+
 // Intake 把事件交给处理函数：先记下（按键去重）、再处理、处理完记“处理了”。
-// 处理失败的事件留在“没处理完”里，下次重放；轮询和 webhook 共用。
+// 处理失败（存储写不进去之类）的事件留在“没处理完”里，下次重放，最多重放 MaxReplays 次，之后丢掉并记警告；
+// 业务上的拒绝不是失败：处理函数记一笔日志、返回 nil。轮询和 webhook 共用。
+// Record 可以和别的方法同时调用；Submit、Replay 要由使用方串行。
 type Intake struct {
 	State  *State
 	Handle func(Event) error
+	Warn   func(ev Event, err error) // 丢掉一个事件时调用；可以为空
 }
+
+// Record 只记下：见过的键直接丢（返回 false）。
+func (in *Intake) Record(ev Event) (bool, error) { return in.State.Record(ev) }
 
 // Submit 受理一个事件：见过的键直接丢（返回 false）；新的先记下再处理。
 func (in *Intake) Submit(ev Event) (bool, error) {
@@ -25,13 +34,24 @@ func (in *Intake) Submit(ev Event) (bool, error) {
 }
 
 func (in *Intake) process(ev Event) error {
-	if err := in.Handle(ev); err != nil {
+	herr := in.Handle(ev)
+	if herr == nil {
+		return in.State.Done(ev.Key)
+	}
+	n, err := in.State.Fail(ev.Key)
+	if err != nil {
 		return err
 	}
-	return in.State.Done(ev.Key)
+	if n > MaxReplays { // 第一次处理不算重放
+		if in.Warn != nil {
+			in.Warn(ev, herr)
+		}
+		return in.State.Done(ev.Key)
+	}
+	return herr
 }
 
-// Replay 把记下了但没处理完的事件接着处理（启动时调用）。
+// Replay 把记下了但没处理完的事件接着处理（启动时、后台处理时调用）。
 func (in *Intake) Replay() error {
 	var first error
 	for _, ev := range in.State.Pending() {
@@ -84,8 +104,10 @@ func (p *Poller) Poll(ctx context.Context) (wait time.Duration, err error) {
 		return 0, err
 	default:
 		sort.SliceStable(issues, func(i, j int) bool { return issues[i].UpdatedAt.Before(issues[j].UpdatedAt) })
+		prev := cur.IssuesSince
 		for _, i := range issues {
-			if i.PullRequest == nil { // PR 的正文不当议题受理
+			// /issues 按更新时间返回：旧议题来一条评论也会出现，只有上一轮游标之后创建的才是新议题
+			if i.PullRequest == nil && !i.CreatedAt.Before(prev) { // PR 的正文不当议题受理
 				if _, err := p.Intake.Submit(issueEvent(i)); err != nil {
 					return 0, err
 				}
@@ -103,9 +125,12 @@ func (p *Poller) Poll(ctx context.Context) (wait time.Duration, err error) {
 	case err != nil:
 		return 0, err
 	default:
+		prev := cur.CommentsSince
 		for _, c := range comments {
-			if _, err := p.Intake.Submit(commentEvent(c, false)); err != nil {
-				return 0, err
+			if !c.CreatedAt.Before(prev) { // 旧评论被编辑过不算新评论
+				if _, err := p.Intake.Submit(commentEvent(c, false)); err != nil {
+					return 0, err
+				}
 			}
 			if c.UpdatedAt.After(cur.CommentsSince) {
 				cur.CommentsSince = c.UpdatedAt
@@ -120,9 +145,12 @@ func (p *Poller) Poll(ctx context.Context) (wait time.Duration, err error) {
 	case err != nil:
 		return 0, err
 	default:
+		prev := cur.PullCommentsSince
 		for _, c := range pcs {
-			if _, err := p.Intake.Submit(rcommentEvent(c)); err != nil {
-				return 0, err
+			if !c.CreatedAt.Before(prev) {
+				if _, err := p.Intake.Submit(rcommentEvent(c)); err != nil {
+					return 0, err
+				}
 			}
 			if c.UpdatedAt.After(cur.PullCommentsSince) {
 				cur.PullCommentsSince = c.UpdatedAt
@@ -185,8 +213,7 @@ func (p *Poller) pollPull(ctx context.Context, n int) error {
 		if r.Status != "completed" {
 			s.done = false
 		}
-		switch r.Conclusion {
-		case "failure", "timed_out", "cancelled", "action_required", "startup_failure":
+		if FailedConclusion(r.Conclusion) {
 			s.failed = true
 		}
 	}

@@ -85,7 +85,7 @@ func (a *App) startSource(t ticket.Ticket) (repoSource, error) {
 
 // pushBranch 把工单的分支推到连接的仓库。先核对本地分支的提交就是工单记下的 Commit；
 // 远端已经是这个提交就不重推（不重放已经成功的那一步）。
-func (a *App) pushBranch(ctx context.Context, t ticket.Ticket, repo ticketRepo, r repos.Repo, token string) error {
+func (a *App) pushBranch(ctx context.Context, t ticket.Ticket, repo ticketRepo, r repos.Repo, token string) (string, error) {
 	b := ticketBranch(t.ID)
 	script := repo.repoEnv() + `set -eu
 b=` + shellLiteral(b, false) + `
@@ -103,19 +103,19 @@ echo NANO_PUSH=done
 	}
 	out, err := a.runTicketShellEnv(ctx, t, repo, repo.hostSpec(dirs, nil), script, "push", ticketGitTimeout, gitAuthEnv(token))
 	if err != nil {
-		return errors.New(scrubToken(err.Error(), token))
+		return "", errors.New(scrubToken(err.Error(), token))
 	}
 	if strings.Contains(out, "NANO_BADREF=") {
-		return errors.New("本地分支的提交不是工单记下的提交，没有推送")
+		return "", errors.New("本地分支的提交不是工单记下的提交，没有推送")
 	}
 	p := marker(out, "PUSH")
 	if p != "done" && p != "skip" {
-		return errors.New("推送的输出看不懂：" + scrubToken(tailLines(out, 3), token))
+		return "", errors.New("推送的输出看不懂：" + scrubToken(tailLines(out, 3), token))
 	}
 	a.mu.Lock()
 	a.lastPushOutcome = p
 	a.mu.Unlock()
-	return nil
+	return p, nil
 }
 
 // deleteBranch 删本地分支（PR 合并之后）。
@@ -173,10 +173,16 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 	}
 	r, connected := a.repoOfTicket(t)
 	repo, rerr := a.ticketRepoOf(t)
+	if connected && forced && t.ForcedBy != by { // 记下是谁先收下的：交付失败重试时，PR 正文还要写这句
+		if _, err := a.tickets.Update(id, func(t *ticket.Ticket) { t.ForcedBy = by }); err != nil {
+			a.ticketHealth(err)
+		}
+	}
 	a.mu.Unlock()
 	if !connected {
 		return
 	}
+	hadPR := t.PR != "" // PR 开了以后的各轮（审阅意见、CI 返工）：结果发在 PR 上
 	block := func(by, why string) {
 		a.mu.Lock()
 		a.ticketBlock(id, by, why, "", true)
@@ -189,7 +195,8 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
 	defer cancel()
-	if err := a.pushBranch(ctx, t, repo, r, c.Token); err != nil {
+	pushed, err := a.pushBranch(ctx, t, repo, r, c.Token)
+	if err != nil {
 		block("push", "推送失败："+clip(err.Error(), 500))
 		return
 	}
@@ -202,12 +209,12 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 		}
 	}
 	head := ticketBranch(id)
-	pull, found, err := c.PullByHead(ctx, head)
+	pull, found, err := c.PullByHead(ctx, head) // 只认开着的：合并了或关了的可能是以前留下的同名分支
 	if err != nil {
 		block("pr", "开 PR 失败："+clip(err.Error(), 400))
 		return
 	}
-	if !found || pull.State != "open" && !pull.Merged {
+	if !found {
 		note := ""
 		if forced {
 			note = fmt.Sprintf("验收没过，由 %s 收下：现在的改动先放上来。", by)
@@ -230,6 +237,24 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 		return
 	}
 	a.publishCommitments()
+	if hadPR {
+		short := t.Commit
+		if len(short) > 7 {
+			short = short[:7]
+		}
+		text := fmt.Sprintf("改了：%s（提交 %s）", firstNonEmpty(summary, "有改动"), short)
+		if pushed == "skip" {
+			text = "看过了，没有新的改动：" + firstNonEmpty(summary, "没有要改的")
+		}
+		a.mu.Unlock()
+		cctx, ccancel := context.WithTimeout(a.ctx, 20*time.Second)
+		if err := c.Comment(cctx, pull.Number, text); err != nil {
+			a.log.Warn("在 PR 上回复失败", "ticket", id, "err", scrubToken(err.Error(), c.Token))
+		}
+		ccancel()
+		a.mu.Lock()
+		return
+	}
 	text := fmt.Sprintf("改好了，PR 在这里：%s。%s", pull.HTMLURL, firstNonEmpty(summary, "有改动"))
 	if forced {
 		text = fmt.Sprintf("验收没过，由 %s 收下，先开了 PR：%s。%s", by, pull.HTMLURL, firstNonEmpty(summary, "有改动"))
@@ -310,7 +335,7 @@ func (a *App) onPRState(r repos.Repo, ev repos.Event) error {
 
 // onCheck 是 PR 上的检查结果：失败算一次返工（和本地验收的返工共用计数）；每个提交只算一次，只认推上去的最新提交。
 func (a *App) onCheck(r repos.Repo, ev repos.Event) error {
-	if ev.State != "failure" && ev.State != "timed_out" && ev.State != "cancelled" {
+	if !repos.FailedConclusion(ev.State) {
 		return nil
 	}
 	a.mu.Lock()
@@ -360,12 +385,24 @@ func (a *App) onReview(r repos.Repo, ev repos.Event) error {
 	if !ok || ticket.IsEnded(t.Status) {
 		return nil
 	}
-	if strings.EqualFold(ev.Actor, r.Bot) || !a.allowedOnRepo(r, ev.Actor) || strings.TrimSpace(ev.Text) == "" {
-		a.emitRepoLog(r, ev, "repo.ignored")
+	// PR 对话里的普通评论是人和人说话的地方，要点名才送；批准不是要它再干一轮
+	if strings.EqualFold(ev.Actor, r.Bot) || !a.allowedOnRepo(r, ev.Actor) || strings.TrimSpace(ev.Text) == "" ||
+		ev.Kind == repos.KindComment && !mentions(ev.Text, r.Bot) || ev.Kind == repos.KindReview && ev.State == "approved" {
+		a.emitRepoLogOnce(r, ev, "repo.ignored")
 		return nil
 	}
-	text := clip(strings.TrimSpace(ev.Text), 2000)
-	return a.ticketDeliver(t, "gh:"+ev.Actor, "[审阅意见 · "+ev.Actor+"] "+text)
+	text := ev.Text
+	if ev.Kind == repos.KindComment {
+		text = stripMention(text, r.Bot)
+	}
+	text = clip(strings.TrimSpace(text), 2000)
+	if err := a.ticketDeliver(t, "gh:"+ev.Actor, "[审阅意见 · "+ev.Actor+"] "+text); err != nil {
+		if errors.Is(err, errTicketStore) {
+			return err // 存储的错误：留着重放
+		}
+		a.log.Info("审阅意见没有送进分支", "ticket", t.ID, "why", err.Error()) // 业务上的拒绝（续满了、没有分支）算处理完
+	}
+	return nil
 }
 
 var _ = commit.KindTicket

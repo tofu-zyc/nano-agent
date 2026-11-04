@@ -3,9 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/host"
 	"nano-agent/gateway/internal/proto"
@@ -115,6 +119,7 @@ func TestWebhookIsRefusedUnlessChosenSignedAndWithinSize(t *testing.T) {
 	if code := re.a.RepoWebhook(v.ID, "issue_comment", "d1", sig, body); code != 202 {
 		t.Fatalf("正确的：%d", code)
 	}
+	eventually(t, "后台处理了", func() bool { return len(re.events()) == 1 })
 	if evs := re.events(); len(evs) != 1 || evs[0].Key != "comment:501" || evs[0].Actor != "alice" {
 		t.Fatalf("事件：%+v", evs)
 	}
@@ -406,4 +411,130 @@ func TestGitHubTicketResultGoesBackToTheIssue(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// 基线之前就有的议题，之后有人评论（议题的更新时间变了）：不是新议题。
+func TestZZOldIssueTouchedAfterBaselineIsNotANewIssue(t *testing.T) {
+	re, v := newRepoEnv(t, "poll")
+	base := re.a.now()
+	re.gh.SetClock(func() time.Time { return base.Add(-time.Hour) })
+	re.gh.AddIssue("alice", "旧议题", "@nano-bot 很久以前的请求 OLD-BODY")
+	if _, err := re.a.PollRepo(context.Background(), v.ID); err != nil { // 基线
+		t.Fatal(err)
+	}
+	re.gh.SetClock(func() time.Time { return base.Add(time.Minute) })
+	re.gh.AddComment(1, "carol", "我也遇到了")
+	if _, err := re.a.PollRepo(context.Background(), v.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range re.events() {
+		if ev.Kind == repos.KindIssue {
+			t.Fatalf("旧议题被当成新议题受理了：%+v", ev)
+		}
+	}
+}
+
+// 键表满了、旧键被挤掉以后，议题也不会因为后来的评论重新受理。
+func TestIssueIsNotReacceptedAfterItsKeyIsEvicted(t *testing.T) {
+	re, v := newRepoEnv(t, "poll")
+	ctx := context.Background()
+	re.a.mu.Lock()
+	rt := re.a.repoRTs[v.ID]
+	re.a.mu.Unlock()
+	rt.state.SetSeenLimit(3)
+	if _, err := re.a.PollRepo(ctx, v.ID); err != nil { // 基线
+		t.Fatal(err)
+	}
+	iss := re.gh.AddIssue("alice", "新议题", "@nano-bot 做点事")
+	if _, err := re.a.PollRepo(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ { // 评论把 issue 的键挤出去
+		re.gh.AddComment(iss.Number, "alice", fmt.Sprintf("补充 %d", i))
+	}
+	if _, err := re.a.PollRepo(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rt.state.Seen(fmt.Sprintf("issue:%d", iss.ID)) {
+		t.Fatal("前提：议题的键已经被挤掉")
+	}
+	re.gh.AddComment(iss.Number, "bob", "又一条")
+	if _, err := re.a.PollRepo(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, ev := range re.events() {
+		if ev.Kind == repos.KindIssue {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("议题只受理一次：%d", n)
+	}
+}
+
+// 处理卡住时 webhook 照样马上回 202，处理完以后事件才到。
+func TestWebhookReturnsAfterRecordingNotAfterHandling(t *testing.T) {
+	re, v := newRepoEnv(t, "webhook")
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	dispatchRepoEventHook = func(a *App, r repos.Repo, ev repos.Event) error {
+		started <- struct{}{}
+		<-release
+		re.mu.Lock()
+		re.seen = append(re.seen, ev)
+		re.mu.Unlock()
+		return nil
+	}
+	body := []byte(`{"action":"created","issue":{"number":3},"comment":{"id":601,"body":"@nano-bot 来","user":{"login":"alice"}}}`)
+	done := make(chan int, 1)
+	go func() { done <- re.a.RepoWebhook(v.ID, "issue_comment", "w1", repos.Sign("whsec", body), body) }()
+	select {
+	case code := <-done:
+		if code != 202 {
+			t.Fatalf("记下就回 202：%d", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook 在等处理")
+	}
+	<-started
+	if len(re.events()) != 0 {
+		t.Fatal("处理还卡着")
+	}
+	close(release)
+	eventually(t, "处理完", func() bool { return len(re.events()) == 1 })
+}
+
+// 一直失败的处理：重放 5 次以后不再重放，事件日志里这个事件只有一条。
+func TestFailingHandlerIsReplayedAtMostFiveTimes(t *testing.T) {
+	re, v := newRepoEnv(t, "webhook")
+	var calls atomic.Int32
+	dispatchRepoEventHook = func(a *App, r repos.Repo, ev repos.Event) error {
+		calls.Add(1)
+		return errors.New("存储写不进去")
+	}
+	re.a.mu.Lock()
+	seq0 := re.a.runtimeEventSeq
+	rt := re.a.repoRTs[v.ID]
+	re.a.mu.Unlock()
+	body := []byte(`{"action":"created","issue":{"number":3},"comment":{"id":701,"body":"@nano-bot 来","user":{"login":"alice"}}}`)
+	if code := re.a.RepoWebhook(v.ID, "issue_comment", "f1", repos.Sign("whsec", body), body); code != 202 {
+		t.Fatal(code)
+	}
+	eventually(t, "第一次处理", func() bool { return calls.Load() >= 1 })
+	for i := 0; i < 12; i++ {
+		_, _ = re.a.PollRepo(context.Background(), v.ID) // 每轮开头重放
+	}
+	if got := calls.Load(); got != 1+repos.MaxReplays {
+		t.Fatalf("第一次加最多 %d 次重放：%d", repos.MaxReplays, got)
+	}
+	if len(rt.state.Pending()) != 0 {
+		t.Fatal("丢掉以后不再留着")
+	}
+	re.a.mu.Lock()
+	seq1 := re.a.runtimeEventSeq
+	re.a.mu.Unlock()
+	if seq1-seq0 != 1 {
+		t.Fatalf("repo.* 只写一次：%d", seq1-seq0)
+	}
 }

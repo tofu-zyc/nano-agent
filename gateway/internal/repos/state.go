@@ -3,6 +3,8 @@ package repos
 import (
 	"encoding/json"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"nano-agent/gateway/internal/journal"
@@ -30,15 +32,19 @@ type Cursor struct {
 }
 
 type stateRec struct {
-	T        string  `json:"t"` // event | done | cursor | delivery
+	T        string  `json:"t"` // event | done | cursor | delivery | fail | logged
+	N        int     `json:"n,omitempty"`
 	Event    *Event  `json:"event,omitempty"`
 	Key      string  `json:"key,omitempty"`
 	Cursor   *Cursor `json:"cursor,omitempty"`
 	Delivery string  `json:"delivery,omitempty"`
 }
 
-// State 是一个仓库的状态。不加锁：由使用方串行调用。
+// State 是一个仓库的状态。方法各自加锁（webhook 的请求只记不处理，和后台的处理、轮询同时用它）。
 type State struct {
+	mu         sync.Mutex
+	failed     map[string]int  // 处理失败的次数（没处理完的事件）
+	logged     map[string]bool // 已经写过事件日志的（事件键 + 名字），重放不重写
 	j          *journal.Journal
 	seen       map[string]bool
 	order      []string
@@ -46,11 +52,19 @@ type State struct {
 	cursor     Cursor
 	deliveries map[string]bool
 	delOrder   []string
+	limit      int // 留多少个键；0 用 maxSeen（测试可以调小）
+}
+
+// SetSeenLimit 调整留多少个键（只给测试）。
+func (s *State) SetSeenLimit(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limit = n
 }
 
 // OpenState 打开（不存在就创建）并重放。
 func OpenState(path string) (*State, error) {
-	s := &State{seen: map[string]bool{}, pending: map[string]Event{}, deliveries: map[string]bool{}}
+	s := &State{seen: map[string]bool{}, pending: map[string]Event{}, deliveries: map[string]bool{}, failed: map[string]int{}, logged: map[string]bool{}}
 	j, err := journal.Open(path, stateFormat, journal.Limits{Record: recordLimit, File: fileLimit}, func(_ uint64, data json.RawMessage) error {
 		var r stateRec
 		if err := json.Unmarshal(data, &r); err != nil {
@@ -76,6 +90,16 @@ func (s *State) apply(r stateRec) {
 	case "done":
 		s.markSeen(r.Key)
 		delete(s.pending, r.Key)
+		delete(s.failed, r.Key)
+		for k := range s.logged {
+			if strings.HasPrefix(k, r.Key+"|") {
+				delete(s.logged, k)
+			}
+		}
+	case "fail":
+		s.failed[r.Key] = r.N
+	case "logged":
+		s.logged[r.Key] = true
 	case "cursor":
 		if r.Cursor != nil {
 			s.cursor = *r.Cursor
@@ -98,7 +122,11 @@ func (s *State) markSeen(key string) {
 	}
 	s.seen[key] = true
 	s.order = append(s.order, key)
-	if len(s.order) > maxSeen {
+	max := maxSeen
+	if s.limit > 0 {
+		max = s.limit
+	}
+	for len(s.order) > max {
 		old := s.order[0]
 		s.order = s.order[1:]
 		if _, p := s.pending[old]; !p {
@@ -120,6 +148,8 @@ func (s *State) append(r stateRec) error {
 
 // Close 关掉文件。
 func (s *State) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s == nil || s.j == nil {
 		return nil
 	}
@@ -128,6 +158,8 @@ func (s *State) Close() error {
 
 // Record 记下一个事件：键没见过才记（返回 true），见过的丢掉。先记再处理。
 func (s *State) Record(ev Event) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.seen[ev.Key] {
 		return false, nil
 	}
@@ -138,10 +170,20 @@ func (s *State) Record(ev Event) (bool, error) {
 }
 
 // Done 记下一个事件处理完了。
-func (s *State) Done(key string) error { return s.append(stateRec{T: "done", Key: key}) }
+func (s *State) Done(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.append(stateRec{T: "done", Key: key})
+}
 
 // Pending 是记下了但还没处理完的事件（按键排序，重放用）。
 func (s *State) Pending() []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pendingLocked()
+}
+
+func (s *State) pendingLocked() []Event {
 	out := make([]Event, 0, len(s.pending))
 	for _, e := range s.pending {
 		out = append(out, e)
@@ -151,10 +193,16 @@ func (s *State) Pending() []Event {
 }
 
 // Seen 是这个键已经受理过。
-func (s *State) Seen(key string) bool { return s.seen[key] }
+func (s *State) Seen(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seen[key]
+}
 
 // Cursor 是现在的游标。
 func (s *State) Cursor() Cursor {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	c := s.cursor
 	c.ETags = map[string]string{}
 	for k, v := range s.cursor.ETags {
@@ -164,10 +212,16 @@ func (s *State) Cursor() Cursor {
 }
 
 // SetCursor 记下新的游标。
-func (s *State) SetCursor(c Cursor) error { return s.append(stateRec{T: "cursor", Cursor: &c}) }
+func (s *State) SetCursor(c Cursor) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.append(stateRec{T: "cursor", Cursor: &c})
+}
 
 // SeenDelivery 是这次 webhook 投递已经收过；没见过就记下并返回 false。
 func (s *State) SeenDelivery(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if id == "" {
 		return false, nil
 	}
@@ -187,12 +241,43 @@ func (s *State) compact() error {
 			recs = append(recs, stateRec{T: "done", Key: k})
 		}
 	}
-	for _, e := range s.Pending() {
+	for _, e := range s.pendingLocked() {
 		e := e
 		recs = append(recs, stateRec{T: "event", Event: &e})
+		if n := s.failed[e.Key]; n > 0 {
+			recs = append(recs, stateRec{T: "fail", Key: e.Key, N: n})
+		}
+		for k := range s.logged {
+			if strings.HasPrefix(k, e.Key+"|") {
+				recs = append(recs, stateRec{T: "logged", Key: k})
+			}
+		}
 	}
 	for _, d := range s.delOrder {
 		recs = append(recs, stateRec{T: "delivery", Delivery: d})
 	}
 	return s.j.Rewrite(recs)
+}
+
+// Fail 记下一个事件处理失败了一次，返回累计的次数（重启后接着算）。
+func (s *State) Fail(key string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.failed[key] + 1
+	return n, s.append(stateRec{T: "fail", Key: key, N: n})
+}
+
+// Once 是这个事件的这一条事件日志还没写过：没写过就记下并返回 true（重放时返回 false，所以每个事件的日志只写一次）。
+// 事件处理完（Done）以后这些记号就不留了。
+func (s *State) Once(key, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key + "|" + name
+	if s.logged[k] {
+		return false
+	}
+	// 记不下来也当没写过会重复写；日志重复比丢了好，所以记失败照样放行
+	_ = s.append(stateRec{T: "logged", Key: k})
+	s.logged[k] = true
+	return true
 }

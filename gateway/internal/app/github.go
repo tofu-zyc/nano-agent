@@ -153,7 +153,7 @@ func (a *App) routeIssueMessage(r repos.Repo, ev repos.Event) error {
 	a.mu.Lock()
 	ignore := strings.EqualFold(ev.Actor, r.Bot) || !a.allowedOnRepo(r, ev.Actor) || !mentions(ev.Text, r.Bot)
 	if ignore {
-		a.emitRepoLog(r, ev, "repo.ignored") // 账号、对话、事件 ID，不带正文
+		a.emitRepoLogOnce(r, ev, "repo.ignored") // 账号、对话、事件 ID，不带正文
 		a.mu.Unlock()
 		return nil
 	}

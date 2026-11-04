@@ -159,6 +159,7 @@ type Issue struct {
 	State       string    `json:"state"`
 	User        User      `json:"user"`
 	HTMLURL     string    `json:"html_url"`
+	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	PullRequest *struct {
 		URL string `json:"url"`
@@ -248,7 +249,7 @@ func (c *Client) Issues(ctx context.Context, since time.Time, etag string) ([]Is
 
 // IssueComments 取 since 之后的议题评论（含 PR 对话里的评论）。
 func (c *Client) IssueComments(ctx context.Context, since time.Time, etag string) ([]Comment, string, error) {
-	q := url.Values{"sort": {"created"}, "direction": {"asc"}, "per_page": {"100"}}
+	q := url.Values{"sort": {"updated"}, "direction": {"asc"}, "per_page": {"100"}}
 	if !since.IsZero() {
 		q.Set("since", since.UTC().Format(time.RFC3339))
 	}
@@ -259,7 +260,7 @@ func (c *Client) IssueComments(ctx context.Context, since time.Time, etag string
 
 // PullComments 取 since 之后的 PR 审阅意见（行内评论）。
 func (c *Client) PullComments(ctx context.Context, since time.Time, etag string) ([]Comment, string, error) {
-	q := url.Values{"sort": {"created"}, "direction": {"asc"}, "per_page": {"100"}}
+	q := url.Values{"sort": {"updated"}, "direction": {"asc"}, "per_page": {"100"}}
 	if !since.IsZero() {
 		q.Set("since", since.UTC().Format(time.RFC3339))
 	}
@@ -289,17 +290,19 @@ func (c *Client) Pull(ctx context.Context, n int) (Pull, error) {
 	return out, err
 }
 
-// PullByHead 找 head 是这个分支的 PR（任何状态）；没有返回 false。
+// PullByHead 找 head 是这个分支的、开着的 PR；没有返回 false。
 func (c *Client) PullByHead(ctx context.Context, branch string) (Pull, bool, error) {
 	var out []Pull
 	q := url.Values{"head": {c.Owner + ":" + branch}, "state": {"all"}, "per_page": {"5"}}
 	if _, err := c.do(ctx, "GET", c.repoPath("/pulls"), q, nil, &out, ""); err != nil {
 		return Pull{}, false, err
 	}
-	if len(out) == 0 {
-		return Pull{}, false, nil
+	for _, p := range out { // 只认开着的；合并了或关了的可能是以前留下的同名分支
+		if p.State == "open" {
+			return p, true, nil
+		}
 	}
-	return out[0], true, nil
+	return Pull{}, false, nil
 }
 
 // CreatePull 开 PR。

@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/host"
@@ -465,4 +467,207 @@ func (g *gitEnv) history(sid string) string {
 		b.WriteString(m.Content + "\n")
 	}
 	return b.String()
+}
+
+// round 让分支改一次文件（content 为空就不改）、汇报 ready、这一轮结束。
+func (p *prEnv) round(t *testing.T, in proto.Msg, content string) {
+	t.Helper()
+	if content != "" {
+		p.editWorktree(t, "a.txt", content)
+	}
+	p.a.mu.Lock()
+	p.a.ticketReported("tk-1", commit.StatusReady, "好了", "")
+	p.a.mu.Unlock()
+	p.k.send(proto.Msg{T: proto.TDone, SID: in.SID, Status: proto.StatusOK})
+}
+
+func (p *prEnv) prComments(n int) string {
+	var b strings.Builder
+	for _, c := range p.gh.Comments(n) {
+		b.WriteString(c.Body + "\n")
+	}
+	return b.String()
+}
+
+// APPROVED 的审阅只记事件日志：工单还是 ready，分支没跑。
+func TestApprovedReviewDoesNotRunTheBranch(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	in, n := p.openPR(t, sid)
+	p.gh.AddReview(n, "alice", "APPROVED", "LGTM 可以合")
+	p.poll(t)
+	if tk := p.tk("tk-1"); tk.Status != ticket.StatusReady {
+		t.Fatalf("批准不是要它再干一轮：%+v", tk)
+	}
+	if strings.Contains(p.history(in.SID), "LGTM") {
+		t.Fatal("批准的正文不送进分支")
+	}
+}
+
+// PR 对话里的普通评论要点名才送进分支（送之前去掉点名）；审阅和行内意见不用点名。
+func TestPlainPRCommentsNeedAMention(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	in, n := p.openPR(t, sid)
+	p.gh.AddComment(n, "alice", "我觉得这样挺好的 CHAT-ONLY")
+	p.poll(t)
+	if tk := p.tk("tk-1"); tk.Status != ticket.StatusReady || strings.Contains(p.history(in.SID), "CHAT-ONLY") {
+		t.Fatalf("没点名的评论不进分支：%+v", tk)
+	}
+	p.gh.AddComment(n, "alice", "@nano-bot 把变量改个名 DO-IT")
+	p.poll(t)
+	eventually(t, "点名的送进分支", func() bool { return p.tk("tk-1").Status == ticket.StatusWorking })
+	p.k.expect(proto.TInput)
+	hist := p.history(in.SID)
+	if !strings.Contains(hist, "把变量改个名 DO-IT") || strings.Contains(hist, "@nano-bot 把变量") {
+		t.Fatalf("送进去的是去掉点名的正文：%s", hist)
+	}
+}
+
+// PR 开了以后的各轮：结果发在 PR 上，原消息里不再有第二次“改好了”。
+func TestRoundsAfterThePRIsOpenReportOnThePR(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	in, n := p.openPR(t, sid)
+	drainSent(p.env)
+	p.gh.AddReview(n, "alice", "CHANGES_REQUESTED", "这里改成 B 方案")
+	p.poll(t)
+	p.k.expect(proto.TInput)
+	p.round(t, in, "一\n二\n三\n")
+	eventually(t, "PR 上有结果", func() bool { return strings.Contains(p.prComments(n), "改了：") })
+	eventually(t, "回到 ready", func() bool { return p.tk("tk-1").Status == ticket.StatusReady })
+	tk := p.tk("tk-1")
+	if !strings.Contains(p.prComments(n), "（提交 "+tk.Commit[:7]+"）") {
+		t.Fatalf("写明提交前 7 位：%s", p.prComments(n))
+	}
+	if sent := drainSent(p.env); len(sent) != 0 {
+		t.Fatalf("原消息里不再有第二次“改好了”：%v", sent)
+	}
+	// 再来一轮，分支看过了但没改：远端已经是这个提交
+	p.gh.AddReview(n, "alice", "COMMENTED", "还有个问题")
+	p.poll(t)
+	p.k.expect(proto.TInput)
+	p.round(t, in, "")
+	eventually(t, "没有新改动的回复", func() bool { return strings.Contains(p.prComments(n), "看过了，没有新的改动") })
+	if sent := drainSent(p.env); len(sent) != 0 {
+		t.Fatalf("原消息里仍然没有：%v", sent)
+	}
+}
+
+// 按分支查到的 PR 合并了：不算，照样开新的。
+func TestMergedPullOnTheSameBranchIsNotReused(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	old := p.gh.AddMergedPull("nano/tk-1")
+	p.openPR(t, sid)
+	tk := p.tk("tk-1")
+	if tk.Status != ticket.StatusReady || tk.PR == strconv.Itoa(old) || len(p.gh.Pulls()) != 2 {
+		t.Fatalf("工单挂在新的 PR 上、还在等合并：%+v", tk)
+	}
+}
+
+// 先收下、开 PR 失败、续上：PR 正文里还有“验收没过、由谁收下”；重试占着工单。
+func TestForcedAcceptSurvivesADeliveryRetry(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "exit 1")
+	in := p.startWork(t, sid)
+	for i := 0; i < 2; i++ {
+		p.round(t, in, strings.Repeat("改\n", i+1))
+		if i == 0 {
+			p.k.expect(proto.TInput)
+		}
+	}
+	eventually(t, "返工用完受阻", func() bool { return p.tk("tk-1").Status == ticket.StatusBlocked })
+	mention(p.env, "@机器人 先收下", "g700", "u2", "李四")
+	p.k.expect(proto.TInput)
+	p.gh.FailNext("/pulls", 500, "boom", nil)
+	if _, err := callTicket(p.env, sid, `{"action":"accept","id":"tk-1"}`); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "开 PR 失败受阻", func() bool { tk := p.tk("tk-1"); return tk.Status == ticket.StatusBlocked && tk.BlockedBy == "pr" })
+	finishGroupRun(t, p.env, sid)
+	mention(p.env, "@机器人 再试一次", "g701", "u2", "李四")
+	p.k.expect(proto.TInput)
+	if _, err := callTicket(p.env, sid, `{"action":"note","id":"tk-1","text":"重试一下"}`); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "重试后开了 PR", func() bool { return p.tk("tk-1").PR != "" })
+	var n int
+	for _, pl := range p.gh.Pulls() {
+		n = pl.Number
+	}
+	if body := p.gh.PullBody(n); !strings.Contains(body, "验收没过，由 fake:u2 收下") {
+		t.Fatalf("重试时 PR 正文还写明验收没过、由谁收下：%s", body)
+	}
+	finishGroupRun(t, p.env, sid)
+}
+
+// 检查的失败结论：timed_out、cancelled、action_required、startup_failure 都算失败，webhook 和轮询一致。
+func TestEveryFailedConclusionCountsOnWebhookToo(t *testing.T) {
+	for _, c := range []string{"failure", "timed_out", "cancelled", "action_required", "startup_failure"} {
+		if !repos.FailedConclusion(c) {
+			t.Fatalf("%s 算失败", c)
+		}
+	}
+	if repos.FailedConclusion("success") || repos.FailedConclusion("neutral") || repos.FailedConclusion("") {
+		t.Fatal("成功、中性不算失败")
+	}
+	for _, c := range []string{"action_required", "startup_failure"} {
+		p := newPREnv(t)
+		sid := p.teamGroupOnRepo(t, "true")
+		_, n := p.openPR(t, sid)
+		pl, _ := p.gh.Pull(n)
+		ev := repos.Event{Kind: repos.KindCheck, Number: n, State: c, SHA: pl.Head.SHA}
+		if err := p.a.onCheck(p.repoOf(t), ev); err != nil {
+			t.Fatal(err)
+		}
+		if tk := p.tk("tk-1"); tk.Status != ticket.StatusWorking || tk.Rework != 1 {
+			t.Fatalf("%s 算一次返工：%+v", c, tk)
+		}
+	}
+}
+
+func (p *prEnv) repoOf(t *testing.T) repos.Repo {
+	t.Helper()
+	r, ok := p.a.repos.Get(p.repo.ID)
+	if !ok {
+		t.Fatal("没有连接")
+	}
+	return r
+}
+
+// 审阅意见送不进分支（续满了）是业务拒绝：处理完，不留着重放。
+func TestReviewRefusedByTheTicketIsNotReplayed(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	_, n := p.openPR(t, sid)
+	p.a.mu.Lock()
+	p.a.tickets.Update("tk-1", func(t *ticket.Ticket) { t.RunSID = "" })
+	p.a.mu.Unlock()
+	p.gh.AddReview(n, "alice", "CHANGES_REQUESTED", "改一下")
+	p.poll(t)
+	p.a.mu.Lock()
+	rt := p.a.repoRTs[p.repo.ID]
+	p.a.mu.Unlock()
+	if len(rt.state.Pending()) != 0 {
+		t.Fatalf("业务上的拒绝算处理完：%+v", rt.state.Pending())
+	}
+}
+
+// env 的值里有 NUL：执行器的 JSON 库会截掉，所以网关填的时候就拒绝，命令不执行。
+func TestEnvWithNULIsRefusedBeforeExecuting(t *testing.T) {
+	p := newPREnv(t)
+	before := len(p.rec.requests())
+	_, err := p.a.gatewayShell(context.Background(), shellRun{Machine: host.LocalName, Key: "nul", Command: "true", Timeout: 5 * time.Second,
+		Env: map[string]string{"A": "a\x00b"}})
+	if err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("值里有 NUL：%v", err)
+	}
+	if _, err := p.a.gatewayShell(context.Background(), shellRun{Machine: host.LocalName, Key: "nul2", Command: "true", Timeout: 5 * time.Second,
+		Env: map[string]string{"A\x00": "x"}}); err == nil {
+		t.Fatal("名字里有 NUL 也拒绝")
+	}
+	if got := len(p.rec.requests()); got != before {
+		t.Fatalf("没有发给执行器：%d -> %d", before, got)
+	}
 }

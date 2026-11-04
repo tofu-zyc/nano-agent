@@ -107,6 +107,7 @@ type Ticket struct {
 	// 5c
 	PR        string `json:"pr,omitempty"`         // PR 号
 	PRHead    string `json:"pr_head,omitempty"`    // 推到 PR 上的提交：检查结果只认这个提交的
+	ForcedBy  string `json:"forced_by,omitempty"`  // 验收没过、由谁“先收下”的；重试交付时 PR 正文还要写这句
 	CIHandled string `json:"ci_handled,omitempty"` // 已经按 CI 失败返工过的提交（每个提交只算一次）
 
 	Created int64 `json:"created"` // 秒

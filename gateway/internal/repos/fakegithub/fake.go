@@ -91,7 +91,7 @@ func (s *Server) AddIssue(author, title, body string) repos.Issue {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := &repos.Issue{ID: s.id(), Number: s.num(), Title: title, Body: body, State: "open", User: repos.User{Login: author},
-		UpdatedAt: s.now()}
+		CreatedAt: s.now(), UpdatedAt: s.now()}
 	i.HTMLURL = fmt.Sprintf("https://github.com/%s/%s/issues/%d", s.Owner, s.Name, i.Number)
 	s.issues = append(s.issues, i)
 	return *i
@@ -166,7 +166,7 @@ func (s *Server) openPull(title, body, head, headSHA string) repos.Pull {
 	p.Head.Ref, p.Head.SHA = head, headSHA
 	s.pulls[p.Number] = p
 	// PR 也是议题：出现在 issues 列表里
-	pr := &repos.Issue{ID: s.id(), Number: p.Number, Title: title, Body: body, State: "open", User: repos.User{Login: s.Bot}, HTMLURL: p.HTMLURL, UpdatedAt: s.now()}
+	pr := &repos.Issue{ID: s.id(), Number: p.Number, Title: title, Body: body, State: "open", User: repos.User{Login: s.Bot}, HTMLURL: p.HTMLURL, CreatedAt: s.now(), UpdatedAt: s.now()}
 	pr.PullRequest = &struct {
 		URL string `json:"url"`
 	}{URL: s.URL}
@@ -387,4 +387,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(404, map[string]string{"message": "Not Found"}, nil)
 	}
+}
+
+// AddMergedPull 造一个 head 是这个分支、已经合并的 PR（以前装的网关留下的同名分支），返回它的号。
+func (s *Server) AddMergedPull(head string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.openPull("旧的 PR", "", head, "old-sha").Number
+	p := s.pulls[n]
+	p.State, p.Merged, p.MergeCommitSHA = "closed", true, "old-merge"
+	return n
 }
