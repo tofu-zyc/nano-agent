@@ -2452,8 +2452,12 @@ func (a *App) Wait() {
 	if a.outbox != nil {
 		a.outbox.Close()
 	}
+	// 承诺记录和工单的日志不加锁，平时都在 App.mu 下写：关的时候也拿着它，
+	// 免得还没退出的后台步骤（比如 settleSilentRun）同时在写
+	a.mu.Lock()
 	a.commits.Close()
 	a.tickets.Close()
+	a.mu.Unlock()
 	if a.hookEngine != nil {
 		a.hookEngine.Close()
 	}
