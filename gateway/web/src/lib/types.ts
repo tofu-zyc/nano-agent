@@ -35,7 +35,7 @@ export type MachineInfo = {
 };
 
 // 工作目录：机器 + 路径。会话可以同时挂好几个；default 表示新会话默认挂上
-export type WorkspaceInfo = { sandbox_mode?: string; id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
+export type WorkspaceInfo = { sandbox_mode?: string; external?: string[]; id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
 
 // 模型接口（端点）：模型服务的地址和密钥，一个接口上可以放多个模型
 export type ModelEndpoint = {

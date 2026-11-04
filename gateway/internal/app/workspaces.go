@@ -37,6 +37,9 @@ type Workspace struct {
 	// 只有这张工单的分支能挂它。可写只有目录本身；ExtraRO 是只读的（<仓库>/.git，包括 worktree 自己的 git 目录）。
 	Ticket  string   `json:"ticket,omitempty"`
 	ExtraRO []string `json:"extra_ro,omitempty"`
+	// External 是在这个工作目录上开启的外部 agent（设计 §16.4），默认都不开。工单的派生工作目录不存它：
+	// 每次调用时按仓库工作目录现在的开关查。
+	External []string `json:"external,omitempty"`
 }
 
 func (w Workspace) Label() string { return w.Host + ":" + w.Path }

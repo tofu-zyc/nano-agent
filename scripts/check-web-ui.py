@@ -305,6 +305,61 @@ def check_repo_connect(page, url):
     page.screenshot(path=os.path.join(SHOTS, "repo-connect.png"))
 
 
+
+def check_external_agents(page, url):
+    """工作目录节点上的“外部 agent”：登记校验不过要报错；登记以后在这个工作目录上开启（确认放宽沙箱），面板写明能读写哪些目录、能联网。"""
+    ws = api(page, "GET", "/api/workspaces")[1]
+    items = ws if isinstance(ws, list) else ws.get("items") or ws.get("workspaces") or []
+    repo = [w for w in items if w["path"].endswith("/repo")]
+    if not repo:
+        fail("找不到种子工作目录")
+        return
+    wid = repo[0]["id"]
+    page.goto(url + "#/")
+    page.reload()
+    page.wait_for_selector(f'g.node[data-id="w:{wid}"]', timeout=8000)
+    page.click(f'g.node[data-id="w:{wid}"]')
+    try:
+        page.wait_for_selector("[data-testid=external-agents]", timeout=5000)
+    except Exception:
+        fail("工作目录面板里没有“外部 agent”")
+        return
+    page.click("[data-testid=ext-add]")
+    page.fill("[data-testid=ext-name]", "claude")
+    page.fill("[data-testid=ext-argv]", "claude\n-p --x={prompt}")
+    page.fill("[data-testid=ext-dirs]", "~/.claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-error]", timeout=5000)
+        ok("外部 agent：{prompt} 嵌在别的字里，登记被拒")
+    except Exception:
+        fail("{prompt} 嵌在别的字里应该报错")
+    page.fill("[data-testid=ext-argv]", "claude\n-p\n{prompt}")
+    page.fill("[data-testid=ext-env]", "CLAUDE_CONFIG_DIR=~/.claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-toggle-claude]", timeout=5000)
+    except Exception:
+        fail("登记没成功：" + page.locator("[data-testid=external-agents]").inner_text()[:300])
+        return
+    if page.locator("[data-testid=ext-toggle-claude]").is_checked():
+        fail("登记以后默认不开")
+    page.once("dialog", lambda d: d.accept())
+    page.click("[data-testid=ext-toggle-claude]")
+    try:
+        page.wait_for_selector("[data-testid=ext-on-claude]", timeout=5000)
+    except Exception:
+        fail("开启以后面板上没写明放宽了什么")
+        return
+    note = page.locator("[data-testid=ext-on-claude]").inner_text()
+    cur = [w for w in (lambda x: x if isinstance(x, list) else x.get("items") or x.get("workspaces") or [])(api(page, "GET", "/api/workspaces")[1]) if w["id"] == wid]
+    if "~/.claude" in note and "联网" in note and cur and cur[0].get("external") == ["claude"]:
+        ok("外部 agent：登记、默认不开、开启时确认，开了写明能读写的目录和联网")
+    else:
+        fail("开启以后的显示或开关不对：" + note + " " + json.dumps(cur, ensure_ascii=False)[:200])
+    page.screenshot(path=os.path.join(SHOTS, "external-agents.png"))
+
+
 def seed_pending(tmp):
     """起网关之前放一个上次失败的定时任务（宿主自己记下的受阻，没有汇报）；再起一次网关，用 /session fork 分出一个分支，
     停掉，往承诺记录里写一条分支上带问题的汇报（Report 工具只有模型能调）。之后正式的那一次网关启动时，
@@ -1008,6 +1063,7 @@ def run(page, url, nano):
     check_pending(page, url)
     check_team_card(page, url)
     check_repo_connect(page, url)
+    check_external_agents(page, url)
     # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
     code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
     if code != 200:

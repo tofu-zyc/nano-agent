@@ -204,14 +204,23 @@ func downloadBase(mirror string) string {
 
 func (s *Server) patchWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SandboxMode string `json:"sandbox_mode"`
+		SandboxMode *string   `json:"sandbox_mode"`
+		External    *[]string `json:"external"` // 开启哪些外部 agent；不带就不改
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.app.SetWorkspaceSandbox(r.PathValue("id"), req.SandboxMode); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+	if req.SandboxMode != nil {
+		if err := s.app.SetWorkspaceSandbox(r.PathValue("id"), *req.SandboxMode); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.External != nil {
+		if err := s.app.SetWorkspaceExternal(r.PathValue("id"), *req.External); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }

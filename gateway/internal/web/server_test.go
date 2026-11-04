@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"nano-agent/gateway/internal/host"
@@ -503,5 +504,45 @@ func TestRepoWebhookRouteNeedsNoLoginButNeedsSignature(t *testing.T) {
 	s.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("外来的 Host：%d", w.Code)
+	}
+}
+
+// 外部 agent 的登记接口要登录；工作目录上开启只改 external，不动执行隔离。
+func TestExternalAgentRoutes(t *testing.T) {
+	srv, s, _ := setup(t)
+	ws, err := s.app.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), false, "on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/external-agents", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("要登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatal(code)
+	}
+	agent := map[string]any{"name": "claude", "argv": []string{"claude", "-p", "{prompt}"}, "dirs": []string{"~/.claude"}}
+	if code, _ := c.do("POST", "/api/external-agents", agent, false); code != http.StatusForbidden {
+		t.Fatalf("不带 X-Nano：%d", code)
+	}
+	if code, out := c.do("POST", "/api/external-agents", map[string]any{"name": "x", "argv": []string{"x"}}, true); code != 400 || !strings.Contains(fmt.Sprint(out), "{prompt}") {
+		t.Fatalf("校验不过：%d %v", code, out)
+	}
+	if code, out := c.do("POST", "/api/external-agents", agent, true); code != 200 {
+		t.Fatalf("登记：%d %v", code, out)
+	}
+	if code, out := c.do("GET", "/api/external-agents", nil, false); code != 200 || len(out["items"].([]any)) != 1 {
+		t.Fatalf("列：%d %v", code, out)
+	}
+	if code, out := c.do("PATCH", "/api/workspaces/"+ws.ID, map[string]any{"external": []string{"claude"}}, true); code != 200 {
+		t.Fatalf("开启：%d %v", code, out)
+	}
+	for _, w := range s.app.Workspaces() {
+		if w.ID == ws.ID && (len(w.External) != 1 || w.SandboxMode != "on") {
+			t.Fatalf("只改 external：%+v", w.Workspace)
+		}
+	}
+	if code, _ := c.do("DELETE", "/api/external-agents/claude", nil, true); code != 200 {
+		t.Fatalf("删：%d", code)
 	}
 }

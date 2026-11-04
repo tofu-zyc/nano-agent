@@ -298,6 +298,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/repos", s.auth(s.saveRepo))
 	mux.HandleFunc("DELETE /api/repos/{id}", s.auth(s.deleteRepo))
 	mux.HandleFunc("POST /api/repos/{id}/webhook", s.repoWebhook) // 不走登录：靠签名
+	mux.HandleFunc("GET /api/external-agents", s.auth(s.listExternalAgents))
+	mux.HandleFunc("POST /api/external-agents", s.auth(s.saveExternalAgent))
+	mux.HandleFunc("DELETE /api/external-agents/{name}", s.auth(s.deleteExternalAgent))
 	mux.HandleFunc("POST /api/tickets/{id}/cancel", s.auth(s.cancelTicket))
 	mux.HandleFunc("POST /api/pending/seen", s.auth(s.pendingSeen))
 	mux.HandleFunc("POST /api/pending/answer", s.auth(s.pendingAnswer))

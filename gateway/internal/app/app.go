@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"nano-agent/gateway/internal/extagent"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -145,6 +146,7 @@ type App struct {
 	tickets         *ticket.Store
 	ticketsErr      error
 	repos           *repos.Store
+	extAgents       *extagent.Store // 外部 agent 的登记（设计 §16.4）；打不开就是 nil
 	ghChan          *channel.GitHub
 	repoRTs         map[string]*repoRT
 	lastPushOutcome string                  // 测试用：最近一次推送是 done 还是 skip（远端已经有就不重推）
@@ -552,6 +554,7 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.openCommits()
 	a.openTickets()
 	a.openRepos()
+	a.openExternalAgents()
 	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)

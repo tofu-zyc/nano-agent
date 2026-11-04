@@ -7,6 +7,7 @@
   import WorkspacePicker from '../WorkspacePicker.svelte';
   import Icon from '../Icon.svelte';
   import RepoConnect from '../RepoConnect.svelte';
+  import ExternalAgents from '../ExternalAgents.svelte';
 
   let { id }: { id?: string } = $props();
 
@@ -60,6 +61,7 @@
         </div>
       </div>
       <RepoConnect workspace={ws.id} />
+      <ExternalAgents {ws} />
       <h5 class="p-h">在这里工作的会话</h5>
       <div class="p-card">
         {#each sessions as s (s.sid)}

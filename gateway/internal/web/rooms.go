@@ -10,6 +10,7 @@ package web
 
 import (
 	"io"
+	"nano-agent/gateway/internal/extagent"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -255,4 +256,30 @@ func (s *Server) repoWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	code := s.app.RepoWebhook(r.PathValue("id"), r.Header.Get("X-GitHub-Event"), r.Header.Get("X-GitHub-Delivery"), r.Header.Get("X-Hub-Signature-256"), body)
 	w.WriteHeader(code)
+}
+
+// 外部 agent 的登记（设计 §16.4）。开启在 PATCH /api/workspaces/{id} 的 external 上。
+
+func (s *Server) listExternalAgents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"items": s.app.ExternalAgents()})
+}
+
+func (s *Server) saveExternalAgent(w http.ResponseWriter, r *http.Request) {
+	var req extagent.Agent
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.app.SaveExternalAgent(req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) deleteExternalAgent(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.DeleteExternalAgent(r.PathValue("name")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
