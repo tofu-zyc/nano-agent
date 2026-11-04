@@ -247,6 +247,19 @@ mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线
   - 跑不起来的原因模型看得到：Job 失败（包括启动前就被执行器拒绝，比如 `agent_rw` 不合规），Job 工具的 `status`、`wait`（和控制操作的回执）带 `reason`：内核记下的 `error`，没有就取执行器回的内容，前 500 个字，对所有后台 Job 一样；`list` 不带（一页最多 100 个任务）。`/job` 的文字回复也写出“原因：…”。
 - **执行请求的 `agent_rw`**：和 `env` 一样只有网关发起的执行能带（请求顶层），`args` 里出现执行器拒绝。执行器在 `setup` 里用这台机器真实的 HOME 展开 `~/`、解析符号链接（在换私有 HOME 之前），每一项必须是存在的目录、在家目录里面、不是家目录本身，不和这次的 `dirs`、`ro` 互相包含，不和 NANO_HOME（没设就是 `~/.nano-agent`）互相包含，不和执行器环境里 `PATH` 的任何目录互相包含（每个 PATH 项解析成真实路径，不是绝对路径的、不存在的跳过；那里的程序宿主之后的步骤和主人自己的终端都会去跑，外部 agent 不该能改——装在家目录里的程序登记它的安装目录，不登记 PATH 里放启动脚本的目录；网页登记处写明了），也不和请求顶层的 `agent_rw_deny` 互相包含；最多 8 项。`agent_rw_deny` 是网关带的“只用来查、不加进任何读写范围”的目录（工单里是仓库的根：执行器不知道它在哪，它又不在 worktree 和 `.git` 里，`~/proj/repo/src` 这样的目录不拦住就能写主仓库签出的文件），写法和 `agent_rw` 一样（`~/` 展开、解析符号链接，必须能写成绝对路径，最多 8 项），也只有网关能带，`args` 里出现执行器拒绝。任何一项不满足整次拒绝，写明是哪一项（PATH 的写明是哪个 PATH 目录）；沙箱关着也照样校验；校验不过时什么目录都还没建（校验在建临时目录之前，所以执行器先把环境建好再校验）。都满足的在 `enter_sandbox` 里加进这一个进程的可写范围（文件工具不用它）。
 - **改登记就关掉开关**：开启时确认的是那时候登记的目录。`Argv`、`Dirs`、`Env` 有任何变化（只改 `Timeout` 不算），所有工作目录上关掉它，`POST /api/external-agents` 返回 `disabled`（关掉的工作目录 ID），网页上保存前确认时列出来；新登记一个名字时也先清掉工作目录上残留的同名开关；删掉登记时同样关掉。先关开关再改登记，登记没写成开关也已经关了。开关和登记都在 `App.mu` 下改，开启时在锁下查登记。
+- **验收对照（5d-4）**：设计 16.4 验收清单的每一条对应的测试，替身脚本当外部 agent。真内核的几条用 `setupRealKernel` 起真内核和真执行器、临时目录里的真 git 仓库、模型替身。
+  - 只在开启了的工作目录里能跑；关掉开关，工单里也立刻不能用：`TestExternalOfferedOnlyWhereEnabled`、`TestExternalAgentRegistrationAndWorkspaceSwitch`、`TestTicketExternalRequestIsSandboxedAndFollowsTheRepoSwitch`、`TestTicketExternalGoneWhenTicketEnded`。
+  - 能读写登记的目录，同一会话里的普通 Shell 读不到，也读不到它往私有 HOME 里写的东西：`TestRealKernelExternalRunsAsBackgroundJob`、`TestRealKernelOrdinaryShellCannotSeeTheExternalAgentsFiles`，内核 `test_exec.py` 的 `t_agent_rw_writable`。
+  - `{prompt}` 不经 shell 解释（带 `'`、`$(...)`、反引号、`;`、换行，什么都没多执行）：`TestExternalCallBuildsTheBackgroundRun`（每项单引号转义）、`TestRealKernelExternalRunsAsBackgroundJob`、`TestRealKernelTicketRunsExternalAgent`（工单里、真内核）。
+  - 登记的目录是家目录本身（登记时就拒绝）、包着仓库、在 NANO_HOME 里、和 PATH 里的目录互相包含、在工单的主仓库里，执行被拒：`test_exec.py` 的 `t_agent_rw_checks`、`t_agent_rw_path`、`t_agent_rw_deny`（含符号链接、沙箱关着、拒绝时什么都没建），`TestRealKernelExternalDirsThatAreNotAllowedAreRefused`、`TestRealKernelTicketExternalDirInsideTheRepoIsRefused`（经过真内核）。
+  - 执行被拒时 Job 工具能看到原因：`TestRealKernelJobFailureReasonVisible`、`TestJobReasonOnlyForFailedAndCutAt500Runes`，以及上一条的两个真内核测试。
+  - 模型的参数里带 `agent_rw`（和 `agent_rw_deny`）被执行器拒绝：`test_exec.py`、`test_host.py` 的 `t_env`（经过真内核）。
+  - Job 没结束时 Report ready 被拒；叫停工单时 Job 被停掉：`TestTicketReportReadyRefusedWhileBranchJobsLive`、`TestTicketCancelStopsTheBranchsLiveJobs`、`TestRealKernelLiveExternalJobBlocksReadyAndCancelStopsIt`（真进程真的没了）。
+  - `Auth.Untrusted` 的工单里 `auto` 也要审批：`TestTicketExternalForcesApprovalWhenUntrusted`、`TestRealKernelUntrustedTicketAsksBeforeExternal`；标记的记法、落盘、继承、清空：`TestUntrustedRecordedPerSessionAndCopiedToTickets`、`TestGitHubIssueBodyFromOutsiderMarksTheSession`、`session.TestUntrustedMarkPersistsInheritsAndClearsOnlyOnReset`。
+  - 改了登记的目录，所有工作目录上的开关都关掉：`TestChangingTheRegistrationTurnsTheSwitchOff`。
+  - Job 结束叫醒分支，只叫一次，重启后不重复，不漏：`TestTicketWakesTheBranchOnceWhenTheLastJobEnds`、`TestTicketJobEndingDuringARunDoesNotWake`、`TestTicketJobsEndingWhileANoteRunsDoNotWake`、`TestTicketWaitingForJobsSurvivesRestart`、`TestRealKernelExternalJobEndWakesTheBranchOnce`。
+  - 改完照常验收：`TestRealKernelTicketRunsExternalAgent`（宿主验收命令通过、提交里是外部 agent 改的）。
+  - 实机验收（还没做）：在一台机器上真的开启 claude 或 codex，派一个小工单跑通一次。
 - **工单里的外部 agent（5d-3）**：
   - 谁能用：管理员发起的这一轮；或者工单的分支——授权记录里有 `External`（`ticketTools` 里加了它，建工单时和 agent 的工具上限取交集；以前建的工单授权记录里没有，工具不给、调用前检查拒绝、调用时也拒绝），并且仓库工作目录在调用这一刻开着这个名字（`externalEnabled`：派生工作目录不存开关，按工单的仓库工作目录现在的开关查；工单结束了就没有）。不另记“派的人在名单里”。
   - 请求：和聊天里一样，另外 `sandbox` 固定是 `on`（不降级、不看工作目录的设置），`agent_rw_deny` 是仓库工作目录的路径（只用来查，见上面执行器的校验），`ro` 带 worktree 的 `.git`；`tmp_key` 是 `ext-<名字>-<分支会话>`，Job 的发起人是 `ticket:<编号>`。

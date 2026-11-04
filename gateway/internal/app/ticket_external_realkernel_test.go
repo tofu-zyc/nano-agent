@@ -16,6 +16,9 @@ import (
 	"nano-agent/gateway/internal/ticket"
 )
 
+// extPrompt 带 '、$(...)、反引号、;、换行：原样交给外部 agent，什么都没多执行。
+const extPrompt = "把 a.txt 加一行 二；it's \"quoted\" $(touch pwned) `touch pwned2`; touch pwned3\n第二行"
+
 // ticketExtModel 是工单分支里的模型替身：External 交给外部 agent → Job wait 等它结束 →（可选）Write 一个文件当凭据 → Report ready。
 type ticketExtModel struct {
 	agent string
@@ -43,7 +46,7 @@ func (m ticketExtModel) Chat(_ context.Context, req llm.Request, _ func(llm.Delt
 	switch {
 	case strings.Contains(text, "[工单 tk-1"):
 		if !done["ext"] {
-			args, _ := json.Marshal(map[string]string{"name": m.agent, "prompt": `把 a.txt 加一行 二；it's "quoted" $(touch pwned)`})
+			args, _ := json.Marshal(map[string]string{"name": m.agent, "prompt": extPrompt})
 			return call("ext", "External", string(args))
 		}
 		var receipt struct {
@@ -87,7 +90,10 @@ type extTicketEnv struct {
 	wsID                 string
 }
 
-func newExtTicketEnv(t *testing.T, agentDirs []string, model llm.Client) *extTicketEnv {
+// defaultExtScript：prompt 原样写进 worktree，往 a.txt 加一行，往自己的目录写一笔，记下 HOME。
+const defaultExtScript = `printf '%s' "$1" > ext-prompt.txt; echo 二 >> a.txt; date > "$FAKE_AGENT_DIR/last-run"; printf 'HOME=%s\n' "$HOME" > ext-env.txt`
+
+func newExtTicketEnv(t *testing.T, agentDirs []string, script string, model llm.Client) *extTicketEnv {
 	t.Helper()
 	executable, err := host.NewExecutor("../../../kernel/nano-exec")
 	if err != nil {
@@ -123,8 +129,9 @@ func newExtTicketEnv(t *testing.T, agentDirs []string, model llm.Client) *extTic
 		t.Fatal(err)
 	}
 	x.wsID = ws.ID
-	// 替身外部 agent：prompt 原样写进 worktree，往 a.txt 加一行，往自己的目录写一笔，记下 HOME 和环境
-	script := `printf '%s' "$1" > ext-prompt.txt; echo 二 >> a.txt; date > "$FAKE_AGENT_DIR/last-run"; printf 'HOME=%s\n' "$HOME" > ext-env.txt`
+	if script == "" {
+		script = defaultExtScript
+	}
 	ag := extagent.Agent{Name: "fake", Argv: []string{"sh", "-c", script, "fake-agent", extagent.PromptSlot}, Dirs: agentDirs,
 		Env: map[string]string{"FAKE_AGENT_DIR": "~/.fake-agent"}, Timeout: 60}
 	if _, err := e.a.SaveExternalAgent(ag); err != nil {
@@ -163,7 +170,7 @@ func (x *extTicketEnv) branchResults(sid string) map[string]string {
 // 真内核：工单的分支用 External 派外部 agent（替身脚本）——作为后台 Job 在 worktree 里跑，改了 worktree 和登记的目录，
 // prompt 不经 shell 解释，模型用 Job wait 等到结束，照常验收、提交、ready。
 func TestRealKernelTicketRunsExternalAgent(t *testing.T) {
-	x := newExtTicketEnv(t, []string{"~/.fake-agent"}, ticketExtModel{agent: "fake", write: true})
+	x := newExtTicketEnv(t, []string{"~/.fake-agent"}, "", ticketExtModel{agent: "fake", write: true})
 	x.startTeam(t, "grep -q 二 a.txt")
 	mention(x.env, "@机器人 修登录页", "g100", "u2", "李四")
 	eventually(t, "验收通过、工单 ready", func() bool {
@@ -182,11 +189,16 @@ func TestRealKernelTicketRunsExternalAgent(t *testing.T) {
 	if got := gitRun(t, x.repo, "show", tk.Commit+":a.txt"); got != "一\n二" {
 		t.Fatalf("提交里有外部 agent 改的：%q", got)
 	}
-	if got := gitRun(t, x.repo, "show", tk.Commit+":ext-prompt.txt"); got != `把 a.txt 加一行 二；it's "quoted" $(touch pwned)` {
+	if got := gitRun(t, x.repo, "show", tk.Commit+":ext-prompt.txt"); got != strings.TrimSuffix(extPrompt, "\n") && got != extPrompt {
 		t.Fatalf("prompt 原样交给命令：%q", got)
 	}
-	if _, err := os.Stat(filepath.Join(x.repo, ".nano", "worktrees", "tk-1", "pwned")); err == nil {
-		t.Fatal("prompt 被 shell 解释了")
+	for _, f := range []string{"pwned", "pwned2", "pwned3"} {
+		if _, err := os.Stat(filepath.Join(x.repo, ".nano", "worktrees", "tk-1", f)); err == nil {
+			t.Fatalf("prompt 被 shell 解释了：%s", f)
+		}
+		if gitRun(t, x.repo, "ls-tree", "--name-only", tk.Commit, f) != "" {
+			t.Fatalf("提交里不该有 %s", f)
+		}
 	}
 	// 登记的目录它能写；HOME 是它自己的私有目录，不是真实的家目录；主仓库的工作区没被动过
 	if _, err := os.Stat(filepath.Join(x.agentDir, "last-run")); err != nil {
@@ -210,7 +222,7 @@ func TestRealKernelTicketRunsExternalAgent(t *testing.T) {
 // 真内核：登记的目录落在仓库里（~/proj/repo/src）——工单里网关带上仓库的根，执行器拒绝整次执行，
 // Job 工具的 wait 带着原因（“仓库的根”）；外部 agent 一行都没跑，主仓库的文件没被写。
 func TestRealKernelTicketExternalDirInsideTheRepoIsRefused(t *testing.T) {
-	x := newExtTicketEnv(t, []string{"~/.fake-agent", "~/proj/repo/src"}, ticketExtModel{agent: "fake"})
+	x := newExtTicketEnv(t, []string{"~/.fake-agent", "~/proj/repo/src"}, "", ticketExtModel{agent: "fake"})
 	x.startTeam(t, "true")
 	mention(x.env, "@机器人 修登录页", "g100", "u2", "李四")
 	eventually(t, "分支等完 Job", func() bool {
@@ -237,7 +249,7 @@ func TestRealKernelTicketExternalDirInsideTheRepoIsRefused(t *testing.T) {
 // 真内核：从“名单外的人说过话”的群建的工单，External 即使在 auto 下也要审批（内核 hook_check → 网关 force_approval → approve_req）。
 // 批准之前外部 agent 没有跑；批准之后接着跑完；拒绝则没有执行。
 func TestRealKernelUntrustedTicketAsksBeforeExternal(t *testing.T) {
-	x := newExtTicketEnv(t, []string{"~/.fake-agent"}, ticketExtModel{agent: "fake", write: true})
+	x := newExtTicketEnv(t, []string{"~/.fake-agent"}, "", ticketExtModel{agent: "fake", write: true})
 	sid := x.startTeam(t, "grep -q 二 a.txt")
 	x.a.mu.Lock()
 	x.a.eps["fake:admin-dm"] = &epRec{Session: "main", Who: "fake:u1"}
