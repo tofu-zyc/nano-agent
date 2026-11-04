@@ -138,6 +138,8 @@ func init() {
 				out, err := a.ticketCall(s, m.Args)
 				callOut(reply, out, err)
 			}},
+		{name: "External", spec: func(a *App, sid string) (proto.ToolSpec, bool) { return a.externalSpec(sid) }, started: true,
+			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) { a.externalCall(s, m, reply) }},
 		{name: "Idea", spec: fixedSpec(ideaTool), state: true, started: true, admin: adminOnlyMind,
 			call: func(a *App, s *sess, m *proto.Msg, reply func(bool, string)) {
 				out, err := a.ideaCall(s.sid, m.Args)

@@ -163,7 +163,7 @@ static cJSON *msg_new(const char *type, const char *sid)
  * 网关只把这里有的网关工具给模型：漏了的话，模型调用它会落到执行器，回“未知工具”。 */
 static const char *const GATEWAY_TOOLS[] = { "Skill", "Gateway", "GatewayAdmin", "WebSearch", "WebFetch", "Schedule", "Message",
                                              "Knowledge", "Diary", "FollowUp", "SendFile", "Agenda", "Idea", "Mind", "Session",
-                                             "Job", "Hook", "Report", "Ticket" };
+                                             "Job", "Hook", "Report", "Ticket", "External" };
 
 static void send_hello(kernel_t *k)
 {

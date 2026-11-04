@@ -27,13 +27,15 @@ SANDBOX = PROBE["landlock"] > 0
 
 
 def run(tool, args=None, dirs=(WORK,), write=True, ro=(), rw=(), home=False, max_output=65536, timeout=30,
-        sandbox=None, hook_input=None, env=None):
+        sandbox=None, hook_input=None, env=None, agent_rw=None):
     req = {"tool": tool, "args": args if args is not None else {}, "dirs": list(dirs), "write": write,
            "ro": list(ro), "rw": list(rw), "home": home, "tmp_key": "test", "max_output": max_output, "watch_stdin": True}
     if hook_input is not None:
         req["hook_input"] = hook_input
     if env is not None:
         req["env"] = env
+    if agent_rw is not None:
+        req["agent_rw"] = agent_rw
     if sandbox is not None:
         req["sandbox"] = sandbox
     p = subprocess.Popen([EXEC], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
@@ -353,6 +355,53 @@ def t_env():
     bad(run("Shell", {"command": "true"}, env=["X=1"]), "JSON 对象")
 
 
+@case("agent_rw：只能放在请求顶层；用真实 HOME 展开、解析符号链接后校验，任何一项不满足整次拒绝（沙箱关着也一样）")
+def t_agent_rw_checks():
+    proj, claude = os.path.join(HOME, "proj"), os.path.join(HOME, ".claude")
+    for d in (os.path.join(proj, "inner"), claude, os.path.join(HOME, ".nano-agent", "tmp")):
+        os.makedirs(d, exist_ok=True)
+    if not os.path.lexists(os.path.join(HOME, "link-out")):
+        os.symlink(OTHER, os.path.join(HOME, "link-out"))
+    mark = os.path.join(proj, "rw-ran")
+    cmd = {"command": "echo ran > " + mark}
+    # 模型的参数里带：拒绝，不执行
+    bad(run("Shell", dict(cmd, agent_rw=["~/.claude"]), dirs=(proj,)), "不能放在工具参数里")
+    cases = [
+        (["~/nope"], (proj,), (), "目录不存在"),
+        ([OTHER], (proj,), (), "不在家目录里面"),
+        (["~/link-out"], (proj,), (), "不在家目录里面"),   # 符号链接指到家目录外
+        (["~/"], (proj,), (), "是家目录本身"),
+        (["~/proj/inner"], (proj,), (), "和这次的工作目录互相包含"),
+        (["~/proj"], (os.path.join(proj, "inner"),), (), "和这次的工作目录互相包含"),
+        (["~/.claude"], (proj,), (claude,), "和这次的只读目录互相包含"),
+        (["~/.nano-agent/tmp"], (proj,), (), "和 NANO_HOME 互相包含"),
+        (["~/.claude", "~/nope"], (proj,), (), "~/nope"),   # 一项不行整次拒绝，写明是哪一项
+        ("~/.claude", (proj,), (), "字符串数组"),
+        (["~/.claude"] * 9, (proj,), (), "最多 8 项"),
+    ]
+    for sandbox in ("auto", "off"):
+        for rw, dirs, ro, want in cases:
+            bad(run("Shell", cmd, dirs=dirs, ro=ro, agent_rw=rw, sandbox=sandbox), want)
+            assert not os.path.exists(mark), (rw, sandbox)
+    ok(run("Shell", cmd, dirs=(proj,), agent_rw=["~/.claude"], sandbox="off"))
+    assert os.path.exists(mark)
+
+
+@case("agent_rw：加进这一个进程的可写范围；env 里 ~/ 开头的值用真实 HOME 展开（HOME 换成私有目录也找得到）", need_sandbox=True)
+def t_agent_rw_writable():
+    claude = os.path.join(HOME, ".claude")
+    os.makedirs(claude, exist_ok=True)
+    write = {"command": "echo H=$HOME; echo C=$CLAUDE_CONFIG_DIR; echo 登录 > \"$CLAUDE_CONFIG_DIR/cred\" && echo wrote"}
+    c = ok(run("Shell", write, env={"CLAUDE_CONFIG_DIR": "~/.claude"}, agent_rw=["~/.claude"], sandbox="on"),
+           "C=" + claude, "wrote")
+    assert "H=" + HOME + "\n" not in c, c   # HOME 仍然是私有的
+    assert open(os.path.join(claude, "cred")).read() == "登录\n"
+    os.remove(os.path.join(claude, "cred"))
+    # 不带 agent_rw：写不进去
+    c = bad(run("Shell", write, env={"CLAUDE_CONFIG_DIR": "~/.claude"}, sandbox="on"), "C=" + claude)
+    assert "wrote" not in c and not os.path.exists(os.path.join(claude, "cred")), c
+
+
 @case("沙箱：不能连 unix socket（D-Bus、systemd、docker 之类）", linux_only=True)
 def t_sandbox_unix():
     path = os.path.join(T, "s.sock")
@@ -496,7 +545,7 @@ def main():
         print(f"probe：{PROBE}")
         for t in (t_read, t_read_misc, t_fetch, t_read_escape, t_read_ro, t_skill_cache_symlink, t_read_all, t_write, t_write_escape, t_edit, t_grep,
                   t_shell, t_stream, t_hook_input, t_shell_timeout, t_shell_background, t_shell_output, t_cancel,
-                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_env, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
+                  t_sandbox_fs, t_sandbox_modes, t_sandbox_env, t_sandbox_private_home, t_sandbox_home_kept, t_env, t_agent_rw_checks, t_agent_rw_writable, t_sandbox_unix, t_sandbox_signal, t_request_errors, t_drvfs, t_elevated_write, t_home_mode):
             t()
         print(f"exec: {len(FAILS)} failures")
         return 1 if FAILS else 0

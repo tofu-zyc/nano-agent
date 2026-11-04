@@ -84,7 +84,7 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 	for _, o := range a.approvalOuts(s) {
 		ch := a.chans[o.ep.ch]
 		ap2, ok := ch.(channel.Approver)
-		if !ok {
+		if !ok || externalApprovalTooLong(m.Name, body) { // 卡片放不下完整的 prompt：发文字（渠道会分段）
 			a.deliver(o.ep, text, "")
 			continue
 		}

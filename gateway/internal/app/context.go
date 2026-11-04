@@ -90,6 +90,9 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 			// MCP 服务带的工具（<服务>__<工具>）：访客、只读和不用工具的模式都没有
 			tools = append(tools, a.mcpOffered(sid, admin)...)
 			tools = append(tools, a.toolsNamed(sid, "Report")...) // 只有 life、分支、定时任务、Hook 的会话有
+			if a.externalOffered(sid, admin) {
+				tools = append(tools, a.toolsNamed(sid, "External")...) // 挂的工作目录上开启了外部 agent 才有
+			}
 		}
 		if a.memoryOn(a.agentOf(sid)) {
 			tools = append(tools, a.toolsNamed(sid, knowledgeLabel)...)
@@ -195,7 +198,7 @@ func (a *App) permSignature(sid string) string {
 			}
 		}
 	}
-	return fmt.Sprintf("%t|%s|%t|%s|%s%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling, strings.Join(missing, ","))
+	return fmt.Sprintf("%t|%s|%t|%s|%s%s|%s|%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling, strings.Join(missing, ","), a.externalSig(sid, admin))
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

@@ -357,6 +357,9 @@ func callCard(name string, raw json.RawMessage) (title, body string) {
 		return fmt.Sprintf("%s写入文件%s：%s（%d 字节）", prefix, where, str("path"), len(str("content"))), clip(str("content"), 300)
 	case "Edit":
 		return prefix + "修改文件" + where + "：" + str("path"), fmt.Sprintf("原文：\n%s\n改为：\n%s", clip(str("old_string"), 400), clip(str("new_string"), 400))
+	case "External":
+		// 外部 agent 拿着自己的登录凭据去联网：审批时要看到是哪个、交给它的完整 prompt（不截断）
+		return "交给外部 agent " + str("name") + where, str("prompt")
 	}
 	return prefix + "工具 " + name + where, prettyArgs(raw)
 }

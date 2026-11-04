@@ -250,6 +250,34 @@ def t_gateway_tool_routing(gw):
         finish(gw, sid)
 
 
+@case("External 交给网关；审批和 Shell 一样跟着权限模式走：ask 每次都问，readonly 拒绝", approvals=True)
+def t_external_policy(gw):
+    args = {"name": "claude", "prompt": "把 a.txt 改好", "workspace": "本机:" + WORK}
+    receipt = '{"status":"backgrounded","job_id":"j_x-1"}'
+    start_run(gw, "ext1", mode="ask", frm="tg:admin")
+    call(gw, "ext1", ("c1", "External", args))
+    req = gw.expect("approve_req", sid="ext1", id="c1", name="External")
+    assert req["args"] == args, req
+    gw.send(t="approve", sid="ext1", id="c1", ok=True, **{"from": "tg:admin"})
+    gw.expect("notice", sid="ext1", text=lambda s: "已批准" in s)
+    m = gw.expect("exec", sid="ext1", id="c1", name="External")
+    assert m["args"] == args and "workspace" not in m, m   # 用哪个工作目录由网关按参数挑
+    gw.send(t="exec_result", sid="ext1", id="c1", ok=True, content=receipt)
+    gw.expect("result", sid="ext1", id="c1", ok=True, content=receipt)
+    finish(gw, "ext1")
+    start_run(gw, "ext2", mode="readonly", frm="tg:admin")
+    call(gw, "ext2", ("c1", "External", args))
+    gw.expect("result", sid="ext2", id="c1", ok=False, content=lambda c: "只读模式" in c)
+    finish(gw, "ext2")
+    if gw.landlock:   # 有沙箱：auto 和 Shell 一样直接交给网关
+        start_run(gw, "ext3", mode="auto", frm="tg:admin")
+        call(gw, "ext3", ("c1", "External", args))
+        gw.expect("exec", sid="ext3", id="c1", name="External")
+        gw.send(t="exec_result", sid="ext3", id="c1", ok=True, content=receipt)
+        gw.expect("result", sid="ext3", id="c1", ok=True)
+        finish(gw, "ext3")
+
+
 @case("多个工作目录：按 workspace 参数决定在哪台机器上执行", approvals=True)
 def t_multi_ws(gw):
     start_run(gw, "mw", workspaces=[local_ws(), box_ws(landlock=0)])
@@ -325,6 +353,12 @@ def t_env(gw):
     r = gw.expect("result", sid="senv", id="e1", ok=False)
     assert "不能放在工具参数里" in r["content"] and "from-model" not in r["content"], r
     assert not os.path.exists(os.path.join(WORK, "env-model-ran"))
+    gw.expect("model", sid="senv")
+    # agent_rw（外部 agent 的目录）也一样：模型的参数里带被执行器拒绝
+    call(gw, "senv", ("e2", "Shell", {"command": "echo model-ran > rw-model-ran", "agent_rw": ["~/.ssh"]}))
+    r = gw.expect("result", sid="senv", id="e2", ok=False)
+    assert "agent_rw 只能由网关发起的执行放在请求的顶层" in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "rw-model-ran"))
     finish(gw, "senv")
 
 
@@ -1125,12 +1159,12 @@ def main():
             assert feat.get("call_identity") == 1 and feat.get("bounded_parallel") == 1, feat
             assert feat.get("max_parallel_tools") and feat.get("max_active_runs"), feat
             # 交给网关的工具名单：网关只把这里有的网关工具给模型
-            assert {"Report", "Ticket", "Agenda", "Job", "Skill"} <= set(hello.get("gateway_tools", [])), hello.get("gateway_tools")
+            assert {"Report", "Ticket", "External", "Agenda", "Job", "Skill"} <= set(hello.get("gateway_tools", [])), hello.get("gateway_tools")
             gw.send(t="welcome", v=11)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_gateway_tool_routing, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
+            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_gateway_tool_routing, t_external_policy, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,
