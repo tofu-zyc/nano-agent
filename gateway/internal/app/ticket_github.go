@@ -195,7 +195,7 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
 	defer cancel()
-	pushed, err := a.pushBranch(ctx, t, repo, r, c.Token)
+	_, err = a.pushBranch(ctx, t, repo, r, c.Token)
 	if err != nil {
 		block("push", "推送失败："+clip(err.Error(), 500))
 		return
@@ -243,8 +243,11 @@ func (a *App) deliverTicketPR(id, summary string, forced bool, by string) {
 			short = short[:7]
 		}
 		text := fmt.Sprintf("改了：%s（提交 %s）", firstNonEmpty(summary, "有改动"), short)
-		if pushed == "skip" {
+		if t.Commit == t.PRHead { // 按这一轮的提交和 PR 上原来的提交比；重试时推送会跳过，但这一轮确实改了
 			text = "看过了，没有新的改动：" + firstNonEmpty(summary, "没有要改的")
+		}
+		if forced {
+			text = fmt.Sprintf("验收没过，由 %s 收下：%s", by, text)
 		}
 		a.mu.Unlock()
 		cctx, ccancel := context.WithTimeout(a.ctx, 20*time.Second)

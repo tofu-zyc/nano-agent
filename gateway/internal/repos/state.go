@@ -148,9 +148,12 @@ func (s *State) append(r stateRec) error {
 
 // Close 关掉文件。
 func (s *State) Close() error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.j == nil {
+	if s.j == nil {
 		return nil
 	}
 	return s.j.Close()

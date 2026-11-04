@@ -671,3 +671,63 @@ func TestEnvWithNULIsRefusedBeforeExecuting(t *testing.T) {
 		t.Fatalf("没有发给执行器：%d -> %d", before, got)
 	}
 }
+
+// PR 开了以后的一轮推了新提交、查 PR 那步失败、续上重试时推送会跳过：PR 上仍然说“改了”。
+func TestZZRetryInALaterRoundStillSaysChanged(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	in, n := p.openPR(t, sid)
+	p.gh.AddReview(n, "alice", "CHANGES_REQUESTED", "这里改成 B 方案")
+	p.poll(t)
+	p.k.expect(proto.TInput)
+	p.gh.FailNext("/pulls", 500, "boom", nil)
+	p.round(t, in, "一\n二\n三\n")
+	eventually(t, "受阻", func() bool { return p.tk("tk-1").Status == ticket.StatusBlocked })
+	if tk := p.tk("tk-1"); tk.BlockedBy != "pr" {
+		t.Fatalf("查 PR 失败受阻：%+v", tk)
+	}
+	finishGroupRun(t, p.env, sid)
+	mention(p.env, "@机器人 再试一次", "g601", "u2", "李四")
+	p.k.expect(proto.TInput)
+	if _, err := callTicket(p.env, sid, `{"action":"note","id":"tk-1","text":"重试一下"}`); err != nil {
+		t.Fatal(err)
+	}
+	finishGroupRun(t, p.env, sid)
+	eventually(t, "重试后 ready", func() bool { return p.tk("tk-1").Status == ticket.StatusReady })
+	eventually(t, "PR 上有回复", func() bool {
+		c := p.prComments(n)
+		return strings.Contains(c, "改了：") || strings.Contains(c, "看过了")
+	})
+	if c := p.prComments(n); !strings.Contains(c, "改了：") || strings.Contains(c, "看过了") {
+		t.Fatalf("这一轮推了新提交，PR 上却说：%s", c)
+	}
+}
+
+// PR 开了以后返工用完、先收下：这一轮 PR 上的回复写明由谁收下。
+func TestForcedRoundAfterThePRIsOpenSaysWhoAccepted(t *testing.T) {
+	p := newPREnv(t)
+	sid := p.teamGroupOnRepo(t, "true")
+	in, n := p.openPR(t, sid)
+	for i, content := range []string{"一\n二\n三\n", "一\n二\n三\n四\n"} {
+		tk := p.tk("tk-1")
+		pl, _ := p.gh.Pull(n)
+		p.gh.SetHead(n, tk.PRHead)
+		p.gh.SetChecks(tk.PRHead, fakegithub.Check("build", int64(30+i), "completed", "failure", "挂了"))
+		_ = pl
+		p.poll(t)
+		if i == 0 {
+			p.k.expect(proto.TInput)
+			p.round(t, in, content)
+			eventually(t, "新提交", func() bool { return p.tk("tk-1").Status == ticket.StatusReady && p.tk("tk-1").PRHead != tk.PRHead })
+		}
+	}
+	eventually(t, "返工用完受阻", func() bool { return p.tk("tk-1").Status == ticket.StatusBlocked })
+	mention(p.env, "@机器人 先收下", "g800", "u2", "李四")
+	p.k.expect(proto.TInput)
+	if out, err := callTicket(p.env, sid, `{"action":"accept","id":"tk-1"}`); err != nil {
+		t.Fatalf("%q %v", out, err)
+	}
+	eventually(t, "PR 上有先收下的回复", func() bool { return strings.Contains(p.prComments(n), "验收没过，由 fake:u2 收下：") })
+	eventually(t, "回到 ready", func() bool { return p.tk("tk-1").Status == ticket.StatusReady })
+	finishGroupRun(t, p.env, sid)
+}
