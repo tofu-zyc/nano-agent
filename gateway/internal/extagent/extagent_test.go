@@ -81,3 +81,83 @@ func TestStorePersistsAndReplaces(t *testing.T) {
 		t.Fatal("没有的删不了")
 	}
 }
+
+// 读入时每一项再校验：不通过的不能用、原样留在文件里，其余照旧；同名重新登记或者删掉才去掉。
+func TestOpenValidatesEachEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "external-agents.json")
+	hand := `[
+  {"name":"claude","argv":["claude","-p","{prompt}"],"dirs":["~/.claude"]},
+  {"name":"codex","argv":["codex","exec"],"dirs":["~/.codex"]},
+  {"name":"claude","argv":["claude","{prompt}"]},
+  {"name":"evil","argv":["sh","{prompt}"],"dirs":["~/"]}
+]`
+	if err := os.WriteFile(path, []byte(hand), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := s.List(); len(l) != 1 || l[0].Name != "claude" || len(l[0].Argv) != 3 {
+		t.Fatalf("只有校验过的能用：%+v", l)
+	}
+	if _, ok := s.Get("codex"); ok {
+		t.Fatal("没有 {prompt} 的不能用")
+	}
+	probs := s.Problems()
+	if len(probs) != 3 || !s.Has("evil") || !s.Has("codex") {
+		t.Fatalf("没通过的记下来：%+v", probs)
+	}
+	// 改别的登记：没通过的原样留在文件里
+	other := good()
+	other.Name = "aider"
+	if err := s.Put(other); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `"codex"`) || !strings.Contains(string(b), `"evil"`) {
+		t.Fatalf("没通过的留在文件里：%s", b)
+	}
+	// 同名重新登记换掉它；删掉也能删
+	fixed := good()
+	fixed.Name = "codex"
+	if err := s.Put(fixed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete("evil"); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := s2.List(); len(l) != 3 {
+		t.Fatalf("claude、aider、codex：%+v", l)
+	}
+	if p := s2.Problems(); len(p) != 1 || p[0].Name != "claude" {
+		t.Fatalf("只剩重名的那项：%+v", p)
+	}
+	if b := []byte("不是 JSON"); os.WriteFile(path, b, 0o600) == nil {
+		if _, err := Open(path); err == nil {
+			t.Fatal("整个文件读不出来是错误")
+		}
+	}
+}
+
+func TestSameGrant(t *testing.T) {
+	a, b := good(), good()
+	b.Timeout = 99
+	if !SameGrant(a, b) {
+		t.Fatal("时限不算")
+	}
+	for what, f := range map[string]func(*Agent){
+		"命令": func(x *Agent) { x.Argv = append(x.Argv, "--yolo") },
+		"目录": func(x *Agent) { x.Dirs = []string{"~/.other"} },
+		"环境": func(x *Agent) { x.Env = nil },
+	} {
+		c := good()
+		f(&c)
+		if SameGrant(a, c) {
+			t.Errorf("改了%s要算变化", what)
+		}
+	}
+}

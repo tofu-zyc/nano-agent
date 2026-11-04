@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -147,13 +149,29 @@ func validDir(d string) error {
 }
 
 // Store 是 data/external-agents.json。写盘失败不改内存。
+//
+// 读入时每一项再校验一遍（文件可能被手改过）：不通过的不能用（List、Get 里没有），原样留在文件里，
+// 用同一个名字重新登记或者删掉才去掉。
 type Store struct {
 	mu     sync.Mutex
 	path   string
 	agents []Agent
+	bad    []badEntry
 }
 
-// Open 读入登记（文件不存在就是空的）。
+type badEntry struct {
+	name string
+	raw  json.RawMessage
+	err  error
+}
+
+// Problem 是读入时没通过校验的一项。
+type Problem struct {
+	Name string
+	Err  error
+}
+
+// Open 读入登记（文件不存在就是空的）。整个文件读不出来是错误；单项不通过的见 Problems。
 func Open(path string) (*Store, error) {
 	s := &Store{path: path}
 	b, err := os.ReadFile(path)
@@ -163,10 +181,37 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(b, &s.agents); err != nil {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(b, &raws); err != nil {
 		return nil, err
 	}
+	for _, raw := range raws {
+		var a Agent
+		err := json.Unmarshal(raw, &a)
+		if err == nil {
+			err = a.Validate()
+		}
+		if err == nil && slices.ContainsFunc(s.agents, func(o Agent) bool { return o.Name == a.Name }) {
+			err = errors.New("名字重复了")
+		}
+		if err != nil {
+			s.bad = append(s.bad, badEntry{name: a.Name, raw: raw, err: err})
+			continue
+		}
+		s.agents = append(s.agents, a)
+	}
 	return s, nil
+}
+
+// Problems 是读入时没通过校验、现在不能用的项。
+func (s *Store) Problems() []Problem {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Problem
+	for _, b := range s.bad {
+		out = append(out, Problem{Name: b.name, Err: b.err})
+	}
+	return out
 }
 
 // List 按名字排序。
@@ -193,7 +238,20 @@ func (s *Store) Get(name string) (Agent, bool) {
 	return Agent{}, false
 }
 
-// Put 新增或替换（按名字）。
+// Has 是这个名字在不在文件里（包括读入时没通过校验的）。
+func (s *Store) Has(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.ContainsFunc(s.agents, func(a Agent) bool { return a.Name == name }) ||
+		slices.ContainsFunc(s.bad, func(b badEntry) bool { return b.name == name })
+}
+
+// SameGrant 是两次登记给出去的东西一样不一样：命令、目录、环境。时限不算。
+func SameGrant(a, b Agent) bool {
+	return slices.Equal(a.Argv, b.Argv) && slices.Equal(a.Dirs, b.Dirs) && maps.Equal(a.Env, b.Env)
+}
+
+// Put 新增或替换（按名字）。同名的、读入时没通过校验的那项一起换掉。
 func (s *Store) Put(a Agent) error {
 	if err := a.Validate(); err != nil {
 		return err
@@ -211,38 +269,39 @@ func (s *Store) Put(a Agent) error {
 	if !replaced {
 		next = append(next, a)
 	}
-	if err := s.save(next); err != nil {
+	bad := slices.DeleteFunc(slices.Clone(s.bad), func(b badEntry) bool { return b.name == a.Name })
+	if err := s.save(next, bad); err != nil {
 		return err
 	}
-	s.agents = next
+	s.agents, s.bad = next, bad
 	return nil
 }
 
-// Delete 删掉一个登记。
+// Delete 删掉一个登记（读入时没通过校验的也能删）。
 func (s *Store) Delete(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var next []Agent
-	for _, a := range s.agents {
-		if a.Name != name {
-			next = append(next, a)
-		}
-	}
-	if len(next) == len(s.agents) {
+	next := slices.DeleteFunc(slices.Clone(s.agents), func(a Agent) bool { return a.Name == name })
+	bad := slices.DeleteFunc(slices.Clone(s.bad), func(b badEntry) bool { return b.name == name })
+	if len(next) == len(s.agents) && len(bad) == len(s.bad) {
 		return errors.New("没有这个外部 agent")
 	}
-	if err := s.save(next); err != nil {
+	if err := s.save(next, bad); err != nil {
 		return err
 	}
-	s.agents = next
+	s.agents, s.bad = next, bad
 	return nil
 }
 
-func (s *Store) save(agents []Agent) error {
-	if agents == nil {
-		agents = []Agent{}
+func (s *Store) save(agents []Agent, bad []badEntry) error {
+	out := make([]any, 0, len(agents)+len(bad))
+	for _, a := range agents {
+		out = append(out, a)
 	}
-	b, err := json.MarshalIndent(agents, "", "  ")
+	for _, b := range bad {
+		out = append(out, b.raw)
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -9,16 +9,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"nano-agent/gateway/internal/kernel"
-	"nano-agent/gateway/internal/proto"
 )
 
 // 网关发起的执行带着 env 交给装了内核的机器代跑：env 的值不以明文落到任何文件里。
 func TestZZGatewayEnvIsNotWrittenToDisk(t *testing.T) {
-	e, _ := setupRealKernel(t, func(a *App) kernel.Handler { // 协商了 Job 能力：内核把这次执行收成 Job
-		return &jobContractHandler{App: a, observed: make(chan proto.Msg, 1024)}
-	})
+	e, _ := setupRealKernel(t) // 正式的 App 协商 Job 能力：内核把这次执行收成 Job
 	e.a.mu.Lock()
 	nodeName := ""
 	for name := range e.a.nodes {

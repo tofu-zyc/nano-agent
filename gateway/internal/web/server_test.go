@@ -542,6 +542,20 @@ func TestExternalAgentRoutes(t *testing.T) {
 			t.Fatalf("只改 external：%+v", w.Workspace)
 		}
 	}
+	// 两项都校验完才动手：外部 agent 不对，执行隔离也不改
+	if code, _ := c.do("PATCH", "/api/workspaces/"+ws.ID, map[string]any{"sandbox_mode": "off", "external": []string{"nope"}}, true); code != 400 {
+		t.Fatalf("没登记的外部 agent：%d", code)
+	}
+	for _, w := range s.app.Workspaces() {
+		if w.ID == ws.ID && (len(w.External) != 1 || w.SandboxMode != "on") {
+			t.Fatalf("一项不对另一项也不改：%+v", w.Workspace)
+		}
+	}
+	// 改了登记的目录：返回关掉了哪些工作目录
+	agent["dirs"] = []string{"~/.claude", "~/.config/claude"}
+	if code, out := c.do("POST", "/api/external-agents", agent, true); code != 200 || fmt.Sprint(out["disabled"]) != "["+ws.ID+"]" {
+		t.Fatalf("改了目录关掉开关：%d %v", code, out)
+	}
 	if code, _ := c.do("DELETE", "/api/external-agents/claude", nil, true); code != 200 {
 		t.Fatalf("删：%d", code)
 	}

@@ -358,6 +358,21 @@ def check_external_agents(page, url):
     else:
         fail("开启以后的显示或开关不对：" + note + " " + json.dumps(cur, ensure_ascii=False)[:200])
     page.screenshot(path=os.path.join(SHOTS, "external-agents.png"))
+    # 改登记的目录：保存前确认里列出会关掉的工作目录；保存后这里关掉了，要重新开启
+    seen = []
+    page.once("dialog", lambda d: (seen.append(d.message), d.accept()))
+    page.locator("[data-testid=external-agents] button", has_text="修改").first.click()
+    page.fill("[data-testid=ext-dirs]", "~/.claude\n~/.config/claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-on-claude]", state="detached", timeout=5000)
+    except Exception:
+        fail("改了登记的目录，开关没关掉")
+        return
+    if seen and "会关掉" in seen[0] and repo[0]["path"] in seen[0] and not page.locator("[data-testid=ext-toggle-claude]").is_checked():
+        ok("外部 agent：改了登记的目录，保存前确认里列出会关掉的工作目录，保存后关掉")
+    else:
+        fail("改登记的确认或开关不对：" + json.dumps(seen, ensure_ascii=False)[:300])
 
 
 def seed_pending(tmp):

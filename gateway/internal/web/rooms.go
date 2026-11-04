@@ -269,11 +269,15 @@ func (s *Server) saveExternalAgent(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.app.SaveExternalAgent(req); err != nil {
+	off, err := s.app.SaveExternalAgent(req)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	if off == nil {
+		off = []string{}
+	}
+	writeJSON(w, map[string]any{"ok": true, "disabled": off})
 }
 
 func (s *Server) deleteExternalAgent(w http.ResponseWriter, r *http.Request) {

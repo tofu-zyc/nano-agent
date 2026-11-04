@@ -44,6 +44,7 @@
     editing = true;
   }
   const lines = (s: string) => s.split('\n').map((x) => x.trim()).filter(Boolean);
+  const sortEnv = (env: Record<string, string>) => Object.fromEntries(Object.entries(env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   async function save() {
     busy = true;
     error = '';
@@ -54,9 +55,16 @@
         if (i <= 0) throw new Error(`env 这一行要写成 名字=值：${l}`);
         env[l.slice(0, i).trim()] = l.slice(i + 1).trim();
       }
-      await api.post('/api/external-agents', { name: f.name.trim(), argv: f.argv.split('\n').filter((x) => x !== ''), dirs: lines(f.dirs), env, timeout: Number(f.timeout) || 0 });
+      const next = { name: f.name.trim(), argv: f.argv.split('\n').filter((x) => x !== ''), dirs: lines(f.dirs), env, timeout: Number(f.timeout) || 0 };
+      // 改了命令、目录或环境（或者新登记的名字），所有开着它的工作目录都会关掉：开启时确认的是那时候登记的目录
+      const prev = items.find((x) => x.name === next.name);
+      const same = prev && JSON.stringify([prev.argv, prev.dirs, prev.env ?? {}]) === JSON.stringify([next.argv, next.dirs, sortEnv(env)]);
+      const affected = same ? [] : (store.ov?.workspaces ?? []).filter((w) => w.external?.includes(next.name));
+      if (affected.length && !confirm(`保存后，这些工作目录上的 ${next.name} 会关掉，要重新开启、重新确认：\n\n${affected.map((w) => `${w.host}:${w.path}`).join('\n')}`)) return;
+      await api.post('/api/external-agents', next);
       editing = false;
       await load();
+      await store.refresh();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
