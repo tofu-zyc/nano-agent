@@ -1078,6 +1078,7 @@ type Auth struct {
 	Workspace string   `json:"workspace"` // 能动到哪里
 	Mode      string   `json:"mode"`      // 工单分支的权限模式，见下
 	Tools     []string `json:"tools"`     // 工单分支的工具，见下
+	Untrusted bool     `json:"untrusted,omitempty"` // 建的时候带了作者不在名单里的议题正文（5d 用它决定 External 要不要审批）
 	At        int64    `json:"at"`
 }
 ```
@@ -1354,6 +1355,7 @@ type Repo struct {
   - 最多 16 项，总共不超过 8KB；
   - 名字是 `[A-Z_][A-Z0-9_]*`，值里不能有 NUL（网关填 `env` 时就查：执行器用的 JSON 库把 `\u0000` 之后的截掉，自己看不出来）；
   - 拒绝 PATH、HOME、TMPDIR、SHELL、IFS、`LD_*`、`DYLD_*`、`NANO_*`、BASH_ENV、ENV。
+- `env` 不落盘：网关请装了内核的机器代跑时，内核把这次执行收成 Job，Job 的记录（`meta.json`）里存着整个请求。`env` 只留在内存里给启动进程用，记录里不存。重启后中断的 Job 不重跑，用不着它。
 - 推送时凭据走 `GIT_CONFIG_COUNT`、`GIT_CONFIG_KEY_0`、`GIT_CONFIG_VALUE_0`：
   - 键是按网址限定的 `http.https://github.com/.extraheader`，只发给 github.com；
   - 不写文件、不进参数，验收和提交那几步的环境里没有。
@@ -1383,6 +1385,7 @@ type Repo struct {
 - 按分支查到的 PR，只有开着的才接着用；合并了或关了的不算（可能是以前装的网关留下的同名分支），开新的。
 - 推送或开 PR 失败：blocked，带上错误。重试前先查远端分支和 PR 在不在，不重放已经成功的那一步。
   - 重试也占着工单（同一时刻只一个后台步骤）；先收下的那句说明，重试时照样写进 PR。
+  - `ForcedBy` 记的是最近这一轮交付是不是先收下的：之后验收通过的一轮交付时清掉。否则那一轮交付失败、重试时，PR 上会说"验收没过"。
 
 **验收**：用本地的假 GitHub（httptest）。
 
@@ -1391,6 +1394,7 @@ type Repo struct {
 - 签名不对的 webhook 被拒；没选 webhook 的仓库返回 404。
 - 名单外的人点名不进会话，正文也不进事件日志。
 - 推送的命令行参数里没有 token；推送的目标是连接的仓库，不是 `origin`；验收和提交的环境里没有凭据。
+- 装了内核的机器代跑推送时，token 不出现在那台机器的任何文件里。
 - 模型的工具参数里带 `env` 被执行器拒绝。
 - PR 合并、关闭、CI 失败各自推出对的阶段。
 - 实机联调由主人在一个测试仓库上做。
@@ -1403,10 +1407,11 @@ Claude Code、Codex 都是命令行程序，不做原生适配，登记成命令
 
 ```go
 type ExternalAgent struct {
-	Name string            `json:"name"`          // claude、codex
-	Argv []string          `json:"argv"`          // 命令模板，{prompt} 换成这次的要求
-	Dirs []string          `json:"dirs"`          // 它自己的配置和登录目录，可读写
-	Env  map[string]string `json:"env,omitempty"` // 比如 CLAUDE_CONFIG_DIR、CODEX_HOME
+	Name    string            `json:"name"`              // claude、codex
+	Argv    []string          `json:"argv"`              // 命令模板，{prompt} 换成这次的要求
+	Dirs    []string          `json:"dirs"`              // 它自己的配置和登录目录，可读写
+	Env     map[string]string `json:"env,omitempty"`     // 比如 CLAUDE_CONFIG_DIR、CODEX_HOME
+	Timeout int               `json:"timeout,omitempty"` // 秒，默认 1800
 }
 ```
 
@@ -1415,23 +1420,52 @@ type ExternalAgent struct {
 - 登记和开启：
   - 主人在网页上登记，存在 `data/external-agents.json`。
   - 在工作目录上显式开启哪些能用（`Workspace.External []string`），默认都不开。
-  - 工单的 worktree 继承仓库工作目录的开关。
-- 工具：新工具 `External`，参数 `name` 和 `prompt`。只出现在开启了外部 agent 的工作目录的会话里。
-  - 网关按模板拼出参数，不经 shell。
-  - `Dirs` 只加进这一个进程的可读写范围，`Env` 只加进它的环境。
-  - 作为后台 Job 在 worktree 里跑，用 Job 工具看输出。
-  - 同一会话里的普通 Shell 调用看不到这些目录。
+  - 工单的 worktree 继承仓库工作目录的开关：每次调用时按仓库工作目录现在的开关查，主人关掉就立刻不能用。
+- 登记时的校验：
+  - 名字是 `[a-z][a-z0-9_-]{0,31}`。
+  - `Argv` 第一项不能空；`{prompt}` 必须单独占一项、恰好出现一次，不能嵌在别的字里，也不能是第一项。
+  - `Dirs` 每项以 `~/` 开头，不是 `~/` 本身，不含 `..`。装在家目录里的程序（比如 `~/.local/share/claude`），安装目录也要登记进来，否则沙箱里执行不了。
+  - `Env` 用 16.3 的名字规则和黑名单（HOME、PATH 这些改不了）。`Env` 放路径和开关，不放密钥：网页上写明。
+- 工具：新工具 `External`，参数只有 `name` 和 `prompt`。只出现在开启了外部 agent 的工作目录的会话里。
+  - `Dirs`、`Env` 只来自登记，模型给不了。`prompt` 最长 32KB，不能有 NUL。
+  - 是网关工具：请求由网关构造，模型的 Shell 那条路（内核从零构造请求）带不进这些目录。
+- 怎么跑：作为后台 Job 在 worktree 里跑，用 Job 工具看输出、等结束、停下。
+  - 不用新做：网关请装了内核的机器代跑一次执行（`run`）、`execution` 是 `background` 时，内核本来就把它收成后台 Job，回执里有 `job_id`。`External` 的工具结果就是这张回执。
+  - 只在装了内核、协商了后台 Job 能力的机器上能用。SSH 服务器和网关自己的执行器上不开，工具结果写明原因。Windows 上先不开。
+  - 时限是 `Timeout`，不超过那台机器的上限。
+  - Job 跑的时候占着 worktree 的独占锁，分支自己的 Read、Shell 会排队：外部 agent 正在改这个目录，这是对的。工具说明里告诉模型用 Job 等它结束，别在这时候读文件。
+- 参数：按模板把 `{prompt}` 换成这次的要求，每一项按 POSIX 单引号规则转义（`'` 写成 `'\''`）后交给 sh。模板和 prompt 里的字符都不被 shell 解释。
+- 目录：执行请求加一个顶层的 `agent_rw`，和 `env` 一样只有网关发起的执行能带，`args` 里出现就拒绝。执行器：
+  - 用这台机器真实的 HOME 展开 `~/`，解析符号链接，在换私有 HOME 之前；
+  - 展开后必须在家目录里面、不是家目录本身；不能和这次的 `dirs`、`ro` 互相包含（worktree 在仓库里面，所以也包不了仓库和它的 `.git`）；不能和 NANO_HOME（没设就是 `~/.nano-agent`）互相包含；
+  - 目录不存在、或者任何一条不满足，整次执行拒绝，写明是哪一项，不跳过；
+  - 都满足的才加进这一个进程的可写范围。
+- 环境：`Env` 走 16.3 的顶层 `env`。值以 `~/` 开头的，执行器用真实的 HOME 展开（也在换私有 HOME 之前）。
+- 私有 HOME 和临时目录：`External` 用它自己的 `tmp_key`（按 agent 名字和会话分），不和同一会话里的 Shell 共用。外部 agent 往 HOME 里写的东西，普通 Shell 读不到。
+- 谁能用：
+  - 聊天会话里，只有管理员发起的这一轮能用，和 MCP 一样。
+  - 工单分支：`External` 在 `Auth.Tools` 里（16.1 已经写了），只有仓库工作目录开启了这个名字才算。不另记"派的人在名单里"：5a、5c 已经保证工单只能由名单里的人派。
+- 审批：和 Shell 一样跟着权限模式走。ask 时每次都问，审批提示里写出 agent 名字和完整的 prompt。
+  - 另外，工单建的时候带了作者不在名单里的议题正文，记 `Auth.Untrusted`。这样的工单里 `External` 每次都问，`auto` 也问：议题正文能让分支拼出一个 prompt，叫外部 agent 拿着登录凭据去联网。
 - 这是对沙箱的放宽：开启后，这个外部 agent 能读写自己的登录凭据，也能联网。
   - 网页上开启时写明这一点。
-  - 只在名单里的人派的工单里有意义。议题正文是不可信的输入。
+  - 只在名单里的人派的工单里有意义。议题正文是不可信的输入，见上面的审批。
+- 工单里的 Job（后台的 Shell 和 `External` 一样）：
+  - 分支还有没结束的 Job 时不开始验收：Report ready 被拒，写明是哪几个 Job；
+  - 一轮结束时还有在跑的 Job，不算"没汇报"，等 Job 结束叫醒分支；
+  - 工单叫停、放弃、结束时，停掉分支开的、还没结束的 Job。
 - 它改完之后仍然走 5b 的验收，不采信它的输出。
 
 **验收**：
 
 - 用一个替身脚本当外部 agent：
-  - 只在开启了的工作目录里能跑；
-  - 它能读写登记的目录，同一会话里的普通 Shell 读不到；
-  - `{prompt}` 不经 shell 解释；
+  - 只在开启了的工作目录里能跑；关掉开关，工单里也立刻不能用；
+  - 它能读写登记的目录，同一会话里的普通 Shell 读不到，也读不到它往私有 HOME 里写的东西；
+  - `{prompt}` 不经 shell 解释：带 `'`、`$(...)`、反引号、`;`、换行的 prompt 原样到替身脚本手里，什么都没多执行；
+  - 登记的目录是家目录本身、包着仓库、或者在 NANO_HOME 里，执行被拒；
+  - 模型的参数里带 `agent_rw` 被执行器拒绝；
+  - Job 没结束时 Report ready 被拒；叫停工单时 Job 被停掉；
+  - `Auth.Untrusted` 的工单里，`auto` 也要审批；
   - 改完照常验收。
 - 实机：主人在一台机器上开启 claude 或 codex，派一个小工单跑通一次。
 
