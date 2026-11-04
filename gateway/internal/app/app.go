@@ -781,6 +781,9 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			}
 			a.publishSession(c.s.sid)
 		}
+		if m.Untrusted || a.outsiderSpoke(c.s.sid, who) {
+			a.markUntrusted(c.s.sid)
+		}
 		a.listenGroup(c.s, ep, m, who)
 		if m.Mentioned || groupMentionsName(m.Text, a.agentOf(c.s.sid).Name) {
 			a.groupReply(c.s, ep, who, m)

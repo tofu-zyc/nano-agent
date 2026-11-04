@@ -125,7 +125,7 @@ func (a *App) ticketCreate(s *sess, team *scene.Team, who string, x ticketArgs) 
 	t0, existed, err := a.tickets.Create(ticket.Ticket{
 		Agent: a.execAgentID(s.sid), Title: title, Goal: goal, Check: team.Check, Budget: team.EffectiveBudget(),
 		Auth: ticket.Auth{By: who, Scene: s.sid, Workspace: team.Workspace, Mode: mode,
-			Tools: tools, At: a.now().Unix(),
+			Tools: tools, Untrusted: a.store.Settings(s.sid).Untrusted, At: a.now().Unix(),
 			Source: ticket.Source{Channel: t.ch, Chat: t.chat, MsgID: t.msgID, Text: t.text}},
 	})
 	if err != nil {
@@ -247,10 +247,11 @@ func (a *App) cancelTicketLocked(t ticket.Ticket, reason string) error {
 	return nil
 }
 
-// ticketTools 是工单的分支能用的工具（设计 §16.1）：内核的文件和命令工具，加上 Job、Report、联网和技能。
+// ticketTools 是工单的分支能用的工具（设计 §16.1）：内核的文件和命令工具，加上 Job、Report、联网、技能和外部 agent（5d）。
+// External 只有仓库工作目录现在开着这个名字才真能用；以前建的工单授权记录里没有它，就一直不能用。
 // 不给：对外发声和派生新承诺的（Message、SendFile、Session、Schedule、Hook、FollowUp、Agenda、Ticket）、
 // 心智工具（Idea、Mind、Diary）、网关管理（Gateway、GatewayAdmin）、Knowledge。和团队群的场景工具表无关。
-var ticketTools = []string{"Read", "Write", "Edit", "Grep", "Shell", "Job", "Report", "WebSearch", "WebFetch", "Skill"}
+var ticketTools = []string{"Read", "Write", "Edit", "Grep", "Shell", "Job", "Report", "WebSearch", "WebFetch", "Skill", "External"}
 
 // ticketAuthority 是授权记录里的权限模式和工具：说的是工单的分支能用什么，不是团队群自己的设置。
 // 模式取 agent 的默认模式，最高 auto（不用 full）；agent 是只读的就接不了工单。工具是上面的固定集合和 agent 的工具上限的交集。

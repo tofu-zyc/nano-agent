@@ -117,6 +117,7 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 	// side effect. The latter has a separate fixed delivery record.
 	if finalJob(j.Receipt.Status) {
 		a.signalJobCompletion(nodeName, j.Receipt.JobID)
+		a.ticketJobsSettled(j.Receipt.OriginSID) // 工单的分支在等的后台任务都结束了：叫醒分支一次
 	}
 	if terminal && current {
 		a.hub.Send(nodeName, proto.Msg{T: proto.TEventsAck, NodeEpoch: epoch, JobID: j.Receipt.JobID, EventSeq: j.Receipt.LastEventSeq})

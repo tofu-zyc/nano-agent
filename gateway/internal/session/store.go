@@ -880,7 +880,7 @@ func (s *Store) Reset(sid string) error {
 			}
 		}
 	}
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 || st.Untrusted {
 		st.EnvNote, st.Base, st.Summary = "", base, ""
 		st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 		st.Meter = Meter{}
@@ -889,6 +889,7 @@ func (s *Store) Reset(sid string) error {
 		st.CompactedAt = 0
 		// 历史清空了：切换边界和交接说明都指向不存在的消息；选的 agent 本身保留
 		st.Handoff, st.AgentSegments = "", nil
+		st.Untrusted = false // 清空重开：那些话不在上下文里了
 		if err := s.SaveSettings(sid, st); err != nil {
 			return err
 		}

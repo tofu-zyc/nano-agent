@@ -74,6 +74,11 @@ type Settings struct {
 	LifeNote string   `json:"life_note,omitempty"` // 拟人型：上一次放的近况说明的哈希
 	Recalled []string `json:"recalled,omitempty"`
 
+	// Untrusted：这个会话里进过不在名单里的人写的东西（议题正文的作者不在名单里、团队群里名单外的人说的话，设计 §16.4）。
+	// 按会话记、要落盘；分出去的会话继承；只在会话清空重开（Reset）时清，压缩历史不清（摘要里还有那些话）。
+	// 从这样的会话建的工单记 Auth.Untrusted：工单里的外部 agent 每次都要审批，auto 也问。
+	Untrusted bool `json:"untrusted,omitempty"`
+
 	// Members 是群聊里说过话的人：名字 → 身份（整理记忆时用来把群友的画像和身份对上）。
 	Members map[string]string `json:"members,omitempty"`
 

@@ -111,6 +111,7 @@ type SnapshotSettings struct {
 	Mode          string   `json:"mode,omitempty"`
 	Workspaces    []string `json:"workspaces,omitempty"`
 	Title         string   `json:"title,omitempty"`
+	Untrusted     bool     `json:"untrusted,omitempty"` // 分出去的会话继承“进过不可信的话”这个标记
 }
 
 // ForkOp 是一次 Fork 操作的持久记录，用来保证重试和重启幂等。
@@ -436,6 +437,7 @@ func (s *Store) ReadyBranch(sid string, snap SnapshotInfo, status string) error 
 	st.Summary = snap.Summary
 	st.Base = snap.Base // 快照里的有效窗口从 Base 之后开始
 	st.Group, st.Web = snap.Settings.Group, false
+	st.Untrusted = snap.Settings.Untrusted
 	if err := s.SaveSettings(sid, st); err != nil {
 		return err
 	}

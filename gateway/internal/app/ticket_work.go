@@ -282,9 +282,21 @@ func (a *App) ticketRunEnded(s *sess, r *run) {
 	if t.Status == ticket.StatusBlocked || t.Status == ticket.StatusPaused {
 		return
 	}
-	switch {
-	case r.outcome != "" && r.outcome != proto.StatusOK && r.outcome != proto.StatusCancelled:
+	if r.outcome != "" && r.outcome != proto.StatusOK && r.outcome != proto.StatusCancelled {
 		a.ticketBlock(t.ID, "error", "这一轮出错了（"+r.outcome+"）："+clip(strings.TrimSpace(r.final), 200), "", true)
+		return
+	}
+	// 还有没结束的后台任务：不算“没汇报”，也先不验收，记下在等哪几个，它们结束了叫醒分支（ticketJobsSettled）
+	if live := a.liveJobsOf(s.sid); len(live) > 0 {
+		a.ticketWaitJobs(t, live)
+		return
+	}
+	if len(t.WaitJobs) > 0 { // 这一轮里它们都结束了：这一轮自己看得到，照常处理
+		if _, err := a.tickets.Update(t.ID, func(t *ticket.Ticket) { t.WaitJobs = nil }); err != nil {
+			a.ticketHealth(err)
+		}
+	}
+	switch {
 	case t.WantCheck:
 		go a.acceptTicket(t.ID)
 	case r.reports == 0:
@@ -503,8 +515,9 @@ func (a *App) finishAccept(t ticket.Ticket, by string, forced bool) (string, err
 	return fmt.Sprintf("已收下 %s：提交 %s 在本地分支 %s。", t.ID, t.Commit, ticketBranch(t.ID)), nil
 }
 
-// wrapUpTicket 在工单结束（收下、叫停、失败）后收尾：停掉干活的分支、去掉派生工作目录、删 worktree。调用方持有锁。
+// wrapUpTicket 在工单结束（收下、叫停、失败）后收尾：停掉干活的分支和它开的还没结束的 Job、去掉派生工作目录、删 worktree。调用方持有锁。
 func (a *App) wrapUpTicket(t ticket.Ticket) {
+	live := a.liveJobsOf(t.RunSID) // 分支开的、还没结束的 Job：停掉它们（外部 agent 还在往 worktree 里写）
 	if t.RunSID != "" {
 		if s := a.sessions[t.RunSID]; s != nil {
 			if s.run != nil {
@@ -522,7 +535,10 @@ func (a *App) wrapUpTicket(t ticket.Ticket) {
 		})
 	}
 	a.syncTicketWorkspaces()
-	go a.cleanupTicket(t)
+	go func() {
+		a.stopTicketJobs(t, live)
+		a.cleanupTicket(t)
+	}()
 }
 
 // cleanupTicket 删 worktree（幂等）。不持有锁。
@@ -685,6 +701,11 @@ func (a *App) resumeWorking(id string) {
 	}
 	if s := a.sessions[t.RunSID]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return // 已经在跑
+	}
+	if len(t.WaitJobs) > 0 {
+		// 分支在等后台任务：还在跑的继续等（结束时叫醒），都结束了就叫醒一次（不算被重启打断）
+		a.ticketJobsSettled(t.RunSID)
+		return
 	}
 	if a.commits != nil {
 		if n, ok := a.commits.Notice(commit.KindTicket, id); ok && (n.Status == commit.StatusBlocked || n.Status == commit.StatusFailed) &&

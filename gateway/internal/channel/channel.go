@@ -22,6 +22,9 @@ type Message struct {
 	Session    string             // 发到指定的会话（网页用）；空表示发到这个聊天窗口接着的会话
 	Action     string             // 不是说话，而是界面上的操作：ActionStop、ActionRecall、ActionApprove、ActionDeny
 	Images     []media.Attachment // 这条消息附带的图片（网页上传、Telegram、飞书下载好的）
+	// Untrusted：这条消息里带着不在名单里的人写的东西（5c：议题正文的作者不在名单里）。会话记上，
+	// 从这个会话建的工单里，外部 agent 每次都要审批（设计 §16.4）。
+	Untrusted bool
 }
 
 const (

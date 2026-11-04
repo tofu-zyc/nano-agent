@@ -12,6 +12,7 @@ import (
 
 	"nano-agent/gateway/internal/extagent"
 	"nano-agent/gateway/internal/proto"
+	"nano-agent/gateway/internal/ticket"
 )
 
 // External 工具（设计 §16.4）：把一件事交给登记了的外部 agent（Claude Code、Codex 这样的命令行程序）。
@@ -34,11 +35,7 @@ func (a *App) externalChoices(rt route) []externalChoice {
 	}
 	var out []externalChoice
 	for i := range rt.mounts {
-		w := a.findWorkspace(rt.mounts[i].ws.ID)
-		if w == nil {
-			continue
-		}
-		for _, name := range w.External {
+		for _, name := range a.externalEnabled(rt.mounts[i].ws.ID) {
 			if _, ok := a.extAgents.Get(name); ok {
 				out = append(out, externalChoice{agent: name, mt: &rt.mounts[i]})
 			}
@@ -47,10 +44,41 @@ func (a *App) externalChoices(rt route) []externalChoice {
 	return out
 }
 
+// externalEnabled 是这个工作目录上现在开着的外部 agent 的名字。工单的派生工作目录（worktree）不存开关：
+// 每次按仓库工作目录现在的开关查，主人关掉就立刻不能用；工单已经结束了就都不能用。调用方持有锁。
+func (a *App) externalEnabled(wsID string) []string {
+	w := a.findWorkspace(wsID)
+	if w == nil {
+		return nil
+	}
+	if w.Ticket == "" {
+		return w.External
+	}
+	if a.tickets == nil {
+		return nil
+	}
+	t, ok := a.tickets.Get(w.Ticket)
+	if !ok || ticket.IsEnded(t.Status) {
+		return nil
+	}
+	if repo := a.findWorkspace(t.Auth.Workspace); repo != nil {
+		return repo.External
+	}
+	return nil
+}
+
 // externalOffered 是会话 sid 的工具表里该不该有 External：聊天里只有管理员的这一轮能用（和 MCP 一样），
-// 只读和不用工具的模式没有。调用方持有锁。
+// 工单的分支只有授权记录里有 External 才提供（以前建的工单没有，就一直没有），只读和不用工具的模式没有。
+// 真能不能用在调用时再按仓库工作目录现在的开关查。调用方持有锁。
 func (a *App) externalOffered(sid string, admin bool) bool {
-	if !admin || isDreamSID(sid) || a.isGroupSession(sid) {
+	if isDreamSID(sid) || a.isGroupSession(sid) {
+		return false
+	}
+	if t, ok := a.ticketOfSession(sid); ok {
+		if ticket.IsEnded(t.Status) || !ticketToolAllowed(t, "External") {
+			return false
+		}
+	} else if !admin {
 		return false
 	}
 	switch a.workspaceOf(sid).mode {
@@ -229,8 +257,18 @@ func (a *App) externalCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		reply(false, "参数格式不对")
 		return
 	}
-	if !a.isAdmin(r.from) {
-		reply(false, "只有管理员发起的这一轮能用外部 agent")
+	// 谁能用：管理员发起的这一轮；或者工单的分支——授权记录里有 External，仓库工作目录现在开着这个名字
+	// （下面按开关挑工作目录时查）。不另记“派的人在名单里”：5a、5c 已经保证工单只能由名单里的人派。
+	tk, byTicket := a.ticketIdentity(r.from)
+	switch {
+	case a.isAdmin(r.from):
+	case byTicket:
+		if !ticketToolAllowed(tk, "External") {
+			reply(false, "工单 "+tk.ID+" 的授权里没有 External")
+			return
+		}
+	default:
+		reply(false, "只有管理员发起的这一轮，或者工单的分支能用外部 agent")
 		return
 	}
 	switch {
@@ -258,6 +296,21 @@ func (a *App) externalCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		reply(false, err.Error())
 		return
 	}
+	// 工单的 worktree：只有这张工单自己的分支能在上面跑；沙箱固定是 on，不降级；仓库的根交给执行器只查互相包含
+	var repoRoot string
+	if mt.ws.Ticket != "" {
+		if byTicket && mt.ws.Ticket != tk.ID {
+			reply(false, "这个工作目录不是工单 "+tk.ID+" 的")
+			return
+		}
+		t, ok := a.tickets.Get(mt.ws.Ticket)
+		repo := a.findWorkspace(t.Auth.Workspace)
+		if !ok || repo == nil {
+			reply(false, "找不到这张工单的仓库工作目录")
+			return
+		}
+		repoRoot = repo.Path
+	}
 	node, why := a.externalNode(mt)
 	if why != "" {
 		reply(false, fmt.Sprintf("外部 agent 在 %s 上用不了：%s", mt.ws.Label(), why))
@@ -273,6 +326,9 @@ func (a *App) externalCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 	}
 	if sandbox == "" {
 		sandbox = "auto"
+	}
+	if repoRoot != "" {
+		sandbox = "on"
 	}
 	priority := 0
 	if r.inner || a.isBranchSID(s.sid) {
@@ -290,6 +346,11 @@ func (a *App) externalCall(s *sess, m *proto.Msg, reply func(bool, string)) {
 		// 自己的私有 HOME 和临时目录：外部 agent 往 HOME 里写的东西，同一会话里的 Shell 读不到
 		"tmp_key": "ext-" + x.Name + "-" + s.sid, "max_output": min(max(m.MaxOutput, 4096), 1<<20), "watch_stdin": true,
 		"sandbox": sandbox, "agent_rw": ag.Dirs,
+	}
+	if repoRoot != "" {
+		// 只用来查、不加进任何读写范围：登记的目录不能和仓库的根互相包含（不然 ~/proj/repo/src 这种能通过：
+		// 执行器不知道仓库根在哪，它又不在 worktree 和 .git 里），也就写不了主仓库签出的文件
+		body["agent_rw_deny"] = []string{repoRoot}
 	}
 	if len(ag.Env) > 0 {
 		body["env"] = ag.Env // 只在内存里交给启动进程，内核不写进 Job 的记录

@@ -116,6 +116,12 @@ func (a *App) reportCall(s *sess, raw []byte) (string, error) {
 	if x.Question != "" && !canAsk {
 		return "", errors.New("这一轮结束后没有人接着问，不能带 question；只汇报情况，要人处理就写在 text 里")
 	}
+	// 工单：分支还有没结束的后台任务（后台 Shell、External）时不能 ready，宿主要等它们结束才验收
+	if kind == commit.KindTicket && x.Status == commit.StatusReady {
+		if live := a.liveJobsOf(s.sid); len(live) > 0 {
+			return "", fmt.Errorf("还有 %d 个没结束的后台任务：%s。用 Job wait 等它们结束（或 Job cancel 停掉），再汇报 ready", len(live), liveJobsText(live))
+		}
+	}
 	var evidence []string
 	if x.Status == commit.StatusReady {
 		if len(x.Evidence) == 0 {

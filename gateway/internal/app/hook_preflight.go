@@ -13,7 +13,9 @@ import (
 // is a pre-execution gate, not a new model round or an interjection shortcut.
 func (a *App) preToolCheck(s *sess, m *proto.Msg) {
 	r := s.run
+	force := false // 不可信的工单里的 External：每次都问，auto 也问
 	reply := func(result hooks.CheckResult) {
+		result.RequireApproval = result.RequireApproval || force && result.Allow
 		a.hub.Send(r.node, proto.Msg{T: proto.THookResult, SID: s.sid, RunID: r.runID, TurnID: m.TurnID, ID: m.ID, RequestID: m.RequestID,
 			OK: proto.Bool(result.Allow), ForceApproval: result.RequireApproval, Detail: result.Detail})
 	}
@@ -27,6 +29,10 @@ func (a *App) preToolCheck(s *sess, m *proto.Msg) {
 		if !allow {
 			reply(hooks.CheckResult{Detail: detail})
 			return
+		}
+		// 派活的会话里进过不在名单里的人写的东西：这些话能让分支拼出一个 prompt，叫外部 agent 拿着登录凭据去联网
+		if t, ok := a.ticketIdentity(r.from); ok && call.Name == "External" && a.ticketUntrusted(t) {
+			force = true
 		}
 		if a.hookEngine == nil || !a.hasBeforeHooks(s.sid) {
 			reply(hooks.CheckResult{Allow: true})

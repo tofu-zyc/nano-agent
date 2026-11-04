@@ -29,6 +29,7 @@ const (
 	MaxNote   = 2000
 	MaxText   = 200 // 原消息只留开头这么多字
 	MaxRework = 2
+	MaxWoken  = 100 // Woken 最多留这么多个
 )
 
 // 工单的状态。
@@ -70,7 +71,10 @@ type Auth struct {
 	Workspace string   `json:"workspace"` // 能动到哪里（仓库所在的工作目录 ID）
 	Mode      string   `json:"mode"`      // 权限模式，不超过工作目录和 agent 的上限
 	Tools     []string `json:"tools"`     // 场景工具表和 agent 上限的交集
-	At        int64    `json:"at"`        // 秒
+	// Untrusted：派活的会话里进过不在名单里的人写的东西（议题正文的作者不在名单里、团队群里名单外的人说的话）。
+	// 这样的工单里 External 每次都问，auto 也问（5d）。
+	Untrusted bool  `json:"untrusted,omitempty"`
+	At        int64 `json:"at"` // 秒
 }
 
 // Ticket 是一张工单。
@@ -109,6 +113,9 @@ type Ticket struct {
 	PRHead    string `json:"pr_head,omitempty"`    // 推到 PR 上的提交：检查结果只认这个提交的
 	ForcedBy  string `json:"forced_by,omitempty"`  // 验收没过、由谁“先收下”的；重试交付时 PR 正文还要写这句
 	CIHandled string `json:"ci_handled,omitempty"` // 已经按 CI 失败返工过的提交（每个提交只算一次）
+	// 5d：分支的后台任务
+	WaitJobs []string `json:"wait_jobs,omitempty"` // 分支这一轮结束时还没结束、在等的后台任务（Job ID）
+	Woken    []string `json:"woken,omitempty"`     // 已经叫醒过分支的后台任务（Job ID，每个只叫一次；最多留最近 MaxWoken 个）
 
 	Created int64 `json:"created"` // 秒
 	Updated int64 `json:"updated"`
