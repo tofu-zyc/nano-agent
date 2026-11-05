@@ -106,8 +106,9 @@
       <label class="p-label">webhook 的签名密钥{mine?.secret_set ? '（已设置，留空不改）' : ''}
         <input class="p-input" type="password" autocomplete="off" bind:value={f.secret} data-testid="repo-secret" /></label>
     {/if}
-    <label class="p-label">准入名单（GitHub 账号，写 gh:账号，空格或换行分开；管理员总算在内）
+    <label class="p-label">准入名单（能派活的 GitHub 账号，写 gh:账号，空格或换行分开；管理员不用写，本来就能派）
       <textarea class="p-input" rows="3" bind:value={f.roster} data-testid="repo-roster" placeholder="gh:alice"></textarea></label>
+    <p class="p-note p-small">议题正文的作者不在名单里时，这个议题建的工单里的外部 agent 也是每次都要你批准。</p>
     <label class="p-label">验收命令（在工单的工作区里跑；空表示只看有没有改动）
       <input class="p-input" bind:value={f.check} /></label>
     <label class="p-label">回答议题的 agent（空是默认 agent）

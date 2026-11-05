@@ -126,7 +126,7 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 		a.hookEngine.Wake()
 	}
 	a.observeJobPresentation(a.jobInfo(eventlog.JobRecord{Job: j}))
-	a.publish(events.Event{T: "job", Name: nodeName, ID: j.Receipt.JobID, Data: a.jobInfo(eventlog.JobRecord{Job: j})})
+	a.publish(events.Event{T: "job", Name: nodeName, ID: j.Receipt.JobID, Data: a.jobInfoDetail(eventlog.JobRecord{Job: j})}) // 网页上看得到失败原因（聊天渠道的卡片不带：输出的开头不往外发）
 	if lease != nil && current {
 		a.leaseMessage(nodeName, lease)
 	}

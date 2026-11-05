@@ -589,6 +589,7 @@ export type JobInfo = {
   status:string;execution:string;background:boolean;silent:boolean;online:boolean;
   created_at:number;started_at?:number;ended_at?:number;deadline_at?:number;
   sandbox_effective?:string;output_cursor:number;output_gap:boolean;error?:string;
+  reason?:string; // 失败的原因（前 500 字）：没跑起来时（比如被执行器拒绝）看这里
 };
 export type JobOutput = {chunks:{cursor:number;next_cursor:number;stream:string;data:string}[];
   next_cursor:number;output_cursor:number;truncated_before:number;gap:boolean;error?:string};

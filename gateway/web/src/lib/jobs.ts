@@ -15,7 +15,8 @@ export function mergeJob(current: JobInfo | undefined, incoming: JobInfo): JobIn
   if (!current || jobKey(current) !== jobKey(incoming)) return incoming;
   if (incoming.revision < current.revision || finalJob(current.status) && !finalJob(incoming.status)) return current;
   // A status HTTP reply and an SSE update may race, including detach/terminal.
-  return incoming;
+  // 列表接口不带失败原因：别让它把已经读到的原因冲掉
+  return incoming.reason || !current.reason || incoming.status !== current.status ? incoming : { ...incoming, reason: current.reason };
 }
 
 /** Bounded view of binary log pages. UTF-8 can straddle chunks and requests. */

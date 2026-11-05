@@ -73,6 +73,12 @@ func (a *App) askApproval(s *sess, m *proto.Msg) {
 	a.nextAppr++
 	n := a.nextAppr
 	title, body := callCard(m.Name, m.Args)
+	if m.ForceApproval && m.Name == "External" {
+		if t, ok := a.ticketIdentity(m.From); ok && a.ticketUntrusted(t) {
+			// 自动模式也问：不然批准的人不明白为什么这一次要问（卡片、文字、网页上都带着）
+			body += "\n\n（工单 " + t.ID + " 是从有名单外的人说过话、或作者不在名单里的议题的会话建的：里面的话可能被拼进了上面的 prompt，所以每次都要你批准，自动模式也一样。）"
+		}
+	}
 	desc := title + "：\n" + body
 	ap := &approval{sid: s.sid, id: m.ID, name: m.Name, detail: desc, from: m.From, at: a.now(),
 		runID: m.RunID, turnID: m.TurnID,

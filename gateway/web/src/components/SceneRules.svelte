@@ -104,7 +104,7 @@
     <label class="p-row"><input type="checkbox" checked={!!team} data-testid="team-on" onchange={(e) => (e.target as HTMLInputElement).checked ? saveTeam({ workspace: workspaces[0]?.id ?? '' }) : onsave({ team: null })} />
       <span class="p-grow">这个群是一个团队</span></label>
     {#if team}
-      <div class="p-label">准入名单（管理员总算在内）
+      <div class="p-label">准入名单（能派活的人；管理员不用勾，本来就能派）
         {#each speakerList as [name, who] (who)}
           <label class="p-row"><input type="checkbox" checked={team.roster.includes(who)} onchange={(e) => toggleRoster(who, (e.target as HTMLInputElement).checked)} />
             <span>{name}</span></label>
@@ -116,6 +116,7 @@
             <span>{speakerName(who)} <span class="tiny">不在最近说过话的人里</span></span></label>
         {/each}
       </div>
+      <p class="p-note p-small" data-testid="team-untrusted-note">名单外的人在这个群里说过话，这个群建的工单里的外部 agent 每次都要你批准（自动模式也一样）；清空这个群的上下文后重新算。</p>
       <label class="p-label">仓库所在的工作目录
         <select class="p-select" value={team.workspace} data-testid="team-workspace" onchange={(e) => saveTeam({ workspace: str(e) })}>
           <option value="">（选一个）</option>

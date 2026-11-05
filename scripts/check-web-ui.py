@@ -570,11 +570,18 @@ def check_jobs(page, url):
            "created_at": 100, "started_at": 101, "sandbox_effective": "off",
            "output_cursor": 10, "output_gap": False}
     bytes_out = "中文🙂".encode()
+    # 启动前就被执行器拒绝的外部 agent：列表里不带原因，选中后读一次状态才有
+    why = "agent_rw 里的 ~/proj/repo/src 不能用：和仓库的根 /home/u/proj/repo 互相包含。没有执行"
+    failed = dict(job, job_id="j_ui-2", revision=3, status="failed", background=True, silent=False,
+                  origin_call_id="ext-1", ended_at=102)
 
     def jobs_api(route):
         req = route.request
         if req.method == "GET":
-            result = {"jobs": [job]}
+            result = {"jobs": [job, failed]}
+        elif "j_ui-2" in req.url:
+            actions.append("failed-status")
+            result = {"job": dict(failed, reason=why)}
         else:
             args = req.post_data_json
             action = args.get("action", "status")
@@ -600,7 +607,7 @@ def check_jobs(page, url):
         jp.wait_for_selector(".insp .job")
         if not jp.url.endswith("#/sessions/main"):
             fail("任务面板切换了当前聊天")
-        jp.click(".insp .job")
+        jp.locator(".insp .job").first.click()
         jp.get_by_role("button", name="读取日志", exact=True).click()
         jp.wait_for_function("() => document.querySelector('.insp .detail')?.textContent.includes('日志游标 2')")
         jp.get_by_role("button", name="读取日志", exact=True).click()
@@ -622,6 +629,17 @@ def check_jobs(page, url):
             fail("安静任务的状态事件推送到了聊天或全局通知")
         if not jp.url.endswith("#/sessions/main"):
             fail("任务状态更新改变了当前聊天")
+        # 失败的任务：点开就看得到为什么没跑起来（不用再点“查询状态”）
+        jp.locator(".insp .job").nth(1).click()
+        try:
+            jp.wait_for_selector("[data-testid=job-reason]", timeout=5000)
+            shown = jp.locator("[data-testid=job-reason]").inner_text()
+            if "仓库的根" in shown and "没有执行" in shown and "failed-status" in actions:
+                ok("失败的任务点开就写明失败信息（比如登记的目录和仓库的根互相包含）")
+            else:
+                fail("失败信息不对：" + shown)
+        except Exception:
+            fail("失败的任务点开后没有显示失败信息：" + jp.locator(".insp .detail").inner_text()[:200])
         jp.screenshot(path=os.path.join(SHOTS, "jobs.png"))
         # Explicit deep links can open the same actual panel.
         jp.goto(url + "#/jobs/j_ui-1?node=ui-node")

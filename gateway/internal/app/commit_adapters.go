@@ -30,6 +30,7 @@ type commitItem struct {
 	At       int64  // 决定阶段的那条事实发生的时间（秒）：等我处理按它排，最新的在前
 	Covered  string // 被汇报的就绪盖住的宿主就绪的 Mark：点“知道了”时一起记
 	Link     string // 网页上打开它的链接
+	Note     string // 进行中时的一句说明（阶段函数在 running 时不给原因，这里补：工单在等后台任务、在验收）
 }
 
 // 已经结束超过这么久的不列。
@@ -351,7 +352,11 @@ func ticketCommit(t ticket.Ticket, now int64) commitItem {
 	if t.Check == "" {
 		done = "有改动、提交在本地分支"
 	}
-	c := commitItem{Kind: commit.KindTicket, ID: t.ID, Agent: t.Agent, Title: t.Title, Link: "#/sessions/" + t.Auth.Scene,
+	link := "#/sessions/" + t.Auth.Scene // 还没有分支、或者已经结束了（分支归档）：打开派活的会话
+	if t.RunSID != "" && !ticket.IsEnded(t.Status) {
+		link = "#/sessions/" + t.RunSID // 打开干活的分支，看它在做什么
+	}
+	c := commitItem{Kind: commit.KindTicket, ID: t.ID, Agent: t.Agent, Title: t.Title, Link: link,
 		Contract: commit.Contract{
 			Goal: t.Goal, By: t.Auth.By, Scene: t.Auth.Scene,
 			Scope:    scopeText(t.Auth.Mode, []string{t.Auth.Workspace}, t.Auth.Tools),
@@ -365,6 +370,12 @@ func ticketCommit(t ticket.Ticket, now int64) commitItem {
 		f.Due, f.Wait = max(t.Created, 1), "等开工" // 阶段表要 Due 才显示 Wait
 	case ticket.StatusWorking, ticket.StatusChecking:
 		f.Running = true
+		switch {
+		case t.Status == ticket.StatusChecking:
+			c.Note = "宿主在跑验收命令"
+		case len(t.WaitJobs) > 0:
+			c.Note = "分支在等后台任务结束：" + strings.Join(t.WaitJobs, "、")
+		}
 	case ticket.StatusPaused:
 		f.Paused = true
 	case ticket.StatusBlocked: // 宿主记下的受阻；Mark 是 b:<Updated>，主人点“知道了”之后再有新的受阻才会再出现

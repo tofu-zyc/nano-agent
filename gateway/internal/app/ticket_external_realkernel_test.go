@@ -277,6 +277,9 @@ func TestRealKernelUntrustedTicketAsksBeforeExternal(t *testing.T) {
 	if !strings.Contains(card, "fake") || !strings.Contains(card, `it's "quoted"`) {
 		t.Fatalf("审批提示写出 agent 名字和完整的 prompt：%s", card)
 	}
+	if !strings.Contains(card, "自动模式也一样") {
+		t.Fatalf("审批提示写明为什么这次要问：%s", card)
+	}
 	time.Sleep(300 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(x.agentDir, "last-run")); err == nil {
 		t.Fatal("批准之前不该跑")

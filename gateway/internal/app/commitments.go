@@ -239,6 +239,9 @@ func (a *App) commitViewsLocked(agent, phase string) []CommitView {
 	out := make([]CommitView, 0, len(items))
 	for _, c := range items {
 		p, why := commit.Phase(c.Facts)
+		if p == commit.Running && why == "" {
+			why = c.Note
+		}
 		if phase != "" && p != phase {
 			continue
 		}
