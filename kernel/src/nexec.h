@@ -29,6 +29,7 @@ typedef struct {
     bool   home_only;             /* 没有挂工作目录：相对路径和 Shell 的当前目录用 HOME */
     char **ro;    size_t nro;     /* 额外的只读路径 */
     char **rw;    size_t nrw;     /* 额外的读写路径 */
+    char **agent_rw; size_t nagent_rw; /* 外部 agent 自己的目录：只加进这个进程的可写范围（文件工具不用） */
     char  *home;
     char  *tmp;                   /* 这个会话的临时目录，TMPDIR 指向它 */
     char  *cache;                 /* 各会话共用的缓存目录，XDG_CACHE_HOME 指向它 */

@@ -57,7 +57,7 @@ type Agent struct {
 	GroupParts     *int    `json:"group_parts,omitempty"`
 	GroupMinGap    *string `json:"group_min_gap,omitempty"`
 
-	// 类型、拟人活动、长期记忆和做梦；见 docs/DESIGN-agent-runtime.md。
+	// 类型、拟人活动、长期记忆和做梦；见 docs/RUNTIME.md。
 	Style      string  `json:"style,omitempty"`       // tool（空也是）| life
 	LifeAwake  *string `json:"life_awake,omitempty"`  // 醒着的时间，如 08:00-23:30
 	LifeLevel  *string `json:"life_level,omitempty"`  // low | normal | high

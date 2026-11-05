@@ -16,12 +16,14 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"nano-agent/gateway/internal/scene"
 )
 
 // 两种说话方式：点名（默认，只有被叫到才说）和自由（可以按积极度插话）。
 const (
-	ModeMention = "mention"
-	ModeFree    = "free"
+	ModeMention = scene.ModeMention
+	ModeFree    = scene.ModeFree
 )
 
 // Room 是一个内部群聊。
@@ -29,12 +31,16 @@ type Room struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Members []string `json:"members"` // agent ID
-	Mode    string   `json:"mode"`    // mention | free
 	Paused  bool     `json:"paused,omitempty"`
-	Muted   []string `json:"muted,omitempty"`  // 被禁言的 agent
-	DM      []string `json:"dm,omitempty"`     // 两个 agent 的私聊：成员就是这两个
-	Budget  int      `json:"budget,omitempty"` // 一天最多用多少 token（0 表示不限），超了就暂停
+	Muted   []string `json:"muted,omitempty"` // 被禁言的 agent
+	DM      []string `json:"dm,omitempty"`    // 两个 agent 的私聊：成员就是这两个
 	Created int64    `json:"created,omitempty"`
+	// 场景规则（说话方式、预算等）。内嵌：JSON 键名和以前一样（mode、budget），旧的 rooms.json 原样能读。
+	scene.Rules
+}
+
+func validMode(m string) bool {
+	return m == ModeMention || m == ModeFree || m == scene.ModeTurns || m == scene.ModeDirector
 }
 
 // IsDM 是不是两个 agent 之间的私聊。
@@ -100,8 +106,8 @@ func (s *Store) Create(r Room) (Room, error) {
 	if r.Mode == "" {
 		r.Mode = ModeMention
 	}
-	if r.Mode != ModeMention && r.Mode != ModeFree {
-		return Room{}, errors.New("说话方式只能是 mention（点名）或 free（自由）")
+	if !validMode(r.Mode) {
+		return Room{}, errors.New("说话方式只能是 mention（点名）、free（自由）、turns（轮流）或 director（导演）")
 	}
 	if r.ID == "" {
 		r.ID = newID()
@@ -135,7 +141,7 @@ func (s *Store) Update(r Room) error {
 		if r.Name == "" {
 			r.Name = s.rooms[i].Name
 		}
-		if r.Mode != ModeMention && r.Mode != ModeFree {
+		if !validMode(r.Mode) {
 			r.Mode = s.rooms[i].Mode
 		}
 		r.Members = normalizeMembers(r.Members)
@@ -175,6 +181,9 @@ func normalizeMembers(in []string) []string {
 }
 
 // newID 起一个随机 ID（短、不会撞）。
+// NewID 取一个新的群 ID（分出平行世界时要在建群之前就知道它）。
+func NewID() string { return newID() }
+
 func newID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

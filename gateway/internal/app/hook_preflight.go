@@ -13,12 +13,33 @@ import (
 // is a pre-execution gate, not a new model round or an interjection shortcut.
 func (a *App) preToolCheck(s *sess, m *proto.Msg) {
 	r := s.run
+	force := false // 不可信的工单里的 External：每次都问，auto 也问
 	reply := func(result hooks.CheckResult) {
+		result.RequireApproval = result.RequireApproval || force && result.Allow
 		a.hub.Send(r.node, proto.Msg{T: proto.THookResult, SID: s.sid, RunID: r.runID, TurnID: m.TurnID, ID: m.ID, RequestID: m.RequestID,
 			OK: proto.Bool(result.Allow), ForceApproval: result.RequireApproval, Detail: result.Detail})
 	}
 	call, ok := r.callArgs[m.ID]
-	if !ok || call.Name != m.Name || m.RequestID != m.ID || m.RunID != r.runID || m.TurnID != r.turnID || a.hookEngine == nil {
+	if !ok || call.Name != m.Name || m.RequestID != m.ID || m.RunID != r.runID || m.TurnID != r.turnID {
+		reply(hooks.CheckResult{Detail: "前置检查调用身份无效"})
+		return
+	}
+	// 工单的分支：不在授权工具里的调用一律拒绝；在里面的，没有前置 Hook 时直接放行
+	if isTicket, allow, detail := a.ticketPreCheck(s, call.Name); isTicket {
+		if !allow {
+			reply(hooks.CheckResult{Detail: detail})
+			return
+		}
+		// 派活的会话里进过不在名单里的人写的东西：这些话能让分支拼出一个 prompt，叫外部 agent 拿着登录凭据去联网
+		if t, ok := a.ticketIdentity(r.from); ok && call.Name == "External" && a.ticketUntrusted(t) {
+			force = true
+		}
+		if a.hookEngine == nil || !a.hasBeforeHooks(s.sid) {
+			reply(hooks.CheckResult{Allow: true})
+			return
+		}
+	}
+	if a.hookEngine == nil {
 		reply(hooks.CheckResult{Detail: "前置检查调用身份无效"})
 		return
 	}

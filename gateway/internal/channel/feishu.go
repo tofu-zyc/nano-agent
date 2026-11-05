@@ -424,7 +424,7 @@ func (f *Feishu) userName(ctx context.Context, openID string) string {
 }
 
 func (f *Feishu) Send(ctx context.Context, chatID, text, replyTo string) error {
-	for i, part := range Split(text, 8000) {
+	for i, part := range Split(text, feishuTextLimit) {
 		content, _ := json.Marshal(map[string]string{"text": part})
 		if i == 0 && replyTo != "" {
 			resp, err := f.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().

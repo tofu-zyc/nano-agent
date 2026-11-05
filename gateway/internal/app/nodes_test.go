@@ -44,7 +44,7 @@ func (e *env) hello(t *testing.T, conn net.Conn, name, token string) *fakeKernel
 	t.Helper()
 	t.Cleanup(func() { conn.Close() })
 	k := &fakeKernel{t: t, conn: conn, sc: bufio.NewScanner(conn)}
-	go k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: token, Node: name, Tools: echoTool})
+	go k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: token, Node: name, Tools: echoTool, GatewayTools: gatewayToolNames()})
 	k.expect(proto.TWelcome)
 	waitNode(e.a, name, true)
 	return k

@@ -40,8 +40,9 @@ const (
 	BranchArchived        = "archived"
 	BranchCancelled       = "cancelled"
 
-	BranchDeliverySilent = "silent" // 默认：只写分支记录，不向源聊天推送
-	BranchDeliveryReport = "report" // 用户明确要求时才带回结果
+	BranchDeliverySilent    = "silent"    // 默认：只写分支记录，不向源聊天推送
+	BranchDeliveryReport    = "report"    // 用户明确要求时才带回结果
+	BranchDeliveryAttention = "attention" // 和 silent 一样安静，只有 Report 的 ready、blocked、failed 和宿主记下的出错才通知主人
 )
 
 // BranchMeta 是一个分支会话的来源、边界与状态。
@@ -65,12 +66,14 @@ type BranchMeta struct {
 	Status          string `json:"status"`
 	Delivery        string `json:"delivery_policy"`
 	// Checkpoint 是分叉点在源会话里的绝对位置（含已经被压缩掉的）
-	Checkpoint int    `json:"fork_checkpoint"`
-	Generation int64  `json:"generation,omitempty"`
-	LastActive int64  `json:"last_active,omitempty"`
+	Checkpoint int   `json:"fork_checkpoint"`
+	Generation int64 `json:"generation,omitempty"`
+	LastActive int64 `json:"last_active,omitempty"`
 	// Progress 是最近进展的一句话（由宿主从真实执行状态生成，不调模型）；ProgressAt 是它的时间
 	Progress   string `json:"progress,omitempty"`
 	ProgressAt int64  `json:"progress_at,omitempty"`
+	// ReportedAt 是主人最近一次把这个分支的结论带回来源会话（引入结论）的时间；之后没有新的一轮就不算“等人看”
+	ReportedAt int64  `json:"reported_at,omitempty"`
 	Note       string `json:"note,omitempty"`
 }
 
@@ -108,6 +111,7 @@ type SnapshotSettings struct {
 	Mode          string   `json:"mode,omitempty"`
 	Workspaces    []string `json:"workspaces,omitempty"`
 	Title         string   `json:"title,omitempty"`
+	Untrusted     bool     `json:"untrusted,omitempty"` // 分出去的会话继承“进过不可信的话”这个标记
 }
 
 // ForkOp 是一次 Fork 操作的持久记录，用来保证重试和重启幂等。
@@ -433,6 +437,7 @@ func (s *Store) ReadyBranch(sid string, snap SnapshotInfo, status string) error 
 	st.Summary = snap.Summary
 	st.Base = snap.Base // 快照里的有效窗口从 Base 之后开始
 	st.Group, st.Web = snap.Settings.Group, false
+	st.Untrusted = snap.Settings.Untrusted
 	if err := s.SaveSettings(sid, st); err != nil {
 		return err
 	}

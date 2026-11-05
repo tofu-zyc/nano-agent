@@ -56,6 +56,8 @@
     logText = '';
     cursor = 0;
     gap = false;
+    // 失败的任务：读一次状态，拿失败的原因（列表里不带）
+    if (job.status === 'failed' && !job.reason) void act('status');
   }
   async function act(action: string) {
     if (!selected || busy) return;
@@ -152,6 +154,7 @@
     {#if selected.silent}<p class="muted">安静任务：状态更新不会切换聊天窗口或向主聊天推送。</p>{/if}
     {#if selected.status === 'unknown'}<p class="error">执行结果未知，相关执行名额和资源占用仍保留。</p>{/if}
     {#if selected.error}<p class="error">{selected.error}</p>{/if}
+    {#if selected.reason}<p class="error" data-testid="job-reason">失败信息：{selected.reason}</p>{/if}
     <div class="actions">
       <button class="btn sm" disabled={busy} onclick={() => act('status')}>查询状态</button>
       <button class="btn sm" disabled={busy || !selected.online} onclick={() => act('output')}>读取日志</button>

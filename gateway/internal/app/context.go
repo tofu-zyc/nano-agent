@@ -21,9 +21,9 @@ const cronGuide = "[定时任务] 这一轮是定时任务的一次执行。这�
 	"不要因为记得以前的做法就少做、不做或者提前收工。"
 
 // prefixVer 是网关给模型的工具这一版的编号：加了新工具（v0.6 的 Knowledge，v0.7 的 SendFile）、
-// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind）就加一，
+// 改了工具的参数（v0.7.2 的 Gateway / GatewayAdmin 能查、能配 MCP；v0.7.4 的 Agenda / Idea / Mind；v0.10 的 Report，只在 life、分支、定时任务、Hook 的会话里）就加一，
 // 旧会话的工具快照作废一次（缓存失效一次），之后照常只在固定时机刷新。
-const prefixVer = 12
+const prefixVer = 13
 
 func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	system, _ := a.personaFor(sid)
@@ -33,10 +33,17 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 	if isCronSID(sid) {
 		system = strings.TrimSpace(system + "\n\n" + cronGuide)
 	}
+	if a.branchAttention(sid) {
+		system += attentionNote
+	}
 	// 群聊：人格后面加上群聊守则（agents/<id>/group.md 或内置的），内容对这个群保持不变
 	if a.isGroupSession(sid) {
 		if g := a.groupGuide(a.agentOf(sid).ID); g != "" {
 			system = strings.TrimSpace(system + "\n\n" + g)
+		}
+		// 场景说明和角色提示词紧跟群聊守则；没设规则就没有这一段
+		if t := a.sceneText(sid); t != "" {
+			system = strings.TrimSpace(system + "\n\n" + t)
 		}
 	}
 	var tools []llm.Tool
@@ -60,58 +67,65 @@ func (a *App) contextParts(sid string) (string, []llm.Tool, string, int) {
 		}
 	}
 	if isDreamSID(sid) {
-		tools = []llm.Tool{toolOf(diaryTool()), toolOf(knowledgeTool())}
+		tools = a.toolsNamed(sid, "Diary", knowledgeLabel)
 	} else if a.isGroupSession(sid) {
 		// 群聊只有 agent 的群聊白名单（默认搜索和技能），不碰文件、命令
-		var all []llm.Tool
-		for _, spec := range a.searchTools() {
-			all = append(all, toolOf(spec))
-		}
-		if spec, ok := a.skillSpec(sid); ok {
-			all = append(all, toolOf(spec))
-		}
+		names := []string{"WebSearch", "WebFetch", "Skill"}
 		if a.memoryOn(a.agentOf(sid)) {
-			all = append(all, toolOf(knowledgeTool()))
+			names = append(names, knowledgeLabel)
 		}
 		if ag.Life() {
-			all = append(all, toolOf(followUpTool()))
+			names = append(names, "FollowUp")
 		}
-		all = append(all, toolOf(sendFileTool()))
-		tools = a.groupTools(sid, all)
+		names = append(names, "SendFile")
+		tools = a.groupTools(sid, a.toolsNamed(sid, names...))
+		tools = append(tools, a.toolsNamed(sid, "Ticket")...) // 只有设了团队规则的群有；不在场景工具表里，不能被选
 	} else {
 		if n := a.nodes[rt.kernel]; n != nil && !noTools {
 			tools = a.toolsFor(sid, n, false, admin)
 		}
 		if noTools {
-			tools = nil
-			for _, spec := range a.searchTools() {
-				tools = append(tools, toolOf(spec))
-			}
+			tools = a.toolsNamed(sid, "WebSearch", "WebFetch")
 		} else {
 			// MCP 服务带的工具（<服务>__<工具>）：访客、只读和不用工具的模式都没有
 			tools = append(tools, a.mcpOffered(sid, admin)...)
+			tools = append(tools, a.toolsNamed(sid, "Report")...) // 只有 life、分支、定时任务、Hook 的会话有
+			if a.externalOffered(sid, admin) {
+				tools = append(tools, a.toolsNamed(sid, "External")...) // 挂的工作目录上开启了外部 agent 才有
+			}
 		}
 		if a.memoryOn(a.agentOf(sid)) {
-			tools = append(tools, toolOf(knowledgeTool()))
+			tools = append(tools, a.toolsNamed(sid, knowledgeLabel)...)
 		}
 		if ag.Life() {
 			if !isLifeSID(sid) {
-				tools = append(tools, toolOf(followUpTool()))
+				tools = append(tools, a.toolsNamed(sid, "FollowUp")...)
 			}
 			if admin {
-				tools = append(tools, toolOf(agendaTool()), toolOf(ideaTool()), toolOf(mindTool()))
+				tools = append(tools, a.toolsNamed(sid, "Agenda", "Idea", "Mind")...)
 			}
 		}
-		tools = append(tools, toolOf(sendFileTool()))
+		tools = append(tools, a.toolsNamed(sid, "SendFile")...)
 		sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 		// agent 可以限定这个会话能用哪些工具（空表示全部）
 		tools = a.filterAgentTools(sid, tools)
 	}
+	if n := a.nodes[rt.kernel]; n != nil {
+		// 网关工具要内核交回网关才能用：内核不交的（旧内核没有 Report、Ticket）不给模型，不然调用会落到执行器
+		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool { return toolDef(t.Function.Name) != nil && !n.handsBack(t.Function.Name) })
+	}
 	if n := a.nodes[rt.kernel]; len(tools) > 0 && n != nil && n.info.Features["bounded_parallel"] >= 1 {
 		system = strings.TrimSpace(system + "\n\n[工具调度] 相互独立的工具调用可以在同一次响应中一起提出；运行时会按执行槽和资源锁有界调度。结果按调用身份关联，全部结果返回后才继续模型请求。有数据依赖的步骤分到下一次响应，不能假定同批调用按顺序完成。")
 	}
+	if t, ok := a.ticketOfSession(sid); ok {
+		// 工单的分支：只给授权记录里的工具（每次调用还会再查一遍）
+		tools = slices.DeleteFunc(tools, func(tl llm.Tool) bool { return !ticketToolAllowed(t, tl.Function.Name) })
+	}
 	if inv := a.sessionHook(sid); inv != nil && inv.work.Spec.Scope.Tools != nil {
-		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool { return !slices.Contains(inv.work.Spec.Scope.Tools, t.Function.Name) })
+		// Report 只汇报情况，不扩大权限：登记 Hook 时的工具表里没有它也照给
+		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
+			return t.Function.Name != "Report" && !slices.Contains(inv.work.Spec.Scope.Tools, t.Function.Name)
+		})
 	}
 	// 工具定义用快照保持请求前缀稳定；技能目录/MCP 工具或权限变化会刷新，不必清空聊天。
 	// 人格改了（/persona、网页保存、直接改文件）是用户有意换的，也算刷新时机：系统提示一变缓存本来就全部失效，工具定义顺便一起刷新
@@ -175,7 +189,25 @@ func (a *App) permSignature(sid string) string {
 		sum := sha256.Sum256(raw)
 		ceiling = fmt.Sprintf("|hook:%x", sum[:8])
 	}
-	return fmt.Sprintf("%t|%s|%t|%s|%s%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling)
+	sig := fmt.Sprintf("%t|%s|%t|%s|%s%s", admin, rt.kernel, a.nodes[rt.kernel] != nil, mcpSig, skillSig, ceiling)
+	// 只在真的少了工具时才往后面加东西：内核不交回来的网关工具（旧内核没有 Report、Ticket、External），
+	// 内核升级、名单变了就换。新内核什么都不少，判据和加这一段之前一模一样，升级后会话的工具快照不刷新，前缀缓存不受影响。
+	if n := a.nodes[rt.kernel]; n != nil {
+		var missing []string
+		for _, name := range gatewayToolNames() {
+			if !n.handsBack(name) {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			sig += "|missing:" + strings.Join(missing, ",")
+		}
+	}
+	// External 只在挂的工作目录上开启了外部 agent 的会话里有，开关、登记变了它的定义跟着变；没有时什么都不加
+	if ext := a.externalSig(sid, admin); ext != "" {
+		sig += "|ext:" + ext
+	}
+	return sig
 }
 
 func (a *App) contextInfo(sid string) session.ContextInfo {

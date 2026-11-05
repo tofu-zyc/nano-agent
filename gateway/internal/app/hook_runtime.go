@@ -190,8 +190,7 @@ func (x hookExecutor) agent(ctx context.Context, w hooks.Execution, done func(ho
 			done(hooks.Result{Err: errors.New("life 目标当前不是拟人 agent")})
 			return
 		}
-		life := a.sessions[lifeSID(r.AgentID)]
-		if life != nil && (life.run != nil || len(life.queue) > 0 || life.compacting) {
+		if ok, why, _ := a.admitRun(lifeSID(r.AgentID)); !ok && why == admitBusy {
 			a.mu.Unlock()
 			done(hooks.Result{Err: errors.New("内心片段正在运行"), Retry: true})
 			return

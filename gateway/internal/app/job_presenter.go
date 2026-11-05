@@ -56,7 +56,7 @@ func (a *App) jobEndpointValid(ch channel.Channel, ep endpoint, agent, sid strin
 	if record := a.eps[ep.key()]; record != nil && a.execAgentID(record.Session) != agent {
 		return false
 	}
-	if ep.ch != "cli" && ep.ch != "web" && a.agentForChannel(ep.ch) != agent && !a.hasExplicitAgent(sid) {
+	if ep.ch != "cli" && ep.ch != "web" && a.agentForEndpoint(ep) != agent && !a.hasExplicitAgent(sid) {
 		return false
 	}
 	return true

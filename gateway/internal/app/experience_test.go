@@ -55,7 +55,6 @@ func TestP6bContextMemoryResetDoesNotWakeOrRepeat(t *testing.T) {
 	g := &experienceGuardModel{}
 	e.a.mu.Lock()
 	e.a.llm = g
-	e.a.lifeOf("default").Next = base.Add(4 * time.Hour).Unix()
 	e.a.mind("default").SetNextCheck(base.Add(4 * time.Hour))
 	e.a.mu.Unlock()
 	e.say("整理一下上下文，我要重置会话了")

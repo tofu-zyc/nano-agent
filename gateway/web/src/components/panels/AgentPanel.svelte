@@ -38,7 +38,7 @@
   // 设置分组：干活跟随全局；群聊、拟人、记忆这几组没有全局设置，用的是默认值
   const groups: { key: AgentSetting['group']; title: string; note: string }[] = [
     { key: 'work', title: '干活', note: '没改的跟随' },
-    { key: 'group', title: '群聊', note: '在群里怎么说话' },
+    { key: 'group', title: '群聊', note: '群里没单独设置规则时用的默认值；某个群的场景规则（说明、角色、工具、说话样式）优先' },
     { key: 'life', title: '拟人', note: '作息、多久醒一次、主动找谁' },
     { key: 'memory', title: '长期记忆', note: '记什么、什么时候整理' },
   ];

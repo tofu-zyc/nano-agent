@@ -231,3 +231,25 @@ func TestCancelledJobActionDoesNotSendControl(t *testing.T) {
 		t.Fatal("cancelled caller enqueued control")
 	}
 }
+
+func TestJobReasonOnlyForFailedAndCutAt500Runes(t *testing.T) {
+	long := strings.Repeat("错", 600)
+	cases := []struct {
+		name string
+		q    proto.JobSnapshot
+		want string
+	}{
+		{"成功不带", proto.JobSnapshot{Status: "succeeded", Result: &proto.JobResult{OK: true, Content: "done"}}, ""},
+		{"取消不带", proto.JobSnapshot{Status: "cancelled", Result: &proto.JobResult{Content: "x"}}, ""},
+		{"没跑起来：执行器回的内容", proto.JobSnapshot{Status: "failed", Result: &proto.JobResult{Content: "agent_rw 里的 ~/x 不能用：目录不存在。没有执行"}}, "agent_rw 里的 ~/x 不能用：目录不存在。没有执行"},
+		{"内核记下的 error 优先", proto.JobSnapshot{Status: "failed", Error: "启动失败", Result: &proto.JobResult{Content: "别的"}}, "启动失败"},
+		{"没有内容", proto.JobSnapshot{Status: "failed"}, ""},
+		{"前 500 个字", proto.JobSnapshot{Status: "failed", Result: &proto.JobResult{Content: long}}, strings.Repeat("错", 500) + "…"},
+		{"非法 UTF-8", proto.JobSnapshot{Status: "failed", Result: &proto.JobResult{Content: "a\xffb"}}, "a�b"},
+	}
+	for _, c := range cases {
+		if got := jobReason(c.q); got != c.want {
+			t.Errorf("%s：%q，要 %q", c.name, got, c.want)
+		}
+	}
+}

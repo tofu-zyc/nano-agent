@@ -11,6 +11,9 @@
   const t = $derived(ov.totals);
   const rt = $derived(ov.runtime);
   const up = $derived(rt?.update);
+  const ob = $derived(rt?.outbox);
+  const obChannels = $derived(Object.entries(ob?.channels ?? {}).filter(([, c]) => c.pending > 0));
+  const obDropped = $derived(Object.entries(ob?.dropped_24h ?? {}));
   const pending = $derived(store.fields.filter((f) => f.pending));
   // 网页里改过的设置：在哪个节点、现在是什么，点一下去那个节点
   const changed = $derived(store.fields.filter((f) => f.source === 'web' && f.type !== 'secret'));
@@ -48,6 +51,39 @@
     </div>
     <p class="p-note p-small">更新会备份旧版本，新版本起不来自动退回；接入的电脑上的内核会自动换成同一个版本。检查更新和下载走下面的「默认代理」。</p>
   </div>
+
+  {#if rt?.health?.length}
+    <h5 class="p-h">部件健康 <span class="muted p-small">各部件自己报告；正常的也列出来</span></h5>
+    <div class="p-card">
+      {#each rt.health as h (h.name)}
+        <div class="p-row">
+          <span class="tag" class:ok={h.state === 'ok'} class:warn={h.state === 'degraded'} class:err={h.state === 'error'}>{h.state}</span>
+          <code class="p-nowrap">{h.name}</code>
+          <span class="p-grow muted p-small">{h.detail ?? ''}</span>
+          {#if h.state !== 'ok'}<span class="muted p-small">{since(Date.parse(h.since))}</span>{/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if ob && (obChannels.length || obDropped.length || ob.full_24h || ob.too_large_24h || ob.storage || ob.recent?.length)}
+    <h5 class="p-h">出站 <span class="muted p-small">发往聊天平台的消息，先落盘再发</span></h5>
+    <div class="p-card">
+      {#each obChannels as [name, c] (name)}
+        <div class="p-row">
+          <code class="p-nowrap">{name}</code>
+          <span class="p-grow muted p-small">待发 {c.pending} 条 · 最老的 {since(Date.parse(c.oldest))}前入队{#if c.failing} · {c.failing} 条在重试{/if}</span>
+        </div>
+      {/each}
+      {#if obDropped.length}<div class="p-row"><span class="p-grow muted p-small">24 小时内丢弃：{obDropped.map(([r, n]) => `${r} ${n}`).join('、')}</span></div>{/if}
+      {#if ob.full_24h || ob.too_large_24h}<div class="p-row"><span class="p-grow muted p-small">队列满 {ob.full_24h} 次 · 超过单条上限 {ob.too_large_24h} 次</span></div>{/if}
+      {#if ob.storage}<div class="p-err">存储不可用，消息改为内存直发：{ob.storage}</div>{/if}
+      {#each ob.recent ?? [] as r (r.id + r.state + r.at)}
+        <div class="p-row"><span class="tag" class:warn={r.state === 'failed'} class:err={r.state === 'dropped'}>{r.state === 'dropped' ? `丢弃 ${r.reason ?? ''}` : '失败'}</span>
+          <code class="p-nowrap">{r.channel}</code><span class="p-grow muted p-small">{truncate(r.error ?? '', 60)}</span></div>
+      {/each}
+    </div>
+  {/if}
 
   {#if ov.storage_issues?.length}
     <div class="p-err"><b>存储恢复需要处理</b>

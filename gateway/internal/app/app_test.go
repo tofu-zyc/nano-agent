@@ -33,6 +33,15 @@ import (
 type fakeCh struct {
 	name string
 	sent chan string
+
+	mu       sync.Mutex
+	replyTos []string // 每条消息的 replyTo（按发出顺序）
+}
+
+func (f *fakeCh) replies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replyTos...)
 }
 
 func (f *fakeCh) Name() string {
@@ -42,7 +51,13 @@ func (f *fakeCh) Name() string {
 	return f.name
 }
 func (f *fakeCh) Run(ctx context.Context, _ channel.Handler) error { <-ctx.Done(); return nil }
-func (f *fakeCh) Send(_ context.Context, _, text, _ string) error  { f.sent <- text; return nil }
+func (f *fakeCh) Send(_ context.Context, _, text, replyTo string) error {
+	f.mu.Lock()
+	f.replyTos = append(f.replyTos, replyTo)
+	f.mu.Unlock()
+	f.sent <- text
+	return nil
+}
 
 func (f *fakeCh) wait(t *testing.T, substr string) string {
 	t.Helper()
@@ -205,7 +220,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	k := &fakeKernel{t: t, conn: conn, sc: bufio.NewScanner(conn)}
-	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "test",
+	k.send(proto.Msg{T: proto.THello, V: proto.Version, Token: "tok", Node: "test", GatewayTools: gatewayToolNames(),
 		Tools: []proto.ToolSpec{{Name: "echo", Description: "回显", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 	k.expect(proto.TWelcome)
 	waitNode(a, "test", true)
@@ -776,6 +791,7 @@ func (e *env) sayOn(ch channel.Channel, text string) {
 
 func TestStreamingView(t *testing.T) {
 	e, sc := setupStream(t)
+	offerNodeTools(e, "Shell") // 模型替身提出 Shell：测试内核得真的提供它，否则这一轮不接受
 	e.a.cfg.LLM.ThinkingLevels = []string{"none", "high"}
 	e.sayOn(sc, "/think high")
 	sc.wait(t, "已切换为 high")

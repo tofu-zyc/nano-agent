@@ -19,8 +19,9 @@ import (
 
 // 内核和机器
 //
-// 内核是 agent 本身，装在哪台设备上都行，可以同时连好几个，按名字区分；它们没有状态，上下文、
-// 会话、审批都在网关，哪个在线都能接手。工作目录在具体的机器上（workspaces.go）：网关所在的本机、
+// 内核是执行节点，装在哪台设备上都行，可以同时连好几个，按名字区分。长期的会话、模型上下文和
+// 审批交互在网关；进行中的 run、后台 Job、执行租约和文件观察在内核所在的节点上。换一个内核接手
+// 只影响之后的轮次，不迁移已经在跑的进程，后台 Job 仍归原节点。工作目录在具体的机器上（workspaces.go）：网关所在的本机、
 // SSH 服务器、装了内核的电脑。一个会话可以同时挂好几个。每一轮开始时决定怎么跑（route）：
 //
 //   - 先挑跑这一轮的内核：第一个挂载的工作目录所在的机器上有内核就用它，其次是别的挂载的机器上的，
@@ -84,6 +85,8 @@ type KernelInfo struct {
 	SandboxEffective string `json:"sandbox_effective,omitempty"`
 	MaxParallelTools int    `json:"max_parallel_tools,omitempty"`
 	MaxActiveRuns    int    `json:"max_active_runs,omitempty"`
+	// GatewayTools 是内核会交回网关执行的工具名单；旧内核不报（nil），见 handsBack
+	GatewayTools []string `json:"gateway_tools,omitempty"`
 }
 
 type node struct {
@@ -112,35 +115,40 @@ func (n *node) setTools(tools []proto.ToolSpec) {
 	}
 }
 
+// legacyNotHandedBack 是没报名单的旧内核不交给网关的网关工具：它们会落到执行器，回“未知工具”。
+var legacyNotHandedBack = []string{"Report", "Ticket", "External"}
+
+// handsBack 是这个内核会不会把网关工具 name 交回网关执行。没报名单的旧内核按它写死的名单算。
+func (n *node) handsBack(name string) bool {
+	if n.info.GatewayTools == nil {
+		return !slices.Contains(legacyNotHandedBack, name)
+	}
+	return slices.Contains(n.info.GatewayTools, name)
+}
+
 // toolsFor 是给模型的工具：内核的基础工具，加上网关上的技能（Skill）；管理员再加 Gateway /
 // GatewayAdmin。按名字排序（顺序固定，方便前缀缓存）。访客没有工具（调用方跳过）。
 // 调用方持有锁。
 func (a *App) toolsFor(sid string, n *node, readOnly, admin bool) []llm.Tool {
 	tools := slices.Clone(n.tools)
-	for _, spec := range a.searchTools() {
-		tools = append(tools, toolOf(spec))
-	}
+	tools = append(tools, a.toolsNamed(sid, "WebSearch", "WebFetch")...)
 	if readOnly {
 		tools = slices.DeleteFunc(tools, func(t llm.Tool) bool {
 			return t.Function.Name != "Read" && t.Function.Name != "Grep" && t.Function.Name != "WebSearch" && t.Function.Name != "WebFetch"
 		})
 	}
-	if spec, ok := a.skillSpec(sid); ok {
-		tools = append(tools, toolOf(spec))
-	}
+	tools = append(tools, a.toolsNamed(sid, "Skill")...)
 	// 会话分叉：任何会话都能用（分支就是从它分出来的）
-	tools = append(tools, toolOf(sessionTool()))
+	tools = append(tools, a.toolsNamed(sid, "Session")...)
 	if a.jobEvents != nil && n.info.Features["job_control_tool"] >= 1 {
-		tools = append(tools, toolOf(jobTool()))
+		tools = append(tools, a.toolsNamed(sid, "Job")...)
 	}
 	if admin {
-		tools = append(tools, toolOf(scheduleTool()))
+		tools = append(tools, a.toolsNamed(sid, "Schedule")...)
 		if a.jobEvents != nil && n.info.Features["hook_tool"] >= 1 {
-			tools = append(tools, toolOf(hookTool()))
+			tools = append(tools, a.toolsNamed(sid, "Hook")...)
 		}
-		for _, spec := range a.gatewayTools() {
-			tools = append(tools, toolOf(spec))
-		}
+		tools = append(tools, a.toolsNamed(sid, "Gateway", "Message", "GatewayAdmin")...)
 	}
 	sort.SliceStable(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
 	return tools
@@ -197,6 +205,7 @@ func (a *App) KernelUp(name string, hello *proto.Msg, local bool) {
 	n := &node{info: KernelInfo{NodeEpoch: hello.NodeEpoch, LeasesReady: hello.Feature("machine_leases") == 0, Node: name, OS: hello.OS, Arch: hello.Arch, Version: hello.Version,
 		Proto: hello.V, Since: time.Now().UnixMilli(), Local: local}}
 	n.setTools(hello.Tools)
+	n.info.GatewayTools = hello.GatewayTools
 	n.info.Managed = a.managedKernel != "" && name == a.managedKernel
 	if hello.Sandbox != nil {
 		n.info.Landlock = hello.Sandbox.Landlock
@@ -469,6 +478,7 @@ func (rt route) spec(m mount, readAll bool) proto.WorkspaceSpec {
 	if readAll {
 		ro = []string{"/"}
 	}
+	ro = append(ro, m.ws.ExtraRO...)
 	return proto.WorkspaceSpec{Name: m.ws.Label(), Dirs: dirs, RO: ro, Local: m.local, Landlock: m.landlock,
 		OS: m.os, SandboxMode: m.sandboxMode, SandboxRequired: m.sandboxRequired}
 }

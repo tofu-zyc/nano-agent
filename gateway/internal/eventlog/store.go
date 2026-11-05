@@ -658,6 +658,35 @@ func (s *Store) Jobs(after string, limit int) ([]JobRecord, string) {
 	}
 	return copyValue(out), next
 }
+
+// JobsBySession 是源会话 sid 开的所有任务（不分节点、不分状态），按任务键排序，不带日志和租约范围。
+// 工单的分支用它看还有没有没结束的任务：一次扫描，只复制命中的。
+func (s *Store) JobsBySession(sid string) []JobRecord {
+	type row struct {
+		key string
+		job JobRecord
+	}
+	var rows []row
+	s.mu.RLock()
+	for key, j := range s.jobs {
+		if j.Receipt.OriginSID == sid {
+			rows = append(rows, row{key, j})
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(rows, func(i, k int) bool { return rows[i].key < rows[k].key })
+	out := make([]JobRecord, len(rows))
+	for i, r := range rows {
+		out[i] = r.job
+		out[i].Receipt.Result = nil
+		out[i].Receipt.OutputTail = ""
+		out[i].Receipt.Lease = nil
+		out[i].Receipt.Origin.Resources = ""
+		out[i].Receipt.Origin.Exclusive = ""
+	}
+	return copyValue(out)
+}
+
 func (s *Store) FindJob(id string) (JobRecord, bool) {
 	s.mu.RLock()
 	var found JobRecord

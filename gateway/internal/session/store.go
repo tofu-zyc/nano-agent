@@ -8,8 +8,8 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,13 +48,13 @@ type Msg struct {
 	//   Kind      "user_interjection" 表示这是任务进行中收到的用户补充，不是新起的一轮
 	//   ParentRun 这条插话属于哪一次 run（历史分组、压缩、撤回按它识别，不把一次任务拆成几次）
 	//   SourceID  平台上的原始消息 ID；Sender 平台确认的发送者
-	Kind      string `json:"kind,omitempty"`
+	Kind string `json:"kind,omitempty"`
 	// Report 是宿主生成的报告卡片内容（目前只有分支报告）；Kind=branch_report 时才有，
 	// 网页按它画卡片，不靠正文前缀判断。
-	Report *Report `json:"report,omitempty"`
-	ParentRun string `json:"parent_run_id,omitempty"`
-	SourceID  string `json:"source_id,omitempty"`
-	Sender    string `json:"sender,omitempty"`
+	Report    *Report `json:"report,omitempty"`
+	ParentRun string  `json:"parent_run_id,omitempty"`
+	SourceID  string  `json:"source_id,omitempty"`
+	Sender    string  `json:"sender,omitempty"`
 	// ID 是这条消息的稳定标识（插话批量注入时用它和历史对账，位置/Base 只作辅助）。
 	ID string `json:"id,omitempty"`
 	// SourceIDs 是这条消息由哪些插话合并而来（按接收顺序）。
@@ -205,11 +205,6 @@ type renameTombstone struct {
 	From        string `json:"from,omitempty"`
 	FromGen     int64  `json:"from_gen,omitempty"`
 	At          int64  `json:"at,omitempty"`
-}
-
-func sumOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) renameOpFile(from, to string) string {
@@ -618,6 +613,49 @@ func (s *Store) Append(sid string, m Msg) error {
 	return nil
 }
 
+// Seed 用一份消息建立一个新会话（平行世界的群记录和成员会话）：整份写临时文件再替换，
+// 要么整份在，要么没有。会话已经存在就拒绝；没有消息时什么都不建。
+func (s *Store) Seed(sid string, msgs []Msg) error {
+	if s.Exists(sid) {
+		return fmt.Errorf("会话 %s 已经存在，不能用 Seed 覆盖", sid)
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	if err := s.startNewGeneration(sid); err != nil {
+		return err
+	}
+	path, _, err := s.locate(sid, ".jsonl")
+	if err != nil {
+		return err
+	}
+	if err := s.rememberLongKey(sid); err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	seeded := make([]Msg, len(msgs))
+	for i, m := range msgs {
+		if m.TS == 0 {
+			m.TS = time.Now().Unix()
+		}
+		line, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+		seeded[i] = m
+	}
+	if err := writeFileAtomic(path, buf.Bytes()); err != nil {
+		return fmt.Errorf("保存会话历史：%w", err)
+	}
+	if err := s.ensureActive(sid); err != nil {
+		return fmt.Errorf("登记会话激活状态失败：%w", err)
+	}
+	s.hist[sid] = seeded
+	return nil
+}
+
 // FindMessage 在会话历史里按稳定 ID 找消息。limit<=0 表示查全部：
 // "历史有多长"不能改变"这条消息是否已经提交"这个事实。
 func (s *Store) FindMessage(sid, id string, limit int) (Msg, bool) {
@@ -842,7 +880,7 @@ func (s *Store) Reset(sid string) error {
 			}
 		}
 	}
-	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 {
+	if st := s.Settings(sid); st.EnvNote != "" || st.Base != base || st.Summary != "" || st.Meter.Usage.PromptTokens != 0 || st.Prefix != nil || len(st.Omitted) > 0 || st.MemNote != "" || st.LifeNote != "" || len(st.Recalled) > 0 || st.Handoff != "" || len(st.AgentSegments) > 0 || st.Untrusted {
 		st.EnvNote, st.Base, st.Summary = "", base, ""
 		st.MemNote, st.LifeNote, st.Recalled = "", "", nil
 		st.Meter = Meter{}
@@ -851,6 +889,7 @@ func (s *Store) Reset(sid string) error {
 		st.CompactedAt = 0
 		// 历史清空了：切换边界和交接说明都指向不存在的消息；选的 agent 本身保留
 		st.Handoff, st.AgentSegments = "", nil
+		st.Untrusted = false // 清空重开：那些话不在上下文里了
 		if err := s.SaveSettings(sid, st); err != nil {
 			return err
 		}

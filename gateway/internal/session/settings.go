@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"nano-agent/gateway/internal/llm"
+	"nano-agent/gateway/internal/scene"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,8 @@ type Settings struct {
 	Handoff string `json:"handoff,omitempty"`
 	Group   bool   `json:"group,omitempty"` // 这是某个群聊里的会话：不挂工作目录、只发正文、用群聊的工具
 	Web     bool   `json:"web,omitempty"`   // 网页接着这个会话：在网页里新建的，或者在网页里说过话
+	// Scene 是外部群的场景规则（内部群的规则存在群记录里）。读出来的值当只读用：改的时候复制一份再存。
+	Scene *scene.Rules `json:"scene,omitempty"`
 
 	// EnvNote 是上一次告诉模型的环境说明。环境变了才在下一条用户消息前追加新的说明，
 	// 不去改系统提示词，前缀缓存就不会失效。
@@ -71,14 +74,19 @@ type Settings struct {
 	LifeNote string   `json:"life_note,omitempty"` // 拟人型：上一次放的近况说明的哈希
 	Recalled []string `json:"recalled,omitempty"`
 
+	// Untrusted：这个会话里进过不在名单里的人写的东西（议题正文的作者不在名单里、团队群里名单外的人说的话，设计 §16.4）。
+	// 按会话记、要落盘；分出去的会话继承；只在会话清空重开（Reset）时清，压缩历史不清（摘要里还有那些话）。
+	// 从这样的会话建的工单记 Auth.Untrusted：工单里的外部 agent 每次都要审批，auto 也问。
+	Untrusted bool `json:"untrusted,omitempty"`
+
 	// Members 是群聊里说过话的人：名字 → 身份（整理记忆时用来把群友的画像和身份对上）。
 	Members map[string]string `json:"members,omitempty"`
 
-	// Base 是历史文件里已经被 Compact 丢掉的消息数；Summary 代替被丢掉的部分，放在历史最前面。
-	Meter       Meter  `json:"meter,omitempty"`
-	CompactedAt int64  `json:"compacted_at,omitempty"`
-	Base        int    `json:"base,omitempty"`
-	Summary     string `json:"summary,omitempty"`
+	Meter       Meter `json:"meter,omitempty"`
+	CompactedAt int64 `json:"compacted_at,omitempty"`
+	// Base 是有效窗口之前、已由 Summary 代替的消息数；这些消息仍保留在历史文件里。Summary 放在历史最前面。
+	Base    int    `json:"base,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 func (s *Store) settingsFile(sid string) string {
@@ -105,7 +113,6 @@ func (s *Store) Settings(sid string) Settings {
 	return st
 }
 
-// SaveSettings 保存会话设置。
 // SaveSettings 保存会话设置。已删除的会话同样要先开新一代，不能靠保存设置清掉墓碑。
 func (s *Store) SaveSettings(sid string, st Settings) error {
 	b, err := json.MarshalIndent(st, "", "  ")

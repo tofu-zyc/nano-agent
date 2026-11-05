@@ -17,6 +17,7 @@ func (a *App) SetMedia(m *media.Store) {
 	a.mu.Lock()
 	a.media = m
 	a.mu.Unlock()
+	a.mediaRef.Store(m)
 }
 
 // MediaStore 是图片存储（创建聊天渠道时用）。

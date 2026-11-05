@@ -64,8 +64,8 @@ const (
 	TToolStarted        = "tool_started" // 内核 → 网关：这个调用真的开始执行了（时限从这时算）
 	THookCheck          = "hook_check"
 	THookResult         = "hook_result"
-	TWatchSync          = "watch_sync"  // 网关 → 内核：明确文件或非递归目录的完整观察集合
-	TFileEvent          = "file_event"  // 内核 → 网关：至少观察到一次变化，resync_required 表示有缺口
+	TWatchSync          = "watch_sync"   // 网关 → 内核：明确文件或非递归目录的完整观察集合
+	TFileEvent          = "file_event"   // 内核 → 网关：至少观察到一次变化，resync_required 表示有缺口
 	TExecStarted        = "exec_started" // 网关 → 内核：交给网关的调用真的开始了
 	TExecQueued         = "exec_queued"
 	TInputPending       = "input_pending" // 网关 → 内核：当前 run 收到了插话（只记 revision，不改调度）
@@ -190,6 +190,7 @@ type Msg struct {
 	// hello：上次自动更新失败、已经退回的版本，网关别再自动推它
 	UpdateFailed string      `json:"update_failed,omitempty"`
 	Tools        []ToolSpec  `json:"tools,omitempty"`
+	GatewayTools []string    `json:"gateway_tools,omitempty"` // hello：内核交给网关执行的工具名单（旧内核不报）
 	Skills       []SkillSpec `json:"skills,omitempty"`
 	Sandbox      *Sandbox    `json:"sandbox,omitempty"`
 

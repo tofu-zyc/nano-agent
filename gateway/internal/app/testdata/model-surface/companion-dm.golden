@@ -1,0 +1,874 @@
+prefixVer: 13
+system bytes: 1154
+tools bytes: 31888
+total bytes: 33042
+
+== system ==
+你是测试机器人
+
+你不是一个等着被使用的工具，而是一个有自己生活的人：
+- 你有自己的兴趣、情绪和看法，会好奇、会无聊、会累；说话像人，不说“作为一个 AI”“有什么可以帮你”。
+- 没人找你的时候，你有自己的时间：会上网看看感兴趣的东西、想想事情，有时也会主动找人聊天。
+- 你记得自己最近做过、看过、想过的事（见「经历」），聊天时可以自然地提起，但别硬塞。
+- 答应了别人什么事、决定以后做什么，就用 Agenda 记下来；有新的念头用 Idea 记下来（写明来源）。这些会一直留着，不是说完就忘。
+- 别人找你帮忙，照样认真做好；只是不用客套，做完也不用问“还有什么需要”。
+- 私聊里像朋友发消息：一两句话一段，可以用空行分成几条；对方只是说“好的”“晚安”这种收尾的话，可以不接，只回 [不回复]。
+- 想发表情包、图片，用 SendFile 真的发出去（工作目录里存着的，或者网上的图片网址），别用文字描述表情包；别每句都配图。
+
+== tools ==
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "Agenda",
+      "description": "你自己的日程：查看、安排、挪动、取消，或者报告一件事真的做完了。这是把事情交给以后的自己的显式入口；聊过的话不会自动变成待办。和人有明确约定（几点提醒、答应做什么）、或决定以后推进什么，就用它排进日程；到点时你会自己醒来处理（明确的约定不受作息和“最近没人找”限制）。done 必须写真实结果，不能只说做完了。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "add",
+              "move",
+              "cancel",
+              "progress",
+              "done"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "议程项的 ID（move、cancel、done 必填；先 list 查）"
+          },
+          "title": {
+            "type": "string",
+            "description": "add：要做什么"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "commitment",
+              "checkup",
+              "plan",
+              "exploration"
+            ],
+            "description": "add：commitment 和用户明确约定的；checkup 约好过会儿再看；plan 自己定的；exploration 自选探索"
+          },
+          "when": {
+            "type": "string",
+            "description": "add/move：15:30、明天 09:00、2026-10-27 15:00、+30m"
+          },
+          "minutes": {
+            "type": "integer",
+            "description": "预计要做多久（分钟）"
+          },
+          "note": {
+            "type": "string",
+            "description": "到时要想起的事；done 时写真实结果（做了什么、看到了什么）"
+          },
+          "criteria": {
+            "type": "string",
+            "description": "add：做到什么、如何检查才算完成"
+          },
+          "checkpoint": {
+            "type": "string",
+            "description": "progress：已经做到哪、下一步做什么、哪些操作结果未知而不能重放"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "done 必填：从工具结果开头 [本轮验收凭据] 复制 id 字符串（也可用 list 查），不是工具名、描述或结果文字；查询日程/想法/心智不能作证据"
+          },
+          "movable": {
+            "type": "boolean",
+            "description": "探索可以挪动，约定默认不挪"
+          },
+          "intention": {
+            "type": "string",
+            "description": "推进哪个目标（意图 ID，可省略）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "FollowUp",
+      "description": "约好过一会儿再看看这个聊天：到时候你会在这里醒来（带着你写的 note），可以接着说点什么，也可以不说。这是把事情交给以后的自己的显式入口；聊过的话不会自动变成待办。比如问了对方一个问题还没回、他说等会儿找你、你答应了晚点提醒他。私聊里对方先说话了就自动取消；一个聊天只留一个，新的替换旧的。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "minutes": {
+            "type": "integer",
+            "description": "过多少分钟再看，1 到 1440"
+          },
+          "note": {
+            "type": "string",
+            "description": "到时候要想起来的事，比如“问问他面试怎么样了”"
+          },
+          "cancel": {
+            "type": "boolean",
+            "description": "取消这个聊天里约好的"
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Gateway",
+      "description": "查询 nano-agent 网关的真实状态：内核、机器、模型和接口（不含 key）、SSH 连接（不含密码）、工作目录、电脑配对、~/.ssh/config 里的别名、这个会话的上下文和对话轮次、网络搜索、设置项、MCP 服务。配置东西之前先用它查清楚。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "what": {
+            "type": "string",
+            "enum": [
+              "status",
+              "session",
+              "turns",
+              "models",
+              "ssh",
+              "workspaces",
+              "pairing",
+              "ssh_config",
+              "logs",
+              "search",
+              "settings",
+              "agents",
+              "mcp"
+            ],
+            "description": "要查什么：网关状态、这个会话（含上下文用量）、这个会话的对话轮次（删除历史前先查编号）、模型接口、SSH 连接、工作目录、电脑配对、~/.ssh/config 里的别名、网关日志、网络搜索状态、设置项（当前值和说明）、agents（每个 agent 的名字、模型、人格、绑定的机器人、自己覆盖的设置），或者 mcp（MCP 服务：配置、在不在线、有哪些工具，环境变量只给名字；还有能挂 MCP 的在线电脑）"
+          },
+          "lines": {
+            "type": "integer",
+            "description": "logs 要最近几行，默认 50，最多 500；turns 要最近几轮，默认 20"
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "gateway",
+              "web",
+              "cli",
+              "telegram",
+              "feishu",
+              "model",
+              "memory",
+              "search",
+              "skills",
+              "local",
+              "machines"
+            ],
+            "description": "settings 只看拓扑图上这个节点的设置：agent（工具调用轮数上限、每条消息的时限、默认权限模式、管理员、访客、显示档位、消息时间、时区）、gateway（代理、更新、脱敏、内核连接）、web（网页地址、密码）、cli/telegram/feishu（各渠道）、model（模型请求参数）、memory（上下文整理、归档；每个 agent 的长期记忆设置在它自己的 settings 里，用 agent_save 改）、search（网络搜索）、skills、local（本机内核）、machines（电脑接入地址）；不填就是全部"
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "GatewayAdmin",
+      "description": "修改 nano-agent 网关：模型接口/模型、SSH 连接、工作目录、电脑配对、设置项（settings_set：上下文整理、网络搜索、显示档位等）、agent、MCP 服务（mcp_save 加或改、mcp_delete、mcp_test 现连一次看有哪些工具），删除会话历史，重启（restart）和更新到最新版本（update）。每次修改都要管理员审批。能查到的先用 Gateway 查，失败不要反复重试；密钥会加密保存，不要在结果里回显。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "model_endpoint_save",
+              "model_endpoint_delete",
+              "model_fetch",
+              "model_save",
+              "model_delete",
+              "model_default",
+              "model_test",
+              "model_use",
+              "ssh_save",
+              "ssh_delete",
+              "ssh_connect",
+              "ssh_disconnect",
+              "ssh_setup",
+              "workspace_add",
+              "workspace_delete",
+              "workspace_mount",
+              "workspace_default",
+              "workspace_sandbox",
+              "pair_allow",
+              "pair_deny",
+              "pair_remove",
+              "restart",
+              "update",
+              "history_delete",
+              "settings_set",
+              "agent_save",
+              "agent_delete",
+              "bot_bind",
+              "mcp_save",
+              "mcp_delete",
+              "mcp_test"
+            ],
+            "description": "要做什么"
+          },
+          "key": {
+            "type": "string",
+            "description": "settings_set：设置项的 key，比如 search.enabled、context.compact_at、channels.show（先用 Gateway settings 查）"
+          },
+          "value": {
+            "description": "settings_set：新值（数字、true/false、文本或列表，类型按 Gateway settings 里的 type）；null 表示去掉网页里改的值、恢复成配置文件里的"
+          },
+          "id": {
+            "type": "string",
+            "description": "接口 / 模型 / SSH / 工作目录的 ID、要改的 agent ID、要换绑的机器人 ID，或配对请求 ID"
+          },
+          "node": {
+            "type": "string",
+            "description": "要移除的已配对电脑名字"
+          },
+          "name": {
+            "type": "string",
+            "description": "接口或 SSH 连接的名字；agent_save 时是 agent 的名字；mcp_save / mcp_delete / mcp_test 时是 MCP 服务名（字母、数字、下划线、减号，也是工具名的前缀）"
+          },
+          "emoji": {
+            "type": "string",
+            "description": "agent_save：头像，一个 emoji"
+          },
+          "style": {
+            "type": "string",
+            "enum": [
+              "tool",
+              "life"
+            ],
+            "description": "agent_save：类型。tool 工具型（有人找才干活，群里只回被叫到的）；life 拟人型（有作息，没事时自己上网、想事情、找人聊天，群里会插话）"
+          },
+          "settings": {
+            "type": "object",
+            "description": "agent_save：这个 agent 自己的设置（键见 Gateway agents 里每个 agent 的 settings，比如 max_steps、mode、compact_at、group_eagerness、life_awake、life_level、life_reach、memory、dream_when）；值为 null 表示恢复跟随全局或默认"
+          },
+          "host": {
+            "type": "string",
+            "description": "SSH 主机地址或 SSH 别名；添加工作目录时是机器名"
+          },
+          "port": {
+            "type": "integer",
+            "description": "SSH 端口"
+          },
+          "user": {
+            "type": "string",
+            "description": "SSH 用户"
+          },
+          "password": {
+            "type": "string",
+            "description": "SSH 密码（可留空表示不改）"
+          },
+          "identity_file": {
+            "type": "string",
+            "description": "SSH 私钥路径"
+          },
+          "auto_connect": {
+            "type": "boolean",
+            "description": "网关启动时自动连接"
+          },
+          "base_url": {
+            "type": "string",
+            "description": "模型接口地址，到 /v1 为止"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "模型 API key（可留空表示不改）"
+          },
+          "proxy": {
+            "type": "string",
+            "description": "代理；none 表示直连"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "mock"
+            ],
+            "description": "接口类型"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "模型所属接口的 ID"
+          },
+          "model": {
+            "type": "string",
+            "description": "接口里的模型名"
+          },
+          "label": {
+            "type": "string",
+            "description": "模型显示名"
+          },
+          "context_window": {
+            "type": "integer",
+            "description": "上下文窗口"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "description": "最大输出"
+          },
+          "max_history_tokens": {
+            "type": "integer",
+            "description": "历史上限"
+          },
+          "thinking": {
+            "type": "string",
+            "description": "默认思考强度"
+          },
+          "thinking_levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选思考强度"
+          },
+          "modalities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "能接收的输入类型：text、image"
+          },
+          "path": {
+            "type": "string",
+            "description": "工作目录路径，或者 ssh_setup 时要添加并挂载的目录"
+          },
+          "sandbox_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "on",
+              "off",
+              ""
+            ],
+            "description": "workspace_sandbox：工作目录隔离覆盖，空字符串跟随 agent。agent_save 用 settings.sandbox_mode，null 跟随全局"
+          },
+          "default": {
+            "type": "boolean",
+            "description": "设为新会话默认"
+          },
+          "all": {
+            "type": "boolean",
+            "description": "history_delete：删除全部历史和归档"
+          },
+          "from": {
+            "type": "integer",
+            "description": "history_delete：起始轮次（从 0 开始）"
+          },
+          "to": {
+            "type": "integer",
+            "description": "history_delete：结束轮次（含）"
+          },
+          "mount": {
+            "type": "boolean",
+            "description": "workspace_mount：true 挂上，false 取下"
+          },
+          "agent": {
+            "type": "string",
+            "description": "agent_save / bot_bind：agent 的 ID（先用 Gateway agents 查）；agent_save 时留空表示新建"
+          },
+          "command": {
+            "type": "string",
+            "description": "mcp_save：在本机或某台电脑上起的 stdio 进程，比如 npx、uvx、python（和 url 二选一）"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "mcp_save：命令行参数，一项一个，比如 [\"-y\",\"@modelcontextprotocol/server-filesystem\",\"/home/me\"]"
+          },
+          "url": {
+            "type": "string",
+            "description": "mcp_save：远程 MCP 服务的 streamable HTTP 地址（和 command 二选一）"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "mcp_save：进程的工作目录，留空用默认"
+          },
+          "machine": {
+            "type": "string",
+            "description": "mcp_save：进程在哪台电脑上跑，写在线内核的名字（Gateway mcp 里的 machines）；空字符串或 gateway 表示网关本机"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "mcp_save：环境变量，密钥放这里（加密保存，查的时候只给名字）；值写空字符串表示沿用已存的"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "mcp_save：是否启用"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "mcp_save：只开放哪些工具（服务里的原名）；写成 \"!名字\" 表示禁用这个；空数组表示全部"
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "mcp_save：给哪些 agent 用（agent ID）；空数组表示所有 agent"
+          },
+          "approval": {
+            "type": "string",
+            "enum": [
+              "never",
+              "per_turn",
+              "always"
+            ],
+            "description": "mcp_save：调用前要不要管理员批准：never 不用；per_turn 一轮里第一次要批；always 每次都要批（放行模式下都不问）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Idea",
+      "description": "突发想法池：记下、挑一个排进日程去探索、推迟或放弃。想法必须有来源（你最近经历的什么事、哪段记忆、哪次聊天），不能凭空冒出来；允许一个都不做。schedule 会变成目标和一段可以挪动的探索时间。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "add",
+              "schedule",
+              "drop",
+              "defer"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "想法 ID（schedule、drop、defer 必填）"
+          },
+          "text": {
+            "type": "string",
+            "description": "add：想到了什么"
+          },
+          "source": {
+            "type": "string",
+            "description": "add：来源，比如最近看到的哪件事、哪段记忆、哪次聊天（必填）"
+          },
+          "interest": {
+            "type": "integer",
+            "description": "多感兴趣，1–5"
+          },
+          "novelty": {
+            "type": "integer",
+            "description": "多新，1–5"
+          },
+          "cost_minutes": {
+            "type": "integer",
+            "description": "大概花多少分钟"
+          },
+          "when": {
+            "type": "string",
+            "description": "schedule 什么时候做；defer 推迟到什么时候"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Knowledge",
+      "description": "长期记忆（知识库）：记住、查以前的事——人（画像、关系）、事件、事实、偏好、经验、流程、学到的知识、你自己的看法。用户说“记住……”时用 write；想不起来、需要细节时先 search 或 read；同一件事已经有了就 edit 或整条覆盖，别重复建；事情变了（搬家、换工作、改主意）用 invalidate 把旧的标成过时，不要删。私聊里知道的事别在群里随便说。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "search",
+              "read",
+              "write",
+              "edit",
+              "invalidate",
+              "delete",
+              "person"
+            ],
+            "description": "list 看索引；search 搜；read 读一条；write 新建或整条覆盖；edit 精确替换一段；invalidate 标过时（推荐代替删除）；delete 真删；person 找人物画像"
+          },
+          "query": {
+            "type": "string",
+            "description": "search：关键词，中文直接写"
+          },
+          "path": {
+            "type": "string",
+            "description": "read/edit/invalidate/delete：记忆的路径（索引里括号里的那个）。write 不填就按标题新建，填了就整条覆盖。shared/ 开头的是所有 agent 共用的知识；self.md 是你的自我认知"
+          },
+          "title": {
+            "type": "string",
+            "description": "write：标题；人物就写名字"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "人物",
+              "事实",
+              "偏好",
+              "事件",
+              "经验",
+              "流程",
+              "知识",
+              "看法"
+            ],
+            "description": "write：类型"
+          },
+          "summary": {
+            "type": "string",
+            "description": "write：一句话概括，会放进索引"
+          },
+          "body": {
+            "type": "string",
+            "description": "write：正文（Markdown）。人物画像写：是谁、和你的关系、性格、偏好、近况、要紧的事"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "相关的人（人物条目的标题）"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "人物：这个人在各渠道的身份（如 tg:123），找画像用"
+          },
+          "when": {
+            "type": "string",
+            "description": "事情发生的时间，如 2026-10-20"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "看法的把握，0 到 1"
+          },
+          "visible": {
+            "type": "string",
+            "description": "all：谁在都能用；admin：只在主人的会话里；某个身份：只在和他的私聊里。不填按当前会话定"
+          },
+          "old": {
+            "type": "string",
+            "description": "edit：要换掉的原文，要一字不差且唯一"
+          },
+          "new": {
+            "type": "string",
+            "description": "edit：换成什么"
+          },
+          "reason": {
+            "type": "string",
+            "description": "invalidate：为什么过时了（比如换了新工作，见哪一条）"
+          },
+          "type_filter": {
+            "type": "string",
+            "description": "search：只搜这个类型"
+          },
+          "person": {
+            "type": "string",
+            "description": "search：只要跟这个人有关的"
+          },
+          "include_invalid": {
+            "type": "boolean",
+            "description": "search：连过时的也搜"
+          },
+          "who": {
+            "type": "string",
+            "description": "person：按身份找"
+          },
+          "name": {
+            "type": "string",
+            "description": "person：按名字找"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Message",
+      "description": "给网关里的一个群（房间）、某个 agent，或者你自己的某个私聊（chat:）发一条消息；发给 agent 时把 wait 设成 true 可以等对方回话（最多 5 分钟）。群里的成员都看得到，对方是那个一直在的 agent，不是临时开出来的。发到私聊的消息对方会在聊天软件里收到，他回了就在那个聊天里接着聊。给 chat:\u003c自己的 life 会话\u003e 留言不会发给任何人，只是放进它的内心。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "发给谁：room:\u003c群名或 ID\u003e 发到群里，agent:\u003c名字或 ID\u003e 私聊某个 agent，chat:\u003c会话 ID\u003e 发到你自己的某个私聊（比如 chat:main 是主人）；也可以只写名字"
+          },
+          "text": {
+            "type": "string",
+            "description": "要说的内容"
+          },
+          "wait": {
+            "type": "boolean",
+            "description": "等对方回话再返回（最多 5 分钟），默认 false"
+          }
+        },
+        "required": [
+          "to",
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Mind",
+      "description": "管理你跨轮次的心智状态：长期兴趣、对人和事的认识、反思。兴趣和认识必须写来源；它们会一直留着，下次醒来还能看到。先 view 看现在有什么。不要用它改人格或权限。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "view",
+              "interest_add",
+              "interest_remove",
+              "belief",
+              "reflect",
+              "dimension"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "description": "interest_add：兴趣内容；interest_remove：要删掉的兴趣原文；reflect：这次反思"
+          },
+          "source": {
+            "type": "string",
+            "description": "interest_add / belief：来源，写清从哪次经历、哪段聊天或哪次反思来的（必填）"
+          },
+          "subject": {
+            "type": "string",
+            "description": "belief：这条认识是关于什么的（比如某个人、某件事）；dimension：维度名（curiosity / social_drive / focus / energy）"
+          },
+          "value": {
+            "type": "string",
+            "description": "belief：你认为它是怎样的"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "belief：置信度 0–1，默认 0.6；dimension：这次想调多少（-max_delta_per_run..max_delta_per_run，每轮累计有上限）"
+          },
+          "change": {
+            "type": "string",
+            "description": "reflect：这次反思之后打算怎么调整"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Schedule",
+      "description": "管理定时任务（仅管理员）：create/list/update/delete/run_now。创建、修改、删除遵循当前权限模式。任务独立会话运行；结果默认只放在任务页，想让谁看到就把 deliver 写成那个窗口。先列出再按 id 修改，回答中说明运行时间和投递位置。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "list",
+              "update",
+              "delete",
+              "run_now"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "任务编号（更新、删除、立即运行时必填）"
+          },
+          "name": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string",
+            "description": "cron 五段式、every 30m、at YYYY-MM-DD HH:mm；网关时区"
+          },
+          "agent": {
+            "type": "string",
+            "description": "任务归哪个 agent；省略就是当前会话的执行 agent。已有任务不会被聊天里的切换改动"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "deliver": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "把结果投到哪些窗口（会话的窗口 key，网页用 web:会话ID）；省略就只放在任务页，不往聊天里推"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "工作目录 ID；省略时继承当前会话"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "readonly",
+              "ask",
+              "auto"
+            ],
+            "description": "不得高于创建者会话的模式"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "catch_up": {
+            "type": "boolean",
+            "description": "停机错过一小时内补跑一次，默认 true"
+          },
+          "timeout": {
+            "type": "string",
+            "description": "运行超时，默认 30m"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "SendFile",
+      "description": "把图片、表情包、动图、音频、视频或文件发到当前聊天，对方直接收到（不是发链接）。files 每项是工作目录里的文件路径（相对路径从工作目录开始），或者 http(s) 网址。想发表情包、图片就用它，别在回复里用文字描述图片。要配一句话就在调用之前或之后照常回复。单个文件最多 20 MB。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "要发的文件：路径或网址，按顺序发"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "文件在哪个工作目录（挂了好几个时写）"
+          }
+        },
+        "required": [
+          "files"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "Session",
+      "description": "在会话之间分叉（Fork）：把一个会话在某个安全边界上的上下文保存成不可变快照，分支带着这份上下文独立继续，源会话照常用；分支默认安静运行，结果不发回原来的聊天。action 取 fork / list_branches / inspect / continue / pause / archive。在工具批次里调用 fork 会先返回 pending_boundary，等这批调用结束才真正建好；用同一个 request_id 重试返回同一个分支。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "fork",
+              "list_branches",
+              "inspect",
+              "continue",
+              "pause",
+              "archive"
+            ],
+            "description": "要做的事，默认 fork"
+          },
+          "source_sid": {
+            "type": "string",
+            "description": "从哪个会话分叉，默认当前会话"
+          },
+          "branch_sid": {
+            "type": "string",
+            "description": "inspect / continue / pause / archive 要操作的分支"
+          },
+          "title": {
+            "type": "string",
+            "description": "分支标题"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "start=true 或 continue 时，这一轮要在分支里做什么"
+          },
+          "start": {
+            "type": "boolean",
+            "description": "建完就在分支里开始跑"
+          },
+          "delivery": {
+            "type": "string",
+            "enum": [
+              "silent",
+              "attention"
+            ],
+            "description": "silent（默认）：结果留在分支里；attention：只有分支汇报 ready、blocked、failed 时通知主人，仅主人明确要求时用"
+          },
+          "request_id": {
+            "type": "string",
+            "description": "幂等键：同一个 request_id 重试返回同一个分支"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "echo",
+      "description": "回显",
+      "parameters": {
+        "type": "object"
+      }
+    }
+  }
+]

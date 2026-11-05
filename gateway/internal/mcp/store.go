@@ -2,7 +2,7 @@
 //
 // 配置在 data/mcp.json：每个服务要么在网关本机跑一个 stdio 进程，要么连一个远程
 // streamable HTTP 地址。工具以 <服务>__<工具> 暴露给模型，参数 schema 原样透传。
-// 经内核透传到别的电脑（协议 v10）是后面一块，这里先只认网关本机。
+// 指定 Machine 时，进程经内核的管道在那台机器上起。
 package mcp
 
 import (
@@ -22,7 +22,7 @@ import (
 // Server 是一个 MCP 服务的配置（data/mcp.json 里的一项）。
 //
 // URL 和 Command 二选一：给 URL 就连远程的 streamable HTTP；给 Command 就在网关本机起一个
-// stdio 进程。Machine 留给协议 v10 的内核透传，现在只认空和 "gateway"。
+// stdio 进程。Machine 指定别的电脑时必须给 Command，进程经内核的管道在那台机器上起。
 type Server struct {
 	Name     string            `json:"name"`               // 服务名，也是工具名的前缀
 	URL      string            `json:"url,omitempty"`      // 远程 streamable HTTP 地址
@@ -30,7 +30,7 @@ type Server struct {
 	Args     []string          `json:"args,omitempty"`     // 命令行参数
 	Env      map[string]string `json:"env,omitempty"`      // 环境变量；密钥存成 enc:v1:
 	Cwd      string            `json:"cwd,omitempty"`      // 工作目录
-	Machine  string            `json:"machine,omitempty"`  // 空或 gateway = 网关本机
+	Machine  string            `json:"machine,omitempty"`  // 空或 gateway = 网关本机；否则是在线内核的名字，进程在那台机器上起
 	Enabled  bool              `json:"enabled"`            // 关掉的服务不连、不提供工具
 	Tools    []string          `json:"tools,omitempty"`    // 允许的工具；"!名字" 表示禁用
 	Agents   []string          `json:"agents,omitempty"`   // 给哪些 agent 用；空 = 所有

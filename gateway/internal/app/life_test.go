@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/knowledge"
 	"nano-agent/gateway/internal/proto"
@@ -84,8 +85,8 @@ func TestLifeWake(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
 	waitIdle(t, e, sid)
 	e.a.mu.Lock()
-	ls := e.a.lifeOf("default")
-	next, wakes, recent := ls.Next, ls.Wakes, len(e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 3, e.a.now()))
+	st := e.a.mind("default")
+	next, wakes, recent := e.a.nextWakeAt("default", st), e.a.wakesToday(st, e.a.now()), len(e.a.experienceOf("default").Recent(knowledge.Viewer{Admin: true}, "", 3, e.a.now()))
 	info := e.a.lifeBrief(func() agents.Agent { ag, _ := store.Get("default"); return ag }())
 	e.a.mu.Unlock()
 	// normal：1 小时 + 0.5×1 小时
@@ -116,7 +117,7 @@ func TestLifeWake(t *testing.T) {
 	e.k.send(proto.Msg{T: proto.TDone, SID: sid, Status: proto.StatusOK})
 	waitIdle(t, e, sid)
 	e.a.mu.Lock()
-	wakes = e.a.lifeOf("default").Wakes
+	wakes = e.a.wakesToday(e.a.mind("default"), e.a.now())
 	e.a.mu.Unlock()
 	if wakes != 1 {
 		t.Fatalf("叫醒的不算次数：%d", wakes)
@@ -131,14 +132,14 @@ func TestLifeBlocked(t *testing.T) {
 	ag, _ := store.Get(agents.DefaultID)
 	e.a.mu.Lock()
 	e.a.bootAt = time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
-	ls := e.a.lifeOf("default")
+	st := e.a.mind("default")
 	e.a.mu.Unlock()
 	check := func(at time.Time, want string) {
 		t.Helper()
 		e.a.mu.Lock()
 		defer e.a.mu.Unlock()
 		e.a.now = func() time.Time { return at }
-		if got := e.a.lifeBlocked(ag, ls, at); got != want {
+		if got := e.a.lifeBlocked(ag, at); got != want {
 			t.Fatalf("%v：期望 %q，实际 %q", at, want, got)
 		}
 	}
@@ -151,10 +152,14 @@ func TestLifeBlocked(t *testing.T) {
 	e.a.mu.Unlock()
 	check(noon, "")
 	check(noon.Add(time.Hour), "")
-	ls.Tokens = 1000
-	check(noon.Add(time.Hour), "今天的预算用完了")
-	ls.Tokens, ls.Wakes = 0, 8
-	check(noon.Add(time.Hour), "今天醒够了")
+	later := noon.Add(time.Hour)
+	st.AddLedgerTokens(autonomy.LedgerOther, 1000, later, e.a.loc) // 今天的用量都在账本里
+	check(later, "今天的预算用完了")
+	for i := range st.Ledger { // 用量清零，醒来次数 8
+		st.Ledger[i].Tokens = 0
+	}
+	st.RaiseLedgerStarts(autonomy.LedgerExploration, 8, later, e.a.loc)
+	check(later, "今天醒够了")
 	// 工具型没有内心活动
 	e.a.mu.Lock()
 	tool, _ := store.Get(agents.DefaultID)
@@ -228,7 +233,11 @@ func TestLifeReachOut(t *testing.T) {
 	all := "all"
 	ag.LifeReach = &all
 	store.Update(ag)
-	e.a.lifeOf("default").Reaches = 0
+	for i, row := range e.a.mind("default").Ledger { // 今天找人的次数清零
+		if row.Source == autonomy.LedgerReach {
+			e.a.mind("default").Ledger[i].Starts = 0
+		}
+	}
 	e.a.now = func() time.Time { return time.Date(2026, 10, 21, 23, 50, 0, 0, time.UTC) }
 	e.a.mu.Unlock()
 	if _, err = send("fake:c2", "睡了吗"); err == nil || !strings.Contains(err.Error(), "睡觉时间") {
@@ -307,7 +316,7 @@ func TestLifeCreateAndLabels(t *testing.T) {
 	e.a.mu.Lock()
 	si := e.a.sessionInfo(lifeSID(info.ID))
 	ag, _ := e.a.agentByID(info.ID)
-	note := e.a.wakeNote(ag, e.a.lifeOf(info.ID), e.a.now(), false)
+	note := e.a.mindNote(ag, e.a.mindOf(info.ID), autonomy.Trigger{}, e.a.now(), true)
 	e.a.mu.Unlock()
 	if si.Title != "小鲍的内心" || si.Channel != "life" {
 		t.Fatalf("内心会话的名字和图标：%q %q", si.Title, si.Channel)

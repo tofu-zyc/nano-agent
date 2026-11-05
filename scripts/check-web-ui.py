@@ -27,6 +27,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATEWAY = os.path.join(ROOT, "gateway", "nano-gateway")
 SHOTS = os.path.join(ROOT, "build", "ui-check")
 PASSWORD = "ui-check-password"
+GROUP_SID = "telegram:ui-group"
+FAKE_GH_API = ""  # 界面检查里的假 GitHub 的地址（main 里起）
 FAILS = []
 
 
@@ -50,14 +52,16 @@ def free_port():
 def start_gateway(tmp):
     port = free_port()
     home, nano = os.path.join(tmp, "home"), os.path.join(tmp, "nano")
-    os.makedirs(home)
-    os.makedirs(nano)
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(nano, exist_ok=True)
     sock = tempfile.mkdtemp(prefix="nui.", dir="/tmp")
     with open(os.path.join(nano, "gateway.toml"), "w") as f:
         f.write(f'[kernel]\nlisten = "unix:{sock}/k.sock"\ntoken = "ui-check"\n'
                 f'[web]\nlisten = "127.0.0.1:{port}"\npassword = "{PASSWORD}"\n'
                 '[cli]\nenabled = false\n[llm]\nprovider = "mock"\nmodel = "mock"\n')
     env = {"PATH": "/usr/bin:/bin", "HOME": home, "NANO_HOME": nano, "USERPROFILE": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+    if FAKE_GH_API:
+        env["NANO_GITHUB_API"] = FAKE_GH_API
     log = open(os.path.join(tmp, "gateway.log"), "w")
     proc = subprocess.Popen([GATEWAY, "-c", os.path.join(nano, "gateway.toml")], cwd=tmp, env=env,
                             stdout=subprocess.DEVNULL, stderr=log)
@@ -70,6 +74,383 @@ def start_gateway(tmp):
             time.sleep(0.1)
     proc.kill()
     raise SystemExit("网关没起来，看 " + os.path.join(tmp, "gateway.log"))
+
+
+def check_pending(page, url):
+    """等我处理：拓扑图上的数字、打开面板、回答、知道了、全部承诺按阶段分组。"""
+    page.goto(url + "#/")
+    page.reload()
+    try:
+        page.wait_for_selector("[data-testid=pending-count]", timeout=8000)
+    except Exception:
+        fail("拓扑图上没有“等我处理”的标记")
+        return
+    n = page.locator("[data-testid=pending-count]").inner_text().strip()
+    if n == "2":
+        ok("拓扑图上的“等我处理”显示 2")
+    else:
+        fail("“等我处理”的数字应该是 2：" + n)
+    page.click("[data-testid=pending-badge]")
+    page.wait_for_selector("[data-testid=pending-panel]")
+    rows = page.locator("[data-testid=pending-row]")
+    if rows.count() == 2:
+        ok("面板里一件事一行")
+    else:
+        fail("面板应该有 2 行：" + str(rows.count()))
+    asked = page.locator("[data-testid=pending-row][data-kind=branch]")
+    failed = page.locator("[data-testid=pending-row][data-id=ui-failed]")
+    if asked.locator("[data-testid=pending-input]").count() == 1 and failed.locator("[data-testid=pending-input]").count() == 0:
+        ok("只有带问题的才有“回答”")
+    else:
+        fail("“回答”应该只在带问题的那一行")
+    if "要不要加上周末？" in asked.inner_text():
+        ok("行里有问题原文")
+    else:
+        fail("行里没有问题：" + asked.inner_text())
+    page.screenshot(path=os.path.join(SHOTS, "pending.png"))
+    # 全部承诺：按阶段分组
+    page.click("[data-testid=pending-all-toggle]")
+    page.wait_for_selector("[data-testid=pending-all] section")
+    phases = page.locator("[data-testid=pending-all] section").evaluate_all("els => els.map(e => e.dataset.phase)")
+    if phases and phases[0] == "blocked":
+        ok("全部承诺按阶段分组：" + "、".join(phases))
+    else:
+        fail("全部承诺的分组不对：" + str(phases))
+    # 工单：出现在全部承诺的“暂停”里（种子工单是 paused，免得重启后自己开工），种类叫“工单”；主人在网页上叫停，要写理由，叫停后进“stopped”
+    tk = page.locator("[data-testid=pending-all] section[data-phase=paused] .lrow", has_text="工单「界面检查·工单」")
+    if tk.count() == 1:
+        ok("工单出现在全部承诺的暂停里（种子工单是暂停的，不让它自己开工）")
+    else:
+        fail("全部承诺里没有工单：" + page.locator("[data-testid=pending-all]").inner_text()[:300])
+    tk.locator("[data-testid=ticket-cancel]").click()
+    page.fill("[data-testid=ticket-reason]", "界面检查里叫停")
+    page.click("[data-testid=ticket-cancel-ok]")
+    try:
+        page.wait_for_selector("[data-testid=pending-all] section[data-phase=stopped] .lrow:has-text('工单「界面检查·工单」')", timeout=5000)
+        ok("网页上叫停工单后进叫停")
+    except Exception:
+        fail("叫停后工单没有进叫停：" + page.locator("[data-testid=pending-all]").inner_text()[:300])
+    # 知道了：那一行消失，数字减一
+    failed.locator("[data-testid=pending-seen]").click()
+    try:
+        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row]').length === 1", timeout=5000)
+        ok("点“知道了”之后这件事不再列")
+    except Exception:
+        fail("点“知道了”之后还在列")
+    # 回答：先记，再生效；分支接着跑，跑完是它自己的就绪，再点一次“知道了”（那是另一件事）
+    if "问：" in asked.inner_text() and "等你回答" not in asked.locator(".why").all_inner_texts().__str__():
+        ok("有问题时不重复显示“等你回答”")
+    else:
+        fail("有问题时 why 和问题显示了两遍")
+    asked.locator("[data-testid=pending-input]").fill("加上")
+    asked.locator("[data-testid=pending-answer]").click()
+    try:
+        page.wait_for_function("document.querySelectorAll('[data-testid=pending-row] .q').length === 0", timeout=5000)
+        ok("回答之后问题不再列")
+    except Exception:
+        fail("回答之后问题还在：" + page.locator("[data-testid=pending-panel]").inner_text()[:400])
+    end = time.time() + 15
+    while time.time() < end and page.locator("[data-testid=pending-row]").count():
+        btn = page.locator("[data-testid=pending-seen]")
+        if btn.count():
+            btn.first.click()
+        time.sleep(0.5)
+    if page.locator("[data-testid=pending-row]").count() == 0:
+        ok("分支带着回答跑完、点过知道了之后没有等我处理的事")
+    else:
+        fail("还有没处理的：" + page.locator("[data-testid=pending-panel]").inner_text()[:200])
+    page.click("[data-testid=pending-badge]")
+    page.reload()
+    page.wait_for_selector(".legend")
+    time.sleep(0.5)
+    if page.locator("[data-testid=pending-badge]").count() == 0:
+        ok("N 为 0 时不显示标记")
+    else:
+        fail("N 为 0 时标记应该不显示")
+
+
+def check_team_card(page, url):
+    """外部群的场景设置里的“团队”卡片：勾上、勾名单成员（显示名字）、选工作目录，保存后重新打开还在。"""
+    target = url + "#/sessions/" + urllib.request.quote(GROUP_SID, safe="")
+    def open_settings():
+        page.goto(target)
+        page.reload()
+        page.click("button[title=会话设置]")
+    open_settings()
+    try:
+        page.wait_for_selector("[data-testid=team-card]", timeout=8000)
+    except Exception:
+        page.screenshot(path=os.path.join(SHOTS, "team-card-missing.png"))
+        fail("外部群的场景设置里没有“团队”卡片：" + page.locator("body").inner_text()[:300].replace("\n", " | "))
+        return
+    on = page.locator("[data-testid=team-on]")
+    if on.is_checked():
+        fail("团队默认不该开着")
+    on.check()
+    try:
+        page.wait_for_selector("[data-testid=team-card] select[data-testid=team-workspace]", timeout=5000)
+    except Exception:
+        fail("勾上之后没有出现工作目录：" + page.locator("[data-testid=team-card]").inner_text()[:300])
+        return
+    card = page.locator("[data-testid=team-card]")
+    text = card.inner_text()
+    if "张三" in text and "李四" in text and "telegram:1" not in text and "feishu:ou_x" not in text:
+        ok("团队名单显示名字，不显示 ID")
+    else:
+        fail("名单应该显示名字、不显示 ID：" + text[:300])
+    card.locator("label", has_text="张三").locator("input[type=checkbox]").check()
+    page.wait_for_function("document.querySelector('[data-testid=team-card] input[type=checkbox]:checked') !== null")
+    sel = card.locator("[data-testid=team-workspace]")
+    want = sel.evaluate("el => el.value")
+    if not want:
+        want = sel.evaluate("el => Array.from(el.options).map(o => o.value).find(v => v)")
+        sel.select_option(want)
+    time.sleep(0.8)
+    open_settings()
+    page.wait_for_selector("[data-testid=team-card]", timeout=8000)
+    card = page.locator("[data-testid=team-card]")
+    boxes = card.locator("label", has_text="张三").locator("input[type=checkbox]")
+    if (page.locator("[data-testid=team-on]").is_checked() and boxes.count() == 1 and boxes.first.is_checked()
+            and page.locator("[data-testid=team-workspace]").evaluate("el => el.value") == want and want):
+        ok("团队设置保存后重新打开还在")
+    else:
+        fail("团队设置保存后没留住：" + card.inner_text()[:300])
+    # 面板淡入完、卡片滚进可视范围再截
+    page.locator("[data-testid=team-card]").scroll_into_view_if_needed()
+    time.sleep(0.8)
+    page.screenshot(path=os.path.join(SHOTS, "team-card.png"))
+
+
+def start_fake_github():
+    """一个最小的假 GitHub：只认 token ui-token，回 /user 和仓库信息。保存连接时网关用 token 查一次。"""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.headers.get("Authorization") != "Bearer ui-token":
+                code, body = 401, {"message": "Bad credentials"}
+            elif self.path == "/user":
+                code, body = 200, {"login": "ui-bot"}
+            elif self.path == "/repos/acme/app":
+                code, body = 200, {"default_branch": "main"}
+            else:
+                code, body = 404, {"message": "Not Found"}
+            raw = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def check_repo_connect(page, url):
+    """工作目录节点上的“GitHub 连接”：填错 token 不保存、错误里没有 token；填对了保存，token 不回显；webhook 显示地址。"""
+    ws = api(page, "GET", "/api/workspaces")[1]
+    items = ws if isinstance(ws, list) else ws.get("items") or ws.get("workspaces") or []
+    repo = [w for w in items if w["path"].endswith("/repo")]
+    if not repo:
+        fail("找不到种子工作目录：" + json.dumps(ws, ensure_ascii=False)[:200])
+        return
+    page.goto(url + "#/")
+    page.reload()
+    page.wait_for_selector(f'g.node[data-id="w:{repo[0]["id"]}"]', timeout=8000)
+    page.click(f'g.node[data-id="w:{repo[0]["id"]}"]')
+    try:
+        page.wait_for_selector("[data-testid=repo-connect]", timeout=5000)
+    except Exception:
+        fail("工作目录面板里没有“GitHub 连接”")
+        return
+    page.click("[data-testid=repo-connect-btn]")
+    page.fill("[data-testid=repo-owner]", "acme")
+    page.fill("[data-testid=repo-name]", "app")
+    page.fill("[data-testid=repo-token]", "wrong-token-zzz")
+    page.fill("[data-testid=repo-roster]", "gh:alice")
+    page.click("[data-testid=repo-save]")
+    try:
+        page.wait_for_selector("[data-testid=repo-error]", timeout=8000)
+        msg = page.locator("[data-testid=repo-error]").inner_text()
+        if "wrong-token-zzz" in msg:
+            fail("错误里不能有 token：" + msg)
+        else:
+            ok("token 不对：不保存，错误里没有 token")
+    except Exception:
+        fail("token 不对应该报错")
+    code, cur = api(page, "GET", "/api/repos")
+    if cur.get("items"):
+        fail("token 不对不该保存")
+    page.fill("[data-testid=repo-token]", "ui-token")
+    page.select_option("[data-testid=repo-intake]", "webhook")
+    page.fill("[data-testid=repo-secret]", "ui-secret")
+    page.click("[data-testid=repo-save]")
+    try:
+        page.wait_for_selector("[data-testid=repo-summary]", timeout=8000)
+    except Exception:
+        fail("保存没成功：" + page.locator("[data-testid=repo-connect]").inner_text()[:300])
+        return
+    summary = page.locator("[data-testid=repo-summary]").inner_text()
+    hook = page.locator("[data-testid=repo-webhook-url]").inner_text()
+    body = json.dumps(api(page, "GET", "/api/repos")[1], ensure_ascii=False)
+    if "ui-bot" in summary and "acme/app" in summary and hook.endswith("/webhook") and "ui-token" not in body and "ui-secret" not in body:
+        ok("GitHub 连接：保存时查出机器人账号，webhook 地址有，token 和密钥不回显")
+    else:
+        fail("保存后的显示不对：" + summary + " " + hook + " " + body[:200])
+    page.screenshot(path=os.path.join(SHOTS, "repo-connect.png"))
+
+
+
+def check_external_agents(page, url):
+    """工作目录节点上的“外部 agent”：登记校验不过要报错；登记以后在这个工作目录上开启（确认放宽沙箱），面板写明能读写哪些目录、能联网。"""
+    ws = api(page, "GET", "/api/workspaces")[1]
+    items = ws if isinstance(ws, list) else ws.get("items") or ws.get("workspaces") or []
+    repo = [w for w in items if w["path"].endswith("/repo")]
+    if not repo:
+        fail("找不到种子工作目录")
+        return
+    wid = repo[0]["id"]
+    page.goto(url + "#/")
+    page.reload()
+    page.wait_for_selector(f'g.node[data-id="w:{wid}"]', timeout=8000)
+    page.click(f'g.node[data-id="w:{wid}"]')
+    try:
+        page.wait_for_selector("[data-testid=external-agents]", timeout=5000)
+    except Exception:
+        fail("工作目录面板里没有“外部 agent”")
+        return
+    page.click("[data-testid=ext-add]")
+    page.fill("[data-testid=ext-name]", "claude")
+    page.fill("[data-testid=ext-argv]", "claude\n-p --x={prompt}")
+    page.fill("[data-testid=ext-dirs]", "~/.claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-error]", timeout=5000)
+        ok("外部 agent：{prompt} 嵌在别的字里，登记被拒")
+    except Exception:
+        fail("{prompt} 嵌在别的字里应该报错")
+    page.fill("[data-testid=ext-argv]", "claude\n-p\n{prompt}")
+    page.fill("[data-testid=ext-env]", "CLAUDE_CONFIG_DIR=~/.claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-toggle-claude]", timeout=5000)
+    except Exception:
+        fail("登记没成功：" + page.locator("[data-testid=external-agents]").inner_text()[:300])
+        return
+    if page.locator("[data-testid=ext-toggle-claude]").is_checked():
+        fail("登记以后默认不开")
+    page.once("dialog", lambda d: d.accept())
+    page.click("[data-testid=ext-toggle-claude]")
+    try:
+        page.wait_for_selector("[data-testid=ext-on-claude]", timeout=5000)
+    except Exception:
+        fail("开启以后面板上没写明放宽了什么")
+        return
+    note = page.locator("[data-testid=ext-on-claude]").inner_text()
+    cur = [w for w in (lambda x: x if isinstance(x, list) else x.get("items") or x.get("workspaces") or [])(api(page, "GET", "/api/workspaces")[1]) if w["id"] == wid]
+    if "~/.claude" in note and "联网" in note and cur and cur[0].get("external") == ["claude"]:
+        ok("外部 agent：登记、默认不开、开启时确认，开了写明能读写的目录和联网")
+    else:
+        fail("开启以后的显示或开关不对：" + note + " " + json.dumps(cur, ensure_ascii=False)[:200])
+    page.screenshot(path=os.path.join(SHOTS, "external-agents.png"))
+    # 改登记的目录：保存前确认里列出会关掉的工作目录；保存后这里关掉了，要重新开启
+    seen = []
+    page.once("dialog", lambda d: (seen.append(d.message), d.accept()))
+    page.locator("[data-testid=external-agents] button", has_text="修改").first.click()
+    page.fill("[data-testid=ext-dirs]", "~/.claude\n~/.config/claude")
+    page.click("[data-testid=ext-save]")
+    try:
+        page.wait_for_selector("[data-testid=ext-on-claude]", state="detached", timeout=5000)
+    except Exception:
+        fail("改了登记的目录，开关没关掉")
+        return
+    if seen and "会关掉" in seen[0] and repo[0]["path"] in seen[0] and not page.locator("[data-testid=ext-toggle-claude]").is_checked():
+        ok("外部 agent：改了登记的目录，保存前确认里列出会关掉的工作目录，保存后关掉")
+    else:
+        fail("改登记的确认或开关不对：" + json.dumps(seen, ensure_ascii=False)[:300])
+
+
+def seed_pending(tmp):
+    """起网关之前放一个上次失败的定时任务（宿主自己记下的受阻，没有汇报）；再起一次网关，用 /session fork 分出一个分支，
+    停掉，往承诺记录里写一条分支上带问题的汇报（Report 工具只有模型能调）。之后正式的那一次网关启动时，
+    “等我处理”里就有这两件事。"""
+    import hashlib
+    import http.cookiejar
+    nano = os.path.join(tmp, "nano")
+    data = os.path.join(nano, "data")
+    os.makedirs(data, exist_ok=True)
+    task = {"id": "ui-failed", "name": "界面检查·上次失败", "when": "0 8 * * *", "agent": "default", "prompt": "x", "deliver": [],
+            "workspaces": [], "mode": "readonly", "enabled": True, "created_by": "web:admin", "creator_mode": "readonly",
+            "catch_up": False, "next": "2099-01-01T00:00:00Z", "results": [], "running": False,
+            "last": {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ok": False, "summary": "接口超时"}}
+    with open(os.path.join(data, "schedules.json"), "w") as f:
+        json.dump([task], f)
+
+    proc, url, _, _ = start_gateway(tmp)
+    try:
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+        def call(method, path, body=None):
+            req = urllib.request.Request(url.rstrip("/") + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"X-Nano": "1", "Content-Type": "application/json"})
+            with op.open(req, timeout=10) as r:
+                return json.loads(r.read().decode() or "{}")
+
+        call("POST", "/api/login", {"password": PASSWORD})
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo, exist_ok=True)
+        call("POST", "/api/workspaces", {"host": "本机", "path": repo})
+        call("POST", "/api/chat", {"sid": "main", "text": "你好"})
+        time.sleep(1)
+        call("POST", "/api/chat", {"sid": "main", "text": "/session fork 界面检查·有问题的分支"})
+        branch = ""
+        for _ in range(50):
+            got = call("GET", "/api/sessions/main/branches").get("branches") or []
+            if got and got[0].get("status") == "ready":
+                branch = got[0]["sid"]
+                break
+            time.sleep(0.2)
+        if not branch:
+            raise SystemExit("分支没有做出来")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    # 一个外部群会话（group: true，成员表里两个人）：“团队”卡片的检查用
+    key = GROUP_SID.encode().hex()
+    sdir = os.path.join(data, "v1", "sessions")
+    os.makedirs(sdir, exist_ok=True)
+    os.makedirs(os.path.join(data, "v1", "active"), exist_ok=True)
+    with open(os.path.join(data, "v1", "active", key), "w") as f:
+        f.write(key)
+    with open(os.path.join(sdir, key + ".jsonl"), "w") as f:
+        f.write(json.dumps({"role": "user", "content": "[10:00][张三] 大家好"}, ensure_ascii=False) + "\n")
+    with open(os.path.join(sdir, key + ".settings.json"), "w") as f:
+        json.dump({"group": True, "members": {"张三": "telegram:1", "李四": "feishu:ou_x"}}, f, ensure_ascii=False)
+    rec = {"seq": 1, "type": "report", "ts": int(time.time() * 1000), "kind": "branch", "id": branch, "agent": "default",
+           "status": "blocked", "text": "不知道要不要带上周末", "question": "要不要加上周末？"}
+    raw = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode()
+    os.makedirs(os.path.join(data, "runtime"), exist_ok=True)
+    # 一张工单（Ticket 工具只有模型能调，这里网关停着时直接写记录）
+    now_s = int(time.time())
+    tk = {"type": "ticket", "ticket": {"id": "tk-1", "agent": "default", "title": "界面检查·工单", "goal": "检查叫停", "check": "make test", "budget": 1000,
+          "status": "paused", "created": now_s, "updated": now_s,
+          "auth": {"by": "telegram:1", "scene": "main", "workspace": "ws1", "mode": "ask", "tools": [], "at": now_s,
+                   "source": {"channel": "telegram", "chat": "-100", "msg_id": "m1", "text": "@bot 修一下"}}}}
+    traw = json.dumps(tk, ensure_ascii=False, separators=(",", ":")).encode()
+    with open(os.path.join(data, "runtime", "tickets.jsonl"), "w") as f:
+        f.write(json.dumps({"version": 1, "seq": 1, "data": json.loads(traw), "sha256": hashlib.sha256(traw).hexdigest()},
+                           ensure_ascii=False, separators=(",", ":")) + "\n")
+    with open(os.path.join(data, "runtime", "commitments.jsonl"), "w") as f:
+        f.write(json.dumps({"version": 1, "seq": 1, "data": json.loads(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                           ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def launch(p):
@@ -91,6 +472,10 @@ def main():
         raise SystemExit("先 make all")
     os.makedirs(SHOTS, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="nano-ui-")
+    fake_gh = start_fake_github()
+    global FAKE_GH_API
+    FAKE_GH_API = "http://127.0.0.1:%d" % fake_gh.server_address[1]
+    seed_pending(tmp)
     proc, url, nano, sock = start_gateway(tmp)
     errors = []
     try:
@@ -185,11 +570,18 @@ def check_jobs(page, url):
            "created_at": 100, "started_at": 101, "sandbox_effective": "off",
            "output_cursor": 10, "output_gap": False}
     bytes_out = "中文🙂".encode()
+    # 启动前就被执行器拒绝的外部 agent：列表里不带原因，选中后读一次状态才有
+    why = "agent_rw 里的 ~/proj/repo/src 不能用：和仓库的根 /home/u/proj/repo 互相包含。没有执行"
+    failed = dict(job, job_id="j_ui-2", revision=3, status="failed", background=True, silent=False,
+                  origin_call_id="ext-1", ended_at=102)
 
     def jobs_api(route):
         req = route.request
         if req.method == "GET":
-            result = {"jobs": [job]}
+            result = {"jobs": [job, failed]}
+        elif "j_ui-2" in req.url:
+            actions.append("failed-status")
+            result = {"job": dict(failed, reason=why)}
         else:
             args = req.post_data_json
             action = args.get("action", "status")
@@ -215,7 +607,7 @@ def check_jobs(page, url):
         jp.wait_for_selector(".insp .job")
         if not jp.url.endswith("#/sessions/main"):
             fail("任务面板切换了当前聊天")
-        jp.click(".insp .job")
+        jp.locator(".insp .job").first.click()
         jp.get_by_role("button", name="读取日志", exact=True).click()
         jp.wait_for_function("() => document.querySelector('.insp .detail')?.textContent.includes('日志游标 2')")
         jp.get_by_role("button", name="读取日志", exact=True).click()
@@ -237,6 +629,17 @@ def check_jobs(page, url):
             fail("安静任务的状态事件推送到了聊天或全局通知")
         if not jp.url.endswith("#/sessions/main"):
             fail("任务状态更新改变了当前聊天")
+        # 失败的任务：点开就看得到为什么没跑起来（不用再点“查询状态”）
+        jp.locator(".insp .job").nth(1).click()
+        try:
+            jp.wait_for_selector("[data-testid=job-reason]", timeout=5000)
+            shown = jp.locator("[data-testid=job-reason]").inner_text()
+            if "仓库的根" in shown and "没有执行" in shown and "failed-status" in actions:
+                ok("失败的任务点开就写明失败信息（比如登记的目录和仓库的根互相包含）")
+            else:
+                fail("失败信息不对：" + shown)
+        except Exception:
+            fail("失败的任务点开后没有显示失败信息：" + jp.locator(".insp .detail").inner_text()[:200])
         jp.screenshot(path=os.path.join(SHOTS, "jobs.png"))
         # Explicit deep links can open the same actual panel.
         jp.goto(url + "#/jobs/j_ui-1?node=ui-node")
@@ -511,10 +914,83 @@ def run(page, url, nano):
     open_node(page, "rm:" + room["id"])
     page.screenshot(path=os.path.join(SHOTS, "room.png"))
     text = page.locator(".insp").inner_text()
-    if "成员" in text and "怎么说话" in text and "每天最多用多少 token" in text:
-        ok("群面板能改成员、说话方式和预算")
+    if "成员" in text and "场景说明" in text and "角色提示词" in text and "旁白和发言" in text:
+        ok("群面板有成员、场景说明、角色提示词和旁白输入")
     else:
         fail("群面板缺东西：" + text[:200])
+    insp = page.locator(".insp")
+    insp.locator("summary:has-text('更多规则')").click()
+    if "每天最多用多少 token" in insp.inner_text() and "这一场最多用多少 token" in insp.inner_text():
+        ok("群面板的更多规则里有说话方式和预算")
+    else:
+        fail("群面板的更多规则里缺说话方式或预算：" + insp.inner_text()[:300])
+
+    def room_now():
+        return [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == room["id"]][0]
+
+    def log_text():
+        return json.dumps(api(page, "GET", "/api/sessions/" + urllib.request.quote(room["sid"], safe="") + "/full-history")[1], ensure_ascii=False)
+
+    # 旁白：作为旁白说一句，出现在群记录里（点名模式，不会叫醒谁）
+    insp.locator("textarea[placeholder^='例如：夜深了']").fill("夜深了，灯一盏盏熄灭")
+    insp.locator("button:has-text('发出')").click()
+    page.wait_for_timeout(800)
+    if "夜深了，灯一盏盏熄灭" in log_text():
+        ok("以旁白身份说一句，出现在群记录里")
+    else:
+        fail("旁白没有进群记录")
+    # 轮流：只选模式，轮数和预算都没设，网页要一起发 rounds
+    mode_sel = insp.locator("select.p-select:has(option[value=turns])")
+    mode_sel.select_option("turns")
+    page.wait_for_timeout(800)
+    cur = room_now()
+    if cur.get("mode") == "turns" and cur.get("rounds") == 5:
+        ok("切到轮流：没设轮数时一起发 rounds=5，后端接受")
+    else:
+        fail("切到轮流没生效：" + json.dumps(cur, ensure_ascii=False)[:300])
+    box = insp.locator("label:has-text('这一场最多几轮') input")
+    box.fill("3")
+    box.press("Tab")
+    page.wait_for_timeout(600)
+    if room_now().get("rounds") == 3:
+        ok("轮流的轮数能改")
+    else:
+        fail("改轮数没生效：" + json.dumps(room_now(), ensure_ascii=False)[:300])
+    # 私下频道：加一个，再勾上第三位成员
+    insp.locator("summary:has-text('私下频道')").click()
+    insp.locator("input[placeholder='新频道的名字']").fill("密谈")
+    insp.locator("button:has-text('添加')").click()
+    page.wait_for_timeout(700)
+    chans = room_now().get("channels") or []
+    if len(chans) == 1 and len(chans[0]["members"]) == 2:
+        third = [m for m in room["members"] if m not in chans[0]["members"]][0]
+        # 没勾上的那一位：频道卡片里第三个复选框
+        unchecked = insp.locator(".p-label:has(b:has-text('密谈')) input[type=checkbox]:not(:checked)")
+        unchecked.first.check()
+        page.wait_for_timeout(700)
+        chans = room_now().get("channels") or []
+        if len(chans) == 1 and third in chans[0]["members"] and len(chans[0]["members"]) == 3:
+            ok("能加一个频道并勾选成员")
+        else:
+            fail("勾选频道成员没生效：" + json.dumps(chans, ensure_ascii=False))
+    else:
+        fail("加频道没生效：" + json.dumps(chans, ensure_ascii=False))
+    # 导演：能看到“让 TA 说”，点一次
+    mode_sel.select_option("director")
+    page.wait_for_timeout(800)
+    cue_btns = insp.locator("button:has-text('让 TA 说')")
+    if room_now().get("mode") == "director" and cue_btns.count() == 3:
+        before = log_text()
+        cue_btns.first.click()
+        page.wait_for_timeout(1200)
+        if not page.locator(".toast.err, .toast.error").count():
+            ok("导演模式有“让 TA 说”，点一次没有报错")
+        else:
+            fail("点“让 TA 说”报错：" + page.locator(".toast").first.inner_text())
+        del before
+    else:
+        fail("切到导演后没有“让 TA 说”：" + json.dumps(room_now(), ensure_ascii=False)[:300])
+    api(page, "PATCH", "/api/rooms/" + room["id"], {"mode": "mention"})
     sessions = {x["sid"]: x for x in api(page, "GET", "/api/overview")[1]["sessions"]}
     if sessions.get(room["sid"], {}).get("title") == "产品组":
         ok("群的会话在列表里显示群名")
@@ -555,7 +1031,7 @@ def run(page, url, nano):
     page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=15000)
     if '/room:' in page.locator('aside.list').inner_text():
         fail("群成员的内部会话从实时事件漏进了列表")
-    if page.locator(".room-chat .msg.user .bubble").count() == 1:
+    if page.locator(".room-chat .msg.user .bubble:has-text(\"这是群聊界面验证\")").count() == 1:
         ok("群发言实时显示头像和说话人，用户消息没有重复")
     else:
         fail("群消息重复或没有显示")
@@ -563,6 +1039,148 @@ def run(page, url, nano):
     page.reload()
     page.wait_for_selector(".room-speaker b:has-text('阿强')", timeout=10000)
     ok("刷新群聊后保留发言人的 agent 身份")
+    # 剧场的场景记录：建一场戏，旁白说一句，时间线里有这一句，前缀全文能取；普通群没有时间线
+    code, stage = api(page, "POST", "/api/rooms", {"name": "戏", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
+    if code == 200 and stage.get("stage") and stage.get("inner"):
+        api(page, "POST", "/api/rooms/" + stage["id"] + "/say", {"text": "夜深了", "as": "旁白"})
+        code, tl = api(page, "GET", "/api/rooms/" + stage["id"] + "/timeline?after=0&n=50")
+        kinds = [x["kind"] for x in tl.get("items", [])] if code == 200 else []
+        lines = [x for x in tl.get("items", []) if x["kind"] == "line"] if code == 200 else []
+        if kinds == ["line", "cursors"] and lines[0]["text"] == "夜深了" and lines[0]["say"] == "narrate" and tl["last"] == 2:
+            ok("戏的时间线：旁白那一句和 cursors 都在")
+        else:
+            fail("时间线不对：" + json.dumps(tl, ensure_ascii=False)[:300])
+        code, _ = api(page, "GET", "/api/rooms/" + room["id"] + "/timeline")
+        if code == 400:
+            ok("不是戏的群没有时间线")
+        else:
+            fail("普通群的时间线应该被拒绝：" + str(code))
+        code, bad = api(page, "PATCH", "/api/rooms/" + stage["id"], {"stage": False})
+        if code == 400:
+            ok("stage 建群以后不能改")
+        else:
+            fail("stage 不应该能改：" + str(code))
+        # 平行世界：从第 1 句分出，新群的时间线最后是 fork；超出的句子被拒绝
+        code, fk = api(page, "POST", "/api/rooms/" + stage["id"] + "/fork", {"at": 1, "rewind": True})
+        if code == 200 and fk.get("id") and fk["id"] != stage["id"] and fk.get("stage"):
+            code, tl2 = api(page, "GET", "/api/rooms/" + fk["id"] + "/timeline?after=0&n=50")
+            kinds2 = [x["kind"] for x in tl2.get("items", [])] if code == 200 else []
+            orig = [r for r in api(page, "GET", "/api/rooms")[1]["items"] if r["id"] == stage["id"]][0]
+            if kinds2 == ["line", "cursors", "fork"] and orig["paused"] is True and not fk.get("paused"):
+                ok("从第 1 句分出平行世界：新群的时间线最后是 fork，倒带暂停了原群")
+            else:
+                fail("分出的结果不对：" + json.dumps({"kinds": kinds2, "orig_paused": orig["paused"]}))
+            api(page, "DELETE", "/api/rooms/" + fk["id"])
+        else:
+            fail("分不出平行世界：" + str(code) + json.dumps(fk, ensure_ascii=False)[:200])
+        code, _ = api(page, "GET", "/api/rooms/" + stage["id"] + "/export?format=srt&from=abc")
+        if code == 400:
+            ok("导出的 from 不是数字时返回 400")
+        else:
+            fail("from=abc 应该返回 400：" + str(code))
+        code, _ = api(page, "POST", "/api/rooms/" + stage["id"] + "/fork", {"at": 99})
+        if code == 400:
+            ok("超出的句子分不出")
+        else:
+            fail("分出超出的句子应该被拒绝：" + str(code))
+        api(page, "DELETE", "/api/rooms/" + stage["id"])
+    else:
+        fail("建不了戏：" + json.dumps(stage, ensure_ascii=False)[:300])
+    # 承诺列表：只读接口，按 agent 和阶段筛选
+    code, cm = api(page, "GET", "/api/commitments")
+    code2, cm2 = api(page, "GET", "/api/commitments?phase=blocked")
+    if code == 200 and isinstance(cm.get("items"), list) and code2 == 200 and isinstance(cm2.get("items"), list):
+        ok("承诺列表接口能用（" + str(len(cm["items"])) + " 件）")
+    else:
+        fail("承诺列表接口不对：" + str(code) + json.dumps(cm, ensure_ascii=False)[:200])
+    check_pending(page, url)
+    check_team_card(page, url)
+    check_repo_connect(page, url)
+    check_external_agents(page, url)
+    # 导演台：打开、旁白、心里话的显示和隐藏、从某一句分出后跳到新群、三种格式导出、放映
+    code, st2 = api(page, "POST", "/api/rooms", {"name": "戏2", "members": [bao, qiang], "mode": "mention", "stage": True, "inner": True})
+    if code != 200:
+        fail("建不了第二场戏：" + json.dumps(st2, ensure_ascii=False)[:200])
+    else:
+        page.goto(url + "#/stage/" + st2["id"])
+        page.reload()
+        page.wait_for_selector(".desk header h2")
+        if page.locator(".desk header h2").inner_text() == "戏2":
+            ok("导演台能打开，标题是群名")
+        else:
+            fail("导演台标题不对：" + page.locator(".desk header h2").inner_text())
+        # 旁白
+        page.locator(".ctl textarea[placeholder^='例如：夜深了']").fill("夜深了，灯一盏盏熄灭")
+        page.locator(".ctl button:has-text('发出')").click()
+        page.wait_for_selector(".tl .row.narrate:has-text('夜深了')", timeout=10000)
+        ok("以旁白身份说一句，出现在时间线里（实时更新）")
+        # 人话 @ 阿强：回复里带心里话（mock 会把这句原样回显）
+        page.locator(".ctl label:has-text('作为旁白') input").uncheck()
+        page.locator(".ctl textarea[placeholder^='例如：夜深了']").fill("@阿强 <心里>他在撒谎</心里>我来回答")
+        page.locator(".ctl button:has-text('发出')").click()
+        page.wait_for_selector(".tl .row.inner:has-text('他在撒谎')", timeout=25000)
+        said = page.locator(".tl .row.say:has(.who b:text-is('阿强'))").first.inner_text()
+        if "他在撒谎" in said:
+            fail("说出口的话里不该有心里话：" + said)
+        else:
+            ok("时间线里心里话单独一行，说出口的话里没有它")
+        page.locator(".tl .toggles label:has-text('心里话') input").uncheck()
+        if page.locator(".tl .row.inner").count() == 0:
+            ok("隐藏心里话")
+        else:
+            fail("心里话没有隐藏")
+        page.locator(".tl .toggles label:has-text('心里话') input").check()
+        if page.locator(".tl .row.inner").count() >= 1:
+            ok("再显示心里话")
+        else:
+            fail("心里话没有显示回来")
+        # 点开一轮看用量
+        page.locator(".tl .row.say button:has-text('这一轮')").first.click()
+        if "用量" in page.locator(".tl .detail").first.inner_text():
+            ok("点开一轮能看用量")
+        else:
+            fail("一轮的详情不对")
+        page.screenshot(path=os.path.join(SHOTS, "stage-desk.png"))
+        # 导出：三种格式
+        bad = []
+        for fmt, needle in (("srt", "-->"), ("md", "## 正文"), ("json", "records")):
+            code, body = api(page, "GET", "/api/rooms/" + st2["id"] + "/export?format=" + fmt + "&inner=1&channels=1")
+            text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
+            if code != 200 or needle not in text or "夜深了" not in text:
+                bad.append(fmt)
+        if not bad and "format=srt" in page.locator(".ctl a:has-text('导出')").get_attribute("href"):
+            ok("字幕、剧本、记录三种格式都能导出")
+        else:
+            fail("导出有问题：" + ",".join(bad))
+        # 放映：开始，看到字幕，停止
+        page.locator(".desk header button:has-text('放映')").click()
+        page.wait_for_selector(".screen .sub:has-text('夜深了')", timeout=5000)
+        page.locator(".screen button:has-text('2×')").click()
+        box = page.locator(".screen label:has-text('心里话') input")
+        if not box.is_enabled():
+            fail("放映中心里话开关是灰的")
+        else:
+            box.check()
+            page.wait_for_selector(".screen .sub:has-text('（阿强心里）')", timeout=25000)
+            ok("放映中打开心里话，接下来放出的字幕里有心里话那一条")
+        page.locator(".screen button:has-text('停止')").click()
+        page.wait_for_selector(".screen", state="detached", timeout=5000)
+        ok("放映能开始、改速度和停止")
+        # 从第 1 句分出：跳到新群
+        page.locator(".tl .row.narrate button:has-text('从这里分出')").first.click(force=True)
+        page.wait_for_function("() => location.hash.startsWith('#/stage/') && !location.hash.includes('" + st2["id"] + "')", timeout=10000)
+        page.wait_for_selector(".desk header h2:has-text('平行')", timeout=10000)
+        if page.locator(".tl .row").count() == 1:
+            ok("从第 1 句分出后跳到新群，时间线只有前面的一句")
+        else:
+            fail("新群的时间线行数不对：" + str(page.locator(".tl .row").count()))
+        for r0 in api(page, "GET", "/api/rooms")[1]["items"]:
+            if r0["name"].startswith("戏2"):
+                api(page, "DELETE", "/api/rooms/" + r0["id"])
+        page.goto(url + "#/")
+        page.reload()
+        page.wait_for_selector("g.node.gateway")
+
     # 收拾干净，后面的检查不受影响
     for r in (room, room2, dm):
         if r.get("id"):

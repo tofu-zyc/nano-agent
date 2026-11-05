@@ -424,13 +424,21 @@ func (a *App) DeleteBot(id string) error {
 		a.mu.Unlock()
 		return errors.New("机器人列表还没准备好")
 	}
-	b, _ := a.botStore.Get(id)
+	b, existed := a.botStore.Get(id)
 	err := a.botStore.Delete(id)
 	a.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	a.reconcileBots()
+	a.reconcileBots() // 先停渠道（停用时它会记进 chRetired）
+	if existed {
+		// 再忘掉这个名字、丢弃待发：之后发给它的消息直接拒绝，不在出站里挂到过期
+		name := agents.ChannelName(b) // 渠道名（tg.<id>），不是 runs 里的键
+		a.ForgetChannel(name)
+		if a.outbox != nil {
+			a.outbox.DropChannel(name)
+		}
+	}
 	if b.Kind == agents.KindWeixin {
 		os.Remove(filepath.Join(a.store.Dir(), "bots", b.ID+".state.json")) // 收消息的游标和 context_token
 	}

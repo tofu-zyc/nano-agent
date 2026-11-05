@@ -603,19 +603,8 @@ func (a *App) toolNames() []string {
 			add(t)
 		}
 	}
-	for _, spec := range a.gatewayTools() {
-		add(spec.Name)
-	}
-	add("Skill")
-	add("Schedule")
-	add(knowledgeLabel)
-	add("FollowUp")
-	add("Agenda")
-	add("Idea")
-	add("Mind")
-	add("SendFile")
-	for _, spec := range a.searchTools() {
-		add(spec.Name)
+	for _, name := range gatewayToolNames() {
+		add(name)
 	}
 	sort.Strings(out)
 	return out
@@ -1003,6 +992,9 @@ func (a *App) dropAgentFromRooms(id string) {
 			r.Muted = muted
 			changed = true
 		}
+		if changed {
+			r.Rules = r.Rules.WithoutMember(id)
+		}
 		if !changed {
 			continue
 		}
@@ -1010,12 +1002,16 @@ func (a *App) dropAgentFromRooms(id string) {
 		if r.IsDM() && len(r.Members) < 2 {
 			if err := a.roomStore.Delete(r.ID); err != nil {
 				a.log.Warn("两个人的私聊少了一个人，没删掉", "room", r.ID, "err", err)
+			} else {
+				a.sceneForget(roomLogSID(r.ID))
 			}
 			continue
 		}
 		if len(r.Members) == 0 {
 			if err := a.roomStore.Delete(r.ID); err != nil {
 				a.log.Warn("清空成员的群没删掉", "room", r.ID, "err", err)
+			} else {
+				a.sceneForget(roomLogSID(r.ID))
 			}
 			continue
 		}

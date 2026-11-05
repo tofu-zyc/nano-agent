@@ -113,8 +113,8 @@ func (a *App) agentDoing(ag agents.Agent, viewer string) Doing {
 	case idle >= slackFor:
 		d = Doing{State: "idle", Icon: "😶", Text: "在发呆", Brief: "在发呆"}
 	}
-	if ls := a.lifeOf(ag.ID); ls.Next > 0 {
-		if next := time.Unix(ls.Next, 0).In(a.loc); next.After(now) && w.contains(next) {
+	if at := a.nextWakeAt(ag.ID, a.mind(ag.ID)); at > 0 {
+		if next := time.Unix(at, 0).In(a.loc); next.After(now) && w.contains(next) {
 			d.Text += "，大约 " + clockDay(now, next) + "起来转转"
 		}
 	}
@@ -182,16 +182,17 @@ func (a *App) cmdState(c in) {
 		if !ag.Life() || !admin {
 			continue
 		}
-		ls := a.lifeOf(ag.ID)
-		if n := len(ls.Recent); n > 0 {
-			b.WriteString("\n近况：" + ls.Recent[n-1].Text)
+		st := a.mind(ag.ID)
+		if note := a.latestLifeNote(ag.ID); note != "" {
+			b.WriteString("\n近况：" + note)
 		}
-		if ls.Day == a.now().In(a.loc).Format("2006-01-02") {
+		{
+			now := a.now().In(a.loc)
 			p := effectiveLifePolicy(ag)
-			fmt.Fprintf(&b, "\n%s；%s", p.wakeText(ls.Wakes), p.reachText(ls.Reaches))
+			fmt.Fprintf(&b, "\n%s；%s", p.wakeText(a.wakesToday(st, now)), p.reachText(a.reachesToday(st, now)))
 		}
 		var waiting []string
-		for s := range ls.Awaiting {
+		for s := range st.Awaiting {
 			waiting = append(waiting, a.chatName(s))
 		}
 		if len(waiting) > 0 {

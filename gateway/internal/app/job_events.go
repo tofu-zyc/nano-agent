@@ -117,6 +117,7 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 	// side effect. The latter has a separate fixed delivery record.
 	if finalJob(j.Receipt.Status) {
 		a.signalJobCompletion(nodeName, j.Receipt.JobID)
+		a.ticketJobsSettled(j.Receipt.OriginSID) // 工单的分支在等的后台任务都结束了：叫醒分支一次
 	}
 	if terminal && current {
 		a.hub.Send(nodeName, proto.Msg{T: proto.TEventsAck, NodeEpoch: epoch, JobID: j.Receipt.JobID, EventSeq: j.Receipt.LastEventSeq})
@@ -125,7 +126,7 @@ func (a *App) jobEventCommitted(nodeName, epoch, key string, j eventlog.Job, ter
 		a.hookEngine.Wake()
 	}
 	a.observeJobPresentation(a.jobInfo(eventlog.JobRecord{Job: j}))
-	a.publish(events.Event{T: "job", Name: nodeName, ID: j.Receipt.JobID, Data: a.jobInfo(eventlog.JobRecord{Job: j})})
+	a.publish(events.Event{T: "job", Name: nodeName, ID: j.Receipt.JobID, Data: a.jobInfoDetail(eventlog.JobRecord{Job: j})}) // 网页上看得到失败原因（聊天渠道的卡片不带：输出的开头不往外发）
 	if lease != nil && current {
 		a.leaseMessage(nodeName, lease)
 	}

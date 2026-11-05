@@ -160,7 +160,7 @@ func (l *SnapshotLease) reader() io.Reader {
 }
 
 func frozenSnapshotSettings(st Settings) SnapshotSettings {
-	return SnapshotSettings{Persona: st.SnapshotPersona, Agent: st.Agent, Model: st.Model, Thinking: st.Thinking, Mode: st.Mode, Workspaces: append([]string(nil), st.Workspaces...), WorkspacesSet: st.WorkspacesSet, Title: st.Title, Group: st.Group}
+	return SnapshotSettings{Persona: st.SnapshotPersona, Agent: st.Agent, Model: st.Model, Thinking: st.Thinking, Mode: st.Mode, Workspaces: append([]string(nil), st.Workspaces...), WorkspacesSet: st.WorkspacesSet, Title: st.Title, Group: st.Group, Untrusted: st.Untrusted}
 }
 
 func (l *SnapshotLease) Fingerprint() (string, error) {

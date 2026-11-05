@@ -15,15 +15,6 @@ import (
 // 只用于升级时导入 models.json；它也会被搬进 config.json 加密，免得留在 gateway.toml 里。
 var secretKeys = []string{"web.password", "kernel.token", "telegram.token", "feishu.app_secret", "llm.api_key"}
 
-func isSecretKey(key string) bool {
-	for _, k := range secretKeys {
-		if k == key {
-			return true
-		}
-	}
-	return false
-}
-
 func envForSecret(key string) string { return envKeys[key] }
 
 // decryptOverlay 把 config.json 里的 enc:v1: 值换回明文（只在内存里）。

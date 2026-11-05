@@ -175,7 +175,7 @@ func (a *App) recordToolEvidence(r *run, m *proto.Msg) {
 
 func taskEvidence(name string) bool {
 	switch name {
-	case "Agenda", "Idea", "Mind", "Skill", "Gateway", "FollowUp", "Schedule":
+	case "Agenda", "Idea", "Mind", "Skill", "Gateway", "FollowUp", "Schedule", "Report":
 		return false
 	}
 	return name != ""

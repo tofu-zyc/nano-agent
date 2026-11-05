@@ -1,6 +1,6 @@
 package app
 
-// 长期记忆：Knowledge 与上下文注入；见 docs/DESIGN-agent-runtime.md。
+// 长期记忆：Knowledge 与上下文注入；见 docs/RUNTIME.md。
 //
 // 每个 agent 一个知识库 agents/<id>/knowledge（人物画像在 people/ 下），所有 agent 共用的在
 // ~/.nano-agent/knowledge，自我认知是 agents/<id>/self.md。系统提示不变（缓存优先）：
@@ -260,6 +260,9 @@ func (a *App) recallNote(sid, who, text string, skip []string) (string, []string
 // memoryNotes 是这一轮要放在消息前面的记忆部分：记忆说明（变了才放）和想起来的。st 会被更新，dirty 表示要保存。
 // 调用方持有锁。
 func (a *App) memoryNotes(sid, who, text string, st *session.Settings, dirty *bool) string {
+	if a.sceneIsolated(sid) {
+		return "" // 戏里只有人格、场景说明、角色和场内的话
+	}
 	var parts []string
 	if note := a.memoryNote(sid, who); note != "" {
 		if h := fmt.Sprintf("%x", sha256.Sum256([]byte(note))); h != st.MemNote {

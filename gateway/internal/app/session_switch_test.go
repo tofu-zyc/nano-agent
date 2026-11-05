@@ -1,6 +1,7 @@
 package app
 
 import (
+	"nano-agent/gateway/internal/autonomy"
 	"os"
 	"path/filepath"
 	"strings"
@@ -529,8 +530,8 @@ func TestLifeOwnershipFollowsCurrentAgent(t *testing.T) {
 	}
 
 	// 旧 agent 约好的回访不能越过归属：切换后到点直接作废
-	ls := e.a.lifeOf("bob")
-	ls.FollowUps[mainSID] = followUp{At: e.a.now().Add(-time.Minute).Unix(), Note: "问问他面试怎么样"}
+	ls := e.a.mind("bob")
+	ls.FollowUpMap()[mainSID] = autonomy.FollowUp{At: e.a.now().Add(-time.Minute).Unix(), Note: "问问他面试怎么样"}
 	def := agents.DefaultID
 	if err := e.a.UpdateSession(mainSID, SessionPatch{Agent: &def}); err != nil {
 		t.Fatal(err)

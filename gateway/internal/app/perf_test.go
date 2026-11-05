@@ -113,6 +113,7 @@ func (m *parallelPerfModel) Chat(_ context.Context, req llm.Request, _ func(llm.
 
 func TestPerfParallelOutputStaysBounded(t *testing.T) {
 	e := setup(t)
+	offerNodeTools(e, "Read")
 	e.a.mu.Lock()
 	e.a.llm = &parallelPerfModel{}
 	e.a.mu.Unlock()

@@ -17,7 +17,6 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/llm"
-	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -54,8 +53,10 @@ func groupPerHour(v string) (string, int) {
 	return "low", 2
 }
 
-// groupRuleOf 是会话所属 agent 的群聊规则。调用方持有锁。
-func (a *App) groupRuleOf(sid string) groupRule { return a.groupRuleFor(a.agentOf(sid)) }
+// groupRuleOf 是会话生效的群聊规则：agent 的群聊设置，再叠上场景规则。调用方持有锁。
+func (a *App) groupRuleOf(sid string) groupRule {
+	return a.applyScene(sid, a.groupRuleFor(a.agentOf(sid)))
+}
 
 // groupRuleFor 是 agent 的群聊规则。工具型在群里只回被叫到的（不主动插话），拟人型按积极度。
 func (a *App) groupRuleFor(ag agents.Agent) groupRule {
@@ -151,11 +152,17 @@ func groupMentionsName(text, name string) bool {
 }
 
 // groupReply 排一次回复：等 2 秒，把紧接着的几条一起交给模型。调用方持有锁。
-func (a *App) groupReply(s *sess, ep endpoint, who string) {
+func (a *App) groupReply(s *sess, ep endpoint, who string, m channel.Message) {
 	if s.groupTimer != nil {
 		return // 已经排上了，后面的消息都进了历史，等这一次一起看
 	}
+	// 外部群额度用完了：不调用模型，每天最多回一次固定说明
+	if sc, ok := a.sceneOf(s.sid); ok && a.sceneOver(sc) {
+		a.sceneBudgetNotice(s, ep, sc)
+		return
+	}
 	sid, key := s.sid, ep.key()
+	trig := &trigger{who: who, ch: ep.ch, chat: ep.chat, msgID: m.MsgID, text: clipText(m.Text, 200)} // 排上这次回复的那条点名
 	s.groupTimer = time.AfterFunc(2*time.Second, func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -164,9 +171,9 @@ func (a *App) groupReply(s *sess, ep endpoint, who string) {
 		}
 		s.groupTimer = nil
 		s.groupFresh = false
-		s.groupProactive = false
+		s.groupProactive, s.groupObserve = false, nil
 		ep2 := parseEndpoint(key)
-		s.queue = append(s.queue, queued{ep: ep2, who: who, trigger: true, m: channel.Message{ChatID: ep2.chat, Group: true}})
+		s.queue = append(s.queue, queued{ep: ep2, who: who, trigger: true, trig: trig, m: channel.Message{ChatID: ep2.chat, Group: true}})
 		a.startRun(s)
 	})
 }
@@ -210,17 +217,22 @@ func (a *App) groupTick() {
 	defer a.mu.Unlock()
 	now := a.now()
 	for _, s := range a.sessions {
-		if s == nil || s.groupEp.chat == "" || !a.isGroupSession(s.sid) {
+		if s == nil || s.groupEp.chat == "" {
+			continue
+		}
+		sc, ok := a.sceneOf(s.sid)
+		if !ok {
 			continue
 		}
 		if s.run != nil || len(s.queue) > 0 || s.compacting || s.groupTimer != nil || !s.groupFresh {
 			continue
 		}
-		// 房间里的成员：点名模式下永远不主动开口，只有自由模式交给这里按额度插话
-		if room, ok := a.roomOfSession(s.sid); ok {
-			if s.sid == roomLogSID(room.ID) || room.Paused || room.Mode != rooms.ModeFree || room.MutedAgent(roomSender(s.sid)) {
-				continue
-			}
+		// 点名模式下永远不主动开口，只有自由模式交给这里按额度插话（内部群默认点名，外部群默认自由）
+		if !sc.free() || a.sceneOver(sc) {
+			continue
+		}
+		if room := sc.Room; room != nil && (s.sid == roomLogSID(room.ID) || room.Paused || room.MutedAgent(roomSender(s.sid))) {
+			continue
 		}
 		rule := a.groupRuleOf(s.sid)
 		if rule.PerHour <= 0 {
@@ -240,9 +252,13 @@ func (a *App) groupTick() {
 			continue
 		}
 		// 不调模型的门槛：按这几条新消息估计“该不该接话”，乘上积极度抽一次；没抽中就等下一批新消息
-		if a.random() >= a.groupGate(s, now)*talkValue(rule.Eagerness) {
+		gate := a.groupGate(s, now) * talkValue(rule.Eagerness)
+		if a.random() >= gate {
 			s.groupFresh = false
 			continue
+		}
+		if sc.Rules.Observe {
+			s.groupObserve = &observeWhy{QuietSec: int(now.Sub(s.groupLast).Seconds()), Pending: s.groupPending, Gate: gate}
 		}
 		s.groupThoughtAt = now
 		s.groupThoughts = append(s.groupThoughts, now)
@@ -254,12 +270,9 @@ func (a *App) groupTick() {
 	}
 }
 
-// groupTools 是群聊里能用的工具：agent 的群聊白名单，没设就只有搜索和技能。
+// groupTools 是群聊里能用的工具：场景工具表、agent 的群聊白名单，都没设就用默认表（见 sceneToolAllow）。
 func (a *App) groupTools(sid string, all []llm.Tool) []llm.Tool {
-	allow := a.agentOf(sid).GroupTools
-	if len(allow) == 0 {
-		allow = []string{"WebSearch", "WebFetch", "Skill", knowledgeLabel, "FollowUp", "SendFile"}
-	}
+	allow := a.sceneToolAllow(sid)
 	out := make([]llm.Tool, 0, len(allow))
 	for _, t := range all {
 		for _, name := range allow {
@@ -445,4 +458,21 @@ func (a *App) groupGate(s *sess, now time.Time) float64 {
 // isNoteMsg 是网关自己放进历史的说明（记忆、近况、想起来的、[系统]），不是谁说的话。
 func isNoteMsg(content string) bool {
 	return strings.HasPrefix(content, memNoteOpen) || strings.HasPrefix(content, recallOpen) || strings.HasPrefix(content, lifeRecentOp) || strings.HasPrefix(content, "[系统] ")
+}
+
+// triggerOf 是触发这一轮的消息：群里是排队时记下的那条点名；其余（私聊、议题）就是这一项自己的消息。
+func (a *App) triggerOf(head queued) *trigger {
+	if head.trig != nil {
+		return head.trig
+	}
+	return &trigger{who: head.who, ch: head.ep.ch, chat: head.ep.chat, msgID: head.m.MsgID, text: clipText(head.m.Text, 200)}
+}
+
+// clipText 取开头 n 个字。
+func clipText(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }

@@ -45,6 +45,18 @@ func (a *App) workspaceOf(sid string) workspace {
 }
 func (a *App) workspaceBase(sid string) workspace {
 	st := a.store.Settings(sid)
+	// 工单的分支：模式和工作目录以工单为准，不看会话的设置（网页上改了也不生效）。
+	// 模式是会话设置和 Auth.Mode 里较低的一个，工作目录只认这张工单的 worktree。
+	if t, ok := a.ticketOfSession(sid); ok {
+		w := workspace{mode: t.Auth.Mode}
+		if st.Mode != "" && modeRank(st.Mode) >= 0 && modeRank(st.Mode) < modeRank(w.mode) {
+			w.mode = st.Mode
+		}
+		if x := a.findWorkspace("w-" + t.ID); x != nil {
+			w.wss = []*Workspace{x}
+		}
+		return w
+	}
 	// 权限模式：会话自己的 > agent 的 > 全局默认
 	w := workspace{mode: a.agentModeDefault(sid)}
 	if st.Mode != "" {
@@ -107,6 +119,9 @@ func (a *App) isAdmin(who string) bool {
 // runMode 是这一轮实际使用的模式：管理员用会话的设置，其他人用 access.guest。
 func (a *App) runMode(w workspace, from string) string {
 	if a.isAdmin(from) {
+		return w.mode
+	}
+	if _, ok := a.ticketIdentity(from); ok { // 工单的分支：权限模式就是授权记录里的（会话设置里已经定成 Auth.Mode）
 		return w.mode
 	}
 	if a.cfg.Access.Guest == proto.ModeReadonly {
@@ -342,6 +357,9 @@ func callCard(name string, raw json.RawMessage) (title, body string) {
 		return fmt.Sprintf("%s写入文件%s：%s（%d 字节）", prefix, where, str("path"), len(str("content"))), clip(str("content"), 300)
 	case "Edit":
 		return prefix + "修改文件" + where + "：" + str("path"), fmt.Sprintf("原文：\n%s\n改为：\n%s", clip(str("old_string"), 400), clip(str("new_string"), 400))
+	case "External":
+		// 外部 agent 拿着自己的登录凭据去联网：审批时要看到是哪个、交给它的完整 prompt（不截断）
+		return "交给外部 agent " + str("name") + where, str("prompt")
 	}
 	return prefix + "工具 " + name + where, prettyArgs(raw)
 }

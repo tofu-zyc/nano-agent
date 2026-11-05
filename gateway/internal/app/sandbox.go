@@ -28,22 +28,13 @@ func (a *App) freezeSandboxRoute(rt *route, mode string) {
 }
 
 func (a *App) SetWorkspaceSandbox(id, mode string) error {
+	return a.PatchWorkspace(id, &mode, nil)
+}
+
+func checkSandboxMode(mode string) error {
 	if mode != "" && mode != "auto" && mode != "on" && mode != "off" {
 		return errors.New("执行隔离只能是 auto、on、off，或空字符串跟随 agent")
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	w := a.findWorkspace(id)
-	if w == nil {
-		return errors.New("没有这个工作目录")
-	}
-	old := w.SandboxMode
-	w.SandboxMode = mode
-	if err := a.saveWorkspaces(); err != nil {
-		w.SandboxMode = old
-		return err
-	}
-	a.publishWorkspaces()
 	return nil
 }
 

@@ -101,6 +101,9 @@ func (e *env) helloVersion(t *testing.T, name string, m proto.Msg) *fakeKernel {
 	t.Cleanup(func() { kernelSide.Close() })
 	k := &fakeKernel{t: t, conn: kernelSide, sc: bufio.NewScanner(kernelSide)}
 	m.T, m.V, m.Node, m.Tools = proto.THello, proto.Version, name, echoTool
+	if m.GatewayTools == nil {
+		m.GatewayTools = gatewayToolNames()
+	}
 	go k.send(m)
 	k.expect(proto.TWelcome)
 	waitNode(e.a, name, true)

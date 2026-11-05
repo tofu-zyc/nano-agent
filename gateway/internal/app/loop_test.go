@@ -1,6 +1,7 @@
 package app
 
 import (
+	"nano-agent/gateway/internal/autonomy"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"nano-agent/gateway/internal/session"
 )
 
-// 统一聊天循环；见 docs/DESIGN-agent-runtime.md。
+// 统一聊天循环；见 docs/RUNTIME.md。
 
 // 不调模型的门槛：问句更想接，@别人的不太想接，最近自己说得多更想接着说。
 func TestGroupGate(t *testing.T) {
@@ -133,7 +134,6 @@ func TestFollowUp(t *testing.T) {
 	e.a.mu.Lock()
 	_, tools, _, _ := e.a.contextParts(mainSID)
 	out, err := e.a.followUpCall(mainSID, []byte(`{"minutes":30,"note":"问问面试怎么样"}`))
-	e.a.lifeOf("default").Next = base.Add(10 * time.Hour).Unix() // 别让内心活动插进来
 	e.a.mind("default").SetNextCheck(base.Add(10 * time.Hour))
 	e.a.mu.Unlock()
 	if err != nil || !strings.Contains(out, "15:30") {
@@ -170,20 +170,20 @@ func TestFollowUp(t *testing.T) {
 	e.k.expect(proto.TInput)
 	e.roundTrip(t)
 	e.a.mu.Lock()
-	_, left := e.a.lifeOf("default").FollowUps[mainSID]
+	_, left := e.a.mind("default").FollowUps[mainSID]
 	e.a.mu.Unlock()
 	if left {
 		t.Fatal("对方先说话了，约好的应该取消")
 	}
 	// 睡着时到点：挪到醒来
 	e.a.mu.Lock()
-	e.a.lifeOf("default").FollowUps[mainSID] = followUp{At: time.Date(2026, 10, 21, 23, 40, 0, 0, time.UTC).Unix(), Note: "x"}
+	e.a.mind("default").FollowUpMap()[mainSID] = autonomy.FollowUp{At: time.Date(2026, 10, 21, 23, 40, 0, 0, time.UTC).Unix(), Note: "x"}
 	e.a.mu.Unlock()
 	setNow(e, time.Date(2026, 10, 21, 23, 45, 0, 0, time.UTC))
 	e.a.lifeTick()
 	e.k.none()
 	e.a.mu.Lock()
-	moved := e.a.lifeOf("default").FollowUps[mainSID].At
+	moved := e.a.mind("default").FollowUps[mainSID].At
 	e.a.mu.Unlock()
 	if moved != time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC).Unix() {
 		t.Fatalf("睡着时到点应该挪到 08:00：%v", time.Unix(moved, 0).UTC())
@@ -217,7 +217,7 @@ func TestRoomAgentMention(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.a.mu.Lock()
-	e.a.roomAgentSay(room, "default", "@小波 你怎么看")
+	e.a.roomAgentSay(room, "default", "@小波 你怎么看", "")
 	e.a.mu.Unlock()
 	in := e.k.expect(proto.TInput)
 	if in.SID != e.a.roomMemberSID("bob", room.ID) {
@@ -235,7 +235,7 @@ func TestRoomAgentMention(t *testing.T) {
 	}
 	// 没叫到别人：不叫醒
 	e.a.mu.Lock()
-	e.a.roomAgentSay(room, "default", "今天天气不错")
+	e.a.roomAgentSay(room, "default", "今天天气不错", "")
 	e.a.mu.Unlock()
 	e.k.none()
 }

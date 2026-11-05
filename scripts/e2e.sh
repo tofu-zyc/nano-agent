@@ -153,7 +153,7 @@ send "!call Read $READ_LOCAL"; expect "技能附带文件放到执行的机器�
 send '!call Read {"path":"~/.profile"}';                expect "工作目录外也能读 HOME" "secret-profile"
 send '!call Shell {"command":"cat ~/.profile"}';        expect "Shell 也能读 HOME" "secret-profile"
 send '!call Write {"path":"/tmp/nano-e2e-outside.txt","content":"x"}'; expect "工作目录外不能写" "elevated"
-send '!call nope {}';                                 expect "未知工具变成错误结果" "未知工具：nope"
+send '!call nope {}';                                 expect "没提供的工具整批不接受" "这一轮没有提供工具 nope"
 send '!call Read {oops';                              expect "非法参数变成错误结果" "不是合法的 JSON 对象"
 send "/whoami";                                       expect "查身份" "你的身份：cli:local"
 send "/dir";                                          expect "查看工作目录" "1. 本机:$TMP/work（已挂载，新会话默认）"
@@ -237,10 +237,10 @@ READ_REMOTE=$(python3 -c 'import json,sys;print(json.dumps({"path":sys.argv[1],"
 send "!call Read $READ_REMOTE"; expect_n "服务器上读技能文件" "skill-e2e-data" 2
 send '!call Read {"path":"back.txt","workspace":"本机:'"$TMP"'/work"}'; expect_n "同一轮也能用本机的目录" "1	pc is back" 1; wait_round_end
 # 网关执行的工具不挑工作目录：挂了多个目录时也不能要求 workspace（v0.7.4 修）
-send '!call Agenda {"action":"list"}'; expect "Agenda 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
-send '!call Idea {"action":"list"}'; expect "Idea 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
-send '!call Mind {"action":"view"}'; expect "Mind 由网关执行，不要求 workspace" "只有拟人型 agent 有自己的日程和想法"
-send '!call fake__echo {}'; expect "MCP 工具由网关执行，不要求 workspace" "没有这个 MCP 服务：fake"
+send '!call Gateway {"what":"status"}'; expect "Gateway 由网关执行，不要求 workspace" "kernels"
+send '!call Session {"action":"list_branches"}'; expect "Session 由网关执行，不要求 workspace" "branches"
+send '!call Agenda {"action":"list"}'; expect "不是拟人型时 Agenda 不提供，整批不接受" "这一轮没有提供工具 Agenda"
+send '!call fake__echo {}'; expect "没配置的 MCP 工具不提供，整批不接受" "这一轮没有提供工具 fake__echo"
 send "/dir -3";                                       expect "取下服务器上的目录" "取下了 $BOXWS"
 
 # 超出历史上限后生成摘要，再沿用近期上下文继续调用工具。

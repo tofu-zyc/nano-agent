@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/schedule"
 	"path/filepath"
@@ -99,6 +101,7 @@ func (a *App) loadSchedules() {
 	a.schedules, a.schedulesErr = schedule.Open(filepath.Join(a.store.Dir(), "schedules.json"), a.now())
 	if a.schedulesErr != nil {
 		a.log.Warn("定时任务不可用", "err", a.schedulesErr)
+		a.hSchedule.Set(health.Error, a.schedulesErr.Error())
 	}
 }
 func (a *App) Schedules() ScheduleView {
@@ -374,7 +377,7 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 		return errors.New("任务已在运行")
 	}
 	s := a.sessOf(cronSID(task))
-	if s.run != nil || s.compacting || len(s.queue) > 0 {
+	if ok, why, _ := a.admitRun(s.sid); !ok && why == admitBusy {
 		return errors.New("任务会话正在使用")
 	}
 	if advance {
@@ -390,6 +393,12 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	task.Running = true
 	if err := a.saveTask(task); err != nil {
 		return err
+	}
+	if a.commits != nil {
+		if a.schedPrior == nil {
+			a.schedPrior = map[string]uint64{}
+		}
+		a.schedPrior[task.ID] = a.commits.LastSeq()
 	}
 	fail := func(err error) error { a.completeSchedule(&task, false, err.Error()); return err }
 	if strings.TrimSpace(task.Prompt) == "" {
@@ -423,11 +432,8 @@ func (a *App) launchSchedule(task schedule.Task, advance bool) error {
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		return fail(err)
 	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return fail(errors.New("还没有配置模型"))
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return fail(errors.New("没有在线的内核"))
+	if ok, why, _ := a.admitRun(s.sid); !ok { // 设置都写好以后再查模型和内核（工作目录在设置里）
+		return fail(errors.New(why))
 	}
 	s.scheduled = &task
 	// 没有投递窗口（只放任务页）时，这一轮挂在任务自己的会话上；结果由 completeSchedule 记进任务。
@@ -504,6 +510,12 @@ func (a *App) completeSchedule(task *schedule.Task, ok bool, text string) {
 			push = false
 		}
 		current.Running = false
+		if prior, had := a.schedPrior[task.ID]; had {
+			delete(a.schedPrior, task.ID)
+			if ok { // 下一次成功了，上一次的汇报（失败、受阻）不用再看
+				a.handledByOwner(commit.KindSchedule, task.ID, prior)
+			}
+		}
 		schedule.Record(&current, schedule.Result{At: a.now(), OK: ok, Summary: clip(summary, 2000)})
 		if err := a.saveTask(current); err != nil {
 			a.log.Error("记录任务结果失败", "err", err)

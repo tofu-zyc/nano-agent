@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"nano-agent/gateway/internal/agents"
@@ -12,6 +13,7 @@ import (
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/health"
 )
 
 // 渠道管理：按配置启动、停止、重启各个聊天渠道。网页里改了渠道设置时调用 ReconcileChannels，
@@ -52,8 +54,8 @@ func (a *App) Web() *channel.Web { return a.web }
 
 // ReconcileChannels 让正在运行的渠道和配置一致：该开的开，该关的关，配置变了的重启。
 func (a *App) ReconcileChannels(cfg *config.Config) {
-	// 先取一份机器人列表（要拿 a.mu），再进 chMu：锁的顺序只能是 a.mu → chMu，
-	// 反过来的话会和 Status()（拿着 a.mu 读渠道）互相卡住
+	// 先取一份机器人列表（要拿 a.mu），再进 chMu：持有 a.mu 时不能去拿 chMu
+	// （Status() 拿着 a.mu 读渠道，会互相卡住）；持有 chMu 时可以拿 a.mu（AddChannel、RemoveChannel 就是这样）
 	a.mu.Lock()
 	bots := []agents.Bot{}
 	if a.botStore != nil {
@@ -64,6 +66,7 @@ func (a *App) ReconcileChannels(cfg *config.Config) {
 	defer a.chMu.Unlock()
 	if a.runs == nil {
 		a.runs, a.chErr = map[string]*chanRun{}, map[string]string{}
+		a.chHealth = map[string]*health.Handle{}
 	}
 	if a.web == nil {
 		a.web = channel.NewWeb()
@@ -85,10 +88,12 @@ func (a *App) reconcile(name string, want bool, conf any, build func() (channel.
 		cur = nil
 	}
 	if want && cur == nil {
+		h := a.claimChannelHealth(name)
 		ch, err := build()
 		if err != nil {
 			a.log.Error("启动渠道失败", "channel", name, "err", err)
 			a.chErr[name] = err.Error()
+			h.Set(health.Error, err.Error())
 			a.publishChannel(name)
 			return
 		}
@@ -97,8 +102,98 @@ func (a *App) reconcile(name string, want bool, conf any, build func() (channel.
 	}
 	if !want {
 		delete(a.chErr, name)
+		a.releaseChannelHealth(name)
 		a.publishChannel(name)
 	}
+}
+
+// channel:<名字> 健康条目只在这里认领和释放：启用的渠道有条目（构建失败也有，显示 error），
+// 停用或被删除的没有。调用方持有 chMu。
+func (a *App) claimChannelHealth(name string) *health.Handle {
+	a.releaseChannelHealth(name)
+	h, _ := a.health.Claim("channel:" + name)
+	a.chHealth[name] = h
+	return h
+}
+
+func (a *App) releaseChannelHealth(name string) {
+	a.chHealth[name].Release()
+	delete(a.chHealth, name)
+}
+
+// channelErrorGrace 是渠道自己报的 error 要持续多久才算 error，之前算 degraded：
+// 一次网络抖动不该让 nano-gateway status 返回 3。
+const channelErrorGrace = time.Minute
+
+// channelWatch 把一个渠道报来的状态写进它的健康条目，并给渠道自己报的 error 一段宽限。
+type channelWatch struct {
+	h     *health.Handle
+	grace time.Duration
+
+	mu       sync.Mutex
+	since    time.Time // 这一次连续出错的开始；零值表示现在没在出错
+	promoted bool      // 宽限已过，条目是 error
+	detail   string
+}
+
+func (w *channelWatch) report(st channel.Status) {
+	state, detail := channelHealth(st)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch st.State {
+	case channel.StateOnline, channel.StateIdle:
+		w.since, w.promoted = time.Time{}, false // 只有这两种算恢复
+		w.h.Set(state, detail)
+		return
+	case channel.StateStarting:
+		if !w.since.IsZero() {
+			return // 出错期间重试前报的“连接中”不算恢复：保持当前状态，计时照走
+		}
+		w.h.Set(state, detail)
+		return
+	case channel.StateError:
+	default: // stopped 等：直接按状态写，不再有“正在出错”的计时
+		w.since, w.promoted = time.Time{}, false
+		w.h.Set(state, detail)
+		return
+	}
+	w.detail = detail
+	if w.since.IsZero() {
+		w.since = time.Now()
+		since := w.since
+		time.AfterFunc(w.grace, func() {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			if w.since.Equal(since) { // 中间恢复过又出错的，是另一次，不能被前一次的定时器提前判成 error
+				w.promoted = true
+				w.h.Set(health.Error, w.detail)
+			}
+		})
+	}
+	if w.promoted {
+		w.h.Set(health.Error, detail)
+	} else {
+		w.h.Set(health.Degraded, detail)
+	}
+}
+
+// channelHealth 把渠道自己报的状态换成健康状态：出错和停止（启用的渠道不该停）是 error，
+// 连接中和等人接入还算正常。
+func channelHealth(st channel.Status) (health.State, string) {
+	switch st.State {
+	case channel.StateError:
+		if st.Error == "" {
+			return health.Error, "出错"
+		}
+		return health.Error, st.Error
+	case channel.StateStopped:
+		return health.Error, "已停止"
+	case channel.StateStarting:
+		return health.OK, "连接中"
+	case channel.StateIdle:
+		return health.OK, "等待接入"
+	}
+	return health.OK, ""
 }
 
 func (a *App) startChannel(name string, ch channel.Channel, conf any) {
@@ -106,13 +201,29 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 	r := &chanRun{ch: ch, conf: conf, cancel: cancel, done: make(chan struct{})}
 	a.runs[name] = r
 	a.AddChannel(ch)
+	// 网页和终端不经过 reconcile，没有健康条目（h 为 nil，什么也不做）。
+	// 渠道停止之后迟到的回报写不到这里：stopChannel 先释放了 h。
+	h := a.chHealth[name]
 	if sr, ok := ch.(channel.StatusReporter); ok {
-		sr.OnStatus(func(channel.Status) { a.publishChannel(name) })
+		w := &channelWatch{h: h, grace: a.channelGrace}
+		sr.OnStatus(func(st channel.Status) {
+			w.report(st)
+			a.publishChannel(name)
+		})
+		w.report(sr.Status())
 	}
 	go func() {
 		defer close(r.done)
-		if err := ch.Run(ctx, a.OnMessage); err != nil {
+		err := ch.Run(ctx, a.OnMessage)
+		if err != nil {
 			a.log.Error("聊天渠道退出", "channel", name, "err", err)
+		}
+		if ctx.Err() == nil {
+			detail := "渠道已退出"
+			if err != nil {
+				detail += "：" + err.Error()
+			}
+			h.Set(health.Error, detail)
 		}
 		a.publishChannel(name)
 	}()
@@ -121,6 +232,7 @@ func (a *App) startChannel(name string, ch channel.Channel, conf any) {
 }
 
 func (a *App) stopChannel(name string) {
+	a.releaseChannelHealth(name)
 	r := a.runs[name]
 	if r == nil {
 		return
@@ -132,6 +244,7 @@ func (a *App) stopChannel(name string) {
 		a.log.Warn("渠道停止超时", "channel", name)
 	}
 	delete(a.runs, name)
+	a.RemoveChannel(r.ch) // 待发消息留在出站里，渠道回来再发
 	a.log.Info("渠道已停止", "channel", name)
 }
 
@@ -168,7 +281,7 @@ func (a *App) Channels() []ChannelInfo {
 	return out
 }
 
-// reconcileBotsLocked 按机器人列表启动、停止、重启机器人渠道。调用方持有 chMu，不能再去拿 a.mu。
+// reconcileBotsLocked 按机器人列表启动、停止、重启机器人渠道。调用方持有 chMu；持有 chMu 时可以拿 a.mu，反过来持有 a.mu 时不能拿 chMu。
 func (a *App) reconcileBotsLocked(cfg *config.Config, bots []agents.Bot) {
 	seen := map[string]bool{}
 	for _, b := range bots {
@@ -187,6 +300,13 @@ func (a *App) reconcileBotsLocked(cfg *config.Config, bots []agents.Bot) {
 			continue
 		}
 		a.stopChannel(name)
+	}
+	// 机器人被删除时，没在跑（比如构建失败）的也要撤掉条目
+	for name := range a.chHealth {
+		if isBotChannel(name) && !seen[name] {
+			a.releaseChannelHealth(name)
+			delete(a.chErr, name)
+		}
 	}
 }
 

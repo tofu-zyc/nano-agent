@@ -230,6 +230,54 @@ def t_skill(gw):
     finish(gw, "sk")
 
 
+@case("网关工具 Report、Ticket 交给网关")
+def t_gateway_tool_routing(gw):
+    # 以前内核的网关工具名单里没有它们：挂了工作目录回“未知工具：Report”，没挂的回“没有挂载工作目录”
+    for i, (name, args, wss) in enumerate([("Agenda", {"action": "list"}, None), ("Report", {"status": "ready", "summary": "x"}, None),
+                                           ("Ticket", {"action": "list"}, None), ("Report", {"status": "ready", "summary": "x"}, []),
+                                           ("Ticket", {"action": "list"}, [])]):
+        sid = "gwt-%d" % i
+        if wss is None:
+            start_run(gw, sid, mode="auto", frm="tg:admin")
+        else:
+            gw.send(t="input", sid=sid, mode="auto", workspaces=wss, **{"from": "tg:admin"})
+            gw.expect("model", sid=sid)
+        call(gw, sid, ("c1", name, args))
+        m = gw.expect("exec", sid=sid, id="c1", name=name)
+        assert m["args"] == args and "workspace" not in m, m
+        gw.send(t="exec_result", sid=sid, id="c1", ok=True, content="ok")
+        gw.expect("result", sid=sid, id="c1", ok=True, content="ok")
+        finish(gw, sid)
+
+
+@case("External 交给网关；审批和 Shell 一样跟着权限模式走：ask 每次都问，readonly 拒绝", approvals=True)
+def t_external_policy(gw):
+    args = {"name": "claude", "prompt": "把 a.txt 改好", "workspace": "本机:" + WORK}
+    receipt = '{"status":"backgrounded","job_id":"j_x-1"}'
+    start_run(gw, "ext1", mode="ask", frm="tg:admin")
+    call(gw, "ext1", ("c1", "External", args))
+    req = gw.expect("approve_req", sid="ext1", id="c1", name="External")
+    assert req["args"] == args, req
+    gw.send(t="approve", sid="ext1", id="c1", ok=True, **{"from": "tg:admin"})
+    gw.expect("notice", sid="ext1", text=lambda s: "已批准" in s)
+    m = gw.expect("exec", sid="ext1", id="c1", name="External")
+    assert m["args"] == args and "workspace" not in m, m   # 用哪个工作目录由网关按参数挑
+    gw.send(t="exec_result", sid="ext1", id="c1", ok=True, content=receipt)
+    gw.expect("result", sid="ext1", id="c1", ok=True, content=receipt)
+    finish(gw, "ext1")
+    start_run(gw, "ext2", mode="readonly", frm="tg:admin")
+    call(gw, "ext2", ("c1", "External", args))
+    gw.expect("result", sid="ext2", id="c1", ok=False, content=lambda c: "只读模式" in c)
+    finish(gw, "ext2")
+    if gw.landlock:   # 有沙箱：auto 和 Shell 一样直接交给网关
+        start_run(gw, "ext3", mode="auto", frm="tg:admin")
+        call(gw, "ext3", ("c1", "External", args))
+        gw.expect("exec", sid="ext3", id="c1", name="External")
+        gw.send(t="exec_result", sid="ext3", id="c1", ok=True, content=receipt)
+        gw.expect("result", sid="ext3", id="c1", ok=True)
+        finish(gw, "ext3")
+
+
 @case("多个工作目录：按 workspace 参数决定在哪台机器上执行", approvals=True)
 def t_multi_ws(gw):
     start_run(gw, "mw", workspaces=[local_ws(), box_ws(landlock=0)])
@@ -289,6 +337,46 @@ def t_host_run(gw):
     assert os.path.exists(os.path.join(d, "SKILL.md")), "失败时不动原来的文件"
     gw.send(t="skill_put", id="p3", skill="../x", files=[])
     gw.expect("run_result", id="p3", ok=False)
+
+
+@case("env：网关发起的 run 能带顶层 env；模型的 Shell 调用（参数里带 env）被拒绝，也带不出顶层 env")
+def t_env(gw):
+    gw.send(t="run", id="env1", req={"tool": "Shell", "args": {"command": "echo V=$GIT_CONFIG_VALUE_0"}, "dirs": [WORK], "write": True,
+                                      "env": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "k", "GIT_CONFIG_VALUE_0": "from-gateway"}})
+    gw.expect("run_result", id="env1", ok=True, content=lambda c: "V=from-gateway" in c)
+    gw.send(t="run", id="env2", req={"tool": "Shell", "args": {"command": "echo V=$LD_PRELOAD"}, "dirs": [WORK], "write": True,
+                                      "env": {"LD_PRELOAD": "/tmp/x.so"}})
+    gw.expect("run_result", id="env2", ok=False, content=lambda c: "不能设置这个名字" in c)
+    # 模型的工具调用：内核从零构造请求，参数整个放进 args；args 里带 env 被执行器明确拒绝，命令没有执行
+    start_run(gw, "senv")
+    call(gw, "senv", ("e1", "Shell", {"command": "echo model-ran > env-model-ran; echo V=$GIT_CONFIG_VALUE_0", "env": {"GIT_CONFIG_VALUE_0": "from-model"}}))
+    r = gw.expect("result", sid="senv", id="e1", ok=False)
+    assert "不能放在工具参数里" in r["content"] and "from-model" not in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "env-model-ran"))
+    gw.expect("model", sid="senv")
+    # agent_rw（外部 agent 的目录）也一样：模型的参数里带被执行器拒绝
+    call(gw, "senv", ("e2", "Shell", {"command": "echo model-ran > rw-model-ran", "agent_rw": ["~/.ssh"]}))
+    r = gw.expect("result", sid="senv", id="e2", ok=False)
+    assert "agent_rw 只能由网关发起的执行放在请求的顶层" in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "rw-model-ran"))
+    gw.expect("model", sid="senv")
+    call(gw, "senv", ("e3", "Shell", {"command": "echo model-ran > rw-model-ran", "agent_rw_deny": [T]}))
+    r = gw.expect("result", sid="senv", id="e3", ok=False)
+    assert "agent_rw_deny 只能由网关发起的执行放在请求的顶层" in r["content"], r
+    assert not os.path.exists(os.path.join(WORK, "rw-model-ran"))
+    finish(gw, "senv")
+    # 网关发起的 run 带的顶层 agent_rw、agent_rw_deny 穿过内核到执行器：互相包含的整次拒绝
+    home = os.path.join(T, "home")
+    for d in ("repo-x/src", ".claude-x"):
+        os.makedirs(os.path.join(home, d), exist_ok=True)
+    gw.send(t="run", id="rw1", req={"tool": "Shell", "args": {"command": "echo ran > rw-gateway-ran"}, "dirs": [WORK], "write": True,
+                                     "agent_rw": ["~/repo-x/src"], "agent_rw_deny": ["~/repo-x"]})
+    gw.expect("run_result", id="rw1", ok=False, content=lambda c: "仓库的根" in c and "没有执行" in c)
+    gw.send(t="run", id="rw2", req={"tool": "Shell", "args": {"command": "echo ran > rw-gateway-ran"}, "dirs": [WORK], "write": True,
+                                     "agent_rw": ["~/.claude-x"], "agent_rw_deny": ["~/repo-x"]})
+    gw.expect("run_result", id="rw2", ok=True)
+    assert os.path.exists(os.path.join(WORK, "rw-gateway-ran"))
+    os.remove(os.path.join(WORK, "rw-gateway-ran"))
 
 
 @case("工具往返：Write 写文件，Read 读回来")
@@ -1087,11 +1175,13 @@ def main():
             feat = hello.get("features", {})
             assert feat.get("call_identity") == 1 and feat.get("bounded_parallel") == 1, feat
             assert feat.get("max_parallel_tools") and feat.get("max_active_runs"), feat
+            # 交给网关的工具名单：网关只把这里有的网关工具给模型
+            assert {"Report", "Ticket", "External", "Agenda", "Job", "Skill"} <= set(hello.get("gateway_tools", [])), hello.get("gateway_tools")
             gw.send(t="welcome", v=11)
             gw.auto_approve = hello["sandbox"]["landlock"] == 0
             gw.landlock = hello["sandbox"]["landlock"]
             print(f"hello ok：{names}，sandbox={hello['sandbox']}")
-            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_multi_ws, t_host_run, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
+            for t in (t_hook_preflight, t_schedule, t_ls, t_skill, t_gateway_tool_routing, t_external_policy, t_multi_ws, t_host_run, t_env, t_roundtrip, t_parallel, t_timeout, t_output, t_gateway_limits, t_modes, t_approve,
                       t_approve_timeout, t_cancel, t_background, t_guard, t_bad_args, t_gateway_exec, t_gateway_nosandbox,
                       t_shell_serialized,
                       t_gateway_cancel, t_identity, t_parallel_limit, t_resource_locks, t_no_exec_started, t_run_queue,

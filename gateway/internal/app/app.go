@@ -7,8 +7,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"nano-agent/gateway/internal/extagent"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -20,11 +22,13 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
+	"nano-agent/gateway/internal/commit"
 	"nano-agent/gateway/internal/config"
 	"nano-agent/gateway/internal/dispatch"
 	"nano-agent/gateway/internal/eventlog"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
+	"nano-agent/gateway/internal/health"
 	"nano-agent/gateway/internal/hooks"
 	"nano-agent/gateway/internal/kernel"
 	"nano-agent/gateway/internal/knowledge"
@@ -32,14 +36,17 @@ import (
 	"nano-agent/gateway/internal/mcp"
 	"nano-agent/gateway/internal/media"
 	"nano-agent/gateway/internal/models"
+	"nano-agent/gateway/internal/outbox"
 	"nano-agent/gateway/internal/persona"
 	"nano-agent/gateway/internal/proto"
 	"nano-agent/gateway/internal/redact"
+	"nano-agent/gateway/internal/repos"
 	"nano-agent/gateway/internal/rooms"
 	"nano-agent/gateway/internal/schedule"
 	"nano-agent/gateway/internal/search"
 	"nano-agent/gateway/internal/session"
 	"nano-agent/gateway/internal/skills"
+	"nano-agent/gateway/internal/ticket"
 )
 
 // Command 是一个聊天命令。/help、网页输入框里打 / 时的提示都用这张表。
@@ -68,8 +75,11 @@ var Commands = []Command{
 	{Name: "forget", Args: "<标题或路径>", Desc: "把一条记忆标成过时（不删，还能找回）", Admin: true},
 	{Name: "sleep", Desc: "让 agent 现在去整理记忆（睡觉做梦）", Admin: true},
 	{Name: "wake", Desc: "叫醒拟人型 agent，让它自己待一会儿（冲浪、想事情、找人聊天）", Admin: true},
-	{Name: "session", Args: "[编号 | new 名字]", Desc: "查看会话；切换到别的会话、新建一个会话", Admin: true},
+	{Name: "session", Args: "[编号 | new 名字 | fork [--attention] [标题]]", Desc: "查看会话；切换到别的会话、新建一个会话、分出一个分支（--attention：分支汇报结果时通知这里）", Admin: true},
 	{Name: "branch", Args: "[report <分支编号>]", Desc: "查看这个会话的安静分支；把某个分支的结论带回这个会话"},
+	{Name: "pending", Desc: "列出等你处理的事：受阻的、做完了等你看的", Admin: true},
+	{Name: "answer", Args: "<编号> <回答>", Desc: "回答一件等你处理的事里的问题", Admin: true},
+	{Name: "seen", Args: "<编号>", Desc: "把一件等你处理的事记为知道了", Admin: true},
 	{Name: "compact", Args: "[特别保留的重点]", Desc: "整理上下文（不动记忆）", Admin: true},
 	{Name: "show", Args: "[详细 | 过程 | 简洁 | default]", Desc: "设置这个窗口显示的过程"},
 	{Name: "context", Desc: "查看上下文用量、缓存命中和分项"},
@@ -121,6 +131,32 @@ type App struct {
 	jobCompletions  map[string]jobCompletionWait
 	jobEvents       *eventlog.Store
 	jobEventsErr    error
+	health          *health.Board
+	hStorage        *health.Handle // 以下各条目只由 App 写（channel:<名字> 由 channels.go 认领）
+	hDispatch       *health.Handle
+	hEvents         *health.Handle
+	hAutonomy       *health.Handle
+	hSchedule       *health.Handle
+	hStage          *health.Handle    // 场景记录：有一场写不进去就是 degraded
+	hCommit         *health.Handle    // 承诺记录：写不进去就是 degraded
+	commits         *commit.Store     // 承诺记录（Report、知道了、回答）
+	schedPrior      map[string]uint64 // 定时任务这一轮开始时承诺记录的最大序号：成功后更早的汇报算处理过
+	commitsErr      error
+	hTicket         *health.Handle // 工单记录：写不进去就是 degraded
+	tickets         *ticket.Store
+	ticketsErr      error
+	repos           *repos.Store
+	extAgents       *extagent.Store // 外部 agent 的登记（设计 §16.4）；打不开就是 nil
+	ghChan          *channel.GitHub
+	repoRTs         map[string]*repoRT
+	lastPushOutcome string                  // 测试用：最近一次推送是 done 还是 skip（远端已经有就不重推）
+	repoPushURL     func(repos.Repo) string // 测试用：推送和 fetch 的网址（默认是连接的那个 https://github.com/...）
+	repoAPIBase     string                  // GitHub API 地址；空是真的 GitHub，测试里换成假的
+	repoNoLoop      bool                    // 测试用：不开轮询循环
+	lastRepoEventID string                  // 测试用：最近一次写进事件日志的仓库事件
+	ticketNoStart   bool                    // 测试用：建了工单不自动开工
+	ticketBusy      map[string]bool         // 正在由后台步骤处理的工单（开工、验收）：同一张工单同一时刻只一个
+	stageBad        map[string]string       // 写不进去的戏：群 ID → 群名
 	jobPersist      map[string]*jobPersistence
 	runtimeLimits   config.Runtime
 	runWaitSerial   uint64
@@ -151,6 +187,11 @@ type App struct {
 	agentRoot         string          // agents 目录
 	roomStore         *rooms.Store    // 网关内部群聊（data/rooms.json）
 	roomRuns          map[string]*roomRun
+	sceneUses         map[string]*sceneUse // 场景的用量（data/runtime/scenes.json）
+	sceneUsePath      string
+	observe           *observeLog          // observe 记录（第一次用到时打开）
+	observeDir        string               // data 目录
+	stages            map[string]*stageLog // 开了 stage 的群的场景记录，按群 ID
 	hub               *kernel.Hub
 	hubRef            atomic.Pointer[kernel.Hub] // 同一个 hub，不用拿总锁就能读（MCP 管道收发用）
 	mcp               *mcp.Manager               // MCP 服务（data/mcp.json）
@@ -171,11 +212,13 @@ type App struct {
 	pendingRestart string
 
 	// 渠道管理（channels.go），用单独的锁：停止渠道要等它退出，不能拿着 mu 等
-	chMu  sync.Mutex
-	runs  map[string]*chanRun
-	chErr map[string]string
-	cli   *channel.CLI
-	web   *channel.Web
+	chMu         sync.Mutex
+	runs         map[string]*chanRun
+	chErr        map[string]string
+	chHealth     map[string]*health.Handle // channel:<名字> 的健康条目，受 chMu 保护
+	channelGrace time.Duration             // 渠道自己报的 error 的宽限，测试里改短
+	cli          *channel.CLI
+	web          *channel.Web
 
 	now func() time.Time // 测试里可以换成固定时间
 	loc *time.Location   // 时间戳用的时区
@@ -195,7 +238,11 @@ type App struct {
 	jobCards       map[string]*jobPresentation
 	jobButtons     map[string]jobButtonAction
 	jobStopGroups  map[string]bool
-	outboxes       map[string]chan outItem
+	outboxes       map[string]chan outItem                    // 每个渠道一个内存协程：Job 卡片、cli、web，以及出站不可用时的内存直发
+	outbox         *outbox.Outbox                             // 外部平台渠道的可靠出站
+	chRetired      atomic.Pointer[map[string]channel.Channel] // 停用渠道最后的对象：只用来给排队中的消息按它的发法切段
+	chSnap         atomic.Pointer[map[string]channel.Channel] // 渠道快照：AddChannel 时复制一份换上，出站不去拿 a.mu
+	mediaRef       atomic.Pointer[media.Store]
 	eps            map[string]*epRec // 聊天窗口接在哪个会话上（endpoints.go）
 	wss            []Workspace       // 工作目录列表（workspaces.go）
 	hosts          Hosts             // 网关能直接执行工具的机器：本机、SSH 服务器（nodes.go）
@@ -208,7 +255,6 @@ type App struct {
 	agentSkills    map[string]*skills.Registry // 每个 agent 自己的技能目录
 	dreams         map[string]*dreamState      // 每个 agent 整理记忆的进度（dream.go）
 	bootAt         time.Time                   // 网关启动的时间（算“空闲多久”的起点）
-	lifes          map[string]*lifeState       // 拟人型的内心活动状态（life.go，data/life.json）
 	minds          map[string]*autonomy.State  // 自主活动的心智状态（autonomy.go，data/autonomy.json）
 	mindsLoaded    bool
 	mindMachines   map[string]bool            // 已通知心智状态的设备在线状态
@@ -260,6 +306,9 @@ type sess struct {
 	groupSpeaks    []time.Time
 	groupThoughtAt time.Time   // 上一次判断“要不要说话”的时间
 	groupThoughts  []time.Time // 最近一小时判断了几次
+	roomHint       string      // 房间里叫成员说话时，只放进下一次请求的提示（轮到谁、在哪个频道）
+	roomChan       string      // 这一次说话要回到哪个私下频道（空为公开）
+	groupObserve   *observeWhy // groupTick 触发的下一轮是 observe（开始时交给 run）
 	groupSilent    int         // 自己凑上来、又决定不说话的连续次数（退避用）
 	groupPending   int         // 上一轮之后进来的新消息条数
 
@@ -278,6 +327,17 @@ type queued struct {
 	ticket  uint64          // immutable queue admission order; cleared together with this entry
 	inner   bool            // agent 自己的一轮（整理记忆、内心活动）：不对任何窗口回复、没有环境说明
 	report  *session.Report // 宿主生成的报告卡片（分支报告）：随这条消息一起进历史
+	trig    *trigger        // 触发这一轮的消息（群里排上这次回复的那条点名）；没有就是这一项自己的 m
+}
+
+// trigger 是触发一轮的那条消息：谁、在哪、消息 ID 和开头一段。工单的派活人看它，不采信模型填的。
+// 记在排队的那一项上、这一轮开始时带进 run，不记在会话上：这一轮还在跑时别人又点名，改不掉这一轮是谁派的。
+type trigger struct {
+	who   string // 渠道名:发送人 ID
+	ch    string // 渠道名
+	chat  string // 对话 ID
+	msgID string
+	text  string // 开头 200 字
 }
 
 // in 是收到一条命令时的情况：哪个会话、哪个窗口、谁说的
@@ -295,6 +355,8 @@ type out struct {
 }
 
 type run struct {
+	trig                 *trigger // 触发这一轮的消息
+	ticketSettled        bool     // 工单分支的这一轮用的 token 已经记进工单
 	hook                 *hookInvocation
 	experienceActions    []string
 	experienceActionTurn int
@@ -316,12 +378,17 @@ type run struct {
 	start           time.Time
 	calls           int                              // 这一轮请求了几次模型
 	usage           llm.Usage                        // 这一轮的累计用量
+	thought         string                           // 这一轮的心里话（场景开了 inner 才有）
+	reports         int                              // 这一轮已经 Report 了几次
 	noTools         bool                             // 访客没有工作目录：不给模型工具，只聊天
 	mode            string                           // 这一轮交给内核的权限模式（放行模式这里是 auto，另有 full 标记）
 	mcpOK           map[string]bool                  // 这一轮已经批准过的 MCP 服务（approval=per_turn）
 	readOnly        bool                             // 保留给以后可能的只读场景；现在没有工作目录也给全部工具
 	elevate         bool                             // 这个身份可以提权写工作目录外（管理员）
 	proactive       bool                             // 群聊里自己凑上来的（上一次是 groupTick 触发的）
+	hint            string                           // 只放进每次请求末尾、不写进历史的提示
+	roomChan        string                           // 房间里这一轮的回复去哪个频道（空为公开）
+	observe         *observeWhy                      // 场景是 observe 档的主动插话：回复只记录，不写历史、不发出、不执行工具
 	inner           bool                             // agent 自己的一轮（整理记忆、内心活动）
 	withImages      bool                             // 这一轮的模型能接收图片
 	usedTools       bool                             // 这一轮调过工具（拟人型私聊里纯聊天的回复才拆成几条发）
@@ -400,6 +467,7 @@ func (r *run) addOut(ep endpoint) {
 }
 
 type outItem struct {
+	kind    string                // reply | notice，出站只用来统计；空按 notice
 	job     func(context.Context) // bounded task-card I/O on the existing channel sender
 	ch      channel.Channel
 	chatID  string
@@ -437,6 +505,16 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 		desktopGates:   map[string]chan struct{}{},
 		desktopUsed:    map[string]map[string]bool{},
 	}
+	a.channelGrace = channelErrorGrace
+	a.health = health.NewBoard()
+	a.hStorage, _ = a.health.Claim("storage")
+	a.hDispatch, _ = a.health.Claim("dispatch")
+	a.hEvents, _ = a.health.Claim("runtime_events")
+	a.hAutonomy, _ = a.health.Claim("autonomy")
+	a.hSchedule, _ = a.health.Claim("schedule")
+	a.hStage, _ = a.health.Claim("stage")
+	a.hCommit, _ = a.health.Claim("commitments")
+	a.hTicket, _ = a.health.Claim("tickets")
 	for _, recovery := range []struct {
 		name string
 		run  func() error
@@ -454,7 +532,8 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.dispatchWait = map[string]func(dispatch.Change){}
 	a.dispatcher, a.dispatchErr = dispatch.Open(ctx, filepath.Join(store.Dir(), "runtime", "leases.json"), a.runtimeLimits.Dispatch(), a.leaseChanged)
 	if a.dispatchErr != nil {
-		store.RecordStorageIssue("execution_leases", a.dispatchErr)
+		store.RecordStorageIssue(issueExecutionLeases, a.dispatchErr)
+		a.hDispatch.Set(health.Error, a.dispatchErr.Error())
 		a.log.Error("执行租约恢复失败，保留现场", "err", a.dispatchErr)
 	}
 	a.jobHints = map[string]*jobHint{}
@@ -466,9 +545,17 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.jobCompletions = map[string]jobCompletionWait{}
 	a.jobEvents, a.jobEventsErr = eventlog.Open(ctx, filepath.Join(store.Dir(), "runtime", "events.jsonl"), eventlog.Limits{})
 	if a.jobEventsErr != nil {
-		store.RecordStorageIssue("runtime_events", a.jobEventsErr)
+		store.RecordStorageIssue(issueRuntimeEvents, a.jobEventsErr)
+		a.hEvents.Set(health.Error, a.jobEventsErr.Error())
 		a.log.Error("可靠事件恢复失败，保留现场", "err", a.jobEventsErr)
 	}
+	a.openOutbox(ctx, store.Dir())
+	a.observeDir = store.Dir()
+	a.openCommits()
+	a.openTickets()
+	a.openRepos()
+	a.openExternalAgents()
+	a.loadSceneUses(filepath.Join(store.Dir(), "runtime", "scenes.json"))
 	if a.persona != nil {
 		a.persona.BindSessions(store)
 		if err := store.MigrateAuxiliary("persona", a.persona.Dir(), ".md"); err != nil {
@@ -484,12 +571,15 @@ func New(ctx context.Context, cfg *config.Config, client llm.Client, store *sess
 	a.loadEndpoints()
 	a.recoverForksLocked()
 	a.loadWorkspaces()
+	a.syncTicketWorkspaces()
 	a.loadSchedules()
 	a.skills.Scan()
 	go a.maintenance()
 	go a.scheduleLoop()
 	go a.groupLoop()
 	go a.agentLoop()
+	go a.ticketLoop()
+	go a.startRepos()
 	return a
 }
 
@@ -521,12 +611,71 @@ func (a *App) Bus() *events.Bus { return a.bus }
 
 func (a *App) publish(e events.Event) { a.bus.Publish(e) }
 
+// RemoveChannel 在渠道停用时把它从渠道表和快照里去掉（已经被同名的新对象替换的不动）。
+// 出站里它的待发消息按“渠道暂时不在”等待，重新启用后接着发；删除机器人另走 DropChannel。
+func (a *App) RemoveChannel(ch channel.Channel) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name := ch.Name()
+	if a.chans[name] != ch {
+		return
+	}
+	delete(a.chans, name)
+	retired := map[string]channel.Channel{name: ch}
+	if old := a.chRetired.Load(); old != nil {
+		for k, v := range *old {
+			retired[k] = v
+		}
+		retired[name] = ch
+	}
+	a.chRetired.Store(&retired)
+	a.storeChannelsLocked(name)
+}
+
+// ForgetChannel 把停用渠道的记录去掉（删除机器人用）：之后发给它的消息不再进出站等待。
+func (a *App) ForgetChannel(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if old := a.chRetired.Load(); old != nil {
+		if _, ok := (*old)[name]; ok {
+			retired := make(map[string]channel.Channel, len(*old))
+			for k, v := range *old {
+				if k != name {
+					retired[k] = v
+				}
+			}
+			a.chRetired.Store(&retired)
+		}
+	}
+}
+
+// storeChannelsLocked 重新发布渠道快照；name 回来了就不再算停用。调用方持有 a.mu。
+func (a *App) storeChannelsLocked(name string) {
+	snap := make(map[string]channel.Channel, len(a.chans))
+	for k, v := range a.chans {
+		snap[k] = v
+	}
+	a.chSnap.Store(&snap)
+	if old := a.chRetired.Load(); old != nil {
+		if _, ok := (*old)[name]; ok && snap[name] != nil {
+			retired := make(map[string]channel.Channel, len(*old))
+			for k, v := range *old {
+				if k != name {
+					retired[k] = v
+				}
+			}
+			a.chRetired.Store(&retired)
+		}
+	}
+}
+
 // AddChannel 登记一个聊天通道（同名的旧通道被替换），并保证有一个按顺序发送消息的协程。
 func (a *App) AddChannel(ch channel.Channel) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	name := ch.Name()
 	a.chans[name] = ch
+	a.storeChannelsLocked(name)
 	if _, ok := a.outboxes[name]; ok {
 		return
 	}
@@ -632,9 +781,12 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			}
 			a.publishSession(c.s.sid)
 		}
+		if m.Untrusted || a.outsiderSpoke(c.s.sid, who) {
+			a.markUntrusted(c.s.sid)
+		}
 		a.listenGroup(c.s, ep, m, who)
 		if m.Mentioned || groupMentionsName(m.Text, a.agentOf(c.s.sid).Name) {
-			a.groupReply(c.s, ep, who)
+			a.groupReply(c.s, ep, who, m)
 		}
 		return
 	}
@@ -686,7 +838,6 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 			name = "有人"
 		}
 		if text := strings.TrimSpace(m.Text); text != "" {
-			_ = a.store.Append(c.s.sid, session.Msg{Role: "user", Content: "[" + name + "] " + text})
 			a.publish(events.Event{T: "message", SID: c.s.sid, Name: m.SenderName, Text: text})
 		}
 		a.roomHumanLine(room.ID)
@@ -725,6 +876,15 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 		return
 	case "branch":
 		a.cmdBranch(c, arg)
+		return
+	case "pending":
+		a.cmdPending(c)
+		return
+	case "answer":
+		a.cmdAnswer(c, arg)
+		return
+	case "seen":
+		a.cmdSeen(c, arg)
 		return
 	case "session":
 		if strings.HasPrefix(strings.TrimSpace(arg), "fork") {
@@ -855,8 +1015,6 @@ func (a *App) OnMessage(ch channel.Channel, m channel.Message) {
 	if heard == "" {
 		heard = fmt.Sprintf("（发来 %d 张图片）", len(m.Images))
 	}
-	// 心跳状态：拟人型的每次聊天都记一条事件（同一个会话合并），不每条都唤醒模型
-	a.mindHeard(c.s.sid, who, m.SenderName, heard)
 	s := c.s
 	if br, ok := a.store.Branch(s.sid); ok && (br.Status == session.BranchPreparing || br.Status == session.BranchPendingBoundary || br.SnapshotID == "") {
 		a.answer(c, "分支还没有就绪，请先查看分支状态")
@@ -927,10 +1085,39 @@ func (a *App) deliver(ep endpoint, text, replyTo string) {
 }
 
 // deliverReply 发 agent 的回复正文：能渲染 Markdown 的渠道按 Markdown 发。调用方持有锁。
-func (a *App) deliverReply(ep endpoint, text string) { a.enqueue(ep, outItem{text: text, md: true}) }
+func (a *App) deliverReply(ep endpoint, text string) {
+	a.enqueue(ep, outItem{text: text, md: true, kind: "reply"})
+}
 
 func (a *App) enqueue(ep endpoint, it outItem) bool {
-	ch := a.chans[ep.ch]
+	var ch channel.Channel
+	if snap := a.chSnap.Load(); snap != nil {
+		ch = (*snap)[ep.ch]
+	}
+	// Job 卡片、命令行和网页走内存协程；其余渠道（以后新加的平台自动算）进可靠出站。
+	if it.job == nil && ep.ch != "cli" && ep.ch != "web" && a.outbox != nil {
+		// 渠道停用了（不在快照里）：照样入队，等它回来；切段按它停用前的样子
+		sizing := ch
+		if sizing == nil {
+			if r := a.chRetired.Load(); r != nil {
+				sizing = (*r)[ep.ch]
+			}
+		}
+		if sizing != nil {
+			_, err := a.outbox.Enqueue(a.outboxItem(sizing, ep, it))
+			switch {
+			case err == nil:
+				return true
+			case errors.Is(err, outbox.ErrFull):
+				a.log.Warn("出站队列已满，消息没发出去", "chat", ep.key())
+				return false
+			case errors.Is(err, outbox.ErrTooLarge):
+				a.log.Warn("消息超过出站日志的单条上限，改为内存直发", "chat", ep.key())
+			default:
+				a.log.Debug("出站不可用，改为内存直发", "chat", ep.key(), "err", err)
+			}
+		}
+	}
 	if ch == nil {
 		a.log.Warn("渠道已经不在了，消息没发出去", "chat", ep.key())
 		return false
@@ -943,6 +1130,34 @@ func (a *App) enqueue(ep endpoint, it outItem) bool {
 		a.log.Warn("发送队列已满，丢弃一条消息", "chat", ep.key())
 		return false
 	}
+}
+
+// outboxItem 把一条要发的消息换成出站的条目：渠道实现了 Parter 就先按它实际的发法切段。
+func (a *App) outboxItem(ch channel.Channel, ep endpoint, it outItem) outbox.Item {
+	o := outbox.Item{Channel: ep.ch, Chat: ep.chat, ReplyTo: it.replyTo, Delay: it.delay, Kind: it.kind}
+	if o.Kind == "" {
+		o.Kind = "notice"
+	}
+	if it.att != nil {
+		att := *it.att
+		o.Media = &att
+		return o
+	}
+	o.Markdown = it.md
+	if p, ok := ch.(channel.Parter); ok {
+		o.Parts, o.Plain = p.Parts(it.text, it.md)
+	} else {
+		o.Parts = []string{it.text} // 不切段，整条重试
+	}
+	return o
+}
+
+// mediaNote 是附件发不出去时的说明，和 sendMedia 的两种写法一样；err 为 nil 表示渠道不能发文件。
+func mediaNote(att media.Attachment, err error) string {
+	if err == nil {
+		return fmt.Sprintf("［%s：%s］", kindLabel(att.MIME), att.Name)
+	}
+	return fmt.Sprintf("［%s：%s，没发出去：%s］", kindLabel(att.MIME), att.Name, err)
 }
 
 // sendMedia 发一个文件：渠道有 MediaSender 就按它的方式发（发不出去时退回一行说明），没有就发一行说明。
@@ -1098,6 +1313,22 @@ func (a *App) startRun(s *sess) {
 		s.queue = nil
 		return
 	}
+	if id := ticketIDOfIdentity(head.who); id != "" && node != "" && a.nodes[node] != nil && a.nodes[node].info.Features["hook_check"] < 1 {
+		// 工单分支的每次调用都要内核在调用前问网关（hook_check）：内核不支持就不开这一轮
+		if _, ok := a.ticketIdentity(head.who); ok {
+			a.ticketBlock(id, "kernel", "内核太旧，做不了调用前检查", "", true)
+		}
+		s.queue = nil
+		return
+	}
+	if id := ticketIDOfIdentity(head.who); id != "" && node != "" && a.nodes[node] != nil && !a.nodes[node].handsBack("Report") {
+		// 分支靠 Report 交回结果：内核不把它交给网关，分支做完了也汇报不了
+		if _, ok := a.ticketIdentity(head.who); ok {
+			a.ticketBlock(id, "kernel", "内核太旧，不会把 Report 交给网关", "", true)
+		}
+		s.queue = nil
+		return
+	}
 	if node == "" {
 		const text = "（没有在线的内核，暂时没法处理消息）"
 		a.publish(events.Event{T: "say", SID: s.sid, Text: text})
@@ -1242,7 +1473,7 @@ func (a *App) startRun(s *sess) {
 	a.markSeen(head.ep, s.sid, a.histEnd(s.sid), false)
 
 	a.runSeq++
-	r := &run{hook: head.hook, scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
+	r := &run{trig: a.triggerOf(head), hook: head.hook, scheduled: s.scheduled, id: a.runSeq, node: node, from: head.who, start: a.now(), outs: []out{{ep: head.ep}}, execs: map[string]context.CancelFunc{},
 		callArgs: map[string]proto.Call{}, sent: map[string][]media.Attachment{}, images: map[string][]media.Attachment{},
 		runID: fmt.Sprintf("r%d-%s", a.runSeq, randHex(8)), asked: text,
 		rt: rt, w: w, elevate: admin, withImages: a.modelSupportsImages(s.sid)}
@@ -1315,6 +1546,8 @@ func (a *App) startRun(s *sess) {
 	}
 	r.proactive = s.groupProactive
 	s.groupProactive = false
+	r.observe, s.groupObserve = s.groupObserve, nil
+	r.hint, r.roomChan, s.roomHint, s.roomChan = s.roomHint, s.roomChan, "", ""
 	// 放行：内核按自动模式跑（沙箱和审批规则都不变），要审批的调用由网关当场批准（approvals.go）
 	if mode == proto.ModeFull {
 		r.full, mode = true, proto.ModeAuto
@@ -1322,7 +1555,7 @@ func (a *App) startRun(s *sess) {
 	r.mode = mode
 	r.sandboxMode = sandboxMode
 	in := proto.Msg{T: proto.TInput, SID: s.sid, RunID: r.runID, From: r.from, Mode: mode,
-		HookChecks:  a.nodes[node].info.Features["hook_check"] >= 1 && a.hookEngine != nil && a.hasBeforeHooks(s.sid),
+		HookChecks:  a.nodes[node].info.Features["hook_check"] >= 1 && (a.hookEngine != nil && a.hasBeforeHooks(s.sid) || a.isTicketRun(r.from)),
 		SandboxMode: r.sandboxMode, Silent: a.branchSilent(s.sid), OwnerAgent: a.execAgentID(s.sid), MaxParallelTools: a.runtimeLimits.MaxParallelToolsPerRun}
 	if r.inner || a.isBranchSID(s.sid) {
 		in.Priority = 10
@@ -1345,7 +1578,8 @@ func (a *App) startRun(s *sess) {
 	for _, m := range rt.mounts {
 		in.Workspaces = append(in.Workspaces, rt.spec(m, admin))
 	}
-	r.write = admin && (mode == proto.ModeAuto || mode == proto.ModeAsk)
+	_, ticketRun := a.ticketIdentity(r.from) // 工单的分支：按工单的授权写 worktree，但不能提权
+	r.write = (admin || ticketRun) && (mode == proto.ModeAuto || mode == proto.ModeAsk)
 	in.Elevate = admin
 	if len(rt.mounts) == 0 {
 		if admin && mode != proto.ModeNone && node != "" && a.nodes[node] != nil && a.nodes[node].info.Local {
@@ -1772,6 +2006,9 @@ func (a *App) finish(s *sess, status, detail string) {
 	default:
 		note = "（出错了：" + detail + "）"
 	}
+	if r.observe != nil {
+		body, note = "", "" // observe 的那一轮：本来会说的话已经记在 observe.jsonl，什么都不发（出错也只留日志）
+	}
 	if text, ok := a.afterRun(s); ok {
 		body, note = "", text
 	}
@@ -1835,7 +2072,7 @@ func (a *App) finish(s *sess, status, detail string) {
 	}
 	group := a.isGroupSession(s.sid)
 	roomOf, inRoom := a.roomOfSession(s.sid)
-	if group && r.proactive {
+	if group && r.proactive && r.observe == nil {
 		// 自己凑上来又不想说：记着，连着几次就越等越久
 		if isSilence(body) {
 			s.groupSilent++
@@ -1882,14 +2119,15 @@ func (a *App) finish(s *sess, status, detail string) {
 		}
 		a.deliver(o.ep, text, "")
 	}
-	// agent 在房间里的回复：记进群记录，转给其他成员；说出口的也算进每小时的额度；顺手记用量
+	// agent 在房间里的回复：先记进群记录、转给听得到的成员，再算用量（可能因此暂停），最后回合制接着叫下一位
+	body = a.sceneSplit(s, r, body) // 心里话只记进场景记录，别人只听到说出口的
 	if inRoom {
-		if roomLogSID(roomOf.ID) != s.sid && !isSilence(body) {
-			s.groupSpokeAt = a.now()
-			s.groupSpeaks = append(s.groupSpeaks, s.groupSpokeAt)
-			a.roomAgentSay(roomOf, roomSender(s.sid), body)
-		}
-		a.roomUsage(roomOf, r.usage.PromptTokens, r.usage.CompletionTokens)
+		a.roomRunSay(roomOf, s, r, body)
+	}
+	a.sceneRunEnd(s, r, status)
+	a.sceneUsage(s.sid, r.usage.PromptTokens+r.usage.CompletionTokens)
+	if inRoom {
+		a.roomRunDone(roomOf, s, status, body)
 	}
 	s.lastActivity = a.now()
 	a.pumpRuns()
@@ -1965,7 +2203,7 @@ func (a *App) generateModel(s *sess) {
 	// 桌面任务会连续截很多图：模型请求里只保留最近两张，旧的换成一句说明（历史原样留着）
 	hist := trimToolImages(a.store.EffectiveHistory(s.sid), 2)
 	for _, tool := range snapshotTools {
-		if tool.Function.Name == "Agenda" {
+		if tool.Function.Name == "Agenda" || tool.Function.Name == "Report" { // Report 的 ready 也要凭据
 			hist = evidenceHistory(r, hist)
 			break
 		}
@@ -1974,10 +2212,16 @@ func (a *App) generateModel(s *sess) {
 		Messages: session.BuildMessages(system, st.Summary, hist, a.cfg.LLM.SendReasoning, images),
 		Thinking: a.thinkingOf(s.sid),
 	}
+	var tail []string // 只放在这次请求里的内容
 	if r.proactive {
 		// 自己凑上来的那一轮：只在这次请求里加一句提醒，不改历史（前缀缓存基本不受影响）
-		req.Messages = append(req.Messages, llm.Message{Role: "user",
-			Content: "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。"})
+		tail = append(tail, "[系统] 群里安静了一会儿。想接一句就回一两句；不想说就只回 [不回复]。")
+	}
+	if r.hint != "" {
+		tail = append(tail, r.hint)
+	}
+	for _, t := range tail {
+		req.Messages = append(req.Messages, llm.Message{Role: "user", Content: t})
 	}
 	if a.cfg.Security.Redact != "off" {
 		_, e, ok := a.modelOf(s.sid)
@@ -1997,6 +2241,7 @@ func (a *App) generateModel(s *sess) {
 	req.Tools = snapshotTools
 	_, _, meterSignature, _ := a.contextParts(s.sid)
 	meterPosition := st.Base + len(a.store.History(s.sid))
+	recordModel := a.sceneModel(s, system, req, tail, st.Base, meterPosition)
 	ctx, cancel := context.WithCancel(a.ctx)
 	r.cancelLLM = cancel
 	r.calls++
@@ -2009,6 +2254,9 @@ func (a *App) generateModel(s *sess) {
 	views, bus, sid := r.views(), a.bus, s.sid
 	contentEmitted := false
 	onDelta := func(d llm.Delta) {
+		if r.observe != nil {
+			return // observe 的那一轮不显示
+		}
 		if d.Reasoning != "" {
 			bus.Publish(events.Event{T: "delta", SID: sid, RunID: r.runID, TurnID: r.turnID, Kind: "reasoning", Text: d.Reasoning})
 			for _, v := range views {
@@ -2040,6 +2288,9 @@ func (a *App) generateModel(s *sess) {
 			return
 		}
 		r.cancelLLM = nil
+		if recordModel != nil {
+			recordModel(res, err)
+		}
 		// 拒绝回复等结果可能没有正文增量，仍需交给流式窗口显示一次。
 		if err == nil && res.Content != "" && !contentEmitted {
 			onDelta(llm.Delta{Content: res.Content})
@@ -2062,6 +2313,7 @@ func (a *App) generateModel(s *sess) {
 			}
 		}
 		a.addUsage(r, u)
+		a.ticketBudgetCheck(s, r) // 工单分支：每次模型调用结束时看预算
 		a.publish(events.Event{T: "model", SID: s.sid, RunID: r.runID, TurnID: r.turnID, Kind: "end", Text: res.Reason,
 			Data: map[string]any{"usage": u, "ms": time.Since(start).Milliseconds()}})
 		// 边界二：生成完整结束（用量已经结算），但还没把结果交给内核。这期间收到的插话要
@@ -2069,12 +2321,21 @@ func (a *App) generateModel(s *sess) {
 		if a.yieldToInterjection(s, r, res, u) {
 			return
 		}
+		if r.observe != nil {
+			a.observeTurn(s, r, res)
+			a.hub.Send(r.node, proto.Msg{T: proto.TTurn, SID: s.sid, RunID: r.runID, TurnID: r.turnID, Reason: proto.ReasonFinal})
+			return
+		}
 		if res.Reason == llm.ReasonToolUse {
 			limit := a.runtimeLimits.MaxCallsPerTurn
 			if n := a.nodes[r.node]; n != nil && n.info.Features["max_calls_per_turn"] > 0 {
 				limit = min(limit, n.info.Features["max_calls_per_turn"])
 			}
-			if why := validateProposedCalls(res.Calls, limit); why != "" {
+			why := validateProposedCalls(res.Calls, limit)
+			if name := unofferedCall(res.Calls, req.Tools); why == "" && name != "" {
+				why = fmt.Sprintf("这一轮没有提供工具 %s；整批未接受、未执行", name)
+			}
+			if why != "" {
 				proposals := res.Calls
 				if len(proposals) > 256 {
 					proposals = proposals[:256]
@@ -2199,6 +2460,15 @@ func wireMs(d time.Duration) int {
 // Wait joins durable workers after the App context has been cancelled. Call it
 // before re-exec or releasing the data directory; an in-progress sync may finish.
 func (a *App) Wait() {
+	if a.outbox != nil {
+		a.outbox.Close()
+	}
+	// 承诺记录和工单的日志不加锁，平时都在 App.mu 下写：关的时候也拿着它，
+	// 免得还没退出的后台步骤（比如 settleSilentRun）同时在写
+	a.mu.Lock()
+	a.commits.Close()
+	a.tickets.Close()
+	a.mu.Unlock()
 	if a.hookEngine != nil {
 		a.hookEngine.Close()
 	}

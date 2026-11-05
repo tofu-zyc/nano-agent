@@ -1,0 +1,37 @@
+prefixVer: 13
+system bytes: 21
+tools bytes: 1002
+total bytes: 1023
+
+== system ==
+你是测试机器人
+
+== tools ==
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "SendFile",
+      "description": "把图片、表情包、动图、音频、视频或文件发到当前聊天，对方直接收到（不是发链接）。files 每项是工作目录里的文件路径（相对路径从工作目录开始），或者 http(s) 网址。想发表情包、图片就用它，别在回复里用文字描述图片。要配一句话就在调用之前或之后照常回复。单个文件最多 20 MB。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "要发的文件：路径或网址，按顺序发"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "文件在哪个工作目录（挂了好几个时写）"
+          }
+        },
+        "required": [
+          "files"
+        ]
+      }
+    }
+  }
+]

@@ -24,7 +24,10 @@ import (
 )
 
 // SchemaVersion 是心智状态的版本，加载旧文件时按它迁移。
-const SchemaVersion = 2
+//
+//	2：清掉自动生成的聊天事实
+//	3：data/life.json 的状态（下次醒来、今天的次数和用量、找人记录、回访）并进这里；见 app 的 importLife
+const SchemaVersion = 3
 
 // 事件种类。
 const (
@@ -115,7 +118,49 @@ type State struct {
 	Executions  []Execution  `json:"executions,omitempty"`
 	Reflections []Reflection `json:"reflections,omitempty"`
 
-	Migrated int `json:"migrated,omitempty"` // 从旧 life.json 导入过什么
+	Migrated int `json:"migrated,omitempty"` // 从旧 life.json 导入过什么（MigratedPersona、MigratedLifeJSON）
+
+	// Awaiting 是主动发了消息、对方还没回的私聊：会话 ID → 发出的时间（秒）
+	Awaiting map[string]int64 `json:"awaiting,omitempty"`
+	// FollowUps 是约好过会儿再看的会话（统一聊天循环）：会话 ID → 到点的时间和说明
+	FollowUps map[string]FollowUp `json:"follow_ups,omitempty"`
+}
+
+// Migrated 的位。
+const (
+	MigratedPersona  = 1 // 旧近况已经当作认识导进来（ImportLife）
+	MigratedLifeJSON = 2 // data/life.json 的状态已经并进来
+)
+
+// FollowUp 是一个约好的回访。
+type FollowUp struct {
+	At   int64  `json:"at"`
+	Note string `json:"note"`
+}
+
+// AwaitingMap 是 Awaiting（没有就建一个，调用方写进去）。
+func (s *State) AwaitingMap() map[string]int64 {
+	if s.Awaiting == nil {
+		s.Awaiting = map[string]int64{}
+	}
+	return s.Awaiting
+}
+
+// FollowUpMap 是 FollowUps（没有就建一个，调用方写进去）。
+func (s *State) FollowUpMap() map[string]FollowUp {
+	if s.FollowUps == nil {
+		s.FollowUps = map[string]FollowUp{}
+	}
+	return s.FollowUps
+}
+
+// MarkLifeImported 记下 life.json 已经并进来：版本升到 3，Migrated 加一位。
+func (s *State) MarkLifeImported() {
+	s.Migrated |= MigratedLifeJSON
+	if s.SchemaVersion < SchemaVersion {
+		s.SchemaVersion = SchemaVersion
+	}
+	s.Touch()
 }
 
 // TopicBranch 记住某个话题（意图 in:<id> 或日程 ag:<id>）已经用自己的持久分支继续。
@@ -203,9 +248,16 @@ type AgendaItem struct {
 	Workspaces  []string `json:"workspaces,omitempty"`
 	Mode        string   `json:"mode,omitempty"`
 	Result      string   `json:"result,omitempty"`
+	EndedBy     string   `json:"ended_by,omitempty"` // 取消的是谁：owner（主人，网页上取消）| agent（自己，Agenda cancel）；其他结束不填
 	Created     int64    `json:"created"`
 	Updated     int64    `json:"updated"`
 }
+
+// 取消日程的是谁。
+const (
+	EndedByOwner = "owner"
+	EndedByAgent = "agent"
+)
 
 // Event 是进入控制层的一件事。至少一次投递、按 Dedupe 去重。
 type Event struct {
@@ -286,7 +338,7 @@ func (s *State) Normalize() {
 				s.Events[i].Processed = true
 			}
 		}
-		s.SchemaVersion = SchemaVersion
+		s.SchemaVersion = 2
 		s.Touch()
 	}
 	for i := range s.Agenda {
@@ -318,35 +370,46 @@ func (s *State) NewID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, s.Seq)
 }
 
-// RollDay 换天时清空当天用量。
+// RollDay 换天：当天用量从账本里取（Budget.Tokens 只是账本当天总数的副本，方便网页读，不是另一份账）。
 func (s *State) RollDay(now time.Time, loc *time.Location) bool {
 	day := now.In(loc).Format("2006-01-02")
-	if s.Budget.Day == day {
-		return false
+	changed := s.Budget.Day != day
+	s.Budget.Day = day
+	s.refreshBudget()
+	if changed {
+		s.Touch()
 	}
-	s.Budget.Day, s.Budget.Tokens = day, 0
-	s.Touch()
-	return true
+	return changed
 }
 
-// BudgetLeft 是今天还剩多少 token；没设上限时返回 -1。
+// TokensOn 是账本里某一天所有来源的 token 总和。
+func (s *State) TokensOn(day string) int {
+	n := 0
+	for _, u := range s.Ledger {
+		if u.Day == day {
+			n += u.Tokens
+		}
+	}
+	return n
+}
+
+func (s *State) refreshBudget() { s.Budget.Tokens = s.TokensOn(s.Budget.Day) }
+
+// BudgetLeft 是今天还剩多少 token（账本里今天的总数算）；没设上限时返回 -1。
 func (s *State) BudgetLeft(limit int) int {
 	if limit <= 0 {
 		return -1
 	}
-	left := limit - s.Budget.Tokens
+	left := limit - s.TokensOn(s.Budget.Day)
 	if left < 0 {
 		left = 0
 	}
 	return left
 }
 
-// Spend 记一次自主活动的用量。
-func (s *State) Spend(tokens int) {
-	if tokens > 0 {
-		s.Budget.Tokens += tokens
-		s.Touch()
-	}
+// SpendAt 把不属于某一轮结算的用量（自主分支）记进账本的 other 来源，只记 token，不记次数。
+func (s *State) SpendAt(tokens int, now time.Time, loc *time.Location) {
+	s.AddLedgerTokens(LedgerOther, tokens, now, loc)
 }
 
 // AddEvent 把事件放进队列；同一个 Dedupe 在 ttl 内重复到达就合并掉。返回是否真的加进去了。
@@ -691,14 +754,19 @@ func (s *State) MoveAgenda(id string, at int64, now time.Time) error {
 }
 
 // CancelAgenda 取消一个议程项；它的意图没有别的议程了就一起取消。
-func (s *State) CancelAgenda(id, why string, now time.Time) error {
+func (s *State) CancelAgenda(id, why, by string, now time.Time) error {
 	a := s.agenda(id)
 	if a == nil {
 		return errors.New("没有这个议程项")
 	}
-	a.Status, a.Updated = StatusCancelled, now.Unix()
-	if why != "" {
+	a.Status, a.Updated, a.EndedBy = StatusCancelled, now.Unix(), by
+	switch {
+	case why != "":
 		a.Result = clip(why, 200)
+	case by == EndedByOwner:
+		a.Result = "主人取消了" // 网页上取消不写理由：不能留着 Retry 留下的旧原因，也不能让它变成“没写理由”
+	default:
+		a.Result = ""
 	}
 	if in := s.intention(a.IntentionID); in != nil && !hasOpenAgenda(s.Agenda, in.ID) {
 		in.State, in.Updated = IntentionCancelled, now.Unix()

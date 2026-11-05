@@ -6,6 +6,8 @@
   import type { WorkspaceInfo } from '../../lib/types';
   import WorkspacePicker from '../WorkspacePicker.svelte';
   import Icon from '../Icon.svelte';
+  import RepoConnect from '../RepoConnect.svelte';
+  import ExternalAgents from '../ExternalAgents.svelte';
 
   let { id }: { id?: string } = $props();
 
@@ -58,6 +60,8 @@
           <button class="btn sm" onclick={() => setDefault(ws)}><span class="star" class:on={ws.default}>★</span>{ws.default ? '取消新会话默认' : '设为新会话的默认'}</button>
         </div>
       </div>
+      <RepoConnect workspace={ws.id} />
+      <ExternalAgents {ws} />
       <h5 class="p-h">在这里工作的会话</h5>
       <div class="p-card">
         {#each sessions as s (s.sid)}

@@ -137,11 +137,14 @@ class Node:
                 return message
         raise AssertionError("no matching response: " + repr(self.history[-12:]))
 
-    def run(self, ident, command, execution="foreground", **args):
+    def run(self, ident, command, execution="foreground", env=None, **args):
         origin = dict(agent="test-agent", sid="tg:owner", run_id="r-"+ident, turn_id=1,
                       call_id="c-"+ident, created_by="tg:owner")
-        self.send(t="run", id=ident, req=dict(tool="Shell", args=dict(command=shell(command), execution=execution, **args),
-                  origin=origin, dirs=[native(self.work)], write=True, sandbox="off"))
+        req = dict(tool="Shell", args=dict(command=shell(command), execution=execution, **args),
+                   origin=origin, dirs=[native(self.work)], write=True, sandbox="off")
+        if env is not None:
+            req["env"] = env
+        self.send(t="run", id=ident, req=req)
 
     def result(self, ident, **kw):
         return self.wait(lambda m: m["t"] == "run_result" and m["id"] == ident, past=True, **kw)
@@ -178,6 +181,16 @@ def check():
             assert fore["ok"] and fore["content"] == "foreground", fore
             fore_id = fore["job_id"]
             assert node.control("status-fore", "status", fore_id)["job"]["status"] == "succeeded"
+
+            # 网关带的顶层 env：进程的环境里有，Job 的记录（meta.json）和其他文件里没有
+            secret = "ghs_KERNELprobeVALUE42"
+            node.run("env", "printf %s \"$PROBE_TOKEN\" | wc -c", env={"PROBE_TOKEN": secret})
+            got = node.result("env")
+            assert got["ok"] and got["content"].strip() == str(len(secret)), got
+            time.sleep(0.2)
+            leaked = [str(p) for p in Path(root).rglob("*") if p.is_file() and secret.encode() in p.read_bytes()]
+            assert not leaked, ("env 写进了文件", leaked)
+            assert not any(secret in json.dumps(m, ensure_ascii=False) for m in node.history), "env 不回给网关"
 
             # Explicit background returns while machine slot/resources are occupied.
             gate = node.work / "release"

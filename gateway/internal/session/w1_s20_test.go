@@ -1,11 +1,18 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func sumOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // 世代文件读不出来时绝不能被当成第 0 代，否则旧操作会删掉新代。
 func TestUnreadableGenFileDoesNotDeleteNewGeneration(t *testing.T) {

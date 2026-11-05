@@ -75,6 +75,10 @@ static const builtin BUILTINS[] = {
     { { "Idea", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },      /* 自主活动：想法 */
     { { "Mind", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },      /* 自主活动：心智状态 */
     { { "SendFile", NA_TOOL_PUBLIC_READ, 320 * 1000 }, NULL, NULL }, /* 把图片、表情包、文件发到当前聊天 */
+    { { "Report", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },    /* 汇报承诺、工单的进展 */
+    { { "Ticket", NA_TOOL_PUBLIC_READ, 70 * 1000 }, NULL, NULL },    /* 团队群里的工单 */
+    /* 外部 agent：网关构造请求，在工作目录所在的机器上作为后台 Job 跑；审批和 Shell 一样跟着权限模式走 */
+    { { "External", NA_TOOL_SHELL, 320 * 1000 }, NULL, NULL },
     { { "Write", NA_TOOL_WRITE, 30 * 1000 },
       "创建或覆盖文件，写入完整内容；上级目录不存在会自动创建。默认只能写工作目录；写工作目录外要把 elevated 设为 true，会请用户批准。"
       "只改文件的一部分时用 Edit，不要用 Write 重写整个文件。",

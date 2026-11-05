@@ -8,6 +8,7 @@
   import { portal } from '../lib/portal';
   import Icon from '../components/Icon.svelte';
   import ContextMenu, { type MenuItem } from '../components/ContextMenu.svelte';
+  import PendingPanel from '../components/PendingPanel.svelte';
   import WorkspacePicker from '../components/WorkspacePicker.svelte';
   import DirPicker from '../components/DirPicker.svelte';
   import type { AgentInfo, Ev, KernelInfo, MachineInfo, MCPInfo, MemoryInfo, MountInfo, RoomInfo, ScheduleSummary, SearchInfo, SessionInfo, Target, WorkspaceInfo } from '../lib/types';
@@ -1131,6 +1132,8 @@
     {/if}
     <button class="btn sm" onclick={fit} title="适应窗口"><Icon name="fit" size={14} /></button>
   </div>
+
+  <PendingPanel />
 
   <div class="stats">
     <div><b>{num(t.prompt_tokens)}</b><span>输入 tokens</span></div>

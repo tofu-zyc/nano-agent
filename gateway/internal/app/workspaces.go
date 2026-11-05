@@ -33,6 +33,13 @@ type Workspace struct {
 	Path        string `json:"path"` // 那台机器上的路径，规范形式由那台机器给
 	OS          string `json:"os,omitempty"`
 	Default     bool   `json:"default,omitempty"`
+	// Ticket 是工单的派生工作目录（设计 §16.2）：工单的 worktree。不存进 workspaces.json，由工单推出来；
+	// 只有这张工单的分支能挂它。可写只有目录本身；ExtraRO 是只读的（<仓库>/.git，包括 worktree 自己的 git 目录）。
+	Ticket  string   `json:"ticket,omitempty"`
+	ExtraRO []string `json:"extra_ro,omitempty"`
+	// External 是在这个工作目录上开启的外部 agent（设计 §16.4），默认都不开。工单的派生工作目录不存它：
+	// 每次调用时按仓库工作目录现在的开关查。
+	External []string `json:"external,omitempty"`
 }
 
 func (w Workspace) Label() string { return w.Host + ":" + w.Path }
@@ -125,7 +132,13 @@ func (a *App) migrateWorkspaces() {
 }
 
 func (a *App) saveWorkspaces() error {
-	b, err := json.MarshalIndent(a.wss, "", "  ")
+	own := []Workspace{} // 工单的派生工作目录由工单推出来，不存
+	for _, w := range a.wss {
+		if w.Ticket == "" {
+			own = append(own, w)
+		}
+	}
+	b, err := json.MarshalIndent(own, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -258,6 +271,9 @@ func (a *App) workspaceInfos() []WorkspaceInfo {
 		}
 	}
 	for _, w := range a.wss {
+		if w.Ticket != "" {
+			continue // 工单的派生工作目录只属于那张工单的分支，不在选择器和拓扑里列
+		}
 		out = append(out, WorkspaceInfo{Workspace: w, Sessions: count[w.ID], Online: a.hostUsable(w.Host)})
 	}
 	return out
@@ -440,8 +456,12 @@ func (a *App) SetDefaultWorkspace(id string, on bool) error {
 func (a *App) cleanWorkspaces(ids []string) ([]string, error) {
 	var clean []string
 	for _, id := range ids {
-		if a.findWorkspace(id) == nil {
+		w := a.findWorkspace(id)
+		if w == nil {
 			return nil, errors.New("没有这个工作目录：" + id)
+		}
+		if w.Ticket != "" {
+			return nil, errors.New("工单的工作目录只属于这张工单的分支，不能选给别的会话：" + id)
 		}
 		if !slices.Contains(clean, id) {
 			clean = append(clean, id)

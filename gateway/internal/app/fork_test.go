@@ -385,7 +385,7 @@ func TestAutonomousBranchRespectsPauseAndBudget(t *testing.T) {
 	// 2) 预算用完之后，agent 自己继续同样被拒绝
 	broke := fork("broke-branch")
 	e.a.mu.Lock()
-	e.a.mind("default").Spend(10)
+	e.a.mind("default").SpendAt(10, e.a.now().In(e.a.loc), e.a.loc)
 	e.a.mind("default").SetBudgetLimit(10)
 	e.a.mu.Unlock()
 	if _, err := e.a.SessionBranchAction("continue", broke.BranchSID, "再试一次", "life:default"); err == nil || !strings.Contains(err.Error(), "预算") {

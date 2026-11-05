@@ -20,7 +20,7 @@
 
 | t | 字段 | 含义 |
 |---|---|---|
-| `hello` | `v` `token` `pair?` `node` `os` `arch` `tools[]` `sandbox` | 握手。没有口令时 `token` 为空、`pair` 为 true，请求配对，报告工具、沙箱能力和系统。`tools` 每项是 `{name, description, input_schema}`（五个基础工具，`Skill` 由网关提供）；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`os` 是 linux / macos / windows，`arch` 是 x86_64 / arm64 |
+| `hello` | `v` `token` `pair?` `node` `os` `arch` `tools[]` `gateway_tools[]` `sandbox` | 握手。没有口令时 `token` 为空、`pair` 为 true，请求配对，报告工具、沙箱能力和系统。`tools` 每项是 `{name, description, input_schema}`（五个基础工具，`Skill` 由网关提供）；`gateway_tools` 是内核会用 `exec` 交回网关执行的工具名（见 [RUNTIME](RUNTIME.md#网关工具登记和本轮工具)）；`sandbox` 是 `{landlock: N}`，0 表示没有沙箱；`os` 是 linux / macos / windows，`arch` 是 x86_64 / arm64 |
 | `tools` | `tools[]` | 工具定义变了（旧内核用来报技能，现在网关忽略其中的 `Skill`） |
 | `model` | `sid` `run_id` `turn_id` | 请模型基于这个会话的上下文生成下一轮 |
 | `result` | `sid` `run_id` `turn_id` `id` `ok` `content` `sandbox?` | 一次工具调用的结果，包括内核自己生成的失败结果（权限不足、超时、被拒……） |

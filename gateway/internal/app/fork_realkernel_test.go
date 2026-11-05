@@ -21,6 +21,7 @@ func (parallelForkModel) Chat(_ context.Context, req llm.Request, _ func(llm.Del
 
 func TestRealKernelForkWaitsForCompleteParallelBatch(t *testing.T) {
 	e, _ := setupRealKernel(t)
+	addSkill(t, e, "other") // Skill 得被提供；调用的 missing-fixture 不存在
 	e.a.mu.Lock()
 	e.a.llm = parallelForkModel{}
 	e.a.mu.Unlock()

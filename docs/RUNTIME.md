@@ -1,0 +1,398 @@
+# 运行时
+
+本文描述当前实现（v0.9.x）：调用循环、并行、插话、后台任务、执行隔离、Hook、分支和拟人活动。目标设计和评审标准见 [设计原则与目标架构](DESIGN.md)，安装和日常操作见 [README](../README.md)，消息字段见 [协议](protocol.md)。实现及验收过程保留在 Git 历史，不再逐轮追加到本文。
+
+## 分层与约束
+
+C 状态机控制模型与工具循环；C 宿主管理真实执行、资源锁、后台 Job 和文件观察；Go 网关负责模型、渠道、持久会话、Hook 与拟人状态。队列、日志、缓存和并发均有上限，不为每个分支或 Hook 启动常驻进程。
+
+## 调用身份与并行
+
+一次调用由 (sid, run_id, turn_id, call_id) 唯一确定。整批执行前校验数量、空 ID 和重复 ID；迟到、重复、跨 run 或旧轮次消息不能完成新的调用。
+
+调用按校验、前置 Hook、审批、排队、派发、执行、完成推进。审批和排队不占执行槽，执行时限从宿主确认实际开始时计算；派发等待、排队等待和 run 总预算另行限制。所有已接受调用闭合后，才把整批结果交回模型。
+
+资源域由真实工具和参数计算，网关机器租约与节点准入共同执行：
+
+- 文件读写在目录上取共享锁，写操作再对目标文件取独占锁。
+- Shell 对工作目录取独占锁；同目录 Shell 与文件操作互斥，不同文件写仍可并行。
+- 提权 Shell 与机器文件域互斥；MCP、桌面等按服务或实际资源协调。
+- 本地、代执行和后台任务进入统一限额；后台任务继续占执行槽和资源锁。
+
+网关 [runtime] 默认值如下，节点配置还可收紧。运行中修改这些配置需重启网关。
+
+| 配置 | 默认值 |
+| --- | ---: |
+| max_calls_per_turn | 32 |
+| max_active_runs_per_node | 16 |
+| max_parallel_tools_per_run | 4 |
+| max_active_execs_per_machine | 8 |
+| max_parallel_shells_per_machine | 2 |
+| max_background_jobs_per_agent | 4 |
+| max_live_jobs_per_machine | 16 |
+| max_queued_calls_per_run | 32 |
+
+调度包含前台优先和等待公平性，队列满时明确拒绝或等待，不无界启动执行器。
+
+## 用户插话
+
+发起人在活动 run 中发送的普通消息进入有序收件箱。用户插话不打断模型生成，也不取消工具；必须等当前生成完整结束、或已接受的这一批工具全部结束。后台任务独立运行，不构成前台边界的等待条件。
+
+在模型请求前、以及生成结束交回内核前检查插话。后一个边界发现补充时，尚未被内核接受的工具提案不会派发；重规划通过 model_yield 回到 C 内核，仍消耗原 run 的步数预算。旧节点不支持插话时补充进入下一轮队列。
+
+写入历史的补充标记为“用户插话”，保留来源与稳定 ID。收件箱最多 16 条、64 KiB；平台消息 ID 与内部接收 ID 分开，渠道重发按来源去重。
+
+每会话日志追加并同步成功后才回执“已收到”。状态分别证明：
+
+| 状态 | 含义 |
+| --- | --- |
+| received | 已可靠受理，尚未写入历史 |
+| injected | 已写入正式历史，记录稳定历史 ID 和来源 ID |
+| included | 已包含在某次模型请求快照中 |
+| outcome | 明确记录成功、预算耗尽、超时、取消、失败或重新排队 |
+| withdrawn / discard | 撤回、停止、重置或删除后失效 |
+
+included 不代表处理完成。恢复时先与完整历史及压缩前缀对账，不重复追加正文或重放旧工具；没有结局的已注入消息保留 interrupted 和“继续”入口。撤回、停止、重置与删除持久记录失效，重置还推进世代。
+
+检查点保留接收序号高水位和有界去重窗口。末尾半条截回提交边界；中间损坏或写入结果无法核实时停止新回执，保留现场。更多存储规则见 [存储与恢复](STORAGE.md)。
+
+## 后台 Shell
+
+Shell 支持 foreground、background 和 auto。后台移交保留原进程，只解除原调用的等待关系；backgrounded 不是命令成功。前台 run 结束后，Job 的状态、日志和控制入口仍存在。
+
+JobManager 位于 C 节点。网关先可靠登记固定来源、权限和终态名额，再授权执行租约；终态落盘后才确认节点事件。原调用只返回一次，完成通知作为独立事件处理。
+
+用户可用 /jobs、/bg、/job 查询和控制；长调用按实际执行时间提示，飞书、Telegram 提供按钮，网页提供任务面板和有界游标日志。取消受理不等于进程已经退出；重启后的 unknown 不等于失败或成功，禁止自动重跑原命令。完整入口、限额和平台卡片语义见 [后台任务](JOBS.md)。
+
+## 执行隔离
+
+隔离配置为 auto/on/off，可在全局、agent 和工作目录设置，default 恢复继承；执行节点的强制要求优先。
+
+- auto 按目标平台实际能力执行，明确展示降级。
+- on 无法满足时失败，不静默降级。
+- off 跳过隔离机制，Shell 使用系统用户权限；文件工具路径校验和审批仍独立生效。
+
+调用保存原请求、最终策略和实际隔离结果。设置只影响新调用，已开始的 Job 使用启动时快照。Linux 使用 Landlock/seccomp；Windows、macOS 按实际能力声明，不宣称等同 Linux 的隔离。
+
+## Hook 与文件观察
+
+规则订阅可靠事件，可执行 notify、短 command 或 agent。agent 处理器可选择临时会话、来源会话、life 或持久分支。临时会话不复制来源整段历史；分支继承上下文并沿用安静策略。
+
+事件、规则修订、固定投递集合及尝试记录持久提交。相同 event/hook/revision 对应稳定投递身份；一次性规则在认领时防重复，成功后停用。队列、并发、重试、去抖、冷却和因果深度均受限。外部副作用没有跨系统“恰好一次”保证，结果不明时先核实。
+
+tool.before 是同步屏障，位于审批和排队之前，只能拒绝或追加审批，不能放宽原权限。普通 Hook 不占住 C 主循环。协议、示例和异常恢复见 [Hook](HOOKS.md) 与 [可靠事件日志](RUNTIME-events.md)。
+
+文件观察支持明确文件或非递归目录，最多 64 条登记、500 毫秒合并：
+
+| 平台 | 后端 | 接入主循环 |
+| --- | --- | --- |
+| Linux | inotify | 直接轮询 |
+| Windows | ReadDirectoryChangesW + IOCP | 一个线程、回环 UDP 唤醒 |
+| macOS | kqueue EVFILT_VNODE | 一个线程、管道唤醒 |
+
+能力只在初始化成功后声明。槽位稳定，订阅与异步退订绑定具体代际或对象；旧事件、旧退订不能影响新登记。Windows 通知缓冲区显式对齐。队列溢出、断线、重启或无法登记均产生 resync_required，处理器重新比较状态，不假装补齐漏掉的变化。
+
+## 会话 Fork 与安静活动
+
+Fork 保存分叉时的完整已提交历史、有效窗口、Summary/Base/Omitted、附件引用和适用设置，形成不可变快照；分支只保存自己的尾部。相同内容复用快照。父会话后续追加、压缩、重置和删除不改变已就绪分支。
+
+生成、整理或工具批次进行中时，创建操作返回 pending_boundary，在安全边界发布 ready。同批工具里的 Fork 先返回操作身份，避免等待自身批次。操作持久化，重试和重启返回同一个分支。
+
+Session 工具提供 fork、list_branches、inspect、continue、pause、archive；聊天可用 /session fork [--attention] 和 /branch，网页提供分支列表与操作。继续分支核验固定 agent 与来源；归档不会被迟到取消回执改回暂停。
+
+分支默认 silent，普通回复、工具进度、长调用、审批、失败、恢复提示、Message、SendFile、Hook 及派生 Schedule 都不能借主人窗口回退推送。安静来源也不能修改或启动主人的普通任务来绕过投递限制。
+
+主人显式“引入结论”才在父会话的下一个安全边界追加带来源的报告；不合并整段历史或重执行工具。每份报告有独立结构化卡片，保留结论、依据、来源和分叉点；多份排队报告各自保留，准备好的环境与交接说明只消费一次。“打开分支”只切换查看会话。
+
+列表只读元数据，最近进展由真实开始、完成、失败、取消、暂停和归档状态生成，不调用模型读历史。闲置历史可卸载，共享快照缓存有预算；快照按引用回收，删除一个分支不影响其他分支。
+
+## 拟人活动与心智
+
+工具型 agent 被请求时工作；拟人型另有作息、探索、日程、目标、想法与主动联系。Agenda、Idea、Mind 管理这些状态。日程完成需引用本轮真实成功的工具凭据，正常结束后提交；检查点用于恢复规划，结果未知的操作不直接重放。
+
+每日探索次数 life_max_wakes、主动联系次数 life_max_reaches、间隔 life_wake_min/max 分别配置。未设置跟随活跃档位，次数 0 表示不限；不限次数仍遵守间隔、暂停、权限和 token 预算。明确约定与自主探索分别准入，聊天活跃不应让到期日程一直延期。
+
+自主分支按话题复用。自动 continue、Fork 就绪和排队放行都核验暂停、固定 agent 及当日总预算；主人手动继续使用显式操作语义。活动账本按稳定身份预留和幂等结算，跨日释放启动日预留，开始次数记启动日、token 记结束日。
+
+mind_dimensions 在 agents.json 中配置启用维度、初值、范围、基线、每小时漂移、阈值及是否允许模型调整；当前状态单独持久化。预设和权重控制偏好：
+
+- curiosity 调整探索的新颖权重，focus 限制同时推进的目标数。
+- energy 调整探索间隔，social_drive 调整主动联系倾向。
+- 漂移按锚点和真实经过时间计算，不受读取或活动频率影响。
+- 阈值有重新武装区间，跨越只报一次，回落后才再次触发。
+- Mind dimension 必须带来源，同轮共享 max_delta_per_run；人工锁定值与优先级会被实际决策消费。
+
+这些数值不提高权限，不绕过暂停、次数或预算。旧账本格式兼容读取；心智文件解析失败时保留原文件并拒绝用空状态覆盖。
+
+### 自主活动的状态和预算口径
+
+`data/autonomy.json` 是自主活动唯一的权威状态（版本 3）。旧的 `data/life.json` 只导入一次，之后不再读写：
+
+- 第一次加载时把它并进来：下次醒来并进 `NextCheck`（只有这一份，网页上的“下次醒来”是 `NextDueTime`，含日程和意图）；今天醒了几次、找了几次人、用了多少 token 进账本（每一项取旧的几个数里最大的，显示的数字不变）；找人记录（`awaiting`）和回访（`follow_ups`）搬进状态；还没导入经历的旧近况先导进经历（稳定来源键，重来不重复），状态里的“近况”改取最近一条 life 经历。每个状态的 `Migrated` 加一位（`MigratedLifeJSON`）、版本升到 3；升级前的 `autonomy.json` 留一份 `autonomy.json.schema2.bak`。
+- 成功后 `life.json` 改名为 `life.json.imported`（已有同名文件就加时间戳，不覆盖、不删）。失败（`life.json` 读不懂、经历写不进去、`autonomy.json` 写不进去）时两个文件都不动，健康条目 `autonomy` 变成 error，自主活动不启动，修好后重启再试。改在副本上做，全部成功才换进内存。
+- 旧版的 `ls.Wakes`/`ls.Tokens`/`Budget.Tokens` 三份用量统一成账本：今天用了多少 token = 账本里今天所有来源的 token 总和（`State.TokensOn`），`BudgetLeft` 从它算，上限照旧每次从 agent 配置取；`Budget.Tokens` 只是这个总数的副本，每次从账本重算。今天醒了几次 = 账本里 `exploration` 的启动次数（含已预留的）；找了几次人 = `reach` 的次数。
+
+各类次数和用量计在哪里（统一到账本时口径不变，这也是后面“停止条件”的依据）：
+
+| 活动 | 账本来源 | 记次数 | 记 token | 占每日探索次数 | 占每日 token 预算 |
+| --- | --- | --- | --- | --- | --- |
+| 自己安排的检查、探索类日程（life 会话的一轮） | `exploration` | 开始时预留，结束时结算 | 结束时结算 | 是 | 是 |
+| 约定和已排好的目标（life 会话的一轮） | `commitment` | 同上 | 同上 | 否 | 是 |
+| 走 life 会话的 Hook | `hook` | 同上 | 同上 | 否 | 是 |
+| 主人叫醒（`/wake`、网页按钮） | `manual` | 同上 | 同上 | 否 | 是（叫醒本身不受预算限制，但用量记进账本，会减少之后自主活动的剩余预算） |
+| 被打断、没正常结束的活动 | 原来的来源 | 是（开始时的预留不释放，`LedgerStarts` 含预留，仍算一次，和以前 `Wakes` 不退回一样） | 是（`AddLedgerTokens`） | 是（探索类的照常占一次） | 是 |
+| 自主分支的一轮（有拟人型主人的分支） | `other` | 否 | 是（`SpendAt`） | 否 | 是 |
+| 主动找人（Message 给私聊） | `reach` | 是（每次一次，只在 life 会话里） | 否 | 否 | 否；占每日找人次数 |
+| 升级时补上的差额（旧 `Budget.Tokens` 比账本多的部分） | `other` | 否 | 是 | 否 | 是 |
+
+不在账本里的：聊天会话里的回复和 FollowUp 回访醒来的那一轮（它们是聊天，不是自主活动）、定时任务、整理记忆、群里的发言。显示：网页和状态里的四个来源（探索、约定、Hook、手动）不变，`reach` 和 `other` 另外取。
+
+和旧版口径不同的几处（都是设计里“只看账本”的结果）：走 Hook 的、触发类型是探索的那一轮，以前同时数进 `Wakes`，现在只记 `hook`，不占探索次数；“今天用了多少 token”以前 life 一份（只含 life 会话）、预算一份（含自主分支），现在都是预算那一份。
+
+### 启动一轮之前的准入
+
+启动一轮之前的共同检查只写一份：`admitRun(sid) (ok, why, retry)`（`app/admit.go`），按顺序查 ①会话在跑、在排队或在整理上下文 ②没有配置模型 ③工作目录没有在线内核 ④会话所在的场景额度用完了；`retry` 是建议的延后时间（忙 2 分钟、没模型 30 分钟、没内核 5 分钟、额度用完等到下一个本地自然日），调用方现有的延后时间优先。作息、每日次数、自主预算、暂停仍在 `autonomy.Trigger.CanStart` 里。
+
+各处怎么用它（延后时间和失败说法都和以前一样）：
+
+| 调用方 | 查哪几项 | 不通过时 |
+| --- | --- | --- |
+| 自主活动到点（`autonomyAgent`） | 前三项 | 忙：下次检查改成 2 分钟后，不动约定；没模型、没内核：把这件事记成失败，30 分钟 / 5 分钟后重试，写明原因 |
+| 主人叫醒（`startLife`） | 前三项 | 返回“它正在想事情”“还没有配置模型”“没有在线的内核” |
+| 自主活动开始（`startMindWithHookLocked`，也是 Hook 的 life 入口） | 只认忙 | 返回“它正在想事情”；没模型、没内核开不起来时，照旧记失败、5 分钟后重试 |
+| FollowUp 到点（`followUpTick`） | 忙、额度 | 约定留着，下一次扫描或额度恢复后再来；没模型、没内核不拦（照旧发出去，由聊天那边告诉对方） |
+| 定时任务（`launchSchedule`） | 忙（一开始查），其余（设置写好以后查） | 忙：返回“任务会话正在使用”；没模型、没内核：这次记成失败，写明原因 |
+| 整理记忆（`startDream`） | 前三项 | 返回“正在整理记忆”“还没有配置模型”“没有在线的内核”（没内核现在在清空上次上下文之前就报，不留半截状态） |
+| Hook 的 life 会话 | 只认忙 | 返回“内心片段正在运行”，让 Hook 稍后重试 |
+| 分支继续 | 只认忙 | 返回“这个分支正在跑，等它结束” |
+
+### 承诺、阶段和 Report
+
+约定（议程项）、意图、回访、定时任务、Hook 规则、分支这六种承诺各是自己的对象，保留自己的到期、补跑、取消和验收规则；`internal/commit` 只管它们共用的两样东西：
+
+- **契约**（`commit.Contract`：目标、授权（谁让做的、在哪个会话、能动到哪里）、完成标准、汇报去处、停止条件）：从各自的字段推出来，不另存一份。推法见 `app/commit_adapters.go` 里六个适配函数（`agendaCommit`、`intentionCommit`、`followUpCommit`、`scheduleCommit`、`hookCommit`、`branchCommit`），都是纯函数。
+- **阶段**（九个：等待、进行中、受阻、就绪、暂停、完成、无需处理、失败、叫停）：由纯函数 `commit.Phase` 从事实（`commit.Facts`）推出，从上往下十二行，第一行命中就是结果。结束阶段一定带着证据或理由——没有证据的“完成”、没有理由的“无需处理”（也包括失败、叫停）算受阻。
+
+只列还存在的承诺，删掉的和结束超过 30 天的不列；意图只列没有未完成议程项的。为了分清日程是谁取消的，`AgendaItem` 加了 `ended_by`（`owner` 或 `agent`）：模型调用 `Agenda cancel` 要写 `note`（不做的理由），网页上的取消记 `owner`；主人取消的是“叫停”，自己取消的是“无需处理”。`BranchMeta.reported_at` 记主人最近一次引入结论的时间：主人建的分支做完一轮、之后没引入过结论，才算“就绪”；自主活动分出的分支不算，只看它的汇报。
+
+**Report 工具**：干活的会话向主人汇报，只有 life 会话、分支、定时任务、Hook 的 agent 处理器有（普通聊天和群聊没有：在原对话里直接回复就是汇报；戏里也没有）。汇报的是哪件事由宿主从这一轮推出：life 的这一轮看 `mindRun.Trigger`（议程项优先，其次意图；自己安排的检查不对应任何承诺，拒绝），分支汇报分支自己，定时任务汇报这个任务，Hook 汇报这条规则（这一轮跑在分支或 life 会话里也算 Hook）。`status` 是 `progress`、`waiting`（只记一笔）、`ready`、`blocked`、`failed`、`not_needed`；拒绝的情况：`ready` 没有本轮真实成功的工具结果当 `evidence`（`Report` 自己不算），`blocked`、`failed`、`not_needed` 没有 `text`，`question` 和 `blocked` 以外的状态一起用，定时任务和 Hook 带 `question`（这一轮结束后没有人接着问），一轮超过 4 次，另有长度上限（`text` 500 字、`question` 200 字）。汇报只记录“主人需要知道什么”，不改承诺自己的状态：做完日程仍用 Agenda done。工具说明和 life 技能里写了什么时候该汇报。这几类会话的工具表因此多了 Report，`prefixVer` 加一，这四类快照的内容更新，其余快照只改第一行的 `prefixVer`。Hook 登记时的工具白名单不限制 Report；有 Agenda 或 Report 的会话（含分支、定时任务、Hook）都给凭据回执，`ready` 的 `evidence` 才有可引用的真实结果。
+
+**承诺记录** `data/runtime/commitments.jsonl`（`internal/journal`，单条 8KB，整份 16MB）：`report`（汇报）、`seen`（主人点了“知道了”）、`answer`（主人回答了问题）三种；先记再说——Report 写成功才返回成功，写不进去（太大、满了、磁盘出错）就把错误返回给模型，健康条目 `commitments`（网关启动时认领）变 degraded。启动时重放，每件事留两条汇报：最近一条，和最近一条要主人知道的（问题、受阻、就绪等；`progress`、`waiting` 不顶掉它），再加最近 16 个看过或回答过的 `Mark`；文件超过 8MB 时整份重写，已经不在的承诺的记录在这时丢掉。汇报的 `Mark` 是 `r:<序号>`，宿主自己记下的受阻和就绪也带 `Mark`（上一次失败 `last:<时间>`、投递 `d:<投递 ID>`、分支做完一轮 `p:<ProgressAt>`），点过“知道了”的 Mark 不再算。
+
+**汇报叠加到宿主事实上**的先后：问题先于受阻，受阻先于就绪；汇报和宿主两边都受阻时取汇报的（更具体）；`Mark` 跟着决定阶段的那条事实。
+
+**接口**：`GET /api/commitments?agent=&phase=`（只读，要登录），每件事给出种类、ID、agent、标题、契约、阶段和原因、最近一条汇报、`Mark` 和打开它的链接；每写一条承诺记录发一个网页事件 `commitments`。**等我处理**（只给管理员）：阶段是受阻或就绪的承诺，最新的在前。
+- 网页：拓扑图上有“等我处理 N”的标记（N 为 0 不显示），点开是面板，每件事一行：agent、种类和标题、阶段和原因、问题，操作有“回答”（有问题时才有）、“知道了”、“打开”；底部展开“全部承诺”按阶段分组。
+- 聊天（管理员窗口）：`/pending` 列出，每件事带编号（有汇报的用汇报序号，没有的用 `Mark`）；`/answer <编号> <回答>`；`/seen <编号>`。接口：`GET /api/pending`、`POST /api/pending/seen`、`POST /api/pending/answer`（回答最多 2000 字）。
+- “知道了”和回答都先写进承诺记录（`seen`、`answer`）再生效；对不上当前 `Mark` 的请求（这件事已经变了）拒绝。汇报的就绪盖住了宿主自己的就绪时（`CommitView.Covered`），“知道了”把两个 `Mark` 一起记，不用点两次；受阻和就绪互相盖住时不这样。
+- 回答送到干活的地方：分支放进分支会话的下一个安全边界（和“继续”一样接着跑，已归档拒绝，判断在写记录之前）；议程项、意图在 agent 的心智状态里加一个带 ID 和回答的事件，没开始的议程项时间改成现在。定时任务、Hook 的 Report 不能带问题，不接受回答。回答过的问题不再算 `Question`。还没回答的问题不管这件事现在处在哪个阶段（比如这一轮还在跑）都列进等我处理，也能回答，回答排进下一个安全边界；结束了的不列。没有 `Mark` 的受阻只在“全部承诺”里。
+- 主人在别处自己动手也算处理过：分支引入结论、继续或归档后，之前的汇报都算看过；定时任务下一次成功后，上一次的汇报不再算。
+
+**attention 投递档**：分支的第三种投递档（`delivery_policy = attention`），和 `silent` 一样安静（`branchSilent` 为真）。例外：这个分支的 Report 是 ready、blocked、failed，或宿主记下这一轮出错（当作受阻），发一条通知到父会话最近的窗口（外部渠道走可靠出站，网页发 `say` 事件），不写进父会话的历史。先在承诺记录里写一条 `notify` 再入队；状态和正文与上一条推送一样的不发，每个分支每小时最多 3 条，父会话本身安静时不发——多出来的只留在“等我处理”里。只有主人明确要求才能设：`/session fork --attention [标题]`、主人聊天的普通会话里的 Session 工具（`delivery: "attention"`）、`SessionFork` 的 `Delivery`；定时任务、分支、life、Hook、整理记忆里的模型，以及 life、Hook、整理记忆分出的分支，一律是 `silent`，非管理员也是。attention 分支的系统提示多一句“有结果用 Report ready，卡住用 Report blocked 问具体问题”，契约的汇报去处是父会话。通知里的编号取这件事在等我处理里的编号（决定阶段的那条事实的 `Mark`）。Session 工具的 `delivery` 枚举因此多了 `attention`，七份模型面快照随之更新。
+
+## 团队与工单
+
+第 5 步（团队）分 5a 到 5d 四段，设计见 [设计原则](DESIGN.md) 第 16 节，都已有（2026-11-04）。本节是 5a（团队规则、工单对象、Ticket 工具），下面依次是 5b（工单的执行）、5c（GitHub）、5d（外部 agent）。单看 5a 的这部分，它不建 worktree、不跑代码；工单的执行从“工单的执行（5b）”起。
+
+**团队规则**：`scene.Rules.Team`（准入名单、仓库工作目录、验收命令、每个工单的 token 预算），只能设在外部群：内部群和戏里设了校验拒绝。名单写法和 `access.admins` 一样是“渠道名:发送人 ID”，管理员总算在内。设了团队的场景生效的规则固定为点名、主动插话只记录（`Rules.Effective()`，存的和读的都经过它）。网页上外部群的场景设置里有“团队”一项，名单从这个群说过话的人里勾选（`GET /api/sessions/{sid}` 的 `speakers`：名字 → 身份串），工作目录要存在。
+
+**触发消息**：群里的点名会等 2 秒、把紧接着的几条一起交给模型；触发这一轮的是排上这次回复的那条点名（2 秒里的第一条），`run.from` 是它的发送人。排回复时把发送人、渠道、对话、消息 ID 和开头 200 字记在排队项的 `trig` 上，这一轮开始时带进 `run.trig`（私聊就是排队项自己的消息）；不填进 `m.MsgID`（会改变所有群回复贴在哪条消息上）。Ticket 只读这一轮自己的，所以这一轮还在跑时别人又点名，改不掉是谁派的。
+
+**工单** `internal/ticket`：`data/runtime/tickets.jsonl`（journal，单条 16KB，整份 16MB）。每次改动写一条完整的工单，重放时每个 ID 留最后一条；编号 `tk-<序号>` 不重用——压缩重写（超过 8MB，结束超过 30 天的丢掉）时先写一条序号水位记录，重放取它和工单记录里的较大值。写不进去就把错误返回给模型，健康条目 `tickets` 变 degraded；打不开则保留现场、变 error。授权记录（谁派的、哪个场景、原消息、工作目录、权限模式、工具）建的时候定下，之后不变。其中权限模式和工具说的是工单的分支（5b）能用什么，不是团队群自己的设置：模式取 agent 的默认模式，最高 `auto`，agent 只读就接不了工单；工具是固定的工单工具集（Read、Write、Edit、Grep、Shell、Job、Report、WebSearch、WebFetch、Skill）和 agent 的工具上限的交集，不含对外发声和派生承诺的、心智和网关管理的工具，和团队群的场景工具表无关。
+
+**Ticket 工具**只在设了团队规则的群会话里（不在场景工具表里，选不了）：`create`（同一条原消息只建一个；派活的人看这一轮的触发消息，不在名单里、仓库所在的机器不在线都拒绝）、`list`、`show`（只认本群的工单）、`note`、`accept`（5a 里工单到不了就绪，只会拒绝）、`cancel`（名单里的人或管理员，要写理由，结束为 `stopped`）。设了团队规则的群新增一份快照金样 `group-team`，其他快照不变。
+
+**说话纪律**：原对话里只有建工单那一轮 agent 自己的确认、要人回答的问题、最终结果。问题和结果由宿主发，作为原消息的回复；和 attention 共用 `notifyGate`：先写 `notify` 记录再入队，与上一条相同的不发，每个工单每小时最多 3 条，工单结束后问题不再发。5a 里还没有问题和结果的来源（要等 5b 的分支和验收），发送函数 `ticketPush` 先用测试直接调用。问题的末尾写一句“@<agent 名> 回复就行”；群里不提 `/answer`（只在管理员窗口里有）。
+
+**承诺列表**：`ticketCommit` 接进 `commitItems`（第 7 种承诺，种类“工单”）。open 是等待（`Due` 取创建时间，显示“等开工”）；`blocked` 是宿主记下的受阻（理由在 `Reason`，Mark `b:<Updated>`，5a 里没有地方会写它）；叫停是 stopped 带理由；回答问题要等 5b 有了干活的分支，5a 拒绝。网页的“全部承诺”里工单有“叫停”（`POST /api/tickets/{id}/cancel {reason}`），“打开”打开来源会话。
+
+### 工单的执行（5b）
+
+设计见第 16.2 节。建 worktree、跑验收命令、提交都由宿主做，不经过模型。
+
+- **网关发起的执行**：`leasedExec`（拿执行租约、准备请求、执行、释放）从 `hook_command.go` 抽出，Hook 和工单共用；`gatewayShell` 在仓库所在的机器上按给定的读写范围跑一条命令。git 步骤在 `ticket_git.go`，假定 POSIX shell，Windows 上的仓库暂不支持。
+- **worktree**：`<仓库>/.nano/worktrees/tk-<序号>`，`/.nano/` 写进 `<仓库>/.git/info/exclude`；起点是 fetch 后 `origin/HEAD` 指向的分支，没有远端取仓库当前签出的分支。worktree 和分支 `nano/tk-<序号>` 已经在了就接着用。登记成派生工作目录（`Workspace.Ticket`，ID `w-tk-<序号>`）：不存进 `workspaces.json`，由工单推出来（`syncTicketWorkspaces`）；不在选择器和拓扑里列，也不能选给别的会话。沙箱模式照抄仓库工作目录的。
+- **干活的分支**：从派活的会话分出，`By` 是 `ticket:<编号>`（`SessionForkRequest.host` 跳过调用人的访问检查），第一次开跑前 `prepareTicketBranch` 把会话设成不是群聊、工作目录只有工单的 worktree、权限模式是 `Auth.Mode`。身份 `ticket:<编号>` 不是管理员，不能提权；`runMode` 认它，模式就是 `Auth.Mode`，`run.write` 照 `Auth.Mode` 开；每次工具调用前内核问网关（前置检查，要内核支持 `hook_check`，不支持就不开这一轮、工单 blocked，理由“内核太旧，做不了调用前检查”），不在 `Auth.Tools` 里的一律拒绝，提供给模型的工具也按它过滤。分支的权限模式和工作目录以工单为准：`workspaceBase` 对工单分支返回 `Auth.Mode` 和会话设置里较低的模式、只认 `w-<编号>`，网页上改这两项被拒。`ask` 模式的审批发到这个 agent 主会话的管理员窗口，不发到团队群。
+- **读写范围**：分支和验收命令可写的只有 worktree；`Workspace.ExtraRO`（`<仓库>/.git`，包括 worktree 自己的 git 目录）由 `route.spec` 加进只读（它的 HEAD、index、commondir 也只读：能写就能把 HEAD 指到主分支，让宿主提交到主分支上）。`readAll` 为假，不给整台机器只读，系统目录和 PATH 里的目录执行器本来就放行。`git status`、`git diff` 在只读索引下照常能用。没有 Landlock 的机器上工单 blocked（不降级）。
+- **家目录**：真实的家目录不在可读范围里时，执行器（`nexec_main.c` 的 `enter_sandbox`）把 HOME 换成这次执行的私有可写目录 `<tmp>/<tmp_key>/home`，同一个 `tmp_key` 下保留；沙箱没真的施加（auto 降级）或家目录本来就可读时不换。否则 git 读不了 `~/.gitconfig` 直接报错，`go`、`npm`、`cargo` 往家目录写缓存也会失败。对所有不能读家目录的沙箱执行都一样。
+- **宿主的 git 步骤不信 worktree 里的任何东西**：worktree 是分支能写的（里面的 `.git` 文件能指到它自己造的 git 目录，在那里的配置里设 `core.fsmonitor` 会执行命令），宿主那一步却可写 `<仓库>/.git`。所以宿主的每个 git 命令都显式 `GIT_DIR=<仓库>/.git/worktrees/<名字>`、`GIT_COMMON_DIR=<仓库>/.git`、`GIT_WORK_TREE=<worktree>`（名字按主仓库的 worktree 登记和管理目录里记的 gitdir 查，不读 worktree 的 `.git`），都带 `-c core.fsmonitor=false -c core.hooksPath=/dev/null`，全局、系统和 XDG 配置置空；提交前核对 HEAD 是 `refs/heads/nano/tk-<序号>`，不是就 blocked；删 worktree 直接删目录再 `worktree prune`。宿主提交时可写 `<仓库>/.git`、只读 worktree。
+- **验收**：分支 Report ready 只记 `WantCheck`；这一轮结束后宿主在 worktree 里跑验收命令（超时 30 分钟，沙箱同分支）。没跑起来（机器不可用、沙箱起不来、执行出错）：blocked，理由写明，不算返工；超时算没过。通过且有改动：宿主 `git add -A` 并提交（作者是 agent 的名字，末尾一行 `Nano-Ticket: tk-<序号>`，不执行仓库的 hook），记 `Commit`、`CheckLog`，状态 ready，把结果作为对原消息的回复发回；重做时 worktree 是干净的、已经有带这一行的提交就收养它。没过或没改动：返工加一，验收输出最后 40 行作为一条消息放进分支的下一个安全边界；到上限（2 次）还没过 blocked，问“继续改、放弃，还是先收下？”。
+- **预算**：每次模型调用结束时（`addUsage` 之后）检查已用加这一轮用的（输入加输出）有没有超过现在的上限，超了停下这一轮、blocked；每轮用量只记一次。
+- **从受阻里出来**：受阻时收到回答、名单里的人的 note，状态回到 working，回答送进分支；返工用完的再给两次返工，预算用完的再给一份预算；这一轮结束了没有 Report：worktree 有改动就照常验收（当作 ready），没有改动才受阻。每次续上记在工单上（`Renewed`：谁、什么时候、续的什么），最多 3 次，再往后只能叫停或放弃。`accept` 在因为返工用完而受阻时是“先收下”：把现在的改动提交下来再收下，证据写明“验收没过，由 <谁> 收下”和提交、验收结果；正常收下写“由 <谁> 收下”。
+- **回答**：问题的末尾写“@agent 回复就行”；名单里的人回复时 agent 用 Ticket note，在有没回答的问题时同时写 `answer`；主人在等我处理里回答，送进分支。在等人回答的工单重启后不替人续。
+- **重启**：`resumeTickets` 在有内核在线之后做一次：open 的重新开工，checking 的重跑验收，working 的重新排一条“接着做”（`Resumes` 单独计数，最多 3 次，再被打断 blocked，理由“多次被打断”）。每一步按工单状态可以重做，不重复建 worktree、不重复提交。working 的工单分支在等后台 Job（`WaitJobs` 非空）时不排“接着做”：Job 还在跑就继续等，都结束了（终态在叫醒之前就记下了）叫醒一次，不算被打断。
+- **收尾**：收下、叫停、失败、不用做了之后，停掉干活的分支（归档）和它开的还没结束的 Job（`stopTicketJobs`：`JobAction` cancel，等它们结束最多 10 秒，外部 agent 还在往 worktree 里写）、去掉派生工作目录、删 worktree（git 分支留着）。
+- **Report**：在工单的分支里汇报的是这张工单。blocked 带着问题发回原消息；failed、not_needed 结束工单并发回原消息。
+
+### GitHub（5c）
+
+设计见第 16.3 节。
+
+- **仓库连接**（`internal/repos`，`data/repos.json`；网页上仓库工作目录的设置里填）：token 和 webhook 密钥用 `internal/secret` 加密存，网页不回显；保存时用 token 调 `GET /user`（填 `Bot`）和 `GET /repos/<owner>/<name>`，不通就不保存；错误信息和日志里的 token 一律打码（客户端的所有错误、推送的输出）。要用单独的 GitHub 账号做机器人。一个工作目录只连一个仓库。API 地址只有 github.com；`NANO_GITHUB_API` 环境变量只给测试换成假 GitHub（界面检查里用）。不支持 GitHub Enterprise：推送的网址和凭据的键都只认 github.com。
+- **事件进来**：每个仓库选轮询（默认，间隔 120 秒、最少 60）或 webhook。都变成归一化的事件（`repos.Event`），由同一个函数处理，并写进事件日志 `repo.issue`、`repo.comment`、`repo.review`、`repo.pr`、`repo.check`、`repo.ignored`（只有账号、对话、事件 ID、状态，不带正文，Hook 可以订阅）。每个仓库一份状态日志 `data/runtime/repos/<id>.jsonl`（journal）：事件先记下、处理完再记“处理了”，崩溃后没处理完的重放；游标（议题、评论、行内意见的 `since`）和 ETag 也在里面，事件都记下之后游标才往前走；第一次轮询只定基线，不把历史当新事件；之后只有在上一轮游标之后**创建**的议题才当新议题（`/issues` 按更新时间返回，旧议题来一条评论也会出现；键表有上限、旧键会被挤掉，所以创建时间是第一道，键是第二道），评论、行内意见同样按创建时间，评论按更新时间排序取，一页取不完游标不会跳过。处理失败（存储写不进去之类）的事件留着重放，最多重放 5 次（次数记在状态日志里，重启后接着算），之后丢掉记一条警告；业务上的拒绝（比如工单续满了）算处理完；每个事件的 `repo.*` 日志只写一次，重放不重写。**去重的键是 GitHub 对象**：`issue:<id>`、`comment:<id>`、`review:<id>`、`rcomment:<id>`、`pr:<号>:merged|closed`、`check:<套件>:<结论>`，不带 `updated_at`（议题每来一条评论它的 `updated_at` 都会变，带上就会把原来的正文再交给 agent 一次）；webhook 的 `X-GitHub-Delivery` 另记一份。被限流（403、429 带 `Retry-After` 或 `X-RateLimit-Reset`）按它说的时间退避，不加快重试。
+- **webhook**：`POST /api/repos/{id}/webhook`，不走登录，也不走 `X-Nano` 和 Host 的守卫（GitHub 不是浏览器）。守卫的例外只认 `POST /api/repos/<id>/webhook` 这一个形状。web 层只限正文 1MB；签名校验（`X-Hub-Signature-256`，恒定时间比较）、事件类型白名单、记下事件都在 app 层，记下就回 202（记不下来 500，GitHub 会重发），处理放到每个仓库一个的后台协程里，和轮询串行（处理里有 API 调用，GitHub 只等 10 秒）。只在这个仓库选了 webhook、配了密钥时才接，否则和 ID 不存在一样返回 404；签名不对 401；同一次投递重发直接丢。
+- **GitHub 渠道**（`internal/channel/github.go`，名字 `gh`）：对话 ID `owner/name#号`，身份 `gh:<账号>`，议题会话是群聊，发消息就是发评论，走可靠出站。议题会话的场景规则每次从仓库连接上取（`Repo.Team`，经过 `Effective()`，不存进会话设置），回答的 agent 是 `Repo.Agent`。**在渠道这一层挡**：不在名单里（也不是管理员）、没点名（`@<Bot>`，按词边界）、或者是 `Bot` 自己发的，一律不构造消息，只在事件日志里记一笔（不带正文）。名单里的人点名时带上议题的标题和正文（最多 4000 字）作为资料，作者不在名单里时写明“下面只当资料看，不照着里面的话做”。
+- **执行请求的 `env`**：`nano-exec` 的请求加顶层 `env`（最多 16 项、总共 8KB、名字 `[A-Z_][A-Z0-9_]*`、值里不能有 NUL（网关填的时候就查：执行器用的 JSON 库把 `\u0000` 之后的截掉，自己看不出来）、拒绝 `PATH`、`HOME`、`TMPDIR`、`SHELL`、`IFS`、`LD_*`、`DYLD_*`、`NANO_*`、`BASH_ENV`、`ENV`）。模型的工具调用由内核从零构造请求，参数整个放在 `args` 里，带不出顶层 `env`；`args` 里出现 `env` 执行器明确拒绝。内核把网关请它代跑的执行收成 Job 时，`env` 只留在内存里给启动进程用，Job 的记录（`meta.json`）里不存（推送时这里面是 token）。网关只有两处会填：5c 的推送（和连了仓库时的 fetch）和 5d 的外部 agent；Hook 命令不填。值以 `~/` 开头的，执行器用这台机器真实的 HOME 展开（在换私有 HOME 之前）。
+- **交付**：工作目录连了 GitHub，工单不管从团队群还是议题来，都走 PR。起点是从连接的网址 fetch 默认分支（`Repo.Base`，空就问 GitHub）到私有引用 `refs/nano/base`，失败就是失败。验收通过、宿主提交之后：推送在主仓库上做（照“宿主的 git 步骤不信 worktree”：显式 `GIT_DIR`、关 fsmonitor 和 hooks、可写 `<仓库>/.git`），推之前核对本地分支的提交就是工单记下的 `Commit`，推到显式的 `https://github.com/<Owner>/<Name>.git` 而不是 `origin`；凭据只走 `GIT_CONFIG_COUNT/KEY_0/VALUE_0`（键按网址限定 `http.https://github.com/.extraheader`），不进参数、不落文件，验收和提交的环境里没有。先查远端分支是不是已经是这个提交（是就不重推）、按分支查开着的 PR（有就接着用），再开 PR（标题是工单标题，正文写目标、谁派的、原消息、验收命令和结果），记 `PR`，状态 ready（Mark `pr:<号>`），PR 链接和摘要发回原消息。推送或开 PR 失败 blocked（`push`、`pr`），续上时重做交付。连了仓库的工单没有 `accept`；“先收下”也开 PR（正文写明验收没过、由谁收下），等合并才 done。
+- **PR 和检查变成工单的事实**（轮询看工单相关的 PR，或 webhook）：合并 → done（证据是合并提交，不再发消息，删 worktree 和本地分支）；关了没合并 → stopped（“PR 被关了”）；检查套件失败（只认推上去的最新提交，每个提交只算一次）→ 一次返工，和本地验收共用 `Rework`，失败的检查名和摘要放进分支的下一个安全边界，到上限 blocked；名单里的人的审阅（带正文、CHANGES_REQUESTED 或 COMMENTED）和行内意见 → `note` 送进分支（`ready` 回到 `working`），不算返工；PR 对话里的普通评论要点名 `@<Bot>` 才送（送之前去掉点名）；APPROVED 只记事件日志；名单外的忽略。检查的结论 failure、timed_out、cancelled、action_required、startup_failure 都算失败，轮询和 webhook 一致。PR 开了以后的各轮（审阅意见、CI 返工），结果作为评论发在 PR 上（按这一轮的提交和更新前的 `PRHead` 比：不一样写“改了：<摘要>（提交 <前 7 位>）”，一样写“看过了，没有新的改动：<摘要>”；先收下的这一轮前面加“验收没过，由 <谁> 收下：”），不再发回原消息；受阻的问题仍发回原消息。按分支查 PR 只认开着的，合并了或关了的照样开新的。重试交付也占着工单，“先收下”的说明（`ForcedBy`，按每一次交付设：先收下的设成谁，验收通过的一轮清掉）重试时照样写进 PR。
+
+### 外部 agent（5d）
+
+- **登记**（`internal/extagent`，`data/external-agents.json`；网页上工作目录面板里的“外部 agent”）：名字 `[a-z][a-z0-9_-]{0,31}`；命令模板 `Argv` 第一项不能空，`{prompt}` 单独占一项、恰好一次、不是第一项；`Dirs` 是它自己的配置和登录目录，每项以 `~/` 开头、不是家目录本身、不含 `..`（展开和其余校验在执行器上，按那台机器真实的 HOME）；`Env` 用执行请求 `env` 的名字规则和黑名单，放路径和开关，不放密钥；`Timeout` 秒，默认 1800。校验不过不存，写盘失败不改内存。读入时每一项再校验一遍（文件可能被手改过）：不通过的不能用，记一条警告，原样留在文件里，同名重新登记或者删掉才去掉；整个文件读不出来时外部 agent 都不可用，文件不动。
+- **开启**：`Workspace.External` 列出在这个工作目录上开启的名字，默认都不开，只能开登记了的；`PATCH /api/workspaces/{id}` 带 `external` 才改（不带的字段不动；和 `sandbox_mode` 一起带时两项都校验完才改，一起写盘）。网页上开启时要确认，并写明这是对沙箱的放宽：它能读写登记的目录（里面有登录凭据），也能联网。工单的派生工作目录不存开关。
+- **External 工具**：参数 `name`、`prompt`、可选的 `workspace`（写法和内核工具一样：完整的“机器:路径”、序号、只写机器或只写路径）。只在挂的工作目录上开启了外部 agent 的会话里提供；聊天里只有管理员发起的这一轮有（和 MCP 一样），只读和不用工具的模式没有。开关按调用时的算，不按这一轮开始时冻结的。几个工作目录都开了这个名字时要给 `workspace`，没给就拒绝，列出可选的。`prompt` 不能空、最长 32KB、不能有 NUL。
+  - 是网关工具：内核把它交给网关（`GATEWAY_TOOLS`），权限表里和 Shell 一类，审批跟着权限模式走（ask 每次问，readonly 拒绝）。审批提示写出 agent 名字和完整的 prompt；放不进卡片的（超过 2000 字）改发文字，渠道会分段。
+  - 网关构造请求，发 `run` 给工作目录所在机器上的内核（`kernelOn`）：`tool` 是 Shell，命令是登记的 `Argv` 每一项按 POSIX 单引号转义（`'` 写成 `'\''`）后用空格拼起来，`{prompt}` 那一项换成这次的要求；`args.execution` 是 background，`args.timeout` 是登记的时限（不超过那台机器的 `job_timeout_max_seconds`）；`dirs` 只有这一个工作目录（工单的是 worktree），`ro` 只有工作目录自己的 `ExtraRO`（工单的 `.git`），不带管理员读整个文件系统的 RO `/`；`env` 是登记的 `Env`；`agent_rw` 是登记的 `Dirs`；`tmp_key` 是 `ext-<名字>-<会话>`（自己的私有 HOME 和临时目录，同一会话里的 Shell 读不到）；`sandbox` 按这个工作目录的路由。内核把它收成 JOB_HOST 的后台 Job，回执 `{"status":"backgrounded","job_id":…}` 原样作为工具结果，模型用 Job 工具看输出、等结束、停下。内核按 Shell 给它算资源键，Job 结束前占着这个工作目录的独占锁。
+  - 用不了的情况写进工具结果，不发请求：那台机器上没有在线的内核（网关自己的执行器跑不了后台 Job）、SSH 服务器、Windows、内核没有协商后台 Job（`job_manager`、`lease_detach`、`machine_leases`）。
+  - 跑不起来的原因模型看得到：Job 失败（包括启动前就被执行器拒绝，比如 `agent_rw` 不合规），Job 工具的 `status`、`wait`（和控制操作的回执）带 `reason`：内核记下的 `error`，没有就取执行器回的内容，前 500 个字，对所有后台 Job 一样；`list` 不带（一页最多 100 个任务）。`/job` 的文字回复也写出“原因：…”。
+- **执行请求的 `agent_rw`**：和 `env` 一样只有网关发起的执行能带（请求顶层），`args` 里出现执行器拒绝。执行器在 `setup` 里用这台机器真实的 HOME 展开 `~/`、解析符号链接（在换私有 HOME 之前），每一项必须是存在的目录、在家目录里面、不是家目录本身，不和这次的 `dirs`、`ro` 互相包含，不和 NANO_HOME（没设就是 `~/.nano-agent`）互相包含，不和执行器环境里 `PATH` 的任何目录互相包含（每个 PATH 项解析成真实路径，不是绝对路径的、不存在的跳过；那里的程序宿主之后的步骤和主人自己的终端都会去跑，外部 agent 不该能改——装在家目录里的程序登记它的安装目录，不登记 PATH 里放启动脚本的目录；网页登记处写明了），也不和请求顶层的 `agent_rw_deny` 互相包含；最多 8 项。`agent_rw_deny` 是网关带的“只用来查、不加进任何读写范围”的目录（工单里是仓库的根：执行器不知道它在哪，它又不在 worktree 和 `.git` 里，`~/proj/repo/src` 这样的目录不拦住就能写主仓库签出的文件），写法和 `agent_rw` 一样（`~/` 展开、解析符号链接，必须能写成绝对路径，最多 8 项），也只有网关能带，`args` 里出现执行器拒绝。任何一项不满足整次拒绝，写明是哪一项（PATH 的写明是哪个 PATH 目录）；沙箱关着也照样校验；校验不过时什么目录都还没建（校验在建临时目录之前，所以执行器先把环境建好再校验）。都满足的在 `enter_sandbox` 里加进这一个进程的可写范围（文件工具不用它）。
+- **改登记就关掉开关**：开启时确认的是那时候登记的目录。`Argv`、`Dirs`、`Env` 有任何变化（只改 `Timeout` 不算），所有工作目录上关掉它，`POST /api/external-agents` 返回 `disabled`（关掉的工作目录 ID），网页上保存前确认时列出来；新登记一个名字时也先清掉工作目录上残留的同名开关；删掉登记时同样关掉。先关开关再改登记，登记没写成开关也已经关了。开关和登记都在 `App.mu` 下改，开启时在锁下查登记。
+- **验收对照（5d-4）**：设计 16.4 验收清单的每一条对应的测试，替身脚本当外部 agent。真内核的几条用 `setupRealKernel` 起真内核和真执行器、临时目录里的真 git 仓库、模型替身。
+  - 只在开启了的工作目录里能跑；关掉开关，工单里也立刻不能用：`TestExternalOfferedOnlyWhereEnabled`、`TestExternalAgentRegistrationAndWorkspaceSwitch`、`TestTicketExternalRequestIsSandboxedAndFollowsTheRepoSwitch`、`TestTicketExternalGoneWhenTicketEnded`。
+  - 能读写登记的目录，同一会话里的普通 Shell 读不到，也读不到它往私有 HOME 里写的东西：`TestRealKernelExternalRunsAsBackgroundJob`、`TestRealKernelOrdinaryShellCannotSeeTheExternalAgentsFiles`，内核 `test_exec.py` 的 `t_agent_rw_writable`。
+  - `{prompt}` 不经 shell 解释（带 `'`、`$(...)`、反引号、`;`、换行，什么都没多执行）：`TestExternalCallBuildsTheBackgroundRun`（每项单引号转义）、`TestRealKernelExternalRunsAsBackgroundJob`、`TestRealKernelTicketRunsExternalAgent`（工单里、真内核）。
+  - 登记的目录是家目录本身（登记时就拒绝）、包着仓库、在 NANO_HOME 里、和 PATH 里的目录互相包含、在工单的主仓库里，执行被拒：`test_exec.py` 的 `t_agent_rw_checks`、`t_agent_rw_path`、`t_agent_rw_deny`（含符号链接、沙箱关着、拒绝时什么都没建），`TestRealKernelExternalDirsThatAreNotAllowedAreRefused`、`TestRealKernelTicketExternalDirInsideTheRepoIsRefused`（经过真内核）。
+  - 执行被拒时 Job 工具能看到原因：`TestRealKernelJobFailureReasonVisible`、`TestJobReasonOnlyForFailedAndCutAt500Runes`，以及上一条的两个真内核测试。
+  - 模型的参数里带 `agent_rw`（和 `agent_rw_deny`）被执行器拒绝：`test_exec.py`、`test_host.py` 的 `t_env`（经过真内核）。
+  - Job 没结束时 Report ready 被拒；叫停工单时 Job 被停掉：`TestTicketReportReadyRefusedWhileBranchJobsLive`、`TestTicketCancelStopsTheBranchsLiveJobs`、`TestRealKernelLiveExternalJobBlocksReadyAndCancelStopsIt`（真进程真的没了）。
+  - `Auth.Untrusted` 的工单里 `auto` 也要审批：`TestTicketExternalForcesApprovalWhenUntrusted`、`TestRealKernelUntrustedTicketAsksBeforeExternal`；标记的记法、落盘、继承、清空：`TestUntrustedRecordedPerSessionAndCopiedToTickets`、`TestGitHubIssueBodyFromOutsiderMarksTheSession`、`session.TestUntrustedMarkPersistsInheritsAndClearsOnlyOnReset`。
+  - 改了登记的目录，所有工作目录上的开关都关掉：`TestChangingTheRegistrationTurnsTheSwitchOff`。
+  - Job 结束叫醒分支，只叫一次，重启后不重复，不漏：`TestTicketWakesTheBranchOnceWhenTheLastJobEnds`、`TestTicketJobEndingDuringARunDoesNotWake`、`TestTicketJobsEndingWhileANoteRunsDoNotWake`、`TestTicketWaitingForJobsSurvivesRestart`、`TestRealKernelExternalJobEndWakesTheBranchOnce`。
+  - 改完照常验收：`TestRealKernelTicketRunsExternalAgent`（宿主验收命令通过、提交里是外部 agent 改的）。
+  - 实机验收（还没做）：在一台机器上真的开启 claude 或 codex，派一个小工单跑通一次。
+- **工单里的外部 agent（5d-3）**：
+  - 谁能用：管理员发起的这一轮；或者工单的分支——授权记录里有 `External`（`ticketTools` 里加了它，建工单时和 agent 的工具上限取交集；以前建的工单授权记录里没有，工具不给、调用前检查拒绝、调用时也拒绝），并且仓库工作目录在调用这一刻开着这个名字（`externalEnabled`：派生工作目录不存开关，按工单的仓库工作目录现在的开关查；工单结束了就没有）。不另记“派的人在名单里”。
+  - 请求：和聊天里一样，另外 `sandbox` 固定是 `on`（不降级、不看工作目录的设置），`agent_rw_deny` 是仓库工作目录的路径（只用来查，见上面执行器的校验），`ro` 带 worktree 的 `.git`；`tmp_key` 是 `ext-<名字>-<分支会话>`，Job 的发起人是 `ticket:<编号>`。
+  - `Untrusted`：会话设置里的 `Settings.Untrusted`（落盘），两种情况记上：团队群里不在名单里的人（也不是管理员）说话（`OnMessage` 的群聊分支，`outsiderSpoke`，只在设了团队规则的群里记）；议题正文的作者不在名单里（`issueContext` 返回 true，`channel.Message.Untrusted`）。分出去的会话继承（`SnapshotSettings.Untrusted`、`ReadyBranch`），压缩历史不清，只在会话清空重开（`Store.Reset`）时清。建工单时抄进 `Auth.Untrusted`。这样的工单里（授权记录里记了，或者分支自己的会话标着）`External` 的 `hook_check` 回 `force_approval`：内核发 `approve_req`，`auto` 也问；审批发到 agent 主会话的管理员窗口，提示里有 agent 名字和完整的 prompt。设团队规则之前群里别人说过的话不算。
+  - 工单里的 Job（后台 Shell、External 一样，`ticket_jobs.go`）：分支还有没结束的 Job 时 Report ready 被拒，写明是哪几个；一轮结束时还有在跑的 Job，不算“没汇报”，也先不验收，记下在等哪几个（`Ticket.WaitJobs`）；它们都结束了叫醒分支一次（接在 `jobEventCommitted` 的终态分支里，`ticketJobsSettled`），一条“[后台任务] <id>（状态）、… 结束了”，算这一轮的延续（不加 `Renewals`、`Resumes`）；先把叫过的记进 `Ticket.Woken`、清掉 `WaitJobs` 再排这一轮，所以同一个终态重发、重启后都不重复叫；分支正在跑时结束的 Job 不另外叫，这一轮结束时照常按有没有汇报处理。`JobsBySession` 是按来源会话一次扫描的索引。
+
+## 经历、内心片段与长期记忆
+
+真实聊天、工具行动、自主活动与分支结果形成可追溯经历。经历是有界派生索引，最多 500 条、30 天；写入失败不撤销真实结果，也不宣称与历史构成跨文件事务。可见范围按 agent、会话与权限过滤，安静分支经历不对访客开放。
+
+内心活动每次开启独立模型片段，使用稳定前缀和当次说明；原始片段仍保存给查看和记忆整理。普通聊天不再自动叫醒内心，不把聊天原文当待办反复处理，也不自动生成认识。明确任务通过 Agenda/FollowUp 等入口记录。
+
+长期记忆使用 Knowledge 和可编辑的知识条目；dream 按策略整理原始记录、画像和自我认知。经历记录、模型上下文和长期知识分别维护，reset 不把已清空上下文从旧经历重新灌回来。策略在 life、dream 等技能中，agent 的自定义技能优先。
+
+## 可靠出站与健康状态
+
+第 1 步（事实层）实现，目标和原则见 [设计原则](DESIGN.md)。
+
+### 日志包 `internal/journal`
+
+只追加的可靠日志，一行一条 `{"version","seq","data","sha256"}`，`seq` 从 1 连续。重放只截掉没有换行结尾的最后半条；完整记录损坏、版本不支持、序号不连续时拒绝打开，原文件不变。追加 fsync 之后才算提交，写入或同步失败后冻结，之后的追加都返回错误；关闭后使用返回 `ErrClosed`。`Rewrite` 先写 `<path>.next` 并 fsync，再原子替换（POSIX 用 rename 加目录 fsync，Windows 用 `MoveFileEx` 的 `REPLACE_EXISTING | WRITE_THROUGH`）。单条记录和整个文件都有字节上限。不加锁，由使用方的一个写协程独占。`internal/eventlog` 还有自己的一份实现，迁移见 R13。
+
+### 可靠出站 `internal/outbox`
+
+外部平台渠道（Telegram、飞书、QQ、微信和另外添加的机器人，凡是不是 `cli`、`web` 的渠道）的消息经 `App.enqueue` 进出站；Job 卡片、审批卡片、Hook 通知、流式回复、命令行和网页不经过它，仍走每个渠道的内存协程。
+
+- **先记录后动作**：`Enqueue` 只做内存操作（可在 App 总锁下调用），`enqueue` 记录由唯一的写协程落盘，落盘之前绝不发送。调用 `Deps` 时不持有出站自己的锁；`Deps.Channel` 取 App 在 `AddChannel` 时原子替换的渠道快照，不拿 `a.mu`。
+- **顺序与并发**：同一个窗口（渠道 + 聊天）严格按入队顺序，一次只发一条；队头连续失败 3 次后才放行后面的，队头继续按退避重试；每个渠道同时最多 4 个窗口在发；渠道发送位占满时不空转，等某次发送结束再看。`Delay` 从这条成为队头时开始计时，重启后不再等。
+- **切段**：渠道实现 `channel.Parter`，按实际的发法切段并说明每段用 `Send` 还是 `SendMarkdown`；`Item` 记下 `Plain`，重试从没发出的段接着发，引用回复只用于第一段。没实现的渠道整条重试。
+- **重试与结局**：临时失败退避 5 秒起翻倍到 5 分钟；限流（`channel.RetryAfter`）按平台给的时间等，不计入连续失败次数；`errors.Is(err, channel.ErrGone)`（目前只有 Telegram 的 403 和 400 `chat not found`）立即丢弃；入队 24 小时仍未发出丢弃为 `expired`；渠道暂时不在就等，不算失败；附件读不到丢弃为 `media_missing`；机器人被删除（`DeleteBot`）时它的待发以 `channel_removed` 结局。保证至少一次，结果不明（超时）和崩溃在回执之前会再发一次。
+- **附件**：渠道没有 `MediaSender` 只发说明；`ErrGone` 丢弃不发说明；限流按 `RetryAfter` 重试附件；其他错误发一条说明，说明发出去就算已发并在 `Recent` 里记一次附件失败，说明也发不出去则重试且仍先试附件。
+- **日志**：`data/runtime/outbox.jsonl`，版本 1，四种记录 `enqueue`、`progress`、`attempt`、`settle`。单条记录上限 1 MiB，文件硬上限 32 MiB。重启后待发集合、已发段数、失败次数和下次发送时间都恢复。已结局的只留最近 500 条或 7 天；文件超过 4 MiB 且大部分可回收、或已结局记录多过待发时改写，改写后的第一条 `{"t":"seq"}` 带最大 ID。
+- **容量与拒绝**：待发最多 2048 条、正文 8 MiB，单个窗口最多 256 条。`ErrFull` 是明确拒绝（记警告，`enqueue` 返回 false）；单条超过上限（`ErrTooLarge`）、存储不可用（`ErrStorage`）、已关闭（`ErrClosed`）退回内存直发。
+- **存储坏了**：打开时损坏则 `Open` 返回一个拒绝受理的对象和错误，原文件不动；运行中写盘失败则停止受理，已受理的在内存里照发。健康条目报 error。退回内存直发后，出站里还没发完的消息和 App 直接发的新消息，在同一个窗口里可能乱序。
+
+`Status.Outbox` 带各渠道的待发数、最老一条的入队时间、失败中的条数、24 小时内的丢弃数及原因、队列满和超限的次数、存储状态，以及最近的失败和丢弃。`nano-gateway status` 在有待发或有问题时打印一行概括，网页的网关节点显示同样的信息。
+
+### 健康状态 `internal/health`
+
+每个部件认领一个条目，只由认领者写：`ok` 正常，`degraded` 能用但有事要人看，`error` 这一部分现在不能工作。`Handle.Release` 撤销认领，释放后旧 `Handle` 上的 `Set` 无效。
+
+| 条目 | 认领者 | 状态 |
+| --- | --- | --- |
+| `outbox` | 出站 | 存储失败 error；有条目连续失败 3 次以上、24 小时内有丢弃、队列满或消息超限 degraded（删除机器人导致的丢弃不算） |
+| `channel:<名字>` | `channels.go`（启用时认领，停用、改配置重启、机器人删除时释放） | 构建失败、`Run` 意外退出、启用的渠道停止为 error；渠道自己报 `error` 持续超过 1 分钟才算 error，之前 degraded；只有 online 和 idle 算恢复 |
+| `storage` | App | `StorageIssues()` 有问题为 degraded（不含 `execution_leases`、`runtime_events`，每次取状态前刷新） |
+| `dispatch`、`runtime_events`、`autonomy`、`schedule` | App | 启动失败（自主状态读取失败）为 error |
+
+`Status.Health` 带全部条目；聊天 `/status` 和 `nano-gateway status` 只列不是 `ok` 的，网页的网关节点列出全部。`nano-gateway status` 有 error 条目时退出码为 3（0 运行正常，1 没在运行，2 用法错误）。
+
+### 模型面快照测试
+
+`internal/app/model_surface_test.go` 为 11 种角色（挂了工作目录的管理员、访客 none / readonly、外部群聊、拟人型私聊、life、dream、定时任务、Hook 临时会话、分支、内部群成员）各建一个会话，调用 `contextParts`，把 `prefixVer`、系统提示全文、工具定义 JSON 和字节数存进 `testdata/model-surface/<角色>.golden`。内容变了就失败，用 `go test ./internal/app -run TestModelSurface -update` 更新并检查 `prefixVer`；工具定义变了而 `prefixVer` 没变，失败，带 `-update` 也拒绝写入。每个角色"系统提示加工具定义"的总字节有上限（当时的值上浮 10%，写在测试里）；同一输入两次得到的字节必须相同。
+
+## 网关工具登记和本轮工具
+
+网关自己提供的工具（Skill、Session、Job、Schedule、Hook、Message、Gateway、GatewayAdmin、SendFile、Knowledge、FollowUp、Agenda、Report、Ticket、External、Idea、Mind、Diary、WebSearch、WebFetch）登记在 `internal/app/tooldefs.go` 的一张表里：名字、生成定义的函数、执行入口、是否走 `gateway:tools` 状态租约、受理后直接报“开始”还是先报“排队”、是否只给管理员、能不能出现在群聊和场景的工具表。exec 分发、网页上的工具列表（`toolNames`）、群聊白名单的默认范围都从这张表推出；哪类会话提供哪些工具仍在 `contextParts` 和 `toolsFor` 里，但定义只通过表取。内核工具（Read、Shell 等）和 MCP 工具不在表里，C 侧的执行策略不变。
+
+这些工具要内核交回网关才能用：内核按 `main.c` 里写死的名单（`GATEWAY_TOOLS`）把它们用 `exec` 交给网关，不在名单里的会去挑工作目录、交给执行器（回“未知工具”，没挂工作目录时回“没有挂载工作目录”）。内核在 `hello` 的 `gateway_tools` 里报这份名单，网关只把这个会话的内核会交回来的网关工具给模型（`node.handsBack`）；没报名单的旧内核按它写死的名单算，不交 Report、Ticket、External。名单变了（内核换了版本）工具快照会刷新——但判据（`permSignature`）只在真的少了工具时才往后面加（`|missing:<缺的工具>`）：新内核什么都不少，判据和 5 补之前一模一样，升级后会话的工具快照不刷新、前缀缓存不受影响；External 的开关、登记变了时加 `|ext:…`，没有可用的外部 agent 时什么都不加。工单的分支靠 Report 交回结果，内核不交 Report 时不开工，工单 blocked，理由“内核太旧，不会把 Report 交给网关”。`TestRealKernelHandsBackEveryGatewayTool` 用真内核核对这张表里每个工具都在名单里，加网关工具忘了改内核会失败。权限上，Report、Ticket 和 Agenda 一样是“公开只读”（授权由网关自己做），External 和 Shell 一类。
+
+模型回复里的每个工具调用，名字必须在这次请求的工具表里。有一个不在，整批不接受、不执行，按 `unaccepted_tool_proposal` 写进历史，原因是“这一轮没有提供工具 X”；处理器里原有的权限检查保留。
+
+## 场景规则
+
+内部群和外部群都是场景，规则属于场景：`internal/scene` 的 `Rules`（说话方式 mention/free、`observe`、场景说明、各成员的角色、场内工具表、说话样式、防刷屏阈值、每天和这一场的 token 预算）。内部群的规则嵌在 `rooms.json` 的群记录里（键名不变，旧文件原样可读）；外部群的规则存在会话设置的 `scene` 里。`a.sceneOf(sid)` 返回会话所在的场景，私聊没有规则。
+
+每一项单独取，场景里有值就用场景的，否则用 agent 的群聊设置，再否则用内置默认：积极度（场景角色 → agent → low，工具型 agent 只有角色里明确设了才会主动插话）、说话样式、工具（场景 `tools` 与 agent 的群聊工具取交集，`[]` 不给工具，最后只保留这一轮拿得到的）、防刷屏（连续 8 条、来回 6 轮）。没设规则的场景，模型看到的内容与以前逐字节相同。`[场景] 说明` 和 `[你的角色] 提示词` 紧跟群聊守则，同一个场景里保持不变，工具定义不变。
+
+预算池：一个场景所有成员会话的用量记在一起（含 observe 的轮），存 `data/runtime/scenes.json`，每轮结束后整份写临时文件再替换，重启接着算；崩溃时可能丢最后一轮的累加。内部群超过当天或这一场的预算就暂停并在群记录里写明原因，网页可把累计清零。外部群超过当天预算后不再调用模型、不主动插话，被点名时每天最多回一次“今天的额度用完了”。
+
+`observe` 档只作用于主动插话（`groupTick` 触发的那一轮）：照常请求模型，回复不写任何历史和群记录、不发出，工具调用不执行；本来会说的话、触发原因和用量记在 `data/runtime/observe.jsonl`（journal，最多 2000 条，超了只留最新一半）。被点名、两个 agent 的私聊、Message、FollowUp 不受影响。observe 的判断不占每小时的发言额度，所以记下的“本来会说”可能比真正开启后实际说出口的多；成本仍由每小时判断次数的上限管着。写入失败时这一轮的结果丢掉，健康状态 `observe` 为 degraded。
+
+接口：`PATCH /api/rooms/{id}` 接受规则字段（`tools` 不给不改、`null` 沿用默认、`[]` 不给工具；`reset: true` 清零累计）；`PATCH /api/sessions/{sid}` 的 `scene` 整块替换外部群的规则（`null` 清掉，`scene_reset: true` 清零累计）；`GET /api/observe?scene=<键>&n=50[&all=1]`。
+
+## 场内编排
+
+内部群里的每一句话都走 `roomPost`：群记录统一记 `[名字]`、`[#频道][名字]`、`[旁白]`、`[导演→名字]`；成员会话只收它听得到的（公开的全体收，频道里的话只有频道成员收，cue 只有对象收并写成 `[导演] …`，说话的 agent 自己不再收一遍）；收完再按发言规则决定叫谁说话。`roomHumanSay`、`roomAgentSay` 和 Message 工具都是它的包装。
+
+四种发言规则：mention、free 按真实时间；turns、director 按回合，`sceneInfo.free()` 对它们返回 false，所以主动插话和 observe 不作用在回合制上，防刷屏阈值也不用。
+
+轮流：人或旁白在公开频道说一句之后，按顺序（`order`，空则成员顺序）每人说一句为一轮，上一位说完立刻叫下一位，不等定时器、不用随机数，同样的输入加同样的模型替身，群记录逐字相同。轮到的成员请求末尾多一句只放在这次请求里的提示（“第 N 轮，轮到你。”），不写进历史；被禁言的跳过；@ 和叫名字不插队，人中途说话照常进历史。一整轮全员回 `[不回复]` 就停下等下一句人话或旁白，不算暂停；出错算跳过，连续两次出错（跨轮也算）就暂停并写明原因；一个人都没叫起来的一轮（比如全员禁言）不计入轮数；到了 `rounds` 暂停（“这一场到了 N 轮”）。轮流必须设 `rounds` 或 `budget_total`。轮数（`round`）和下一位（`next`）存在 `scenes.json` 的场景条目里，清零累计时一起清；“正在转”只在内存里，重启或取消暂停后不自动接着跑。
+
+导演：只有被点到的那一个会说话，@ 和叫名字都不触发。`POST /api/rooms/{id}/cue`（`{agent, note, channel}`）：有 note 时先作为 cue 只发给它，再叫它说一句；它正在说话时拒绝，群暂停或它被禁言时也拒绝。
+
+私下频道（`channels`，最多 8 个，成员必须是群成员，退群时一并去掉）：频道里的话只有频道成员听得到，只按点名触发；被叫到频道的成员请求末尾提示在哪个频道、谁听得到，回复回到那个频道。旁白和人的话：`POST /api/rooms/{id}/say`（`{text, as, channel}`），`as` 是“旁白”记作旁白。
+
+## 剧场
+
+内部群建群时可以设 `stage`（之后不能改；两个 agent 的私聊和外部群不能设）：这是一场戏，场内的事不进成员的记忆，场外的事进不来，全程记录。`inner` 可以随时开关。
+
+隔离都按 `sceneOf(sid)` 取到的规则判断：成员会话不记经历、整理记忆不读它、请求里没有记忆说明和经历；工具只能从登记表里 `stage` 为真的（WebSearch、WebFetch）里选，`tools` 不设就一个都不给；Message 工具不能发进戏里（“这是一场戏，只能在导演台说话”），内心活动的聊天对象里不列它；人的话、旁白和 cue 只从网页进来。群记录会话和成员会话只追加（`Line` 和 `cursors` 都假定如此）：清空历史（全部或轮次范围）、重置、撤回、删会话这四个入口对戏的会话直接拒绝，判断在任何副作用之前（不会先停掉正在跑的任务）；只清摘要、删归档、压缩（只挪 Base、不动文件）照常；不是戏的群不受影响。要重来就从某一句分出平行世界。不开 `stage` 的群没有场景记录，行为和存储都不变。
+
+场景记录 `data/runtime/stage/<群 ID>.jsonl`（`internal/journal`，单条 64KB，整份 64MB），记录种类：`line`（群记录里的一句，`line` 就是它在群记录里的位置——写之前取群记录会话当前的长度加一，含系统提示；有一句没写进场景记录、暂停提示只进群记录时，场景记录里会有空位）、`cursors`（这一句送达、说话者这一轮的消息都写进会话之后，每个成员会话的消息数；只在除说话者以外没有成员在跑或排队时才记，所以不是每句都有，没有 cursors 的句子不能分出）、`run`（成员的一轮：谁、状态、心里话、用量、说出口的是第几句）、`model`（一次模型调用：接口、模型、参数、前缀哈希、整个请求的哈希、用到的会话消息范围、只放在请求里的内容、输出和工具调用）、`prefix`（某个前缀第一次出现时的全文）、`op`（导演的暂停、恢复、禁言、改规则、清零）。群记录只有 `roomLogWrite` 一个写入口（`roomPost` 和 `pauseRoom` 都经过它）：先写场景记录，再写群记录；写不进去这一句就不发，暂停这一场，原因只写群记录。健康条目 `stage` 在网关启动时认领：只要还有一场写不进去就是 degraded，详情里列出这几场，某一场之后写成功了就移出去。删群时关掉它的场景记录、从内存里移掉、删掉文件。`/say` 的话和 `/cue` 的提示最多 2000 字，超过直接拒绝（400）。模型调用和一轮结束的记录走同一个场景钩子（`sceneModel`、`sceneRunEnd`），没有场景记录的会话什么都不做。
+
+心里话：场景说明后面多一段固定说明，回复先写 `<心里>…</心里>`，网关拆开（回复里任何位置的 `<心里>…</心里>` 都取出来，有几段取几段，说出口的部分去掉这些段落）：心里话（最多 200 字）记进 `run`，别人只听到说出口的部分，成员自己的会话保留完整回复；没按格式写的整段算说出口；心里话后面只回 `[不回复]` 也记心里话。
+
+接口：`GET /api/rooms/{id}/timeline?after=<序号>&n=200`（`prefix` 只给哈希和长度）、`GET /api/rooms/{id}/timeline/prefix/<hash>`；每写一条记录发一个网页事件 `stage`。重放驱动只在测试里（`stage_test.go`）：按时间线说出人和旁白的话，模型调用按记录的输出回答，重放出的群记录和每次调用的请求哈希都与原场相同。
+
+### 平行世界和倒带
+
+`POST /api/rooms/{id}/fork`（`{at, name, rewind}`）从一场戏的第 `at` 句分出新的一场（只有戏可以分出）：
+
+- 新群的成员、禁言、规则照抄（含 `stage`），名字默认“<原名> · 平行 N”，不暂停，用量（`total`、`round`、`next`）从零开始。
+- 群记录是原群记录的前 `at` 句；每个成员的会话是原会话（完整记录，不带压缩摘要）的前 `cursors[成员]` 条消息，没有 `cursors` 的新成员从空白开始；场景记录是原记录到那一句的 `cursors` 为止的部分，用 `Rewrite` 整份写进新文件，再接上说出第 `at` 句的那一轮的 `run`（按 `said` 找，里面有心里话和用量；那一轮还没结束就没有），最后追加一条 `fork {from, at}`，句子号接着原来的数。`name` 先去掉首尾空格，只有空格按没填处理。
+- 只有记了 `cursors` 的句子能分出（那一刻除说话者外没有成员在跑或排队）；其他句子被拒绝，错误里写明最近一个能分出的句子。
+- 写入顺序：群记录和成员会话（`session.Store.Seed`：整份写临时文件再替换，会话已存在就拒绝）→ 场景记录 → 新群最后才进群列表；中途失败，已经写的会话和文件都删掉。
+- 原来那场不受影响：记录只追加，不删不截。`rewind: true` 时分出后再暂停原群（原群场景记录里记一条 `pause`）；已经在跑的那一轮照常说完，之后不再叫人。
+
+### 导演台、导出和放映
+
+每个 `stage` 群有一个整页的导演台：网页里群面板的“打开导演台”，地址 `#/stage/<群 ID>`（建戏在“创建群”里勾“这是一场戏”，可同时开心里话）。
+
+- **时间线**（左）：每句话一行，收到 `stage` 事件后按序号增量读取（`GET /api/rooms/{id}/timeline`）。心里话、频道里的话、cue、系统提示可以分别显示或隐藏；能分出的句子（记了 `cursors` 的）旁边有“从这里分出”和“从这句重来”（`rewind`），分出后跳到新群；说话的那一行可以点开这一轮，看用量、状态和模型的推理。
+- **控制**（右）：旁白和人的话（公开或某个频道）、给某个成员的 cue 提示和“让 TA 说”、禁言、暂停和恢复、轮数和 token 用量（可清零）、导出。
+- **放映**：按字幕的排法和时间一句一句放出来（1× 或 2×），默认只放发言和旁白，心里话和频道按开关；`Esc` 停止。字幕的排法在 `web/src/lib/stage.ts`，和后端导出的字幕一致。
+- **导出** `GET /api/rooms/{id}/export?format=srt|md|json&inner=1&channels=1&from=&to=`（`from`、`to` 是句子序号，默认整场）：
+  - 字幕（SRT）：公开发言和旁白各占一条，前面写名字（旁白不写）；`channels=1` 时频道里的话写成“名字（私下）：…”，`inner=1` 时心里话排在那句话前面，写成“（名字心里）…”；cue 和系统提示不进字幕。时间不用真实时间：每条时长为字数（含名字）÷ 5 秒，最短 1.5 秒、最长 8 秒，条与条之间留 0.3 秒；超过 40 字的句子按句号、问号、感叹号拆成几条，名字只写在第一条。
+  - 剧本（Markdown）：标题、场景说明、角色表、正文，末尾附这一场的轮数和 token 用量（取场景现在的累计）。正文里心里话用斜体；频道里的话和 cue 只在 `channels=1` 时出现，并标出“【私下·频道名】”“【cue】”；暂停写成一行“（系统：…）”。
+  - JSON：范围内的时间线记录（`prefix` 只给哈希和长度），加上成员、规则和用量。
+  - 范围里的心里话、频道和 cue 都按同样的开关处理；字幕和剧本有逐字节的快照（`testdata/stage-export`）。
+
+## 验收范围与已知边界
+
+v0.9.0 Linux + Windows 范围已验收。2026-10-29 在 c55229b 复验：
+
+| 范围 | 结果 |
+| --- | --- |
+| Go 构建、vet、全量测试及相关 race | 通过 |
+| C core / Linux watch | 262 / 13 项，零失败 |
+| Linux 执行器、宿主 ASan 及 Job 链路 | 通过 |
+| Windows 原生观察器 | 12 项，零失败，退出码 0 |
+| 前端类型检查、语义测试、构建 | 通过，语义测试 7 项 |
+
+macOS 后端已实现、两个架构编译通过；用户暂缓原生运行验收。真实飞书/Telegram 租户联调及长期自主行为仍需后续观察，模拟接口测试不等于真实平台实测。远程 CI 和正式发布状态以对应提交的实际结果为准，发布步骤见 [发布流程](RELEASE.md)。
+
+出站已知边界：Job 卡片和命令行、网页走内存协程，文字走可靠出站；同一个窗口里两者不共用先后顺序（例如一条文字和一张 Job 卡片的到达先后不保证）。目前没有发现看得见的问题。渠道停用时从渠道表里去掉，它的待发消息留在出站里等，重新启用后按顺序接着发；删除机器人才丢弃（删除时先停渠道，再忘掉它并丢弃待发，之后发给它的消息直接拒绝）。重启后，停用中的渠道不再受理新消息，已经在出站里的照样等它回来。

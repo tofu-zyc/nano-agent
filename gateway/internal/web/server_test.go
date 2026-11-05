@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"nano-agent/gateway/internal/host"
+	"nano-agent/gateway/internal/repos"
+	"nano-agent/gateway/internal/repos/fakegithub"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -359,5 +363,200 @@ func TestSchedulesAPI(t *testing.T) {
 	}
 	if code, res = c.do("POST", "/api/schedules", map[string]any{"action": "delete", "id": id}, true); code != 200 {
 		t.Fatal(code, res)
+	}
+}
+
+func TestCommitmentsAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/commitments", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("未登录应该 401：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	code, out := c.do("GET", "/api/commitments?agent=default&phase=blocked", nil, false)
+	items, ok := out["items"].([]any)
+	if code != 200 || !ok || len(items) != 0 {
+		t.Fatalf("没有承诺时是空列表：%d %v", code, out)
+	}
+}
+
+func TestPendingAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	for _, p := range []string{"/api/pending", "/api/pending/seen", "/api/pending/answer"} {
+		method := "POST"
+		if p == "/api/pending" {
+			method = "GET"
+		}
+		if code, _ := c.do(method, p, map[string]string{}, method == "POST"); code != http.StatusUnauthorized {
+			t.Fatalf("%s 未登录应该 401：%d", p, code)
+		}
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	code, out := c.do("GET", "/api/pending", nil, false)
+	if items, ok := out["items"].([]any); code != 200 || !ok || len(items) != 0 {
+		t.Fatalf("没有等我处理的事是空列表：%d %v", code, out)
+	}
+	if code, _ := c.do("POST", "/api/pending/seen", map[string]string{"kind": "branch", "id": "x", "mark": "r:1"}, true); code != http.StatusBadRequest {
+		t.Fatalf("不在列表里的事返回 400：%d", code)
+	}
+	long := strings.Repeat("字", 2001)
+	if code, _ := c.do("POST", "/api/pending/answer", map[string]string{"kind": "branch", "id": "x", "mark": "r:1", "text": long}, true); code != http.StatusBadRequest {
+		t.Fatalf("回答超过 2000 字返回 400：%d", code)
+	}
+}
+
+func TestTicketCancelAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	c := newClient(t, srv)
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": "x"}, true); code != http.StatusUnauthorized {
+		t.Fatalf("未登录应该 401：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatalf("登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": "x"}, true); code != http.StatusBadRequest {
+		t.Fatalf("没有这张工单返回 400：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/tickets/tk-1/cancel", map[string]string{"reason": ""}, true); code != http.StatusBadRequest {
+		t.Fatalf("没写理由返回 400：%d", code)
+	}
+}
+
+// webhook 不要登录，但要签名；web 层限正文 1MB；只有选了 webhook 的连接才接。
+func TestRepoWebhookRouteNeedsNoLoginButNeedsSignature(t *testing.T) {
+	srv, s, _ := setup(t)
+	gh := fakegithub.New("acme", "app", "ghp_webtest", "bot")
+	defer gh.Close()
+	s.app.SetRepoAPIBase(gh.URL)
+	s.app.SetRepoNoLoop(true)
+	ws, err := s.app.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.app.SaveRepo(app.RepoSave{Workspace: ws.ID, Owner: "acme", Name: "app", Token: "ghp_webtest", Intake: "webhook", Secret: "whsec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(path string, body []byte, hdr map[string]string) int {
+		req, _ := http.NewRequest("POST", srv.URL+path, strings.NewReader(string(body)))
+		for k, x := range hdr {
+			req.Header.Set(k, x)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	body := []byte(`{"action":"created","issue":{"number":3},"comment":{"id":9,"body":"hi","user":{"login":"alice"}}}`)
+	good := map[string]string{"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d1", "X-Hub-Signature-256": repos.Sign("whsec", body)}
+	if code := post(v.WebhookPath, body, good); code != 202 {
+		t.Fatalf("没登录、签名对：%d", code)
+	}
+	if code := post(v.WebhookPath, body, map[string]string{"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d2", "X-Hub-Signature-256": repos.Sign("bad", body)}); code != 401 {
+		t.Fatalf("签名不对：%d", code)
+	}
+	if code := post("/api/repos/no-such/webhook", body, good); code != 404 {
+		t.Fatalf("没有这个连接：%d", code)
+	}
+	big := make([]byte, repos.MaxWebhookBody+10)
+	if code := post(v.WebhookPath, big, good); code != 413 {
+		t.Fatalf("超过 1MB：%d", code)
+	}
+	// 管理接口要登录
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/repos", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("列连接要登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatal(code)
+	}
+	code, out := c.do("GET", "/api/repos", nil, false)
+	items, _ := out["items"].([]any)
+	if code != 200 || len(items) != 1 {
+		t.Fatalf("列连接：%d %v", code, out)
+	}
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), "ghp_webtest") || strings.Contains(string(raw), "whsec") {
+		t.Fatalf("token 和密钥不回显：%s", raw)
+	}
+	// 守卫的例外只认 webhook 这一个形状：登录了但不带 X-Nano，其他改动类请求都是 403
+	if code, _ := c.do("POST", "/api/repos", map[string]any{"owner": "acme"}, false); code != http.StatusForbidden {
+		t.Fatalf("保存连接不带 X-Nano：%d", code)
+	}
+	if code, _ := c.do("DELETE", "/api/repos/"+v.ID, nil, false); code != http.StatusForbidden {
+		t.Fatalf("删连接不带 X-Nano：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/repos/"+v.ID+"/webhook/x", nil, false); code != http.StatusForbidden {
+		t.Fatalf("webhook 后面多一段不算 webhook：%d", code)
+	}
+	// 监听本机时，外来的 Host 访问管理接口也是 403
+	s.loopback = true
+	req := httptest.NewRequest("GET", "/api/repos", nil)
+	req.Host = "evil.example:7788"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("外来的 Host：%d", w.Code)
+	}
+}
+
+// 外部 agent 的登记接口要登录；工作目录上开启只改 external，不动执行隔离。
+func TestExternalAgentRoutes(t *testing.T) {
+	srv, s, _ := setup(t)
+	ws, err := s.app.AddWorkspace(context.Background(), host.LocalName, t.TempDir(), false, "on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, srv)
+	if code, _ := c.do("GET", "/api/external-agents", nil, false); code != http.StatusUnauthorized {
+		t.Fatalf("要登录：%d", code)
+	}
+	if code, _ := c.do("POST", "/api/login", map[string]string{"password": "pw"}, true); code != 200 {
+		t.Fatal(code)
+	}
+	agent := map[string]any{"name": "claude", "argv": []string{"claude", "-p", "{prompt}"}, "dirs": []string{"~/.claude"}}
+	if code, _ := c.do("POST", "/api/external-agents", agent, false); code != http.StatusForbidden {
+		t.Fatalf("不带 X-Nano：%d", code)
+	}
+	if code, out := c.do("POST", "/api/external-agents", map[string]any{"name": "x", "argv": []string{"x"}}, true); code != 400 || !strings.Contains(fmt.Sprint(out), "{prompt}") {
+		t.Fatalf("校验不过：%d %v", code, out)
+	}
+	if code, out := c.do("POST", "/api/external-agents", agent, true); code != 200 {
+		t.Fatalf("登记：%d %v", code, out)
+	}
+	if code, out := c.do("GET", "/api/external-agents", nil, false); code != 200 || len(out["items"].([]any)) != 1 {
+		t.Fatalf("列：%d %v", code, out)
+	}
+	if code, out := c.do("PATCH", "/api/workspaces/"+ws.ID, map[string]any{"external": []string{"claude"}}, true); code != 200 {
+		t.Fatalf("开启：%d %v", code, out)
+	}
+	for _, w := range s.app.Workspaces() {
+		if w.ID == ws.ID && (len(w.External) != 1 || w.SandboxMode != "on") {
+			t.Fatalf("只改 external：%+v", w.Workspace)
+		}
+	}
+	// 两项都校验完才动手：外部 agent 不对，执行隔离也不改
+	if code, _ := c.do("PATCH", "/api/workspaces/"+ws.ID, map[string]any{"sandbox_mode": "off", "external": []string{"nope"}}, true); code != 400 {
+		t.Fatalf("没登记的外部 agent：%d", code)
+	}
+	for _, w := range s.app.Workspaces() {
+		if w.ID == ws.ID && (len(w.External) != 1 || w.SandboxMode != "on") {
+			t.Fatalf("一项不对另一项也不改：%+v", w.Workspace)
+		}
+	}
+	// 改了登记的目录：返回关掉了哪些工作目录
+	agent["dirs"] = []string{"~/.claude", "~/.config/claude"}
+	if code, out := c.do("POST", "/api/external-agents", agent, true); code != 200 || fmt.Sprint(out["disabled"]) != "["+ws.ID+"]" {
+		t.Fatalf("改了目录关掉开关：%d %v", code, out)
+	}
+	if code, _ := c.do("DELETE", "/api/external-agents/claude", nil, true); code != 200 {
+		t.Fatalf("删：%d", code)
 	}
 }

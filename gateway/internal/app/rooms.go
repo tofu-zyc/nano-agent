@@ -8,9 +8,11 @@ package app
 // 说话方式沿用阶段 7 的群聊引擎：短、口语、不发思考，被叫到才说（或者自由模式按积极度插话）。
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
 	"nano-agent/gateway/internal/rooms"
+	"nano-agent/gateway/internal/scene"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -62,45 +65,6 @@ func (a *App) roomOfSession(sid string) (rooms.Room, bool) {
 // roomSender 是房间会话属于哪个 agent（房间本身的记录会话返回默认 agent）。
 func roomSender(sid string) string { return agents.SessionAgent(sid) }
 
-// roomHumanSay 把人在群里说的话转给所有成员，并按需要叫它们说话。调用方持有锁。
-func (a *App) roomHumanSay(room rooms.Room, name, text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	if name == "" {
-		name = "有人"
-	}
-	line := fmt.Sprintf("[%s] %s", name, text)
-	for _, member := range room.Members {
-		sid := a.roomMemberSID(member, room.ID)
-		st := a.store.Settings(sid)
-		if !st.Group {
-			st.Group = true
-			if err := a.store.SaveSettings(sid, st); err != nil {
-				a.log.Warn("保存房间成员会话失败", "sid", sid, "err", err)
-			}
-		}
-		if err := a.store.Append(sid, session.Msg{Role: "user", Content: line}); err != nil {
-			a.log.Warn("保存房间消息失败", "sid", sid, "err", err)
-			continue
-		}
-		s := a.sessOf(sid)
-		s.groupFresh = true
-		s.groupPending++
-		s.groupLast = a.now()
-		s.groupEp = endpoint{ch: "room", chat: room.ID}
-		// 暂停了：消息照样进成员的会话（它们还能听到），只是不叫人回
-		if room.Paused || room.MutedAgent(member) {
-			continue
-		}
-		if a.roomShouldSpeak(room, member, text) {
-			a.roomTrigger(s, member, room)
-		}
-	}
-	a.publish(events.Event{T: "rooms"})
-}
-
 // roomShouldSpeak 是这个人说的这句话，要不要叫某个 agent 说话。
 func (a *App) roomShouldSpeak(room rooms.Room, member, text string) bool {
 	ag, ok := a.agentByID(member)
@@ -119,99 +83,15 @@ func (a *App) roomShouldSpeak(room rooms.Room, member, text string) bool {
 	return false
 }
 
-// roomTrigger 让某个成员在房间里说一句（走群聊那一套：先攒 2 秒）。调用方持有锁。
-func (a *App) roomTrigger(s *sess, member string, room rooms.Room) {
-	if s.groupTimer != nil {
-		return
-	}
-	// 两次发言之间留一点间隔
-	rule := a.groupRuleOf(s.sid)
-	if !s.groupSpokeAt.IsZero() && a.now().Sub(s.groupSpokeAt) < rule.MinGap {
-		return
-	}
-	sid := s.sid
-	s.groupTimer = time.AfterFunc(2*time.Second, func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.sessions[sid] != s {
-			return
-		}
-		s.groupTimer = nil
-		s.groupFresh = false
-		s.groupProactive = false
-		ep := endpoint{ch: "room", chat: room.ID}
-		s.queue = append(s.queue, queued{ep: ep, who: "room:" + member, trigger: true,
-			m: channel.Message{ChatID: room.ID, Group: true}})
-		a.startRun(s)
-	})
-}
-
-// roomAgentSay 是 agent 在房间里说了一句：记进房间记录、转给其他成员、看看要不要暂停。调用方持有锁。
-func (a *App) roomAgentSay(room rooms.Room, member, text string) {
-	text = strings.TrimSpace(text)
-	if isSilence(text) {
-		return
-	}
-	ag, ok := a.agentByID(member)
-	name := member
-	if ok {
-		name = ag.Name
-	}
-	line := fmt.Sprintf("[%s] %s", name, text)
-	if err := a.store.Append(roomLogSID(room.ID), session.Msg{Role: "assistant", Content: line, Agent: member}); err != nil {
-		a.log.Warn("保存房间记录失败", "room", room.ID, "err", err)
-	}
-	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: text})
-	// 转给其他成员（说话的这个不再收到自己说的话）
-	for _, m := range room.Members {
-		if m == member {
-			continue
-		}
-		sid := a.roomMemberSID(m, room.ID)
-		if err := a.store.Append(sid, session.Msg{Role: "user", Content: line}); err != nil {
-			a.log.Warn("保存房间消息失败", "sid", sid, "err", err)
-			continue
-		}
-		s := a.sessOf(sid)
-		s.groupFresh = true
-		s.groupPending++
-		s.groupLast = a.now()
-		s.groupEp = endpoint{ch: "room", chat: room.ID}
-		// 在群里 @ 了或者叫到别的成员：叫醒它（连续发言、来回轮数的暂停规则兜底）
-		if !room.Paused && !room.MutedAgent(m) {
-			if other, ok := a.agentByID(m); ok && (strings.Contains(text, "@"+other.Name) || groupMentionsName(text, other.Name)) {
-				a.roomTrigger(s, m, room)
-			}
-		}
-	}
-	a.signalRoomWaiters(room.ID, member, text)
-	a.roomGuard(room, member)
-}
-
-// roomUsage 累加一个群今天的 token 用量，超过预算就暂停。调用方持有锁。
-func (a *App) roomUsage(room rooms.Room, prompt, completion int) {
-	if room.Budget <= 0 {
-		return
-	}
-	st := a.roomState(room.ID)
-	day := a.now().In(a.loc).Format("2006-01-02")
-	if st.TokenDay != day {
-		st.TokenDay, st.Tokens = day, 0
-	}
-	st.Tokens += prompt + completion
-	if st.Tokens > room.Budget {
-		a.pauseRoom(room, fmt.Sprintf("今天的 token 用量到了预算（%d），先暂停，明天或者你恢复", room.Budget))
-	}
-}
-
 // roomGuard 防止几个 agent 在群里聊个不停。调用方持有锁。
 func (a *App) roomGuard(room rooms.Room, speaker string) {
 	st := a.roomState(room.ID)
 	st.Tail = append(st.Tail, speaker)
-	if len(st.Tail) > 12 {
-		st.Tail = st.Tail[len(st.Tail)-12:]
+	if len(st.Tail) > scene.MaxGuard {
+		st.Tail = st.Tail[len(st.Tail)-scene.MaxGuard:]
 	}
-	// 连续 8 条都是 agent 说的（中间没有人说话）就暂停
+	// 连续 N 条（默认 8）都是 agent 说的（中间没有人说话）就暂停
+	runLimit, pingPong := room.Guard.EffectiveGuard()
 	consecutive := 0
 	for i := len(st.Tail) - 1; i >= 0; i-- {
 		if st.Tail[i] == "human" {
@@ -219,29 +99,33 @@ func (a *App) roomGuard(room rooms.Room, speaker string) {
 		}
 		consecutive++
 	}
-	if consecutive >= 8 {
-		a.pauseRoom(room, "群里连续说了 8 条，先暂停，等你说话")
+	if consecutive >= runLimit {
+		a.pauseRoom(room, fmt.Sprintf("群里连续说了 %d 条，先暂停，等你说话", runLimit))
 		return
 	}
-	// 两个 agent 来回超过 6 轮（没有新的人）也暂停
-	if len(st.Tail) >= 6 {
-		tail := st.Tail[len(st.Tail)-6:]
+	// 两个 agent 来回超过 N 轮（默认 6，没有新的人）也暂停
+	if len(st.Tail) >= pingPong {
+		tail := st.Tail[len(st.Tail)-pingPong:]
 		set := map[string]bool{}
 		for _, x := range tail {
 			set[x] = true
 		}
 		if len(set) == 2 && !set["human"] {
-			a.pauseRoom(room, "两个 agent 来回说了 6 轮，先暂停，等你说话")
+			a.pauseRoom(room, fmt.Sprintf("两个 agent 来回说了 %d 轮，先暂停，等你说话", pingPong))
 			return
 		}
 	}
 }
 
 type roomRun struct {
-	Tail     []string // 最近的发言者（"human" 或者 agent ID）
-	Pending  map[string][]chan string
-	Tokens   int
-	TokenDay string
+	Tail    []string // 最近的发言者（"human" 或者 agent ID）
+	Pending map[string][]chan string
+	// 轮流（只在内存里）：是不是正在转、现在轮到谁、这一轮已经说了几位（几位沉默）、连续出错几位
+	TurnActive              bool
+	Current                 string
+	RoundTurns, RoundSilent int
+	RoundCalled             int
+	ErrRun                  int
 }
 
 // roomState 是房间的运行状态（只在内存里）。调用方持有锁。
@@ -258,7 +142,12 @@ func (a *App) roomState(id string) *roomRun {
 }
 
 // pauseRoom 暂停一个群，并在群记录里说一声。调用方持有锁。
-func (a *App) pauseRoom(room rooms.Room, why string) {
+func (a *App) pauseRoom(room rooms.Room, why string) { a.pauseRoomWith(room, why, true) }
+
+// pauseRoomLogOnly 场景记录写不进去时的暂停：原因只写群记录，不再写场景记录。
+func (a *App) pauseRoomLogOnly(room rooms.Room, why string) { a.pauseRoomWith(room, why, false) }
+
+func (a *App) pauseRoomWith(room rooms.Room, why string, staged bool) {
 	if room.Paused {
 		return
 	}
@@ -266,8 +155,13 @@ func (a *App) pauseRoom(room rooms.Room, why string) {
 	if err := a.roomStore.Update(room); err != nil {
 		a.log.Warn("暂停房间失败", "room", room.ID, "err", err)
 	}
-	a.store.Append(roomLogSID(room.ID), session.Msg{Role: "user", Content: "[系统] " + why})
-	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: "[系统] " + why})
+	text := "[系统] " + why
+	if staged {
+		a.roomLogWrite(room, session.Msg{Role: "user", Content: text}, StageRec{Say: "system", Text: text})
+	} else if err := a.store.Append(roomLogSID(room.ID), session.Msg{Role: "user", Content: text}); err != nil {
+		a.log.Warn("保存房间记录失败", "room", room.ID, "err", err)
+	}
+	a.publish(events.Event{T: "say", SID: roomLogSID(room.ID), Text: text})
 	a.publish(events.Event{T: "rooms"})
 	a.log.Info("房间已暂停", "room", room.ID, "why", why)
 }
@@ -292,8 +186,8 @@ func (a *App) signalRoomWaiters(roomID, member, text string) {
 func (a *App) roomHumanLine(roomID string) {
 	st := a.roomState(roomID)
 	st.Tail = append(st.Tail, "human")
-	if len(st.Tail) > 12 {
-		st.Tail = st.Tail[len(st.Tail)-12:]
+	if len(st.Tail) > scene.MaxGuard {
+		st.Tail = st.Tail[len(st.Tail)-scene.MaxGuard:]
 	}
 }
 
@@ -304,18 +198,22 @@ type RoomInfo struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
-	Mode    string   `json:"mode"`
 	Paused  bool     `json:"paused"`
 	Muted   []string `json:"muted"`
 	DM      bool     `json:"dm"`
-	Budget  int      `json:"budget"` // 每天最多的 token（0 不限）
-	SID     string   `json:"sid"`    // 记录会话（网页里打开它就能看聊天）
+	SID     string   `json:"sid"` // 记录会话（网页里打开它就能看聊天）
 	Count   int      `json:"count"`
+	// 场景规则（mode、observe、brief、roles、tools、style、guard、budget、budget_total）平铺在这里
+	scene.Rules
+	Use SceneUsage `json:"use"` // 用量
 }
 
 func (a *App) roomInfo(r rooms.Room) RoomInfo {
-	out := RoomInfo{ID: r.ID, Name: r.Name, Members: r.Members, Mode: r.Mode, Paused: r.Paused, Muted: r.Muted,
-		DM: r.IsDM(), Budget: r.Budget, SID: roomLogSID(r.ID)}
+	out := RoomInfo{ID: r.ID, Name: r.Name, Members: r.Members, Paused: r.Paused, Muted: r.Muted,
+		DM: r.IsDM(), SID: roomLogSID(r.ID), Rules: r.Rules.Clone(), Use: a.sceneUsageOf(roomLogSID(r.ID), r.Rules)}
+	if out.Mode == "" {
+		out.Mode = scene.ModeMention
+	}
 	if out.Members == nil {
 		out.Members = []string{}
 	}
@@ -345,11 +243,10 @@ func (a *App) Rooms() []RoomInfo {
 type RoomPatch struct {
 	Name    *string   `json:"name"`
 	Members *[]string `json:"members"`
-	Mode    *string   `json:"mode"`
 	Paused  *bool     `json:"paused"`
 	Muted   *[]string `json:"muted"`
-	Budget  *int      `json:"budget"`
 	DM      *bool     `json:"dm"`
+	ScenePatch
 }
 
 // CreateRoom 新建一个房间。
@@ -366,9 +263,11 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 	if p.Members != nil {
 		r.Members = *p.Members
 	}
-	if p.Mode != nil {
-		r.Mode = *p.Mode
+	rules, err := p.ScenePatch.apply(r.Rules)
+	if err != nil {
+		return RoomInfo{}, err
 	}
+	r.Rules = rules
 	for _, m := range r.Members {
 		if _, ok := a.agentByID(m); !ok {
 			return RoomInfo{}, fmt.Errorf("没有这个 agent：%s", m)
@@ -392,6 +291,16 @@ func (a *App) CreateRoom(p RoomPatch) (RoomInfo, error) {
 			r.Name = "@" + na + "+" + nb
 		}
 	}
+	kind := scene.Room
+	if r.IsDM() {
+		kind = scene.DMRoom
+	}
+	if err := r.Rules.Validate(kind, sceneToolNames(), stageToolNames()); err != nil {
+		return RoomInfo{}, err
+	}
+	if err := r.Rules.ValidateMembers(r.Members); err != nil {
+		return RoomInfo{}, err
+	}
 	got, err := a.roomStore.Create(r)
 	if err != nil {
 		return RoomInfo{}, err
@@ -413,6 +322,7 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if !ok {
 		return RoomInfo{}, errors.New("没有这个群")
 	}
+	before := r
 	if p.Name != nil {
 		r.Name = *p.Name
 	}
@@ -422,12 +332,15 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 				return RoomInfo{}, fmt.Errorf("没有这个 agent：%s", m)
 			}
 		}
+		for _, old := range r.Members {
+			if !slices.Contains(*p.Members, old) {
+				r.Rules = r.Rules.WithoutMember(old) // 退群的人也从顺序和频道里去掉
+			}
+		}
 		r.Members = *p.Members
 	}
-	if p.Mode != nil {
-		r.Mode = *p.Mode
-	}
 	if p.Paused != nil {
+		a.roomTurnStop(r.ID) // 暂停和恢复都不自动接着跑，等下一句人话或旁白
 		r.Paused = *p.Paused
 		if !r.Paused {
 			// 恢复的时候清掉“进来就暂停”的记录
@@ -438,14 +351,51 @@ func (a *App) UpdateRoom(id string, p RoomPatch) (RoomInfo, error) {
 	if p.Muted != nil {
 		r.Muted = *p.Muted
 	}
-	if p.Budget != nil {
-		if *p.Budget < 0 {
-			return RoomInfo{}, errors.New("预算不能是负数")
-		}
-		r.Budget = *p.Budget
+	oldMode, oldRules := r.Mode, r.Rules
+	rules, err := p.ScenePatch.apply(r.Rules)
+	if err != nil {
+		return RoomInfo{}, err
+	}
+	if rules.Stage != oldRules.Stage {
+		return RoomInfo{}, errors.New("是不是一场戏只能在建群时定，之后不能改")
+	}
+	r.Rules = rules
+	kind := scene.Room
+	if r.IsDM() {
+		kind = scene.DMRoom
+	}
+	if err := r.Rules.Validate(kind, sceneToolNames(), stageToolNames()); err != nil {
+		return RoomInfo{}, err
+	}
+	if err := r.Rules.ValidateMembers(r.Members); err != nil {
+		return RoomInfo{}, err
+	}
+	if r.Mode != oldMode {
+		a.roomTurnStop(r.ID)
+	}
+	if p.Reset {
+		a.sceneResetTotal(roomLogSID(r.ID))
 	}
 	if err := a.roomStore.Update(r); err != nil {
 		return RoomInfo{}, err
+	}
+	// 导演的操作记进场景记录（不是一场戏的群什么都不做）
+	if r.Paused != before.Paused {
+		op := "pause"
+		if !r.Paused {
+			op = "resume"
+		}
+		a.stageOp(r, op, nil)
+	}
+	if !slices.Equal(r.Muted, before.Muted) {
+		a.stageOp(r, "mute", map[string]any{"muted": r.Muted})
+	}
+	b1, _ := json.Marshal(before.Rules)
+	if b2, _ := json.Marshal(r.Rules); !bytes.Equal(b1, b2) {
+		a.stageOp(r, "rules", r.Rules)
+	}
+	if p.Reset {
+		a.stageOp(r, "reset", nil)
 	}
 	a.setRoomTitle(r.ID, r.Name)
 	a.publish(events.Event{T: "rooms"})
@@ -475,6 +425,8 @@ func (a *App) DeleteRoom(id string) error {
 	if err := a.roomStore.Delete(id); err != nil {
 		return err
 	}
+	a.sceneForget(roomLogSID(id))
+	a.stageForget(id)
 	a.publish(events.Event{T: "rooms"})
 	return nil
 }
@@ -567,46 +519,25 @@ func (a *App) messageTool(fromSID string, raw string, reply func(bool, string)) 
 			return
 		}
 	}
+	if target.Stage {
+		a.mu.Unlock()
+		reply(false, "这是一场戏，只能在导演台说话")
+		return
+	}
 	if target.Paused {
 		a.mu.Unlock()
 		reply(false, "这个群现在暂停了，等人恢复")
 		return
 	}
-	line := fmt.Sprintf("[%s] %s", senderName, text)
-	if err := a.store.Append(roomLogSID(target.ID), session.Msg{Role: "user", Content: line}); err != nil {
-		a.mu.Unlock()
-		reply(false, "保存消息失败："+err.Error())
-		return
-	}
-	a.publish(events.Event{T: "say", SID: roomLogSID(target.ID), Text: text})
-	// 转给成员；要等的那个 agent 记下来
+	// 要等的那个 agent 记在后面；整个群发时按点名规则叫人，发给某个 agent 时只叫它
 	var wait chan string
-	for _, m := range target.Members {
-		if m == sender {
-			continue
-		}
-		sid := a.roomMemberSID(m, target.ID)
-		st := a.store.Settings(sid)
-		if !st.Group {
-			st.Group = true
-			_ = a.store.SaveSettings(sid, st)
-		}
-		_ = a.store.Append(sid, session.Msg{Role: "user", Content: line})
-		s := a.sessOf(sid)
-		s.groupFresh = true
-		s.groupLast = a.now()
-		s.groupEp = endpoint{ch: "room", chat: target.ID}
-		if target.MutedAgent(m) {
-			continue
-		}
-		if targetMember != "" {
-			if m == targetMember {
-				a.roomTrigger(s, m, target)
+	a.roomPost(target, roomLine{From: sender, Name: senderName, Kind: lineSay, Text: text}, postOpt{asUser: true,
+		wake: func(m string) bool {
+			if targetMember != "" {
+				return m == targetMember
 			}
-		} else if a.roomShouldSpeak(target, m, text) {
-			a.roomTrigger(s, m, target)
-		}
-	}
+			return a.roomShouldSpeak(target, m, text)
+		}})
 	if args.Wait {
 		if targetMember == "" {
 			a.mu.Unlock()
@@ -773,7 +704,7 @@ func (a *App) dmRoom(from, to string) (rooms.Room, error) {
 	if ag, ok := a.agentByID(to); ok {
 		nb = ag.Name
 	}
-	return a.roomStore.Create(rooms.Room{Name: "@" + na + "+" + nb, Members: []string{from, to}, Mode: rooms.ModeMention, DM: []string{from, to}})
+	return a.roomStore.Create(rooms.Room{Name: "@" + na + "+" + nb, Members: []string{from, to}, DM: []string{from, to}, Rules: scene.Rules{Mode: rooms.ModeMention}})
 }
 
 // messageChat 把一条消息发到 agent 自己的某个私聊：记进那个会话的历史，发到对方最近说话的那个窗口。
@@ -827,20 +758,20 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		return "", fmt.Errorf("没有这个私聊：%s（只能发给你自己的私聊，内心活动醒来时列出来的那些）", target)
 	}
 	fromLife := isLifeSID(fromSID)
-	var ls *lifeState
+	var st *autonomy.State
 	if fromLife {
 		now := a.now().In(a.loc)
-		ls = a.lifeOf(agentID)
+		st = a.mind(agentID)
 		switch reach := pickString(ag.LifeReach, "owner"); {
 		case reach == "off":
 			return "", errors.New("你设成了不主动找人")
 		case reach == "owner" && !a.isOwnerSID(agentID, target):
 			return "", errors.New("你只能主动找主人（找人范围在 agent 设置里改）")
 		}
-		if at, waiting := ls.Awaiting[target]; waiting {
+		if at, waiting := st.Awaiting[target]; waiting {
 			return "", fmt.Errorf("你 %s 主动找过他，他还没回；等他回了再说", agoText(now, at))
 		}
-		if p := effectiveLifePolicy(ag); !p.ReachesUnlimited() && ls.Reaches >= p.MaxReaches {
+		if p := effectiveLifePolicy(ag); !p.ReachesUnlimited() && a.reachesToday(st, now) >= p.MaxReaches {
 			return "", errors.New("今天主动找人的次数用完了")
 		}
 		if !a.awakeOf(ag).contains(now) {
@@ -889,9 +820,10 @@ func (a *App) messageChat(fromSID, target, text string) (string, error) {
 		where = chanName(ep.ch) + "里"
 	}
 	if fromLife {
-		ls.Awaiting[target] = a.now().Unix()
-		ls.Reaches++
-		a.saveLife()
+		now := a.now()
+		st.AwaitingMap()[target] = now.Unix()
+		st.RecordReach(st.NewID("reach"), now.In(a.loc), a.loc) // 账本里记一次找人
+		a.saveMinds()
 	}
 	a.log.Info("主动发了私聊消息", "agent", agentID, "to", target, "from", fromSID)
 	return "发出去了（" + where + "）。对方回了会在那个聊天里接着聊。", nil

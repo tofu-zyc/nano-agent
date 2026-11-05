@@ -142,7 +142,7 @@ func TestCheckpointRecoveryAndUnverifiedCompletion(t *testing.T) {
 	if !strings.Contains(s.BriefForModel(now, time.UTC), "不要重发邮件") {
 		t.Fatal("重启后没有保留给下一轮的检查点")
 	}
-	if err := s.CancelAgenda(id, "用户取消", now); err != nil {
+	if err := s.CancelAgenda(id, "用户取消", EndedByOwner, now); err != nil {
 		t.Fatal(err)
 	}
 	s.Finish(Execution{AgendaID: id, OK: true, UsedTools: true, Verified: true, Summary: "迟到的完成"}, now, time.Minute)
@@ -196,7 +196,7 @@ func TestIdeasNeedSourceAndBecomeScheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 取消
-	if err := s.CancelAgenda(ag.ID, "今天没空", now); err != nil {
+	if err := s.CancelAgenda(ag.ID, "今天没空", EndedByAgent, now); err != nil {
 		t.Fatal(err)
 	}
 	if s.Intentions[0].State != IntentionCancelled {
@@ -236,7 +236,7 @@ func TestBudgetAndDayRollover(t *testing.T) {
 	if !s.RollDay(now, testLoc) {
 		t.Fatal("第一次应该记下日期")
 	}
-	s.Spend(300)
+	s.SpendAt(300, now, testLoc)
 	if s.BudgetLeft(1000) != 700 {
 		t.Fatalf("预算剩多少不对: %d", s.BudgetLeft(1000))
 	}
@@ -488,12 +488,12 @@ func TestLedgerRecordsSourcesReservesAndRollsDays(t *testing.T) {
 	if len(days) > maxLedgerDays {
 		t.Fatalf("账本没有裁剪：%d 天", len(days))
 	}
-	// 旧 life.json 的次数只导一次
+	// 导入旧计数：只升不降，重复导入不叠加
 	fresh := New()
-	fresh.SeedLedger(LedgerExploration, 3, 300, day, loc)
-	fresh.SeedLedger(LedgerExploration, 3, 300, day, loc)
-	if row := fresh.LedgerToday(day, loc)[0]; row.Starts != 3 || row.Tokens != 300 {
-		t.Fatalf("迁移导重了：%+v", row)
+	fresh.RaiseLedgerStarts(LedgerExploration, 3, day, loc)
+	fresh.RaiseLedgerStarts(LedgerExploration, 3, day, loc)
+	if row := fresh.LedgerToday(day, loc)[0]; row.Starts != 3 {
+		t.Fatalf("导入重复叠加了：%+v", row)
 	}
 }
 

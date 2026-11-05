@@ -35,7 +35,7 @@ export type MachineInfo = {
 };
 
 // 工作目录：机器 + 路径。会话可以同时挂好几个；default 表示新会话默认挂上
-export type WorkspaceInfo = { sandbox_mode?: string; id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
+export type WorkspaceInfo = { sandbox_mode?: string; external?: string[]; id: string; host: string; path: string; os?: string; default?: boolean; sessions: number; online: boolean };
 
 // 模型接口（端点）：模型服务的地址和密钥，一个接口上可以放多个模型
 export type ModelEndpoint = {
@@ -83,6 +83,9 @@ export type SessionInfo = {
   can_switch_agent: boolean; // 现在能不能切换（后端最终校验）
   switch_blocked?: string; // 不能切换的原因
   group?: boolean; // 群聊里的会话
+  scene?: SceneRules; // 外部群的群规则
+  scene_use?: SceneUse;
+  speakers?: Record<string, string>; // 外部群里说过话的人：名字 → 身份
   context: { auto_at: number; idle_for: string; total: number; window: number; persona: number; tools: number; summary: number; dialogue: number; tool_results: number; messages: number; last: Usage; compacted: number; compacted_at: number; model: string };
   sid: string;
   channel: string; // 主要的渠道（第一个接着的窗口所在的），配色用
@@ -133,6 +136,34 @@ export type UpdateInfo = {
   updating?: string;
 };
 
+export type HealthEntry = {
+  name: string;
+  state: 'ok' | 'degraded' | 'error';
+  detail?: string;
+  since: string;
+};
+
+export type OutboxRecord = {
+  id: string;
+  channel: string;
+  chat: string;
+  kind?: string;
+  state: 'failed' | 'dropped';
+  reason?: string;
+  error?: string;
+  fails?: number;
+  at: string;
+};
+
+export type OutboxInfo = {
+  channels?: Record<string, { pending: number; oldest: string; failing: number }>;
+  dropped_24h?: Record<string, number>;
+  full_24h: number;
+  too_large_24h: number;
+  storage?: string;
+  recent?: OutboxRecord[];
+};
+
 export type RuntimeStatus = {
   running: boolean;
   pid: number;
@@ -144,6 +175,8 @@ export type RuntimeStatus = {
   kernel_listen: string;
   pending_restart: number;
   recent_errors?: string[];
+  health?: HealthEntry[];
+  outbox?: OutboxInfo;
   update?: UpdateInfo;
 };
 
@@ -210,6 +243,8 @@ export type Overview = {
   agents?: AgentInfo[]; // 所有 agent（v0.5 起）
   bots?: BotInfo[]; // 所有机器人
   rooms?: RoomInfo[]; // 网关内部的群聊
+  scene_tools?: string[]; // 场景里可选的工具（后端从登记表推出）
+  stage_tools?: string[]; // 戏里可选的工具
   mcp?: MCPInfo[]; // MCP 服务（阶段 11）
 };
 
@@ -428,17 +463,49 @@ export type MemoryView = { agent: string; on: boolean; self: string; entries: Me
 
 // 一个机器人：绑一个 agent，凭据只回传有没有（不返回明文）
 // 网关内部的群聊（房间）：成员是 agent，聊天记录是一个会话（sid）
-export type RoomInfo = {
+/** 场景规则：内部群存在群里，外部群存在会话设置里（两边字段一样）。tools 为 null 表示沿用默认，[] 表示不给工具 */
+export type SceneRules = {
+  mode?: 'mention' | 'free' | 'turns' | 'director';
+  observe?: boolean;
+  brief?: string;
+  roles?: Record<string, { prompt?: string; eagerness?: string }>;
+  tools: string[] | null;
+  style?: { quiet?: string; min_gap?: string; max_len?: number; parts?: number };
+  guard?: { run?: number; ping_pong?: number };
+  budget?: number;
+  budget_total?: number;
+  order?: string[]; // 轮流的发言顺序，空表示按成员顺序
+  rounds?: number;
+  channels?: { id: string; name: string; members: string[] }[];
+  stage?: boolean; // 这是一场戏（只能在建群时设）
+  inner?: boolean; // 心里话
+  team?: TeamRules | null; // 团队（外部群）
+};
+export type TeamRules = { roster: string[]; workspace: string; check?: string; budget?: number };
+export type SceneUse = { day_tokens: number; total: number; since?: number; round?: number; over: boolean };
+export type ObserveRecord = {
+  at: number;
+  scene: string;
+  sid: string;
+  agent: string;
+  say?: string;
+  silent: boolean;
+  tools?: { name: string; args?: string }[];
+  why: { quiet_sec: number; pending: number; gate: number };
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+export type RoomInfo = SceneRules & {
   id: string;
   name: string;
   members: string[];
-  mode: 'mention' | 'free';
   paused: boolean;
   muted: string[];
   dm: boolean;
-  budget?: number;
   sid: string;
   count: number;
+  use: SceneUse;
 };
 
 export type BotInfo = {
@@ -522,6 +589,7 @@ export type JobInfo = {
   status:string;execution:string;background:boolean;silent:boolean;online:boolean;
   created_at:number;started_at?:number;ended_at?:number;deadline_at?:number;
   sandbox_effective?:string;output_cursor:number;output_gap:boolean;error?:string;
+  reason?:string; // 失败的原因（前 500 字）：没跑起来时（比如被执行器拒绝）看这里
 };
 export type JobOutput = {chunks:{cursor:number;next_cursor:number;stream:string;data:string}[];
   next_cursor:number;output_cursor:number;truncated_before:number;gap:boolean;error?:string};
@@ -554,3 +622,12 @@ export type HookRule = {id:string;revision:number;agent_id:string;creator:string
 export type HookDelivery = {delivery_id:string;event_id:string;hook_id:string;hook_revision:number;agent_id:string;creator:string;silent:boolean;
   target_sid?:string;run_sid?:string;status:string;attempt:number;next_at?:number;updated_ms?:number;error?:string;result?:string;preflight?:boolean};
 export type HookResponse = {rules?:HookRule[];rule?:HookRule;deliveries?:HookDelivery[];next?:string;matched?:boolean};
+
+// 承诺（GET /api/commitments、GET /api/pending）：等我处理里的一件事
+export type CommitReport = { seq: number; type: string; ts: number; kind: string; id: string; status?: string; text?: string; question?: string };
+export type CommitItem = {
+  kind: string; id: string; agent: string; title: string; phase: string; why?: string; link: string;
+  report?: CommitReport; mark?: string; covered?: string; question?: string; at?: number;
+  contract?: { goal: string };
+};
+export type PendingItem = CommitItem & { number: string };

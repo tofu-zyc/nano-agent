@@ -1,18 +1,18 @@
 package app
 
-// 拟人型的内心活动；见 docs/DESIGN-agent-runtime.md。
+// 拟人型的内心活动；见 docs/RUNTIME.md。
 //
 // 拟人型 agent 有作息：醒着的时间里，按活跃度隔一阵自己醒一次（越久没人找它越容易醒），在
 // @<id>/life 会话里想事情、上网冲浪（WebSearch/WebFetch）、记东西（Knowledge）、找人聊天（Message）。
 // 醒来干什么写在 life 技能里（skills/life/SKILL.md）。每次的最终回复是它的“近况”，带进它的其他聊天。
-// 状态（下次醒来、今天醒了几次、主动找了几次人、近况、谁还没回）存在 data/life.json。
+// 状态（下次醒来、今天醒了几次和用了多少 token、主动找了几次人、谁还没回、回访）都在 autonomy.State（data/autonomy.json）里，
+// 近况取自经历；旧的 data/life.json 只在第一次启动时导入一次（life_import.go）。
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"nano-agent/gateway/internal/agents"
+	"nano-agent/gateway/internal/autonomy"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
 	"nano-agent/gateway/internal/experience"
@@ -54,6 +55,7 @@ const defaultLifeSkill = `# 一个人的时候
 - 有新的念头用 Idea add 记下来，写清来源（从哪件事、哪段记忆、哪次聊天想到的）；可以 Idea schedule 排时间去探索，也可以 defer 或者 drop，允许一个都不做。
 - 对人、对事有了新的认识，想调整长期兴趣，或者做完事想反思，用 Mind（先 view，再 interest_add / belief / reflect）；必须写来源，它会一直留着。
 - 和人有明确约定（几点提醒、答应了什么）一定要用 Agenda 记成 commitment：到点你会自己醒来，即使刚聊过天也不会被推迟。
+- 有结果想让主人知道时用 Report：ready（结果可以用了，要带 evidence）；blocked（卡住了、要人处理，可以问一个具体问题）；failed（做不下去了）；not_needed（不用做了）。progress、waiting 只记一笔，不会发给任何人。汇报的是这一轮「要处理的」那件事；自己安排的检查不对应任何承诺，不用汇报。汇报不改变事情本身的状态：做完日程仍然用 Agenda done，要取消日程用 Agenda cancel 并在 note 里写不做的理由。
 
 别的：
 
@@ -74,10 +76,7 @@ const defaultLifeGuide = `你不是一个等着被使用的工具，而是一个
 
 const (
 	lifeBored    = 3 * time.Hour // 这么久没人找它：下次醒得更早
-	lifeRecent   = 10            // 留几条近况
 	lifeShown    = 3             // 带进聊天的近况条数
-	lifeHighCtx  = 40000         // 内心会话的上下文超过这么多就整理（保持连续又不贵）
-	lifeLowCtx   = 15000
 	lifeRecentOp = "[近况]"
 	lifeRecentEd = "[/近况]"
 )
@@ -222,66 +221,52 @@ func validateLifePolicy(a agents.Agent) error {
 	return nil
 }
 
-// lifeState 是 data/life.json 里一个 agent 的状态。
-type lifeState struct {
-	ExperienceImported bool                `json:"experience_imported,omitempty"`
-	Next               int64               `json:"next,omitempty"` // 下次醒来
-	Day                string              `json:"day,omitempty"`
-	Wakes              int                 `json:"wakes,omitempty"`   // 今天自己醒了几次
-	Reaches            int                 `json:"reaches,omitempty"` // 今天主动找了几次人
-	Tokens             int                 `json:"tokens,omitempty"`  // 今天内心活动用了多少 token
-	Recent             []lifeNote          `json:"recent,omitempty"`
-	Awaiting           map[string]int64    `json:"awaiting,omitempty"`   // 主动发了消息、对方还没回的私聊
-	FollowUps          map[string]followUp `json:"follow_ups,omitempty"` // 约好过会儿再看的会话（统一聊天循环）
-}
-
+// lifeNote 是网页上“近况”里的一条（取自经历）。
 type lifeNote struct {
 	At   int64  `json:"at"`
 	Text string `json:"text"`
 }
 
-type followUp struct {
-	At   int64  `json:"at"`
-	Note string `json:"note"`
-}
+// 旧版 data/life.json 的状态已经并进 autonomy.State（见 life_import.go）：
+// 下次醒来是 NextDueTime（含 NextCheck），今天醒了几次和找了几次人、今天用了多少 token 都从账本算，
+// 找人记录（Awaiting）和回访（FollowUps）在 State 里。
 
 func (a *App) lifeFile() string { return filepath.Join(a.store.Dir(), "life.json") }
 
-// lifeOf 是 agent 的内心活动状态（第一次用时从 data/life.json 读）。调用方持有锁。
-func (a *App) lifeOf(agentID string) *lifeState {
-	if a.lifes == nil {
-		a.lifes = map[string]*lifeState{}
-		if b, err := os.ReadFile(a.lifeFile()); err == nil {
-			_ = json.Unmarshal(b, &a.lifes)
-		}
-	}
-	ls := a.lifes[agentID]
-	if ls == nil {
-		ls = &lifeState{}
-		a.lifes[agentID] = ls
-	}
-	if ls.Awaiting == nil {
-		ls.Awaiting = map[string]int64{}
-	}
-	if ls.FollowUps == nil {
-		ls.FollowUps = map[string]followUp{}
-	}
-	if day := a.now().In(a.loc).Format("2006-01-02"); ls.Day != day {
-		ls.Day, ls.Wakes, ls.Reaches, ls.Tokens = day, 0, 0, 0
-	}
-	return ls
+// wakesToday 是今天自己醒了几次（账本里自选探索的启动，含已经预留的）。
+func (a *App) wakesToday(st *autonomy.State, now time.Time) int {
+	return st.LedgerStarts(autonomy.LedgerExploration, now, a.loc)
 }
 
-func (a *App) saveLife() {
-	b, _ := json.MarshalIndent(a.lifes, "", "  ")
-	p := a.lifeFile()
-	err := os.WriteFile(p+".tmp", b, 0o600)
-	if err == nil {
-		err = os.Rename(p+".tmp", p)
+// reachesToday 是今天主动找了几次人（账本里 reach 的次数）。
+func (a *App) reachesToday(st *autonomy.State, now time.Time) int {
+	return st.LedgerStarts(autonomy.LedgerReach, now, a.loc)
+}
+
+// tokensToday 是今天自主活动用了多少 token（账本里所有来源的总和，和预算同一个数）。
+func (a *App) tokensToday(st *autonomy.State, now time.Time) int {
+	return st.TokensOn(autonomy.LedgerDay(now, a.loc))
+}
+
+// latestLifeNote 是最近一条内心活动（life 经历）说的话；还没有就是空。
+func (a *App) latestLifeNote(agentID string) string {
+	for _, e := range a.experienceOf(agentID).Recent(knowledge.Viewer{Admin: true}, "", 50, a.now()) {
+		if e.Kind == "life" {
+			return e.Said
+		}
 	}
-	if err != nil {
-		a.log.Warn("保存内心活动状态失败", "err", err)
+	return ""
+}
+
+// nextWakeAt 是下次醒来的时间（秒；没有为 0）：最近的日程、意图或自己的检查；这一轮正在跑的时候还没有，显示开始时估的那个。
+func (a *App) nextWakeAt(agentID string, st *autonomy.State) int64 {
+	if t, ok := st.NextDueTime(); ok {
+		return t.Unix()
 	}
+	if s := a.sessions[lifeSID(agentID)]; s != nil && s.mind != nil {
+		return s.mind.NextHint
+	}
+	return 0
 }
 
 // random 是 [0,1) 的随机数（测试里可以换成固定的）。
@@ -336,7 +321,7 @@ func (a *App) lifeTargets(ag agents.Agent) []chatTarget {
 	}
 	if a.roomStore != nil {
 		for _, r := range a.roomStore.List() {
-			if !slices.Contains(r.Members, ag.ID) || r.Paused || r.IsDM() {
+			if !slices.Contains(r.Members, ag.ID) || r.Paused || r.IsDM() || r.Stage {
 				continue
 			}
 			who, last, ts := a.lastLine(roomLogSID(r.ID))
@@ -421,58 +406,6 @@ func agoText(now time.Time, ts int64) string {
 	return fmt.Sprintf("%d 天前", int(d.Hours()/24))
 }
 
-// wakeNote 是醒来时看到的情况：几点了、多久没人找、今天还能找几次人、最近的聊天、谁还没回。
-func (a *App) wakeNote(ag agents.Agent, ls *lifeState, now time.Time, manual bool) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "[系统] 现在是 %s %s %s。", now.Format("01-02"), weekdayCN(now), now.Format("15:04"))
-	if manual {
-		b.WriteString("主人把你叫醒了，看看有什么想做的。")
-	} else {
-		b.WriteString("你醒着，手头没事。")
-	}
-	if last := a.agentLastActivity(ag.ID); !last.IsZero() && !last.Equal(a.bootAt) {
-		fmt.Fprintf(&b, "上次有人找你是 %s。", agoText(now, last.Unix()))
-	} else {
-		b.WriteString("这段时间还没人找过你。")
-	}
-	p := effectiveLifePolicy(ag)
-	fmt.Fprintf(&b, "今天第 %d 次醒来", ls.Wakes+1)
-	if pickString(ag.LifeReach, "owner") == "off" {
-		b.WriteString("；你设成了不主动找人。")
-	} else if p.ReachesUnlimited() {
-		b.WriteString("；主动找人的次数不限。")
-	} else {
-		fmt.Fprintf(&b, "，今天还能主动找人 %d 次。", max(0, p.MaxReaches-ls.Reaches))
-	}
-	if targets := a.lifeTargets(ag); len(targets) > 0 {
-		b.WriteString("\n最近的聊天（Message 的 to 写括号里的）：")
-		for _, t := range targets {
-			fmt.Fprintf(&b, "\n- %s（%s）", t.Name, t.To)
-			if t.Last != "" {
-				b.WriteString("：" + t.Last)
-			}
-			if t.At > 0 {
-				b.WriteString("，" + agoText(now, t.At))
-			}
-			if at, waiting := ls.Awaiting[strings.TrimPrefix(t.To, "chat:")]; waiting {
-				fmt.Fprintf(&b, "。你 %s 主动找过他，他还没回，先别再找他", agoText(now, at))
-			}
-		}
-	}
-	if !a.awakeOf(ag).contains(now) {
-		b.WriteString("\n现在是你睡觉的时间，别去打扰别人。")
-	}
-	// 能做什么要说实话：没开搜索就上不了网，记忆关着就记不了东西，别编
-	if len(a.searchTools()) == 0 {
-		b.WriteString("\n（网络搜索没开，这次上不了网。）")
-	}
-	if !a.memoryOn(ag) {
-		b.WriteString("\n（长期记忆关着，这次记不了东西。）")
-	}
-	b.WriteString("\n想做点什么就做，不想做就歇着。最后用一两句话写下这会儿你做了什么、心情怎样。")
-	return b.String()
-}
-
 // innerLimits 是 agent 自己的一轮的上限：整理记忆要读很多日记、写很多条，内心活动只是醒一会儿。
 func innerLimits(sid string) (steps int, limit time.Duration) {
 	if isDreamSID(sid) {
@@ -497,11 +430,7 @@ func (a *App) innerDone(s *sess, r *run, status, body string) {
 // lifeDone 是一次醒来结束：记用量，最终回复记成近况。调用方持有锁。
 func (a *App) lifeDone(s *sess, r *run, status, body string) {
 	agentID := agents.SessionAgent(s.sid)
-	ls := a.lifeOf(agentID)
-	ls.Tokens += r.usage.PromptTokens + r.usage.CompletionTokens
-	text := strings.TrimSpace(body)
-
-	a.saveLife()
+	text := strings.TrimSpace(body) // 用量由 autonomyDone 结算进账本
 	a.publish(events.Event{T: "life", Name: agentID, Kind: "end", Text: text})
 }
 
@@ -530,6 +459,12 @@ func (a *App) branchDone(s *sess, r *run) {
 		m.ProgressAt = a.now().Unix()
 		m.LastActive = a.now().Unix()
 	})
+	a.ticketRunEnded(s, r)
+	if status == session.BranchNeedsAttention && a.branchAttention(s.sid) {
+		// 宿主自己记下的出错也当作受阻发一条；编号是它的 Mark
+		got, _ := a.store.Branch(s.sid)
+		a.attentionPush(s.sid, "blocked", progress, "", fmt.Sprintf("p:%d", got.ProgressAt))
+	}
 	if meta.OwnerAgent == "" {
 		return
 	}
@@ -538,7 +473,7 @@ func (a *App) branchDone(s *sess, r *run) {
 		return
 	}
 	st := a.mind(meta.OwnerAgent)
-	st.Spend(r.usage.PromptTokens + r.usage.CompletionTokens)
+	st.SpendAt(r.usage.PromptTokens+r.usage.CompletionTokens, a.now().In(a.loc), a.loc) // 自主分支：只记 token
 	st.SetBudgetLimit(pickInt(ag.LifeBudget, 0))
 	a.saveMinds()
 }
@@ -554,18 +489,16 @@ func (a *App) lifeAnswered(sid string) {
 	if !ok || !ag.Life() || a.agentRoot == "" {
 		return
 	}
-	ls := a.lifeOf(ag.ID)
-	_, waiting := ls.Awaiting[sid]
-	_, follow := ls.FollowUps[sid]
+	st := a.mind(ag.ID)
+	_, waiting := st.Awaiting[sid]
+	_, follow := st.FollowUps[sid]
 	if waiting || follow {
-		delete(ls.Awaiting, sid)
-		delete(ls.FollowUps, sid) // 对方先说话了：约好的“过会儿再看”取消
-		a.saveLife()
+		delete(st.Awaiting, sid)
+		delete(st.FollowUps, sid) // 对方先说话了：约好的“过会儿再看”取消
+		st.Touch()
+		a.saveMinds()
 	}
 }
-
-// lifeRecentNote 是拟人型 agent 的近况说明（最近几次内心活动），放在聊天的消息前面。调用方持有锁。
-func (a *App) lifeRecentNote(sid string) string { return a.experienceNote(sid, "") }
 
 // lifeGuide 是拟人守则：agents/<id>/life.md，没有就用内置的。
 func (a *App) lifeGuide(agentID string) string {
@@ -602,9 +535,9 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 		return nil
 	}
 	now := a.now().In(a.loc)
-	ls := a.lifeOf(ag.ID)
+	st := a.mind(ag.ID)
 	p := effectiveLifePolicy(ag)
-	b := &LifeBrief{State: "awake", Next: ls.Next * 1000, Wakes: ls.Wakes, Reaches: ls.Reaches, Tokens: ls.Tokens,
+	b := &LifeBrief{State: "awake", Next: a.nextWakeAt(ag.ID, st) * 1000, Wakes: a.wakesToday(st, now), Reaches: a.reachesToday(st, now), Tokens: a.tokensToday(st, now),
 		MaxWakes: p.MaxWakes, MaxReaches: p.MaxReaches, WakesFree: p.WakesUnlimited(), ReachesFree: p.ReachesUnlimited(),
 		Recent: []lifeNote{}}
 	b.Experience = a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", 12, a.now())
@@ -624,7 +557,7 @@ func (a *App) lifeBrief(ag agents.Agent) *LifeBrief {
 	for _, e := range a.experienceOf(ag.ID).Recent(knowledge.Viewer{Admin: true}, "", lifeShown, a.now()) {
 		b.Recent = append(b.Recent, lifeNote{At: e.At, Text: e.Where + "：" + e.Said})
 	}
-	for sid := range ls.Awaiting {
+	for sid := range st.Awaiting {
 		b.Waiting = append(b.Waiting, a.chatName(sid))
 	}
 	sort.Strings(b.Waiting)
@@ -695,10 +628,11 @@ func (a *App) followUpCall(sid string, raw []byte) (string, error) {
 	if err := json.Unmarshal(raw, &x); err != nil {
 		return "", errors.New("参数格式不对")
 	}
-	ls := a.lifeOf(ag.ID)
+	st := a.mind(ag.ID)
 	if x.Cancel {
-		delete(ls.FollowUps, sid)
-		a.saveLife()
+		delete(st.FollowUps, sid)
+		st.Touch()
+		a.saveMinds()
 		return "取消了。", nil
 	}
 	if x.Minutes < 1 || x.Minutes > 24*60 {
@@ -706,36 +640,41 @@ func (a *App) followUpCall(sid string, raw []byte) (string, error) {
 	}
 	at := a.now().Add(time.Duration(x.Minutes) * time.Minute)
 	note := cutRunes(strings.TrimSpace(x.Note), 200)
-	ls.FollowUps[sid] = followUp{At: at.Unix(), Note: note}
-	a.saveLife()
-	a.mindFollowUp(sid, ag.ID, note, at)
+	st.FollowUpMap()[sid] = autonomy.FollowUp{At: at.Unix(), Note: note}
+	st.Touch()
+	a.saveMinds()
 	return "好，" + at.In(a.loc).Format("01-02 15:04") + " 再来看看。", nil
 }
 
 // followUpTick 处理到点的“过会儿再看”：在那个聊天里放一条说明，叫醒它说一句（或者不说）。
 // 睡着的时候到点的，挪到醒来的时候。调用方持有锁。
-func (a *App) followUpTick(ag agents.Agent, ls *lifeState, now time.Time) {
-	for sid, f := range ls.FollowUps {
+func (a *App) followUpTick(ag agents.Agent, st *autonomy.State, now time.Time) {
+	for sid, f := range st.FollowUps {
 		if now.Unix() < f.At {
 			continue
 		}
 		if w := a.awakeOf(ag); !w.contains(now) {
-			ls.FollowUps[sid] = followUp{At: w.nextStart(now).Unix(), Note: f.Note}
-			a.saveLife()
+			st.FollowUps[sid] = autonomy.FollowUp{At: w.nextStart(now).Unix(), Note: f.Note}
+			st.Touch()
+			a.saveMinds()
 			continue
 		}
 		// 执行前再校验归属：会话可能已经交给别的 agent 了（旧文件、恢复队列里带来的回调也不能越界）
 		if !a.followedByAgent(sid, ag.ID) {
-			delete(ls.FollowUps, sid)
-			a.saveLife()
+			delete(st.FollowUps, sid)
+			st.Touch()
+			a.saveMinds()
+			continue
+		}
+		// 场景的额度用完了：不调用模型，约定留着，额度恢复（第二天）后再触发；正在聊：过一会儿再看。
+		// 没模型、没内核不在这里拦：照旧发出去，由聊天那边告诉对方
+		if ok, why, _ := a.admitRun(sid); !ok && (why == admitOver || why == admitBusy) {
 			continue
 		}
 		s := a.sessOf(sid)
-		if s.run != nil || len(s.queue) > 0 || s.compacting {
-			continue // 正在聊：过一会儿再看
-		}
-		delete(ls.FollowUps, sid)
-		a.saveLife()
+		delete(st.FollowUps, sid)
+		st.Touch()
+		a.saveMinds()
 		ep, ok := a.lastEndpoint(sid)
 		if !ok {
 			continue

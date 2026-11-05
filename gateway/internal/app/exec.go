@@ -24,15 +24,14 @@ import (
 
 // execTool 处理内核的 exec。调用方持有锁。
 func (a *App) execTool(node string, s *sess, m *proto.Msg) {
-	if (m.Name == "Agenda" || m.Name == "Idea" || m.Name == "Mind") && !a.isAdmin(s.run.from) {
-		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID, OK: proto.Bool(false), Content: "只有管理员和 agent 自己的自主活动能修改日程、想法和心智状态"})
+	if t := toolDef(m.Name); t != nil && t.admin != "" && !a.isAdmin(s.run.from) {
+		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID, OK: proto.Bool(false), Content: t.admin})
 		return
 	}
 	// Gateway state/delivery operations join the same per-run arbiter as native
 	// processes. Without this, four state calls plus four node calls could run
 	// concurrently after the node acknowledged its queued calls.
-	switch m.Name {
-	case "Hook", "Session", "Schedule", "Message", "SendFile", "FollowUp", "Agenda", "Idea", "Mind", "Diary", knowledgeLabel, "Skill", "Gateway", "GatewayAdmin":
+	if t := toolDef(m.Name); t != nil && t.state {
 		r := s.run
 		if r.execs == nil {
 			r.execs = map[string]context.CancelFunc{}
@@ -83,11 +82,12 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 	r := s.run
 	// Synchronous Gateway operations start here. Remote execution, network and
 	// MCP report started only after their own queue/approval and real admission.
+	def := toolDef(m.Name)
 	switch m.Name {
-	case "Read", "Write", "Edit", "Grep", "Fetch", "Shell", "WebSearch", "WebFetch":
+	case "Read", "Write", "Edit", "Grep", "Fetch", "Shell":
 		a.execQueued(node, m)
 	default:
-		if _, _, external := mcp.SplitExposed(m.Name); external {
+		if _, _, external := mcp.SplitExposed(m.Name); external || (def != nil && !def.started) {
 			a.execQueued(node, m)
 		} else {
 			a.execStarted(node, m)
@@ -100,128 +100,8 @@ func (a *App) execToolNow(node string, s *sess, m *proto.Msg, completed func()) 
 		a.hub.Send(node, proto.Msg{T: proto.TExecResult, SID: s.sid, ID: m.ID, RunID: m.RunID, TurnID: m.TurnID,
 			OK: proto.Bool(ok), Content: content})
 	}
-	if m.Name == "WebSearch" || m.Name == "WebFetch" {
-		a.webTool(s, m, reply)
-		return
-	}
-	if m.Name == "Hook" {
-		a.hookToolCall(s, m, reply)
-		return
-	}
-	if m.Name == "Job" {
-		a.jobToolCall(s, m, reply)
-		return
-	}
-	if m.Name == "Session" {
-		// 会话分叉在网关执行：不碰文件、不需要工作目录
-		text, ok := a.handleSessionTool(s, m)
-		reply(ok, text)
-		return
-	}
-	if m.Name == "Schedule" {
-		var args ScheduleRequest
-		if err := json.Unmarshal(m.Args, &args); err != nil {
-			reply(false, "定时任务参数格式不正确")
-			return
-		}
-		result, err := a.scheduleAction(s.sid, r.from, args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			b, _ := json.Marshal(result)
-			reply(true, string(b))
-		}
-		return
-	}
-	if m.Name == "Message" {
-		// 管理员让它发，或者拟人型在内心活动里自己想找人（内心活动里有自己的规矩，见 messageChat）
-		if !a.isAdmin(r.from) && !isLifeSID(s.sid) {
-			reply(false, "只有管理员能用 Message 给群和别的 agent 发消息")
-			return
-		}
-		raw := string(m.Args)
-		if raw == "" {
-			raw = "{}"
-		}
-		go a.messageTool(s.sid, raw, reply)
-		return
-	}
-	if m.Name == "SendFile" {
-		a.sendFileCall(s, m, reply)
-		return
-	}
-	if m.Name == "FollowUp" {
-		out, err := a.followUpCall(s.sid, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == "Agenda" {
-		out, err := a.agendaCall(s.sid, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == "Idea" {
-		out, err := a.ideaCall(s.sid, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == "Mind" {
-		out, err := a.mindCall(s.sid, r.runID, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == "Diary" {
-		out, err := a.diaryCall(s.sid, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == knowledgeLabel {
-		out, err := a.knowledgeCall(s.sid, r.from, m.Args)
-		if err != nil {
-			reply(false, err.Error())
-		} else {
-			reply(true, out)
-		}
-		return
-	}
-	if m.Name == "Skill" {
-		a.skillTool(r, s.sid, m, reply)
-		return
-	}
-	if m.Name == "Gateway" || m.Name == "GatewayAdmin" {
-		if !a.isAdmin(r.from) {
-			reply(false, "只有管理员能用网关管理工具")
-			return
-		}
-		raw := string(m.Args)
-		if raw == "" {
-			raw = "{}"
-		}
-		if m.Name == "Gateway" {
-			go a.gatewayQuery(s.sid, raw, reply)
-		} else {
-			go a.gatewayAdminCall(s.sid, r.from, raw, reply)
-		}
+	if def != nil {
+		def.call(a, s, m, reply)
 		return
 	}
 	// MCP 工具：内核不认识 <服务>__<工具> 这种名字，会转回网关执行。

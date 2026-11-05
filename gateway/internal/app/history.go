@@ -51,6 +51,11 @@ func (a *App) deleteHistory(sid string, p HistoryDelete, fromTool bool) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
+	if p.All || (p.From != nil && p.To != nil) { // 只清摘要、删归档的放过
+		if err := a.sceneSealed(sid); err != nil {
+			return err
+		}
+	}
 	s := a.sessOf(sid)
 	if s.compacting {
 		return errors.New("正在整理上下文，稍后再删除")

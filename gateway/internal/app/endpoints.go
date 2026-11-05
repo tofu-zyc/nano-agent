@@ -16,6 +16,7 @@ import (
 	"nano-agent/gateway/internal/agents"
 	"nano-agent/gateway/internal/channel"
 	"nano-agent/gateway/internal/events"
+	"nano-agent/gateway/internal/scene"
 	"nano-agent/gateway/internal/session"
 )
 
@@ -177,7 +178,7 @@ func (a *App) attach(ep endpoint, m channel.Message, who string) string {
 	r := a.eps[key]
 	changed := false
 	// 这个渠道（机器人）归哪个 agent：窗口接到的会话跟着它，一个机器人只属于一个 agent
-	agentID := a.agentForChannel(ep.ch)
+	agentID := a.agentForEndpoint(ep)
 	// 群聊：每个群一个会话，管理员在群里也不接到主会话
 	base := key
 	if a.isAdmin(who) && !m.Group {
@@ -377,12 +378,19 @@ func (a *App) DeleteSession(sid string) error {
 	if !a.hasSession(sid) {
 		return errors.New("没有这个会话")
 	}
+	if err := a.sceneSealed(sid); err != nil {
+		return err
+	}
 	if s := a.sessions[sid]; s != nil && (s.run != nil || len(s.queue) > 0) {
 		return errors.New("这个会话有任务在跑，先停止再删除")
 	}
 	agent := a.execAgentID(sid)
+	sc, inScene := a.sceneOf(sid)
 	if err := a.store.Delete(sid); err != nil {
 		return err
+	}
+	if inScene && sc.Kind == scene.External {
+		a.sceneForget(sc.Key) // 外部群会话没了，它的用量条目也删掉
 	}
 	a.lifecycleExperienceFor(agent, sid, "删除了这个会话")
 	a.dropJournal(sid) // 会话没了，它的插话日志也不能留着复活

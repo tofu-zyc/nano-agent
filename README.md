@@ -118,7 +118,7 @@ bot> 结果是 1、4、9、16、25。
 `nano-gateway` 自己带一套管理命令，终端、网页和聊天里都能用：
 
 ```sh
-nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置和最近错误
+nano-gateway status              # 版本、运行时长、内核、渠道、待重启设置、不正常的部件、出站待发和最近错误
 nano-gateway start               # 启动（有 systemd 用服务，没有用后台进程并看护）
 nano-gateway stop                # 停止
 nano-gateway restart             # 先检查配置，再停止/启动；配置坏了会拒绝，网关保持运行
@@ -128,6 +128,8 @@ nano-gateway doctor              # 检查配置、密钥和目录权限、端口
 nano-gateway version             # 编译时写进去的版本号
 nano-gateway help                # 全部命令；nano-gateway 命令 --help 看单个命令
 ```
+
+各个部件（存储、执行租约、可靠事件、自主活动、定时任务和每个启用的渠道）自己报告健康状态：`ok` 正常，`degraded` 能用但有事要人看，`error` 这一部分现在不能工作。`nano-gateway status` 和聊天 `/status` 只列出不是 `ok` 的部件，网页的网关节点列出全部。`nano-gateway status` 的退出码：0 运行正常，1 没在运行，2 用法错误，3 在运行但有部件是 `error`（脚本里判断“网关没在运行”要用 1，不要用非 0）。
 
 聊天里管理员可以用 `/status` 和 `/restart`；网关节点上有「重启网关」按钮，改动了需要重启的配置时节点上会有标记、面板里列出是哪几项，重启期间页面显示“重启中”并自动重连；AI 可以在管理员会话里用 `Gateway {"what":"logs"}` 看脱敏日志，用 `GatewayAdmin {"action":"restart"}` 重启（要审批）。重启会先重新加载 `gateway.toml` 和 `data/config.json`，加载失败不会停掉正在运行的网关；成功后会给发起的会话回一句“网关已重启”。
 
@@ -163,8 +165,8 @@ make install
 - `gateway.toml`：配置
 - `agents/`：每个 agent 一个目录，里面是它的人格 `persona.md`（v0.5 起）；v0.6 起还有它的长期记忆 `knowledge/`（一条一个 Markdown 文件，人物画像在 `people/` 下）、自我认知 `self.md`、梦境日志 `dreams/`、整理进度 `dream-state.json`，可选的 `life.md`（拟人守则）、`group.md`（群聊守则）、`skills/`（它自己的技能）
 - `knowledge/`：所有 agent 共用的知识（v0.6 起）
-- `personas/`、`skills/`：给某个会话单独用的人格、技能
-- `data/agents.json`、`data/bots.json`：agent 和机器人的配置（凭据加密）；`data/life.json`：拟人型的内心活动状态（v0.6 起）
+- `personas/`：给某个会话单独用的人格；`skills/`：所有 agent 共用的技能
+- `data/agents.json`、`data/bots.json`：agent 和机器人的配置（凭据加密）；`data/autonomy.json`：拟人型的心智与日程、活动账本、作息和回访（旧版的 `life.json` 第一次启动时并进来，改名为 `life.json.imported`）
 - `data/`：会话、模型、SSH 连接、图片、日志
 - `secret.key`：第一次启动时生成的加密密钥（0600）
 - `run/`：unix socket 和 SSH 控制 socket
@@ -273,7 +275,7 @@ description: 处理某类任务时使用的操作步骤
 
 新增、删除或修改技能后不用重启或清空聊天：每一轮开始时重新扫描，目录变化会刷新旧会话的 Skill 工具；网页里点顶栏的内核能看到技能列表。只修改正文和附带文件不会改变工具定义，正文在调用时重新读取。
 
-仓库里自带几个技能：`device-connections` 讲机器、工作目录和接入，`model-setup` 讲怎么在聊天里配置模型，`web-search` 讲上网查资料和配置搜索，`scheduled-tasks` 讲定时任务怎么建、prompt 怎么写，`context-and-history` 讲上下文整理和删除历史，`gateway-settings` 讲其他设置项，`mcp` 讲怎么加 MCP 服务；`computer-use` 讲复用已有桌面接入、观察/操作/核验以及按需读取平台排障；`autonomous-tasks` 讲排期、检查点和真实证据验收。已安装的网关在 `nano-gateway update` 时会补上新技能（改过的技能不会被覆盖）。
+仓库里自带几个技能：`device-connections` 讲机器、工作目录和接入，`model-setup` 讲怎么在聊天里配置模型，`web-search` 讲上网查资料和配置搜索，`scheduled-tasks` 讲定时任务怎么建、prompt 怎么写，`context-and-history` 讲上下文整理和删除历史，`gateway-settings` 讲其他设置项，`mcp` 讲怎么加 MCP 服务；`computer-use` 讲复用已有桌面接入、观察/操作/核验以及按需读取平台排障；`autonomous-tasks` 讲排期、检查点和真实证据验收；`agents` 讲管理多个 agent 和它们绑定的机器人；`event-hooks` 讲用 Hook 做事件驱动的通知、短命令和独立 agent 工作。已安装的网关在 `nano-gateway update` 时会补上新技能（改过的技能不会被覆盖）。
 
 ## MCP 服务（v0.7.1 起）
 
@@ -440,7 +442,8 @@ agent 是一直在的个体：有自己的名字、头像、人格、模型和�
 | `/sleep` | 让它现在去整理记忆（需管理员） |
 | `/wake` | 叫醒拟人型 agent，让它自己待一会儿：冲浪、想事情、找人聊天（需管理员） |
 | `/autonomy [pause\|resume\|wake]` | 查看拟人型 agent 的日程、目标和想法；暂停/恢复自主活动、现在叫醒（改动需管理员） |
-| `/session` | 列出所有会话；`/session <编号或名字>` 把这个窗口切到那个会话，`/session new [名字]` 新建一个会话并切过去（切换需管理员） |
+| `/session` | 列出所有会话；`/session <编号或名字>` 把这个窗口切到那个会话，`/session new [名字]` 新建一个会话并切过去（切换需管理员）；`/session fork [标题]` 从当前会话分出一个安静分支 |
+| `/branch` | 查看这个会话的安静分支；`/branch report <分支编号>` 把那个分支的结论带回这个会话 |
 | `/context` | 查看真实用量加估算的上下文、窗口、缓存与自动整理阈值 |
 | `/compact [重点]` | 管理员手动整理上下文，指定特别要保留的内容 |
 | `/show 详细\|过程\|简洁\|default` | 只设置当前窗口的显示档位：详细（思考 + 工具 + 正文）、过程（工具 + 正文，默认）、简洁（只有正文）；网页始终显示全部。全局默认在拓扑图的 Agent 节点里改，Telegram、飞书节点里可以各自覆盖 |
@@ -452,7 +455,11 @@ agent 是一直在的个体：有自己的名字、头像、人格、模型和�
 | `/think` | 查看思考强度；`/think none\|low\|high…` 切换（`none` 是关闭，可选值跟着这个会话的模型走），`/think default` 恢复模型的默认值 |
 | `/model` | 查看这个会话用的模型和所有可用的模型；`/model <编号或 ID>` 切换，`/model default` 用默认模型 |
 | `/persona` | 查看这个会话用的人格和自带的人格（小纳、大肥鱼）；`/persona <编号或名字>` 给这个会话换上，`/persona default` 改回默认人格 |
-| `/stop` | 停止当前任务（正在执行的命令会被杀掉）。任务进行中直接发「停」也行；Telegram 回复下面有“⏹ 停止”按钮，终端里按 Ctrl-C（连按两次退出） |
+| `/stop` | 停止当前任务（正在执行的命令会被杀掉）。任务进行中直接发「停」也行；Telegram 回复下面有“⏹ 停止”按钮，终端里按 Ctrl-C（连按两次退出）。`/stop all` 同时取消你在这个会话发起的后台任务，`/stop <job_id>` 停止一个后台任务 |
+| `/jobs`、`/bg`、`/job` | 查看已登记的长时间和后台任务；`/bg [job_id]` 把前台命令原地转后台；`/job <job_id> [status\|output [游标]\|wait [秒]\|cancel\|detach]` 查看日志、短等待或停止，见 [后台任务](docs/JOBS.md) |
+| `/hooks`、`/hook` | 查看事件规则；`/hook <编号> [get\|runs\|enable\|disable\|delete]`、`/hook create <规则 JSON>` 管理规则和投递，见 [Hook](docs/HOOKS.md)（需管理员） |
+| `/sandbox` | 查看执行隔离；`/sandbox [global\|agent\|workspace ID] [auto\|on\|off\|default]` 设置，审批和文件权限另外生效（需管理员） |
+| `/status`、`/restart`、`/update` | 查看网关状态；检查配置后重启；有新版本就更新、起不来自动退回（需管理员） |
 | `/undo` | 撤回最近一条消息：还没处理的直接拿掉；正在处理的先停下再删；已经回复的连同回复、工具调用一起从上下文里删掉。直接发「撤回」也行，网页上最后一条消息旁有“撤回”（内容会放回输入框）。飞书里撤回自己发的消息也会同步撤回（需要订阅 `im.message.recalled_v1`，扫码创建的机器人自动订阅） |
 | `/reset` | 归档后清空上下文（工作目录和模式保留）；管理员 `/reset 删除` 永久删除当前历史，不归档 |
 | `/approve <编号>` / `/deny <编号>` | 批准或拒绝一次工具执行 |
@@ -622,7 +629,7 @@ sh nano-kernel-install.sh --gateway 192.168.1.2:7700   # 拷到那台电脑上�
 
 系统提示和工具定义保持稳定；时间、工作目录、记忆、经历和交接说明追加在消息里。工具结果写入时定型，原始历史只追加。当前整理阈值及 /context、/compact、/reset 的说明见前文“上下文整理”，不会每次请求都裁一点而破坏前缀缓存。
 
-历史保存在 data/v1/sessions/<编码键>.jsonl，设置在同目录的 .settings.json；平台绑定在 data/endpoints.json。压缩只更新摘要和有效窗口，不改原始记录；分支共享不可变快照。旧布局和 Windows ADS 的兼容、迁移与冲突处理见 [存储说明](docs/STORAGE-v0.9.0.md)。
+历史保存在 data/v1/sessions/<编码键>.jsonl，设置在同目录的 .settings.json；平台绑定在 data/endpoints.json。压缩只更新摘要和有效窗口，不改原始记录；分支共享不可变快照。旧布局和 Windows ADS 的兼容、迁移与冲突处理见 [存储说明](docs/STORAGE.md)。
 
 ## 测试
 
@@ -648,42 +655,37 @@ make test
 ## 目录
 
 ```
-kernel/            C 内核和执行器
-  src/core.c         状态机（纯逻辑，不做 I/O）
-  src/main.c         内核的 poll 主循环
-  src/runner.c       执行器子进程的管理
-  src/tools.c        内置工具的描述和策略
-  src/link.c         网关连接
-  src/conf.c         配置解析
-  src/nexec_*.c      执行器：五个工具的实现
-  src/sandbox.c      Landlock + seccomp 沙箱
-gateway/           Go 网关
-  internal/app       调度：排队、run、审批、命令、工作目录
-  internal/kernel    内核连接、电脑配对
-  internal/host      能执行工具的机器：本机、SSH 服务器（主连接、部署执行器、重连）
-  internal/skills    技能（放在网关上）：扫描、Skill 工具、附带文件
-  internal/llm       模型接入（OpenAI 兼容 / mock，多模态 content parts）
-  internal/models    模型列表：接口、模型、默认模型（data/models.json）
-  internal/media     图片存储：data/uploads，按内容哈希去重
-  internal/session   对话历史、会话设置、裁剪
-  internal/persona   人格文件热加载、自带人格（presets/，编译进程序）
-  internal/channel   Telegram / 飞书 / 命令行 / 网页
-  internal/web       网页管理界面的接口（前端构建结果嵌在 dist/ 里）
-  internal/config    配置：gateway.toml + 网页里的修改
-  internal/events    事件总线（网页实时显示用）
-  web/               网页界面的前端源码（Svelte）
-personas/          人格文件
-scripts/           install-gateway.sh（安装到用户目录）、install-kernel.sh（内核安装脚本）、run-local.sh、e2e.sh、e2e-control.py
-docs/              当前设计、功能指南与开发说明
+kernel/              C 内核和执行器
+  src/core.c           状态机（纯逻辑，不做 I/O）
+  src/main.c           节点主循环：执行准入、租约、代执行、协议路由
+  src/tools.c          内置工具的描述和策略
+  src/runner*.c        执行器子进程的管理（POSIX、Windows、增量输出）
+  src/job_*.c          后台任务的生命周期和日志
+  src/watch.c          文件观察
+  src/pipe*.c          MCP 进程的 stdio 透传
+  src/nexec_*.c        执行器：五个工具的实现
+  src/sandbox*.c       平台隔离（Linux 是 Landlock + seccomp）
+  src/plat_*.c         平台层
+  src/link.c、conf.c、ctl.c、update.c   网关连接、配置、本机管理命令、自动更新
+  tests/               状态机、执行器、宿主、Job 和观察器的测试
+gateway/             Go 网关
+  cmd/nano-gateway     网关程序：聊天客户端、本机内核、服务管理、doctor、升级、导出和卸载
+  internal/            各模块，职责见 docs/ARCHITECTURE.md
+  web/                 网页界面的前端源码（Svelte），构建结果在 internal/web/dist/
+agents/default/      默认 agent 的人格
+skills/              自带技能
+scripts/             安装、本机运行和端到端测试脚本
+docs/                设计原则、当前实现、功能指南与开发说明
 ```
 
 ## 文档
 
 | 主题 | 文档 |
 | --- | --- |
-| 系统与运行规则 | [架构](docs/ARCHITECTURE.md)、[运行时设计](docs/DESIGN-agent-runtime.md)、[内核协议](docs/protocol.md) |
+| 目标设计与评审标准 | [设计原则与目标架构](docs/DESIGN.md) |
+| 系统与运行规则（当前实现） | [架构](docs/ARCHITECTURE.md)、[运行时](docs/RUNTIME.md)、[内核协议](docs/protocol.md) |
 | 功能指南 | [后台任务](docs/JOBS.md)、[Hook](docs/HOOKS.md)、[桌面操作](docs/COMPUTER-USE.md) |
-| 持久化与恢复 | [会话存储](docs/STORAGE-v0.9.0.md)、[可靠事件](docs/RUNTIME-events.md) |
+| 持久化与恢复 | [会话存储](docs/STORAGE.md)、[可靠事件](docs/RUNTIME-events.md) |
 | 开发与发布 | [开发说明](docs/HANDOFF.md)、[发布流程](docs/RELEASE.md) |
 
 ## 许可

@@ -182,18 +182,19 @@ func (a *App) clearAgentBoundState(sid, oldAgentID string) {
 	if oldAgentID == "" || a.agentRoot == "" {
 		return
 	}
-	ls := a.lifeOf(oldAgentID)
+	st := a.mind(oldAgentID)
 	changed := false
-	if _, ok := ls.Awaiting[sid]; ok {
-		delete(ls.Awaiting, sid)
+	if _, ok := st.Awaiting[sid]; ok {
+		delete(st.Awaiting, sid)
 		changed = true
 	}
-	if _, ok := ls.FollowUps[sid]; ok {
-		delete(ls.FollowUps, sid)
+	if _, ok := st.FollowUps[sid]; ok {
+		delete(st.FollowUps, sid)
 		changed = true
 	}
 	if changed {
-		a.saveLife()
+		st.Touch()
+		a.saveMinds()
 	}
 	// 群聊里已经排着的“要不要插一句”的触发按旧身份算的：换人了就不算数
 	if s := a.sessions[sid]; s != nil {
@@ -201,7 +202,7 @@ func (a *App) clearAgentBoundState(sid, oldAgentID string) {
 			s.groupTimer.Stop()
 			s.groupTimer = nil
 		}
-		s.groupFresh, s.groupProactive = false, false
+		s.groupFresh, s.groupProactive, s.groupObserve = false, false, nil
 	}
 	// 旧 agent 的自主日程里和这个聊天有关的约定 / 复查也作废
 	a.mindDropSession(sid, oldAgentID)

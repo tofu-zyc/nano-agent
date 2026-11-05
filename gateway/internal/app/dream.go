@@ -1,6 +1,6 @@
 package app
 
-// 睡觉做梦：整理记忆；见 docs/DESIGN-agent-runtime.md。
+// 睡觉做梦：整理记忆；见 docs/RUNTIME.md。
 //
 // agent 睡着、空闲或者到点时，在 @<id>/dream 会话里跑一轮（每次都是全新的上下文）：用 Diary 读日记
 // （这个 agent 的原始聊天记录，压缩不影响），把值得长期记住的用 Knowledge 写进知识库。怎么整理写在
@@ -147,7 +147,7 @@ func (a *App) diarySources(agentID string) []diarySource {
 	var out []diarySource
 	for _, sid := range a.sessionIDs() {
 		// 按当前执行身份算：会话中途换过 agent 的，只整理现在属于它的部分
-		if a.execAgentID(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") {
+		if a.execAgentID(sid) != agentID || isDreamSID(sid) || isCronSID(sid) || strings.HasPrefix(sid, "room:") || a.sceneIsolated(sid) {
 			continue
 		}
 		title, partner, label := a.diaryPartner(agentID, sid)
@@ -538,11 +538,11 @@ func (a *App) startDream(agentID string, manual bool) error {
 		return errors.New("这个 agent 关掉了长期记忆")
 	}
 	s := a.sessOf(dreamSID(agentID))
-	if s.run != nil || len(s.queue) > 0 || s.compacting {
-		return errors.New("正在整理记忆")
-	}
-	if a.models != nil && len(a.models.Models()) == 0 {
-		return errors.New("还没有配置模型")
+	if ok, why, _ := a.admitRun(s.sid); !ok {
+		if why == admitBusy {
+			return errors.New("正在整理记忆")
+		}
+		return errors.New(why)
 	}
 	if err := a.store.Reset(s.sid); err != nil {
 		return fmt.Errorf("清空上次整理的上下文：%w", err)
@@ -553,9 +553,6 @@ func (a *App) startDream(agentID string, manual bool) error {
 	st.Model = pickString(ag.DreamModel, "")
 	if err := a.store.SaveSettings(s.sid, st); err != nil {
 		return err
-	}
-	if a.route(a.workspaceOf(s.sid)).kernel == "" {
-		return errors.New("没有在线的内核")
 	}
 	ds := a.dreamOf(agentID)
 	now := a.now().In(a.loc)

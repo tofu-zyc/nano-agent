@@ -73,7 +73,8 @@ const MaxScopedTools = 128
 
 var EventNames = []string{"run.started", "run.finished", "approval.waiting", "tool.before", "tool.after", "tool.failed",
 	"job.completed", "job.failed", "job.cancelled", "job.timed_out", "message.received", "device.online", "device.offline",
-	"file.changed", "mind.threshold_crossed", "deadline.at"}
+	"file.changed", "mind.threshold_crossed", "deadline.at",
+	"repo.issue", "repo.comment", "repo.review", "repo.pr", "repo.check", "repo.ignored"}
 
 func Normalize(s Spec) (Spec, error) {
 	if s.Retries == 0 {
