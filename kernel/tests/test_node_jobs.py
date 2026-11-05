@@ -30,6 +30,8 @@ def shell(command):
     command = command.replace("printf once >> launches", "[IO.File]::AppendAllText((Join-Path (Get-Location) 'launches'),'once')")
     command = re.sub(r"echo started >> ([a-z-]+)", r"Add-Content -LiteralPath '\1' -Value 'started'", command)
     command = command.replace("echo BAD > must-not-run", "Set-Content -LiteralPath 'must-not-run' -Value 'BAD'")
+    # 网关带的顶层 env：Windows 上 Shell 是 PowerShell，环境变量写成 $env:名字（POSIX 的 $名字 在那里是个空变量）
+    command = command.replace('printf %s "$PROBE_TOKEN" | wc -c', "[Console]::Out.Write($env:PROBE_TOKEN.Length)")
     return re.sub(r"printf ([a-z-]+)", r"[Console]::Out.Write('\1')", command)
 
 
